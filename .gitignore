@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+build/
+app/build/
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Android
+*.apk
+*.aab
+*.jks
+*.keystore
+captures/
+.cxx/
+
+# 项目临时与产物（AGENTS.md：临时产物只进 tmp/）
+tmp/
+.scratch/
+.implement-pro/
+
+# macOS
+.DS_Store
