@@ -1,28 +1,25 @@
-# Gradle
+# 构建产物
 .gradle/
 build/
 app/build/
-local.properties
 
-# IDE
-.idea/
-*.iml
-*.ipr
-*.iws
-.vscode/
+# 临时文件
+tmp/
 
-# Android
-*.apk
-*.aab
+# 正式签名
+.keystores
+keystore.properties
 *.jks
 *.keystore
-captures/
-.cxx/
 
-# 项目临时与产物（AGENTS.md：临时产物只进 tmp/）
-tmp/
-.scratch/
+# 本机 SDK 路径
+local.properties
+
+# implement-pro 编排产物
 .implement-pro/
 
-# macOS
-.DS_Store
+#项目记忆
+AGENTS.md
+
+# 交接文档
+HANDOFF.md
