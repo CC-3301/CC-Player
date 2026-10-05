@@ -10,11 +10,15 @@ import com.cc3301.ccplayer.library.DirectoryMediaLibrary
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaLibrary
 import com.cc3301.ccplayer.library.SafMediaFileTree
+import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.library.sortedForDisplay
 import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.settings.ViewMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -26,15 +30,28 @@ data class LibraryState(
     val roots: List<MediaFile> = emptyList(),
     /** 浏览路径，最后一项是当前目录；为空表示停在根目录这一层。 */
     val stack: List<MediaFile> = emptyList(),
+    /** 当前目录读出的条目，未排序；展示次序见 [visibleEntries]。 */
     val entries: List<MediaFile> = emptyList(),
+    val viewMode: ViewMode = ViewMode.List,
+    val gridColumns: Int = SettingsRepository.DEFAULT_GRID_COLUMNS,
+    val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
+    /** 排序选项每次变化的递增序号：界面据此把列表回到顶部。 */
+    val sortRevision: Int = 0,
     val loading: Boolean = false,
     val failed: Boolean = false,
 ) {
     val currentDirectory: MediaFile? get() = stack.lastOrNull()
+
+    /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
+    val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
+
+    /** 套用排序偏好；排序选项变了才递增 [sortRevision]。 */
+    fun withSortOrder(order: SortOrder): LibraryState =
+        copy(sortOrder = order, sortRevision = if (order == sortOrder) sortRevision else sortRevision + 1)
 }
 
 /**
- * 媒体列表的状态持有者：读设置里的根目录，按当前目录向 [MediaLibrary] 要列表。
+ * 媒体列表的状态持有者：读设置里的根目录与视图偏好，按当前目录向 [MediaLibrary] 要列表。
  */
 class LibraryViewModel(
     private val library: MediaLibrary,
@@ -51,6 +68,16 @@ class LibraryViewModel(
             settings.rootLocations.collect { locations ->
                 _state.update { it.copy(ready = true, roots = resolveRoots(locations)) }
             }
+        }
+        viewModelScope.launch {
+            combine(
+                settings.viewMode,
+                settings.gridColumns,
+                settings.sortOrder,
+            ) { mode, columns, order -> Triple(mode, columns, order) }
+                .collect { (mode, columns, order) ->
+                    _state.update { it.withSortOrder(order).copy(viewMode = mode, gridColumns = columns) }
+                }
         }
     }
 
@@ -83,6 +110,18 @@ class LibraryViewModel(
     /** 重新读取当前目录。 */
     fun retry() {
         _state.value.currentDirectory?.let { load(it) }
+    }
+
+    fun setSortOrder(order: SortOrder) {
+        viewModelScope.launch { settings.setSortOrder(order) }
+    }
+
+    fun setViewMode(mode: ViewMode) {
+        viewModelScope.launch { settings.setViewMode(mode) }
+    }
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch { settings.setGridColumns(columns) }
     }
 
     private fun load(directory: MediaFile) {

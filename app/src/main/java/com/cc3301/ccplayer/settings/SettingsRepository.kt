@@ -4,8 +4,10 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.cc3301.ccplayer.library.SortOrder
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -15,7 +17,7 @@ enum class ViewMode { List, Grid }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录与列表视图偏好。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -24,6 +26,15 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
     val viewMode: Flow<ViewMode> = dataStore.data.map { preferences ->
         ViewMode.entries.firstOrNull { it.name == preferences[VIEW_MODE] } ?: ViewMode.List
+    }
+
+    /** 网格列数，取值限于 [GRID_COLUMN_CHOICES]。 */
+    val gridColumns: Flow<Int> = dataStore.data.map { preferences ->
+        preferences[GRID_COLUMNS]?.takeIf { it in GRID_COLUMN_CHOICES } ?: DEFAULT_GRID_COLUMNS
+    }
+
+    val sortOrder: Flow<SortOrder> = dataStore.data.map { preferences ->
+        SortOrder.entries.firstOrNull { it.name == preferences[SORT_ORDER] } ?: DEFAULT_SORT_ORDER
     }
 
     suspend fun addRoot(location: String) {
@@ -37,13 +48,29 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[VIEW_MODE] = mode.name }
     }
 
+    suspend fun setGridColumns(columns: Int) {
+        require(columns in GRID_COLUMN_CHOICES) { "网格列数只能是 $GRID_COLUMN_CHOICES 之一：$columns" }
+        dataStore.edit { preferences -> preferences[GRID_COLUMNS] = columns }
+    }
+
+    suspend fun setSortOrder(order: SortOrder) {
+        dataStore.edit { preferences -> preferences[SORT_ORDER] = order.name }
+    }
+
     companion object {
+        /** 网格可选的列数。 */
+        val GRID_COLUMN_CHOICES = listOf(2, 3, 4)
+        const val DEFAULT_GRID_COLUMNS = 3
+        val DEFAULT_SORT_ORDER = SortOrder.NameAscending
+
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
 
         /** 根目录位置用换行拼接成一个值：URI 不含换行，顺序也就能保住。 */
         private val ROOTS = stringPreferencesKey("media_roots")
         private val VIEW_MODE = stringPreferencesKey("view_mode")
+        private val GRID_COLUMNS = intPreferencesKey("grid_columns")
+        private val SORT_ORDER = stringPreferencesKey("sort_order")
 
         private fun Preferences.rootLocations(): List<String> =
             this[ROOTS].orEmpty().lines().filter { it.isNotBlank() }
