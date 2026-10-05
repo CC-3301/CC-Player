@@ -8,6 +8,17 @@
     <string name="library_up">上一级</string>
     <string name="library_empty">这个目录里没有可播放的媒体</string>
     <string name="library_load_failed">读不了这个目录。检查授权，或换一个目录。</string>
+    <string name="library_network_unreachable">连不上网络源。检查地址、电源与网络，然后重试。</string>
+    <string name="library_network_authentication">网络源拒绝了登录。检查用户名与密码。</string>
+    <string name="library_network_not_found">网络源上找不到这个位置。</string>
+    <string name="library_add_network_source">网络源</string>
+    <string name="network_source_title">添加网络源</string>
+    <string name="network_source_host">主机</string>
+    <string name="network_source_share">共享名</string>
+    <string name="network_source_username">用户名</string>
+    <string name="network_source_password">密码</string>
+    <string name="network_source_confirm">保存</string>
+    <string name="network_source_cancel">取消</string>
     <string name="library_retry">重试</string>
     <string name="library_sort_title">排序</string>
     <string name="library_sort_name_ascending">名称升序</string>

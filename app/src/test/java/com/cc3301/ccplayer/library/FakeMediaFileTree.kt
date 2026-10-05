@@ -8,6 +8,7 @@ class FakeMediaFileTree : MediaFileTree {
     private val directories = mutableMapOf<String, MediaFile>()
     private val childrenByLocation = mutableMapOf<String, List<MediaFile>>()
     private val unreadableLocations = mutableSetOf<String>()
+    private val failuresByLocation = mutableMapOf<String, Exception>()
 
     /** 登记一个目录及其直接子项。 */
     fun addDirectory(directory: MediaFile, vararg children: MediaFile): FakeMediaFileTree {
@@ -22,9 +23,16 @@ class FakeMediaFileTree : MediaFileTree {
         return this
     }
 
+    /** 让该位置的读取抛指定异常，模拟网络源读取失败。 */
+    fun markFailing(location: String, failure: Exception): FakeMediaFileTree {
+        failuresByLocation[location] = failure
+        return this
+    }
+
     override suspend fun resolve(location: String): MediaFile? = directories[location]
 
     override suspend fun children(directory: MediaFile): List<MediaFile> {
+        failuresByLocation[directory.location]?.let { throw it }
         if (directory.location in unreadableLocations) {
             throw SecurityException("无读取授权：${directory.location}")
         }
