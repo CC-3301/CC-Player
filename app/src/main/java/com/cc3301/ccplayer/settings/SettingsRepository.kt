@@ -21,7 +21,7 @@ enum class ResumeMode { FromStart, LastPosition }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关、屏幕方向模式。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -44,6 +44,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
     /** "自动播放下一个"开关，默认开。 */
     val autoPlayNext: Flow<Boolean> = dataStore.data.map { preferences ->
         preferences[AUTO_PLAY_NEXT] ?: DEFAULT_AUTO_PLAY_NEXT
+    }
+
+    val orientationMode: Flow<OrientationMode> = dataStore.data.map { preferences ->
+        OrientationMode.entries.firstOrNull { it.name == preferences[ORIENTATION_MODE] }
+            ?: DEFAULT_ORIENTATION_MODE
     }
 
     /** 起播位置设置，默认接着上次位置播。 */
@@ -83,6 +88,10 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[AUTO_PLAY_NEXT] = enabled }
     }
 
+    suspend fun setOrientationMode(mode: OrientationMode) {
+        dataStore.edit { preferences -> preferences[ORIENTATION_MODE] = mode.name }
+    }
+
     suspend fun setResumeMode(mode: ResumeMode) {
         dataStore.edit { preferences -> preferences[RESUME_MODE] = mode.name }
     }
@@ -101,6 +110,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         const val DEFAULT_GRID_COLUMNS = 3
         val DEFAULT_SORT_ORDER = SortOrder.NameAscending
         const val DEFAULT_AUTO_PLAY_NEXT = true
+        val DEFAULT_ORIENTATION_MODE = OrientationMode.System
         val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
         const val DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED = true
 
@@ -113,6 +123,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val GRID_COLUMNS = intPreferencesKey("grid_columns")
         private val SORT_ORDER = stringPreferencesKey("sort_order")
         private val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
+        private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
         private val RESUME_MODE = stringPreferencesKey("resume_mode")
         private val AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
         private val LAST_PLAYED_LOCATION = stringPreferencesKey("last_played_location")

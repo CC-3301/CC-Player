@@ -47,5 +47,8 @@ interface PlaybackEngine {
 
         /** 播放位置或时长更新，单位毫秒。 */
         fun onPositionChanged(positionMillis: Long, durationMillis: Long)
+
+        /** 画面尺寸变化：宽高比按这对像素值推算；宽或高非正表示当前没有画面。 */
+        fun onVideoSizeChanged(width: Int, height: Int)
     }
 }
