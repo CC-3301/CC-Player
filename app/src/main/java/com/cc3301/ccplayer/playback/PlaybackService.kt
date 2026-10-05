@@ -8,11 +8,18 @@ import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
 import com.cc3301.ccplayer.R
+import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 /**
  * 前台播放服务：唯一持有 mpv 实例与播放控制层，界面只绑定取用。
  */
 class PlaybackService : Service() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private lateinit var playbackEngine: MpvPlaybackEngine
     private lateinit var playbackController: PlaybackController
@@ -24,7 +31,7 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath)
-        playbackController = PlaybackController(playbackEngine)
+        playbackController = PlaybackController(playbackEngine, RoomPlaybackProgressRepository.create(this), scope)
         playbackEngine.initialize()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
@@ -32,6 +39,7 @@ class PlaybackService : Service() {
     override fun onBind(intent: Intent): IBinder = LocalBinder()
 
     override fun onDestroy() {
+        scope.cancel()
         playbackEngine.release()
         super.onDestroy()
     }

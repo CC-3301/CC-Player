@@ -1,6 +1,10 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -8,10 +12,12 @@ import org.junit.Test
 /**
  * 播完当前的下一步：三种循环模式 × 自动连播开关两种取值。
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerLoopTest {
 
     private val engine = FakePlaybackEngine()
-    private val controller = PlaybackController(engine)
+    private val progress = FakePlaybackProgressRepository()
+    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
 
     @Test
     fun `auto play next starts on and the loop mode starts at sequential`() {
