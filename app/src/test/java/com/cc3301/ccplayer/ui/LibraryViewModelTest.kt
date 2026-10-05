@@ -6,6 +6,8 @@ import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.testDirectory
+import com.cc3301.ccplayer.library.testDocument
+import com.cc3301.ccplayer.library.testVideo
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
@@ -54,7 +56,7 @@ class LibraryViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        viewModel = LibraryViewModel(DirectoryMediaLibrary(tree), settings, sources, verifier)
+        viewModel = LibraryViewModel(DirectoryMediaLibrary(tree), tree, settings, sources, verifier)
     }
 
     @After
@@ -123,5 +125,33 @@ class LibraryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(MediaFailure.Unknown, viewModel.state.value.failure)
+    }
+
+    @Test
+    fun `当前目录的原始条目含被媒体列表过滤掉的字幕文件`() = runTest {
+        val local = testDirectory("媒体", "content://root/媒体")
+        tree.addDirectory(
+            local,
+            testVideo("ep01.mkv", "content://root/媒体/ep01.mkv"),
+            testDocument("ep01.chs.ass", "content://root/媒体/ep01.chs.ass"),
+        )
+
+        viewModel.enter(local)
+        advanceUntilIdle()
+
+        assertEquals(listOf("ep01.mkv", "ep01.chs.ass"), viewModel.directoryEntries().map { it.name })
+        assertEquals(listOf("ep01.mkv"), viewModel.state.value.entries.map { it.name })
+    }
+
+    @Test
+    fun `停在根目录或目录读不出来时原始条目为空`() = runTest {
+        assertEquals(emptyList<MediaFile>(), viewModel.directoryEntries())
+
+        val local = testDirectory("媒体", "content://root/媒体")
+        tree.addDirectory(local).markUnreadable(local.location)
+        viewModel.enter(local)
+        advanceUntilIdle()
+
+        assertEquals(emptyList<MediaFile>(), viewModel.directoryEntries())
     }
 }

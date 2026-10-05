@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -53,6 +54,8 @@ import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.SubtitleSelection
+import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.settings.OrientationMode
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -71,6 +74,9 @@ fun PlayerScreen(
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     videoAspectRatio: Double?,
+    subtitleTracks: List<SubtitleTrack>,
+    externalSubtitles: List<MediaFile>,
+    subtitleSelection: SubtitleSelection,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -82,12 +88,14 @@ fun PlayerScreen(
     onToggleLoopMode: () -> Unit,
     onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
+    onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val lock = remember { PlayerLock() }
     var controlsVisible by remember { mutableStateOf(true) }
     var playlistVisible by remember { mutableStateOf(false) }
+    var subtitleMenuVisible by remember { mutableStateOf(false) }
     var levelHint by remember { mutableStateOf<LevelHint?>(null) }
     val locked = lock.locked
 
@@ -147,7 +155,11 @@ fun PlayerScreen(
                     loopMode = loopMode,
                     orientationMode = orientationMode,
                     autoPlayNext = autoPlayNext,
+                    subtitleTracks = subtitleTracks,
+                    externalSubtitles = externalSubtitles,
+                    subtitleSelection = subtitleSelection,
                     playlistVisible = playlistVisible,
+                    subtitleMenuVisible = subtitleMenuVisible,
                     onTogglePlayPause = onTogglePlayPause,
                     onPrevious = onPrevious,
                     onNext = onNext,
@@ -159,6 +171,8 @@ fun PlayerScreen(
                     onCycleOrientationMode = onCycleOrientationMode,
                     onToggleAutoPlayNext = onToggleAutoPlayNext,
                     onTogglePlaylist = { playlistVisible = !playlistVisible },
+                    onToggleSubtitleMenu = { subtitleMenuVisible = !subtitleMenuVisible },
+                    onSelectSubtitle = onSelectSubtitle,
                     onLock = { lock.tapLockButton() },
                     onClose = onClose,
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -318,7 +332,11 @@ private fun Controls(
     loopMode: LoopMode,
     orientationMode: OrientationMode,
     autoPlayNext: Boolean,
+    subtitleTracks: List<SubtitleTrack>,
+    externalSubtitles: List<MediaFile>,
+    subtitleSelection: SubtitleSelection,
     playlistVisible: Boolean,
+    subtitleMenuVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -330,6 +348,8 @@ private fun Controls(
     onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
     onTogglePlaylist: () -> Unit,
+    onToggleSubtitleMenu: () -> Unit,
+    onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onLock: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -349,6 +369,12 @@ private fun Controls(
                 autoPlayNext = autoPlayNext,
                 onToggleAutoPlayNext = onToggleAutoPlayNext,
                 onSelect = onPlaylistSelect,
+            )
+        }
+        if (subtitleMenuVisible) {
+            SubtitlePanel(
+                menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
+                onSelect = onSelectSubtitle,
             )
         }
         SeekBar(
@@ -387,6 +413,9 @@ private fun Controls(
         ) {
             TextButton(onClick = onTogglePlaylist) {
                 Text(text = stringResource(R.string.player_playlist))
+            }
+            TextButton(onClick = onToggleSubtitleMenu) {
+                Text(text = stringResource(R.string.player_subtitles))
             }
             TextButton(onClick = onToggleDecodeMode) {
                 Text(text = stringResource(decodeModeLabel(decodeMode)))
@@ -483,6 +512,40 @@ private fun PlaylistPanel(
             }
         }
     }
+}
+
+/** 字幕菜单：内嵌轨道、可匹配外挂、关闭，当前生效项用强调色。 */
+@Composable
+private fun SubtitlePanel(menu: List<SubtitleMenuItem>, onSelect: (SubtitleMenuItem) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 240.dp)
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
+    ) {
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            items(items = menu) { item ->
+                Text(
+                    text = subtitleItemLabel(item),
+                    color = if (item.active) MaterialTheme.colorScheme.primary else Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(item) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 内嵌条目带「内嵌」前缀，外挂条目用文件名，关闭条目用固定文案。 */
+@Composable
+private fun subtitleItemLabel(item: SubtitleMenuItem): String = when (item) {
+    is SubtitleMenuItem.Embedded -> stringResource(R.string.player_subtitle_embedded, item.label)
+    is SubtitleMenuItem.External -> item.label
+    is SubtitleMenuItem.Off -> stringResource(R.string.player_subtitle_off)
 }
 
 private fun decodeModeLabel(mode: DecodeMode): Int = when (mode) {
