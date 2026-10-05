@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -13,7 +15,8 @@ import org.junit.Test
 class PlaybackControllerTest {
 
     private val engine = FakePlaybackEngine()
-    private val controller = PlaybackController(engine)
+    private val progress = FakePlaybackProgressRepository()
+    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
 
     @Test
     fun `opening a media hands its location to the engine and reports loading`() {

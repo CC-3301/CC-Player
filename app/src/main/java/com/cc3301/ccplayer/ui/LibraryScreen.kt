@@ -88,6 +88,14 @@ fun LibraryScreen(
         if (state.viewMode == ViewMode.List) listState.scrollToItem(0) else gridState.scrollToItem(0)
     }
 
+    // 进入目录后滚动到上次播放的条目。
+    LaunchedEffect(state.scrollRevision) {
+        val target = state.scrollTargetLocation ?: return@LaunchedEffect
+        val index = state.visibleEntries.indexOfFirst { it.location == target }
+        if (index < 0) return@LaunchedEffect
+        if (state.viewMode == ViewMode.List) listState.scrollToItem(index) else gridState.scrollToItem(index)
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()

@@ -9,9 +9,11 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaLibrary
+import com.cc3301.ccplayer.library.ProgressCleanupMediaLibrary
 import com.cc3301.ccplayer.library.SafMediaFileTree
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.sortedForDisplay
+import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
 import kotlinx.coroutines.Job
@@ -37,6 +39,14 @@ data class LibraryState(
     val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
     /** 排序选项每次变化的递增序号：界面据此把列表回到顶部。 */
     val sortRevision: Int = 0,
+    /** 最近起播的媒体位置；列表进入时据此滚动。 */
+    val lastPlayedLocation: String? = null,
+    /** "进入列表自动滚动到上次播放位置"开关，默认开。 */
+    val autoScrollToLastPlayed: Boolean = true,
+    /** 本次进入列表要滚动到的条目位置；没有目标时为 null。 */
+    val scrollTargetLocation: String? = null,
+    /** 每次定出滚动目标时递增：界面据此滚动一次。 */
+    val scrollRevision: Int = 0,
     val loading: Boolean = false,
     val failed: Boolean = false,
 ) {
@@ -48,6 +58,22 @@ data class LibraryState(
     /** 套用排序偏好；排序选项变了才递增 [sortRevision]。 */
     fun withSortOrder(order: SortOrder): LibraryState =
         copy(sortOrder = order, sortRevision = if (order == sortOrder) sortRevision else sortRevision + 1)
+
+    /** 目录读完后套用结果，并定出进入列表要滚动到的条目。 */
+    fun withLoadedEntries(entries: List<MediaFile>, failed: Boolean): LibraryState {
+        val target = scrollTargetIn(entries)
+        return copy(
+            entries = entries,
+            loading = false,
+            failed = failed,
+            scrollTargetLocation = target,
+            scrollRevision = if (target == null) scrollRevision else scrollRevision + 1,
+        )
+    }
+
+    /** 滚动目标：开关关、还没播过、或上次播放的条目不在 [entries] 里时为空。 */
+    private fun scrollTargetIn(entries: List<MediaFile>): String? =
+        lastPlayedLocation?.takeIf { autoScrollToLastPlayed && entries.any { entry -> entry.location == it } }
 }
 
 /**
@@ -74,10 +100,20 @@ class LibraryViewModel(
                 settings.viewMode,
                 settings.gridColumns,
                 settings.sortOrder,
-            ) { mode, columns, order -> Triple(mode, columns, order) }
-                .collect { (mode, columns, order) ->
-                    _state.update { it.withSortOrder(order).copy(viewMode = mode, gridColumns = columns) }
+                settings.autoScrollToLastPlayed,
+                settings.lastPlayedLocation,
+            ) { mode, columns, order, autoScroll, lastPlayed ->
+                ListPreferences(mode, columns, order, autoScroll, lastPlayed)
+            }.collect { preferences ->
+                _state.update {
+                    it.withSortOrder(preferences.sortOrder).copy(
+                        viewMode = preferences.viewMode,
+                        gridColumns = preferences.gridColumns,
+                        autoScrollToLastPlayed = preferences.autoScrollToLastPlayed,
+                        lastPlayedLocation = preferences.lastPlayedLocation,
+                    )
                 }
+            }
         }
     }
 
@@ -129,9 +165,7 @@ class LibraryViewModel(
         _state.update { it.copy(loading = true, failed = false) }
         loadJob = viewModelScope.launch {
             val result = library.list(directory)
-            _state.update {
-                it.copy(entries = result.getOrDefault(emptyList()), loading = false, failed = result.isFailure)
-            }
+            _state.update { it.withLoadedEntries(result.getOrDefault(emptyList()), result.isFailure) }
         }
     }
 
@@ -139,12 +173,24 @@ class LibraryViewModel(
     private suspend fun resolveRoots(locations: List<String>): List<MediaFile> =
         locations.mapNotNull { library.resolveDirectory(it) }
 
+    /** 影响列表展示与滚动的设置项。 */
+    private data class ListPreferences(
+        val viewMode: ViewMode,
+        val gridColumns: Int,
+        val sortOrder: SortOrder,
+        val autoScrollToLastPlayed: Boolean,
+        val lastPlayedLocation: String?,
+    )
+
     companion object {
         /** 生产入口：SAF 文件树 + DataStore 设置。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 LibraryViewModel(
-                    library = DirectoryMediaLibrary(SafMediaFileTree(context)),
+                    library = ProgressCleanupMediaLibrary(
+                        DirectoryMediaLibrary(SafMediaFileTree(context)),
+                        RoomPlaybackProgressRepository.create(context),
+                    ),
                     settings = SettingsRepository.create(context),
                 )
             }

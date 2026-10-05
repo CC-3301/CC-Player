@@ -40,6 +40,7 @@ import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.PlayerScreen
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
@@ -79,6 +80,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
                 launch { binder.controller.loopMode.collect { loopMode = it } }
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
+                launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
+                launch {
+                    combine(binder.controller.playlist, binder.controller.currentIndex) { playlist, index ->
+                        playlist.getOrNull(index)
+                    }.collect { media -> if (media != null) settings.setLastPlayedLocation(media.location) }
+                }
             }
             surface?.let { binder.engine.attachSurface(it) }
             startPendingPlayback()
