@@ -7,7 +7,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SettingsRepositoryTest {
@@ -20,6 +22,18 @@ class SettingsRepositoryTest {
         assertEquals(ViewMode.List, settings.viewMode.first())
         assertEquals(3, settings.gridColumns.first())
         assertEquals(SortOrder.NameAscending, settings.sortOrder.first())
+    }
+
+    @Test
+    fun `默认自动播放下一个`() = runTest {
+        assertTrue(settings.autoPlayNext.first())
+    }
+
+    @Test
+    fun `自动连播开关写入后读回`() = runTest {
+        settings.setAutoPlayNext(false)
+
+        assertFalse(settings.autoPlayNext.first())
     }
 
     @Test

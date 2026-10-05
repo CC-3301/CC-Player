@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.settings
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -17,7 +18,7 @@ enum class ViewMode { List, Grid }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -35,6 +36,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
     val sortOrder: Flow<SortOrder> = dataStore.data.map { preferences ->
         SortOrder.entries.firstOrNull { it.name == preferences[SORT_ORDER] } ?: DEFAULT_SORT_ORDER
+    }
+
+    /** "自动播放下一个"开关，默认开。 */
+    val autoPlayNext: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[AUTO_PLAY_NEXT] ?: DEFAULT_AUTO_PLAY_NEXT
     }
 
     suspend fun addRoot(location: String) {
@@ -57,11 +63,16 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[SORT_ORDER] = order.name }
     }
 
+    suspend fun setAutoPlayNext(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[AUTO_PLAY_NEXT] = enabled }
+    }
+
     companion object {
         /** 网格可选的列数。 */
         val GRID_COLUMN_CHOICES = listOf(2, 3, 4)
         const val DEFAULT_GRID_COLUMNS = 3
         val DEFAULT_SORT_ORDER = SortOrder.NameAscending
+        const val DEFAULT_AUTO_PLAY_NEXT = true
 
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
@@ -71,6 +82,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val VIEW_MODE = stringPreferencesKey("view_mode")
         private val GRID_COLUMNS = intPreferencesKey("grid_columns")
         private val SORT_ORDER = stringPreferencesKey("sort_order")
+        private val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
 
         private fun Preferences.rootLocations(): List<String> =
             this[ROOTS].orEmpty().lines().filter { it.isNotBlank() }
