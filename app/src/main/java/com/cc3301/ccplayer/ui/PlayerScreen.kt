@@ -557,7 +557,7 @@ private fun SleepTimerPanel(
         }
         if (sleepTimerState != SleepTimerState.Off) {
             TextButton(onClick = onCancel) {
-                Text(text = stringResource(R.string.player_sleep_timer_cancel), color = Color.White)
+                Text(text = stringResource(R.string.player_sleep_timer_cancel))
             }
         }
     }
