@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.playback.DecodeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -21,7 +22,7 @@ enum class ResumeMode { FromStart, LastPosition }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关、屏幕方向模式。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关、屏幕方向模式、解码模式。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -59,6 +60,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
     /** "进入列表自动滚动到上次播放位置"开关，默认开。 */
     val autoScrollToLastPlayed: Flow<Boolean> = dataStore.data.map { preferences ->
         preferences[AUTO_SCROLL_TO_LAST_PLAYED] ?: DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED
+    }
+
+    /** 全局解码模式，默认硬解（解码失败由 mpv 回退软解）。 */
+    val decodeMode: Flow<DecodeMode> = dataStore.data.map { preferences ->
+        DecodeMode.entries.firstOrNull { it.name == preferences[DECODE_MODE] } ?: DEFAULT_DECODE_MODE
     }
 
     /** 最近起播的媒体位置，列表据此滚动；还没播过时为 null。 */
@@ -100,6 +106,10 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[AUTO_SCROLL_TO_LAST_PLAYED] = enabled }
     }
 
+    suspend fun setDecodeMode(mode: DecodeMode) {
+        dataStore.edit { preferences -> preferences[DECODE_MODE] = mode.name }
+    }
+
     suspend fun setLastPlayedLocation(location: String) {
         dataStore.edit { preferences -> preferences[LAST_PLAYED_LOCATION] = location }
     }
@@ -113,6 +123,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val DEFAULT_ORIENTATION_MODE = OrientationMode.System
         val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
         const val DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED = true
+        val DEFAULT_DECODE_MODE = DecodeMode.Hardware
 
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
@@ -126,6 +137,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
         private val RESUME_MODE = stringPreferencesKey("resume_mode")
         private val AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
+        private val DECODE_MODE = stringPreferencesKey("decode_mode")
         private val LAST_PLAYED_LOCATION = stringPreferencesKey("last_played_location")
 
         private fun Preferences.rootLocations(): List<String> =
