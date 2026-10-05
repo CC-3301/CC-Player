@@ -26,6 +26,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import com.cc3301.ccplayer.library.CachedMediaPreviewSource
+import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.ui.LibraryScreen
@@ -38,6 +40,8 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext) }
+
+    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext) }
 
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
@@ -88,12 +92,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     BackHandler(enabled = libraryState.stack.isNotEmpty()) { library.navigateUp() }
                     LibraryScreen(
                         state = libraryState,
+                        mediaPreview = mediaPreview,
                         onPickRoot = { picker.launch(null) },
                         onOpenEntry = { entry ->
                             if (entry.isDirectory) library.enter(entry) else openMedia(entry.location)
                         },
                         onNavigateUp = library::navigateUp,
                         onRetry = library::retry,
+                        onSortOrderChange = library::setSortOrder,
+                        onViewModeChange = library::setViewMode,
+                        onGridColumnsChange = library::setGridColumns,
                     )
                 }
             }

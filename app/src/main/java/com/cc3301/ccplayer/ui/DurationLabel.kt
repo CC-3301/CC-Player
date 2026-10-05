@@ -1,0 +1,14 @@
+package com.cc3301.ccplayer.ui
+
+/** 时长角标文本：不足一小时为 `分:秒`，满一小时为 `时:分:秒`。 */
+fun formatDuration(millis: Long): String {
+    val totalSeconds = millis.coerceAtLeast(0) / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
+}
