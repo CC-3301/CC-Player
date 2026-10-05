@@ -35,7 +35,7 @@ class WebDavStreams(
     /** 代理在自己的线程上取流，这里阻塞等打开完成。 */
     private fun openBlocking(location: String): ByteSource = runBlocking {
         val target = targetOf(location)
-        WebDavStreamSource(transport.openRead(target.url, target.username, target.password))
+        transport.openRead(target.url, target.username, target.password)
     }
 
     private suspend fun targetOf(location: String): WebDavTarget =

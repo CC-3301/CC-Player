@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.network
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.library.schemeOf
 import java.io.Closeable
 
 /**
@@ -35,10 +36,6 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     }
 
     private fun streamsFor(location: String): NetworkStreams =
-        streamsByScheme[location.substringBefore(SCHEME_SEPARATOR, missingDelimiterValue = "")]
+        streamsByScheme[schemeOf(location)]
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有能处理这个位置的网络源：$location")
-
-    private companion object {
-        const val SCHEME_SEPARATOR = "://"
-    }
 }

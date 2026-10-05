@@ -46,6 +46,11 @@ class RoutingNetworkStreamsTest {
     }
 
     @Test
+    fun `方案大小写不影响分派`() {
+        assertEquals("http://127.0.0.1:1/电影.mkv", streams.urlFor("SMB://nas/media/电影.mkv"))
+    }
+
+    @Test
     fun `未知方案试连给出找不到原因`() = runTest {
         val exception = runCatching { streams.probe("ftp://nas/media/电影.mkv") }.exceptionOrNull()
 
