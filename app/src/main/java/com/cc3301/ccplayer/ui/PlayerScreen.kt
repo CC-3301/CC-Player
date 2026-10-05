@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -54,8 +55,11 @@ import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.SleepTimerOption
+import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
+import com.cc3301.ccplayer.playback.customSleepMinutes
 import com.cc3301.ccplayer.settings.OrientationMode
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -71,6 +75,7 @@ fun PlayerScreen(
     loopMode: LoopMode,
     orientationMode: OrientationMode,
     autoPlayNext: Boolean,
+    sleepTimerState: SleepTimerState,
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     videoAspectRatio: Double?,
@@ -88,6 +93,8 @@ fun PlayerScreen(
     onToggleLoopMode: () -> Unit,
     onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
+    onSelectSleepTimer: (SleepTimerOption) -> Unit,
+    onCancelSleepTimer: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -96,6 +103,7 @@ fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var playlistVisible by remember { mutableStateOf(false) }
     var subtitleMenuVisible by remember { mutableStateOf(false) }
+    var sleepTimerVisible by remember { mutableStateOf(false) }
     var levelHint by remember { mutableStateOf<LevelHint?>(null) }
     val locked = lock.locked
 
@@ -158,8 +166,10 @@ fun PlayerScreen(
                     subtitleTracks = subtitleTracks,
                     externalSubtitles = externalSubtitles,
                     subtitleSelection = subtitleSelection,
+                    sleepTimerState = sleepTimerState,
                     playlistVisible = playlistVisible,
                     subtitleMenuVisible = subtitleMenuVisible,
+                    sleepTimerVisible = sleepTimerVisible,
                     onTogglePlayPause = onTogglePlayPause,
                     onPrevious = onPrevious,
                     onNext = onNext,
@@ -170,9 +180,18 @@ fun PlayerScreen(
                     onToggleLoopMode = onToggleLoopMode,
                     onCycleOrientationMode = onCycleOrientationMode,
                     onToggleAutoPlayNext = onToggleAutoPlayNext,
+                    onSelectSleepTimer = { option ->
+                        onSelectSleepTimer(option)
+                        sleepTimerVisible = false
+                    },
+                    onCancelSleepTimer = {
+                        onCancelSleepTimer()
+                        sleepTimerVisible = false
+                    },
                     onTogglePlaylist = { playlistVisible = !playlistVisible },
                     onToggleSubtitleMenu = { subtitleMenuVisible = !subtitleMenuVisible },
                     onSelectSubtitle = onSelectSubtitle,
+                    onToggleSleepTimer = { sleepTimerVisible = !sleepTimerVisible },
                     onLock = { lock.tapLockButton() },
                     onClose = onClose,
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -335,8 +354,10 @@ private fun Controls(
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
+    sleepTimerState: SleepTimerState,
     playlistVisible: Boolean,
     subtitleMenuVisible: Boolean,
+    sleepTimerVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -347,9 +368,12 @@ private fun Controls(
     onToggleLoopMode: () -> Unit,
     onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
+    onSelectSleepTimer: (SleepTimerOption) -> Unit,
+    onCancelSleepTimer: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
+    onToggleSleepTimer: () -> Unit,
     onLock: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -375,6 +399,13 @@ private fun Controls(
             SubtitlePanel(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
                 onSelect = onSelectSubtitle,
+            )
+        }
+        if (sleepTimerVisible) {
+            SleepTimerPanel(
+                sleepTimerState = sleepTimerState,
+                onSelect = onSelectSleepTimer,
+                onCancel = onCancelSleepTimer,
             )
         }
         SeekBar(
@@ -417,12 +448,29 @@ private fun Controls(
             TextButton(onClick = onToggleSubtitleMenu) {
                 Text(text = stringResource(R.string.player_subtitles))
             }
+            TextButton(onClick = onToggleSleepTimer) {
+                Text(
+                    text = stringResource(
+                        if (sleepTimerState == SleepTimerState.Off) {
+                            R.string.player_sleep_timer
+                        } else {
+                            R.string.player_sleep_timer_armed
+                        },
+                    ),
+                )
+            }
             TextButton(onClick = onToggleDecodeMode) {
                 Text(text = stringResource(decodeModeLabel(decodeMode)))
             }
             TextButton(onClick = onCycleOrientationMode) {
                 Text(text = stringResource(orientationModeLabel(orientationMode)))
             }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TextButton(onClick = onLock) {
                 Text(text = stringResource(R.string.player_lock))
             }
@@ -471,6 +519,87 @@ private fun SeekBar(
         )
     }
 }
+
+/** 定时暂停面板：四段固定时长、播完本集、自定义分钟数，以及取消。 */
+@Composable
+private fun SleepTimerPanel(
+    sleepTimerState: SleepTimerState,
+    onSelect: (SleepTimerOption) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var customMinutes by remember { mutableStateOf("") }
+    var customRejected by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        fixedSleepTimerChoices.chunked(4).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                row.forEach { (label, option) ->
+                    TextButton(onClick = { onSelect(option) }) {
+                        Text(text = stringResource(label))
+                    }
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = customMinutes,
+                onValueChange = {
+                    customMinutes = it
+                    customRejected = false
+                },
+                singleLine = true,
+                label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
+                isError = customRejected,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = {
+                    val minutes = customSleepMinutes(customMinutes)
+                    if (minutes == null) {
+                        customRejected = true
+                    } else {
+                        onSelect(SleepTimerOption.AfterDuration(minutes))
+                    }
+                },
+            ) {
+                Text(text = stringResource(R.string.player_sleep_timer_custom_confirm))
+            }
+        }
+        if (customRejected) {
+            Text(
+                text = stringResource(R.string.player_sleep_timer_custom_invalid),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (sleepTimerState != SleepTimerState.Off) {
+            TextButton(onClick = onCancel) {
+                Text(text = stringResource(R.string.player_sleep_timer_cancel))
+            }
+        }
+    }
+}
+
+/** 定时暂停的固定选项：四段时长与播完本集。 */
+private val fixedSleepTimerChoices = listOf(
+    R.string.player_sleep_timer_10_minutes to SleepTimerOption.AfterDuration(10),
+    R.string.player_sleep_timer_30_minutes to SleepTimerOption.AfterDuration(30),
+    R.string.player_sleep_timer_1_hour to SleepTimerOption.AfterDuration(60),
+    R.string.player_sleep_timer_2_hours to SleepTimerOption.AfterDuration(120),
+    R.string.player_sleep_timer_end_of_episode to SleepTimerOption.EndOfEpisode,
+)
 
 @Composable
 private fun PlaylistPanel(
@@ -546,22 +675,4 @@ private fun subtitleItemLabel(item: SubtitleMenuItem): String = when (item) {
     is SubtitleMenuItem.Embedded -> stringResource(R.string.player_subtitle_embedded, item.label)
     is SubtitleMenuItem.External -> item.label
     is SubtitleMenuItem.Off -> stringResource(R.string.player_subtitle_off)
-}
-
-private fun decodeModeLabel(mode: DecodeMode): Int = when (mode) {
-    DecodeMode.Hardware -> R.string.player_decode_hardware
-    DecodeMode.Software -> R.string.player_decode_software
-}
-
-private fun loopModeLabel(mode: LoopMode): Int = when (mode) {
-    LoopMode.Sequential -> R.string.player_loop_sequential
-    LoopMode.ListLoop -> R.string.player_loop_list
-    LoopMode.SingleLoop -> R.string.player_loop_single
-}
-
-private fun orientationModeLabel(mode: OrientationMode): Int = when (mode) {
-    OrientationMode.System -> R.string.player_orientation_system
-    OrientationMode.Landscape -> R.string.player_orientation_landscape
-    OrientationMode.Portrait -> R.string.player_orientation_portrait
-    OrientationMode.FollowVideo -> R.string.player_orientation_follow_video
 }

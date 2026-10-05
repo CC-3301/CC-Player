@@ -83,6 +83,7 @@ fun LibraryScreen(
     onSortOrderChange: (SortOrder) -> Unit,
     onViewModeChange: (ViewMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -130,6 +131,7 @@ fun LibraryScreen(
                 onSortOrderChange = onSortOrderChange,
                 onViewModeChange = onViewModeChange,
                 onGridColumnsChange = onGridColumnsChange,
+                onOpenSettings = onOpenSettings,
             )
         }
         when {
@@ -160,6 +162,7 @@ private fun Header(
     onSortOrderChange: (SortOrder) -> Unit,
     onViewModeChange: (ViewMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -193,6 +196,9 @@ private fun Header(
             TextButton(onClick = onPickRoot) {
                 Text(text = stringResource(R.string.library_add_root))
             }
+        }
+        TextButton(onClick = onOpenSettings) {
+            Text(text = stringResource(R.string.settings_open))
         }
     }
 }
@@ -472,11 +478,4 @@ private fun entryKindLabel(entry: MediaFile): Int = when {
     entry.isDirectory -> R.string.library_entry_directory
     mediaKindOf(entry.name) == MediaKind.Audio -> R.string.library_entry_audio
     else -> R.string.library_entry_video
-}
-
-private fun sortLabel(order: SortOrder): Int = when (order) {
-    SortOrder.NameAscending -> R.string.library_sort_name_ascending
-    SortOrder.NameDescending -> R.string.library_sort_name_descending
-    SortOrder.LastModifiedNewestFirst -> R.string.library_sort_time_newest_first
-    SortOrder.LastModifiedOldestFirst -> R.string.library_sort_time_oldest_first
 }

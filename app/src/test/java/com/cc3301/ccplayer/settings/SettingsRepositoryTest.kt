@@ -4,6 +4,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.playback.DecodeMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -122,6 +123,25 @@ class SettingsRepositoryTest {
         settings.setLastPlayedLocation("content://root/a")
 
         assertEquals("content://root/a", settings.lastPlayedLocation.first())
+    }
+
+    @Test
+    fun `默认硬解`() = runTest {
+        assertEquals(DecodeMode.Hardware, settings.decodeMode.first())
+    }
+
+    @Test
+    fun `解码模式写入后读回`() = runTest {
+        settings.setDecodeMode(DecodeMode.Software)
+
+        assertEquals(DecodeMode.Software, settings.decodeMode.first())
+    }
+
+    @Test
+    fun `持久化的解码模式取值不认识时回落硬解`() = runTest {
+        dataStore.edit { preferences -> preferences[stringPreferencesKey("decode_mode")] = "Auto" }
+
+        assertEquals(DecodeMode.Hardware, settings.decodeMode.first())
     }
 
     @Test
