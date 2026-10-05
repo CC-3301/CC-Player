@@ -43,6 +43,7 @@ import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.network.RoutingNetworkStreams
+import com.cc3301.ccplayer.network.withPlaybackLocation
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
@@ -289,8 +290,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /**
-     * 本地文件直接把位置交给播放核心；网络文件先试连一次，再把整个播放列表换成回环地址，
-     * 上一集/下一集也就能照常按名称顺序播。两份列表都带上当前目录的原始条目，供外挂字幕匹配。
+     * 本地文件直接把位置交给播放核心；网络文件先试连一次，再给列表里的条目配上回环地址，
+     * 位置本身不变，进度记录恒以它作键；上一集/下一集也就能照常按名称顺序播。
+     * 两份列表都带上当前目录的原始条目，供外挂字幕匹配。
      */
     private fun openEntry(entry: MediaFile, entries: List<MediaFile>) {
         lifecycleScope.launch {
@@ -310,7 +312,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 showFailure(MediaFailure.Unknown)
                 return@launch
             }
-            openMedia(playableEntry(entry), entries.map(::playableEntry), plainEntries.map(::playableEntry))
+            val streams = networkStreams()
+            openMedia(
+                entry.withPlaybackLocation(streams),
+                entries.map { it.withPlaybackLocation(streams) },
+                plainEntries.map { it.withPlaybackLocation(streams) },
+            )
         }
     }
 
@@ -318,14 +325,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun showFailure(failure: MediaFailure) {
         Toast.makeText(this, getString(mediaFailureText(failure)), Toast.LENGTH_LONG).show()
     }
-
-    /** 网络位置换成回环地址；本地位置与目录原样保留。 */
-    private fun playableEntry(entry: MediaFile): MediaFile =
-        if (entry.isDirectory || entry.source != MediaSource.Network) {
-            entry
-        } else {
-            entry.copy(location = networkStreams().urlFor(entry.location))
-        }
 
     /** 回环代理与网络会话按需建立，关播放页时一并释放。 */
     private fun networkStreams(): NetworkStreams = streams ?: createNetworkStreams().also { streams = it }

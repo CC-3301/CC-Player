@@ -156,7 +156,7 @@ class PlaybackController(
         mediaLoaded = false
         pausedAtEpisodeEnd = false
         _state.value = PlaybackState.Loading
-        engine.start(media.location)
+        engine.start(media.playbackLocation)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(media)
     }
@@ -401,21 +401,25 @@ class PlaybackController(
         val media = currentMedia() ?: return
         val tracks = engine.embeddedSubtitleTracks()
         val start = subtitleStartDecision(media.name, tracks, directoryEntries)
-        start.externalToLoad.forEach { engine.addExternalSubtitle(it.location) }
+        start.externalToLoad.forEach { engine.addExternalSubtitle(it.playbackLocation) }
         _subtitleTracks.value = tracks
         _externalSubtitles.value = start.externalToLoad
         applySubtitleSelection(start.selection)
     }
 
-    /** 把选择交给引擎：切到另一路时前一路停显。 */
+    /** 把选择交给引擎：切到另一路时前一路停显。外挂字幕的身份是条目位置，交给引擎的是它的播放位置。 */
     private fun applySubtitleSelection(selection: SubtitleSelection) {
         when (selection) {
             is SubtitleSelection.Embedded -> engine.selectEmbeddedSubtitle(selection.trackId)
-            is SubtitleSelection.External -> engine.selectExternalSubtitle(selection.location)
+            is SubtitleSelection.External -> engine.selectExternalSubtitle(playbackSubtitleLocation(selection.location))
             SubtitleSelection.Off -> engine.disableSubtitles()
         }
         _subtitleSelection.value = selection
     }
+
+    /** 外挂字幕条目给引擎的位置；菜单里没有这个条目时用位置本身。 */
+    private fun playbackSubtitleLocation(location: String): String =
+        _externalSubtitles.value.firstOrNull { it.location == location }?.playbackLocation ?: location
 
     /** 落进度记录；[force] 为假时位置变化不足 [SAVE_INTERVAL_MILLIS] 就不写库。 */
     private fun savePosition(media: MediaFile, force: Boolean = false) {
