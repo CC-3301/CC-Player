@@ -42,6 +42,15 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
     private val _autoPlayNext = MutableStateFlow(true)
     val autoPlayNext: StateFlow<Boolean> = _autoPlayNext.asStateFlow()
 
+    /**
+     * 当前画面的宽高比（宽/高）；未知时为 null。
+     *
+     * 引擎上报正尺寸后保持到下一次上报或本次会话结束：换集途中旧值不会先归零再回来，
+     * 避免播放中来回旋转（ADR-0013）。
+     */
+    private val _videoAspectRatio = MutableStateFlow<Double?>(null)
+    val videoAspectRatio: StateFlow<Double?> = _videoAspectRatio.asStateFlow()
+
     private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
 
     /** 会话里是否有已打开的媒体。 */
@@ -107,6 +116,7 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         _seekPreviewMillis.value = null
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
+        _videoAspectRatio.value = null
     }
 
     /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
@@ -176,6 +186,11 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
         if (!active) return
         _progress.value = PlaybackProgress(positionMillis, durationMillis)
+    }
+
+    override fun onVideoSizeChanged(width: Int, height: Int) {
+        if (!active || width <= 0 || height <= 0) return
+        _videoAspectRatio.value = width.toDouble() / height
     }
 
     private companion object {

@@ -1,19 +1,23 @@
 package com.cc3301.ccplayer.ui
 
+import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,7 +38,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.cc3301.ccplayer.R
@@ -43,6 +51,7 @@ import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.settings.OrientationMode
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -55,9 +64,11 @@ fun PlayerScreen(
     currentIndex: Int,
     decodeMode: DecodeMode,
     loopMode: LoopMode,
+    orientationMode: OrientationMode,
     autoPlayNext: Boolean,
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
+    videoAspectRatio: Double?,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -67,9 +78,12 @@ fun PlayerScreen(
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
     onToggleLoopMode: () -> Unit,
+    onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 竖屏时视频区上方预留给标题/控制位的带高，见 [PLAYER_TOP_RESERVED_HEIGHT]。 */
+    videoTopReservedHeight: Dp = PLAYER_TOP_RESERVED_HEIGHT,
 ) {
     val lock = remember { PlayerLock() }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -84,14 +98,27 @@ fun PlayerScreen(
         }
     }
 
-    Box(modifier = modifier
+    BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)) {
+        val density = LocalDensity.current
+        val portrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
+        val viewport = videoViewport(
+            containerWidth = with(density) { maxWidth.toPx() },
+            containerHeight = with(density) { maxHeight.toPx() },
+            videoAspectRatio = videoAspectRatio,
+            topReservedHeight = with(density) { if (portrait) videoTopReservedHeight.toPx() else 0f },
+        )
         AndroidView(
             factory = { context ->
                 MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .offset { IntOffset(viewport.left.roundToInt(), viewport.top.roundToInt()) }
+                .size(
+                    width = with(density) { viewport.width.toDp() },
+                    height = with(density) { viewport.height.toDp() },
+                ),
         )
         PlayerGestureLayer(
             locked = locked,
@@ -115,6 +142,7 @@ fun PlayerScreen(
                     currentIndex = currentIndex,
                     decodeMode = decodeMode,
                     loopMode = loopMode,
+                    orientationMode = orientationMode,
                     autoPlayNext = autoPlayNext,
                     playlistVisible = playlistVisible,
                     onTogglePlayPause = onTogglePlayPause,
@@ -125,6 +153,7 @@ fun PlayerScreen(
                     onPlaylistSelect = onPlaylistSelect,
                     onToggleDecodeMode = onToggleDecodeMode,
                     onToggleLoopMode = onToggleLoopMode,
+                    onCycleOrientationMode = onCycleOrientationMode,
                     onToggleAutoPlayNext = onToggleAutoPlayNext,
                     onTogglePlaylist = { playlistVisible = !playlistVisible },
                     onLock = { lock.tapLockButton() },
@@ -244,6 +273,7 @@ private fun Controls(
     currentIndex: Int,
     decodeMode: DecodeMode,
     loopMode: LoopMode,
+    orientationMode: OrientationMode,
     autoPlayNext: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
@@ -254,6 +284,7 @@ private fun Controls(
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
     onToggleLoopMode: () -> Unit,
+    onCycleOrientationMode: () -> Unit,
     onToggleAutoPlayNext: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onLock: () -> Unit,
@@ -316,6 +347,9 @@ private fun Controls(
             }
             TextButton(onClick = onToggleDecodeMode) {
                 Text(text = stringResource(decodeModeLabel(decodeMode)))
+            }
+            TextButton(onClick = onCycleOrientationMode) {
+                Text(text = stringResource(orientationModeLabel(orientationMode)))
             }
             TextButton(onClick = onLock) {
                 Text(text = stringResource(R.string.player_lock))
@@ -417,4 +451,11 @@ private fun loopModeLabel(mode: LoopMode): Int = when (mode) {
     LoopMode.Sequential -> R.string.player_loop_sequential
     LoopMode.ListLoop -> R.string.player_loop_list
     LoopMode.SingleLoop -> R.string.player_loop_single
+}
+
+private fun orientationModeLabel(mode: OrientationMode): Int = when (mode) {
+    OrientationMode.System -> R.string.player_orientation_system
+    OrientationMode.Landscape -> R.string.player_orientation_landscape
+    OrientationMode.Portrait -> R.string.player_orientation_portrait
+    OrientationMode.FollowVideo -> R.string.player_orientation_follow_video
 }

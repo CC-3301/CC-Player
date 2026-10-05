@@ -18,7 +18,7 @@ enum class ViewMode { List, Grid }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播开关、屏幕方向模式。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -41,6 +41,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
     /** "自动播放下一个"开关，默认开。 */
     val autoPlayNext: Flow<Boolean> = dataStore.data.map { preferences ->
         preferences[AUTO_PLAY_NEXT] ?: DEFAULT_AUTO_PLAY_NEXT
+    }
+
+    val orientationMode: Flow<OrientationMode> = dataStore.data.map { preferences ->
+        OrientationMode.entries.firstOrNull { it.name == preferences[ORIENTATION_MODE] }
+            ?: DEFAULT_ORIENTATION_MODE
     }
 
     suspend fun addRoot(location: String) {
@@ -67,12 +72,17 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[AUTO_PLAY_NEXT] = enabled }
     }
 
+    suspend fun setOrientationMode(mode: OrientationMode) {
+        dataStore.edit { preferences -> preferences[ORIENTATION_MODE] = mode.name }
+    }
+
     companion object {
         /** 网格可选的列数。 */
         val GRID_COLUMN_CHOICES = listOf(2, 3, 4)
         const val DEFAULT_GRID_COLUMNS = 3
         val DEFAULT_SORT_ORDER = SortOrder.NameAscending
         const val DEFAULT_AUTO_PLAY_NEXT = true
+        val DEFAULT_ORIENTATION_MODE = OrientationMode.System
 
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
@@ -83,6 +93,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val GRID_COLUMNS = intPreferencesKey("grid_columns")
         private val SORT_ORDER = stringPreferencesKey("sort_order")
         private val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
+        private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
 
         private fun Preferences.rootLocations(): List<String> =
             this[ROOTS].orEmpty().lines().filter { it.isNotBlank() }

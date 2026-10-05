@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.settings
 
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.cc3301.ccplayer.library.SortOrder
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -66,6 +67,27 @@ class SettingsRepositoryTest {
         dataStore.edit { preferences -> preferences[intPreferencesKey("grid_columns")] = 5 }
 
         assertEquals(3, settings.gridColumns.first())
+    }
+
+    @Test
+    fun `默认方向模式为屏幕方向`() = runTest {
+        assertEquals(OrientationMode.System, settings.orientationMode.first())
+    }
+
+    @Test
+    fun `四种方向模式写入后读回`() = runTest {
+        OrientationMode.entries.forEach { mode ->
+            settings.setOrientationMode(mode)
+
+            assertEquals(mode, settings.orientationMode.first())
+        }
+    }
+
+    @Test
+    fun `持久化的方向模式取值不认识时回落屏幕方向`() = runTest {
+        dataStore.edit { preferences -> preferences[stringPreferencesKey("orientation_mode")] = "Sideways" }
+
+        assertEquals(OrientationMode.System, settings.orientationMode.first())
     }
 
     @Test
