@@ -44,7 +44,12 @@
     <string name="player_loop_sequential">顺序</string>
     <string name="player_loop_list">列表循环</string>
     <string name="player_loop_single">单集循环</string>
+    <string name="player_orientation_system">屏幕方向</string>
+    <string name="player_orientation_landscape">横屏</string>
+    <string name="player_orientation_portrait">竖屏</string>
+    <string name="player_orientation_follow_video">跟随视频</string>
     <string name="player_auto_play_next">自动播放下一个</string>
+    <string name="player_title_back">返回</string>
     <string name="player_lock">锁定</string>
     <string name="player_unlock">解锁</string>
     <string name="player_unlock_confirm">再点一次解锁</string>
