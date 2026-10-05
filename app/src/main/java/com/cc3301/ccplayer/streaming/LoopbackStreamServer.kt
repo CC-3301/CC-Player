@@ -10,13 +10,15 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * 回环 HTTP 代理：只监听 127.0.0.1，把登记的 [ByteSource] 按 Range 响应给本机播放器。
+ * 回环 HTTP 代理：只监听 127.0.0.1，把登记的流按 Range 响应给本机播放器。
  *
- * 播放核心不直接接触网络协议，拿到的是本机地址。[close] 会关闭全部已登记的字节源。
+ * 同一个键恒得同一个地址；字节源在第一个请求到达时才由 opener 建立并缓存。
+ * [close] 关闭全部已建立的字节源。
  */
 class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
 
-    private val sources = ConcurrentHashMap<String, ByteSource>()
+    private val entries = ConcurrentHashMap<String, Entry>()
+    private val idsByKey = ConcurrentHashMap<String, String>()
     private val nextId = AtomicLong(1)
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
@@ -27,17 +29,21 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
     /** 实际监听的端口；构造时传 0 则由系统分配。 */
     val port: Int get() = serverSocket.localPort
 
-    /** 登记字节源，返回播放器可用的本机地址。 */
-    fun serve(source: ByteSource): String {
-        val id = nextId.getAndIncrement().toString()
-        sources[id] = source
+    /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
+    fun serve(key: String, open: () -> ByteSource): String {
+        val id = idsByKey.computeIfAbsent(key) {
+            val created = nextId.getAndIncrement().toString()
+            entries[created] = Entry(open)
+            created
+        }
         return "http://$LOOPBACK_ADDRESS:$port/$id"
     }
 
     override fun close() {
         runCatching { serverSocket.close() }
-        sources.values.forEach { runCatching { it.close() } }
-        sources.clear()
+        entries.values.forEach { it.close() }
+        entries.clear()
+        idsByKey.clear()
     }
 
     private fun acceptLoop() {
@@ -58,14 +64,19 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
             } catch (unreadable: IOException) {
                 null
             } ?: return
-            val id = request.path.trimStart('/').substringBefore('/')
-            val source = sources[id]
+            val entry = entries[request.path.trimStart('/').substringBefore('/')]
             try {
                 socket.getOutputStream().buffered().use { output ->
-                    if (source == null) {
-                        writeHead(output, STATUS_NOT_FOUND, "Not Found", emptyMap())
-                    } else {
-                        respond(output, request, source)
+                    when {
+                        entry == null -> writeHead(output, STATUS_NOT_FOUND, statusText(STATUS_NOT_FOUND), emptyMap())
+                        else -> {
+                            val source = runCatching { entry.source() }.getOrNull()
+                            if (source == null) {
+                                writeHead(output, STATUS_UNAVAILABLE, statusText(STATUS_UNAVAILABLE), emptyMap())
+                            } else {
+                                respond(output, request, source)
+                            }
+                        }
                     }
                 }
             } catch (disconnected: IOException) {
@@ -131,13 +142,30 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
     }
 
     private fun statusText(statusCode: Int): String = when (statusCode) {
-        200 -> "OK"
         206 -> "Partial Content"
+        404 -> "Not Found"
         416 -> "Range Not Satisfiable"
+        503 -> "Service Unavailable"
         else -> "OK"
     }
 
     private data class Request(val method: String, val path: String, val rangeHeader: String?)
+
+    /** 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。 */
+    private class Entry(private val open: () -> ByteSource) {
+
+        private val lock = Any()
+
+        @Volatile
+        private var source: ByteSource? = null
+
+        /** 取字节源；建立失败时抛出，下次请求会重试。 */
+        fun source(): ByteSource = source ?: synchronized(lock) { source ?: open().also { source = it } }
+
+        fun close() {
+            source?.let { runCatching { it.close() } }
+        }
+    }
 
     private companion object {
         const val LOOPBACK_ADDRESS = "127.0.0.1"
@@ -145,6 +173,7 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
         const val RANGE_HEADER = "Range"
         const val METHOD_HEAD = "HEAD"
         const val STATUS_NOT_FOUND = 404
+        const val STATUS_UNAVAILABLE = 503
         const val BACKLOG = 16
         const val COPY_BUFFER_BYTES = 64 * 1024
     }

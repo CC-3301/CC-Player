@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.playback
 import android.content.Context
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
+import java.util.Locale
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -20,12 +21,17 @@ class MpvPlaybackEngine(
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
     private var videoOutputStopped = false
 
+    private var positionSeconds = 0.0
+    private var durationSeconds = 0.0
+
     fun initialize() {
         MPVLib.create(context.applicationContext)
         MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
         MPVLib.addObserver(this)
         MPVLib.observeProperty(PAUSE_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+        MPVLib.observeProperty(TIME_POS_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -46,6 +52,15 @@ class MpvPlaybackEngine(
 
     override fun stop() {
         MPVLib.command(arrayOf("stop"))
+    }
+
+    override fun seekTo(positionMillis: Long) {
+        MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+    }
+
+    override fun setDecodeMode(mode: DecodeMode) {
+        val hwdec = if (mode == DecodeMode.Hardware) MpvOptions.HWDEC else MpvOptions.HWDEC_SOFTWARE
+        MPVLib.setPropertyString(HWDEC_PROPERTY, hwdec)
     }
 
     override fun attachSurface(surface: Surface) {
@@ -85,7 +100,14 @@ class MpvPlaybackEngine(
 
     override fun eventProperty(property: String, value: Long) = Unit
 
-    override fun eventProperty(property: String, value: Double) = Unit
+    override fun eventProperty(property: String, value: Double) {
+        when (property) {
+            TIME_POS_PROPERTY -> positionSeconds = value
+            DURATION_PROPERTY -> durationSeconds = value
+            else -> return
+        }
+        listener?.onPositionChanged(toMillis(positionSeconds), toMillis(durationSeconds))
+    }
 
     override fun eventProperty(property: String, value: String) = Unit
 
@@ -93,7 +115,16 @@ class MpvPlaybackEngine(
         if (property == PAUSE_PROPERTY) listener?.onPauseChanged(value)
     }
 
+    /** mpv 在时长未知时上报 NaN，按 0 处理。 */
+    private fun toMillis(seconds: Double): Long =
+        if (seconds.isNaN() || seconds < 0) 0 else (seconds * 1000).toLong()
+
+    private fun formatSeconds(millis: Long): String = String.format(Locale.US, "%.3f", millis / 1000.0)
+
     private companion object {
         const val PAUSE_PROPERTY = "pause"
+        const val HWDEC_PROPERTY = "hwdec"
+        const val TIME_POS_PROPERTY = "time-pos"
+        const val DURATION_PROPERTY = "duration"
     }
 }

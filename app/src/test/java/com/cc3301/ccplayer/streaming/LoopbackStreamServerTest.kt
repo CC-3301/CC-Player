@@ -12,7 +12,11 @@ class LoopbackStreamServerTest {
     private val payload = ByteArray(1000) { (it % 251).toByte() }
     private val server = LoopbackStreamServer()
     private val source = RecordingByteSource(payload)
-    private val url = server.serve(source)
+    private var opened = 0
+    private val url = server.serve("smb://nas/media/电影.mkv") {
+        opened++
+        source
+    }
 
     @After
     fun tearDown() {
@@ -74,7 +78,31 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `关闭后登记流的字节源一并关闭`() {
+    fun `同一个键恒得同一个地址`() {
+        assertEquals(url, server.serve("smb://nas/media/电影.mkv") { opened++; source })
+    }
+
+    @Test
+    fun `字节源在第一个请求到来时才建立，之后复用`() {
+        assertEquals(0, opened)
+
+        httpRequest(url)
+        httpRequest(url)
+
+        assertEquals(1, opened)
+    }
+
+    @Test
+    fun `字节源建立失败时返回 503`() {
+        val failing = server.serve("smb://nas/media/坏文件.mkv") { throw IllegalStateException("连不上") }
+
+        assertEquals(503, httpRequest(failing).statusCode)
+    }
+
+    @Test
+    fun `关闭后已建立的字节源一并关闭`() {
+        httpRequest(url)
+
         server.close()
 
         assertEquals(true, source.closed)

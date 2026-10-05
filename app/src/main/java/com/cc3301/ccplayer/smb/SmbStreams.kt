@@ -1,12 +1,17 @@
 package com.cc3301.ccplayer.smb
 
+import com.cc3301.ccplayer.library.MediaFailure
+import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
+import kotlinx.coroutines.runBlocking
 import java.io.Closeable
 
 /**
- * 网络媒体播放接缝：把 SMB 文件经本机回环代理暴露成 HTTP 地址，播放核心只拿到本机地址。
+ * 网络媒体播放接缝：把 SMB 位置映到本机回环地址，播放核心只拿到本机地址。
  *
- * 会话与读句柄随字节源一起关闭；[close] 一并关掉代理与全部已发出的流。
+ * 一个位置恒得同一个地址，播放列表里的每一项都能先换成地址；字节源在播放器读到时才建立。
+ * [close] 一并关掉代理与全部已建立的流。
  */
 class SmbStreams(
     private val connector: SmbConnector,
@@ -14,12 +19,32 @@ class SmbStreams(
     private val server: LoopbackStreamServer = LoopbackStreamServer(),
 ) : Closeable {
 
-    /**
-     * 为位置开一条本机地址；位置不属于任何书签、指向目录或打不开时返回 null。
-     */
-    suspend fun urlFor(location: String): String? {
-        val target = locator.locate(location) ?: return null
-        if (target.path.isEmpty()) return null
+    /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
+    suspend fun probe(location: String) {
+        connectTo(location).second.close()
+    }
+
+    /** 位置对应的本机地址。 */
+    fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
+
+    override fun close() {
+        server.close()
+    }
+
+    /** 代理在自己的线程上取流，这里阻塞等连接与打开完成。 */
+    private fun openBlocking(location: String): ByteSource = runBlocking {
+        val (target, connection) = connectTo(location)
+        try {
+            SmbStreamSource(connection, connection.openRead(target.path))
+        } catch (failure: Exception) {
+            runCatching { connection.close() }
+            throw failure
+        }
+    }
+
+    private suspend fun connectTo(location: String): Pair<SmbTarget, SmbConnection> {
+        val target = locator.locate(location)
+            ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
         val connection = connector.connect(
             host = target.host,
             port = target.port,
@@ -27,22 +52,6 @@ class SmbStreams(
             username = target.username,
             password = target.password,
         )
-        val handle = try {
-            connection.openRead(target.path)
-        } catch (failure: Exception) {
-            runCatching { connection.close() }
-            throw failure
-        }
-        return try {
-            server.serve(SmbStreamSource(connection, handle))
-        } catch (failure: Exception) {
-            runCatching { handle.close() }
-            runCatching { connection.close() }
-            throw failure
-        }
-    }
-
-    override fun close() {
-        server.close()
+        return target to connection
     }
 }

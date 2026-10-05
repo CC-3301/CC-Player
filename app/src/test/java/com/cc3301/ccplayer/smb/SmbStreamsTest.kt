@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.smb
 
+import com.cc3301.ccplayer.library.MediaFailure
+import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
@@ -8,7 +10,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SmbStreamsTest {
@@ -33,7 +35,7 @@ class SmbStreamsTest {
 
         val url = streams.urlFor(movie)
 
-        assertEquals(true, url!!.startsWith("http://127.0.0.1:"))
+        assertTrue(url.startsWith("http://127.0.0.1:"))
         assertArrayEquals(payload, httpRequest(url).body)
     }
 
@@ -42,29 +44,42 @@ class SmbStreamsTest {
         sources.add(url = root, username = "cc", password = "secret")
         connector.addFile("media", "电影.mkv", payload)
 
-        val response = httpRequest(streams.urlFor(movie)!!, range = "bytes=100-199")
+        val response = httpRequest(streams.urlFor(movie), range = "bytes=100-199")
 
         assertEquals(206, response.statusCode)
         assertArrayEquals(payload.copyOfRange(100, 200), response.body)
     }
 
     @Test
-    fun `书签以外的位置没有本机地址`() = runTest {
-        assertNull(streams.urlFor(movie))
-    }
-
-    @Test
-    fun `目录位置没有本机地址`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
-
-        assertNull(streams.urlFor(root))
-    }
-
-    @Test
-    fun `关闭后读句柄一并关闭`() = runTest {
+    fun `同一个位置恒得同一个地址`() = runTest {
         sources.add(url = root, username = "cc", password = "secret")
         connector.addFile("media", "电影.mkv", payload)
-        streams.urlFor(movie)
+
+        assertEquals(streams.urlFor(movie), streams.urlFor(movie))
+    }
+
+    @Test
+    fun `起播前试连能发现连不上的共享`() = runTest {
+        sources.add(url = root, username = "cc", password = "secret")
+        connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+
+        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+
+        assertEquals(MediaFailure.Unreachable, (exception as MediaSourceException).failure)
+    }
+
+    @Test
+    fun `起播前试连能发现不属于任何书签的位置`() = runTest {
+        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+
+        assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
+    }
+
+    @Test
+    fun `关闭后已建立的读句柄一并关闭`() = runTest {
+        sources.add(url = root, username = "cc", password = "secret")
+        connector.addFile("media", "电影.mkv", payload)
+        httpRequest(streams.urlFor(movie))
 
         streams.close()
 

@@ -16,6 +16,8 @@ class FakePlaybackEngine : PlaybackEngine {
         private set
     var stopCalls = 0
         private set
+    val seekPositions = mutableListOf<Long>()
+    val decodeModes = mutableListOf<DecodeMode>()
 
     override fun setListener(listener: PlaybackEngine.Listener) {
         this.listener = listener
@@ -37,6 +39,14 @@ class FakePlaybackEngine : PlaybackEngine {
         stopCalls++
     }
 
+    override fun seekTo(positionMillis: Long) {
+        seekPositions += positionMillis
+    }
+
+    override fun setDecodeMode(mode: DecodeMode) {
+        decodeModes += mode
+    }
+
     override fun attachSurface(surface: Surface) = Unit
 
     override fun detachSurface() = Unit
@@ -50,4 +60,7 @@ class FakePlaybackEngine : PlaybackEngine {
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
     fun reportPlaybackEnded() = listener?.onPlaybackEnded()
+
+    fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
+        listener?.onPositionChanged(positionMillis, durationMillis)
 }

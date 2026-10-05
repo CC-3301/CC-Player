@@ -8,6 +8,9 @@ object MpvOptions {
     /** 硬解优先，解码失败由 mpv 回退软解。 */
     const val HWDEC = "auto"
 
+    /** 强制软解。 */
+    const val HWDEC_SOFTWARE = "no"
+
     /** 视频输出：libmpv 的 OpenGL 渲染，画面进 Surface。 */
     const val VIDEO_OUTPUT = "gpu"
 
