@@ -33,6 +33,9 @@
     <string name="player_auto_play_next">自动播放下一个</string>
     <string name="player_lock">锁定</string>
     <string name="player_unlock">解锁</string>
+    <string name="player_unlock_confirm">再点一次解锁</string>
+    <string name="player_brightness_hint">亮度 %1$d%%</string>
+    <string name="player_volume_hint">音量 %1$d%%</string>
     <string name="player_exit">退出</string>
     <string name="notification_channel_playback">播放</string>
     <string name="notification_playing">正在播放</string>
