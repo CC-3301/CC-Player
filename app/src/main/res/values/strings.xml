@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CC Player</string>
+    <string name="home_open_video">打开本地视频</string>
+    <string name="player_pause">暂停</string>
+    <string name="player_resume">继续</string>
+    <string name="player_exit">退出</string>
+    <string name="notification_channel_playback">播放</string>
+    <string name="notification_playing">正在播放</string>
+</resources>
