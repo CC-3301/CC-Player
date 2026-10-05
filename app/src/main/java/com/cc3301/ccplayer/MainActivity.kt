@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -35,8 +36,11 @@ import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
+import com.cc3301.ccplayer.ui.MediaVolumeControl
 import com.cc3301.ccplayer.ui.MpvSurfaceView
+import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
+import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -94,6 +98,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     if (uri != null) addRoot(uri)
                 }
 
+                val levelControls = remember {
+                    PlayerLevelControls(
+                        brightness = WindowBrightnessControl(this@MainActivity),
+                        volume = MediaVolumeControl(this@MainActivity),
+                    )
+                }
+
                 if (playerVisible) {
                     BackHandler { closePlayer() }
                     PlayerScreen(
@@ -103,12 +114,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         playlist = playlist,
                         currentIndex = currentIndex,
                         decodeMode = decodeMode,
+                        levelControls = levelControls,
                         surfaceCallback = this@MainActivity,
                         onTogglePlayPause = { playback?.controller?.togglePlayPause() },
                         onPrevious = { playback?.controller?.previous() },
                         onNext = { playback?.controller?.next() },
                         onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
                         onSeekCommit = { playback?.controller?.commitSeekPreview() },
+                        onSeekBy = { seekBy(it) },
                         onPlaylistSelect = { playback?.controller?.playAt(it) },
                         onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
                         onClose = { closePlayer() },
@@ -135,6 +148,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 }
             }
         }
+    }
+
+    /** 双击三分区的快退/快进：目标位置夹取在当前时长内；时长未知时不动作。 */
+    private fun seekBy(deltaMillis: Long) {
+        val controller = playback?.controller ?: return
+        val duration = progress.durationMillis
+        if (duration <= 0) return
+        controller.updateSeekPreview((progress.positionMillis + deltaMillis).coerceIn(0L, duration))
+        controller.commitSeekPreview()
     }
 
     /** 取持久读授权：目录选定后重启仍可读，不需要任何存储权限。 */

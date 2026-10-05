@@ -2,6 +2,8 @@ package com.cc3301.ccplayer.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,13 +23,16 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -36,6 +41,8 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
+import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 @Composable
 fun PlayerScreen(
@@ -45,20 +52,31 @@ fun PlayerScreen(
     playlist: List<MediaFile>,
     currentIndex: Int,
     decodeMode: DecodeMode,
+    levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekBy: (Long) -> Unit,
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val lock = remember { PlayerLock() }
     var controlsVisible by remember { mutableStateOf(true) }
-    var locked by remember { mutableStateOf(false) }
     var playlistVisible by remember { mutableStateOf(false) }
+    var levelHint by remember { mutableStateOf<LevelHint?>(null) }
+    val locked = lock.locked
+
+    LaunchedEffect(lock.unlockPending) {
+        if (lock.unlockPending) {
+            delay(UNLOCK_CONFIRM_WINDOW_MILLIS)
+            lock.expireUnlock()
+        }
+    }
 
     Box(modifier = modifier
         .fillMaxSize()
@@ -69,34 +87,141 @@ fun PlayerScreen(
             },
             modifier = Modifier.fillMaxSize(),
         )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clickable { controlsVisible = !controlsVisible },
+        PlayerGestureLayer(
+            locked = locked,
+            levelControls = levelControls,
+            onTogglePlayPause = onTogglePlayPause,
+            onSeekBy = onSeekBy,
+            onToggleControls = { controlsVisible = !controlsVisible },
+            onLevelHint = { levelHint = it },
+            modifier = Modifier.fillMaxSize(),
         )
-        if (controlsVisible) {
-            Controls(
-                state = state,
-                progress = progress,
-                seekPreviewMillis = seekPreviewMillis,
-                playlist = playlist,
-                currentIndex = currentIndex,
-                decodeMode = decodeMode,
-                locked = locked,
-                playlistVisible = playlistVisible,
-                onTogglePlayPause = onTogglePlayPause,
-                onPrevious = onPrevious,
-                onNext = onNext,
-                onSeekPreview = onSeekPreview,
-                onSeekCommit = onSeekCommit,
-                onPlaylistSelect = onPlaylistSelect,
-                onToggleDecodeMode = onToggleDecodeMode,
-                onTogglePlaylist = { playlistVisible = !playlistVisible },
-                onToggleLock = { locked = !locked },
-                onClose = onClose,
-                modifier = Modifier.align(Alignment.BottomCenter),
+        levelHint?.let { hint ->
+            LevelHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
+        }
+        if (inputAllowed(PlayerInput.ControlBar, locked)) {
+            if (controlsVisible) {
+                Controls(
+                    state = state,
+                    progress = progress,
+                    seekPreviewMillis = seekPreviewMillis,
+                    playlist = playlist,
+                    currentIndex = currentIndex,
+                    decodeMode = decodeMode,
+                    playlistVisible = playlistVisible,
+                    onTogglePlayPause = onTogglePlayPause,
+                    onPrevious = onPrevious,
+                    onNext = onNext,
+                    onSeekPreview = onSeekPreview,
+                    onSeekCommit = onSeekCommit,
+                    onPlaylistSelect = onPlaylistSelect,
+                    onToggleDecodeMode = onToggleDecodeMode,
+                    onTogglePlaylist = { playlistVisible = !playlistVisible },
+                    onLock = { lock.tapLockButton() },
+                    onClose = onClose,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
+            }
+        } else {
+            UnlockButton(
+                unlockPending = lock.unlockPending,
+                onTap = {
+                    lock.tapLockButton()
+                    if (!lock.locked) controlsVisible = true
+                },
+                modifier = Modifier.align(Alignment.TopStart),
             )
         }
+    }
+}
+
+/** 手势层：点击显隐控制条、双击三分区快退/暂停/快进、左右半屏上下拖调亮度/音量。 */
+@Composable
+private fun PlayerGestureLayer(
+    locked: Boolean,
+    levelControls: PlayerLevelControls,
+    onTogglePlayPause: () -> Unit,
+    onSeekBy: (Long) -> Unit,
+    onToggleControls: () -> Unit,
+    onLevelHint: (LevelHint?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // 手势层只在锁定态变化时重启，回调取最新一份，避免双击用上旧的播放位置。
+    val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
+    val latestOnSeekBy = rememberUpdatedState(onSeekBy)
+
+    Box(
+        modifier = modifier
+            .pointerInput(locked) {
+                if (!inputAllowed(PlayerInput.Tap, locked)) return@pointerInput
+                detectTapGestures(
+                    onTap = { onToggleControls() },
+                    onDoubleTap = { offset ->
+                        if (inputAllowed(PlayerInput.DoubleTap, locked)) {
+                            when (val action = doubleTapAction(offset.x, size.width)) {
+                                is DoubleTapAction.Seek -> latestOnSeekBy.value(action.deltaMillis)
+                                DoubleTapAction.TogglePlayPause -> latestOnTogglePlayPause.value()
+                            }
+                        }
+                    },
+                )
+            }
+            .pointerInput(locked) {
+                if (!inputAllowed(PlayerInput.LevelDrag, locked)) return@pointerInput
+                var dragStartX = 0f
+                detectVerticalDragGestures(
+                    onDragStart = { offset -> dragStartX = offset.x },
+                    onDragEnd = { onLevelHint(null) },
+                    onDragCancel = { onLevelHint(null) },
+                    onVerticalDrag = { _, dragAmount ->
+                        val target = dragTarget(dragStartX, size.width)
+                        val fraction = when (target) {
+                            DragTarget.Brightness -> levelControls.dragBrightness(dragAmount, size.height)
+                            DragTarget.Volume -> levelControls.dragVolume(dragAmount, size.height)
+                        }
+                        onLevelHint(LevelHint(target, fraction))
+                    },
+                )
+            },
+    )
+}
+
+private data class LevelHint(val target: DragTarget, val fraction: Float)
+
+/** 拖动亮度/音量时的百分比提示。 */
+@Composable
+private fun LevelHintLabel(hint: LevelHint, modifier: Modifier = Modifier) {
+    Text(
+        text = stringResource(
+            when (hint.target) {
+                DragTarget.Brightness -> R.string.player_brightness_hint
+                DragTarget.Volume -> R.string.player_volume_hint
+            },
+            (hint.fraction * 100).roundToInt(),
+        ),
+        style = MaterialTheme.typography.titleMedium,
+        color = Color.White,
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    )
+}
+
+/** 锁定态下唯一可见的控件：点两次解锁，第一次点后给出「再点一次解锁」提示。 */
+@Composable
+private fun UnlockButton(unlockPending: Boolean, onTap: () -> Unit, modifier: Modifier = Modifier) {
+    TextButton(
+        onClick = onTap,
+        modifier = modifier
+            .safeDrawingPadding()
+            .padding(12.dp)
+            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(8.dp)),
+    ) {
+        Text(
+            text = stringResource(
+                if (unlockPending) R.string.player_unlock_confirm else R.string.player_unlock,
+            ),
+        )
     }
 }
 
@@ -108,7 +233,6 @@ private fun Controls(
     playlist: List<MediaFile>,
     currentIndex: Int,
     decodeMode: DecodeMode,
-    locked: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -118,7 +242,7 @@ private fun Controls(
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
     onTogglePlaylist: () -> Unit,
-    onToggleLock: () -> Unit,
+    onLock: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -170,8 +294,8 @@ private fun Controls(
             TextButton(onClick = onToggleDecodeMode) {
                 Text(text = stringResource(decodeModeLabel(decodeMode)))
             }
-            TextButton(onClick = onToggleLock) {
-                Text(text = stringResource(if (locked) R.string.player_unlock else R.string.player_lock))
+            TextButton(onClick = onLock) {
+                Text(text = stringResource(R.string.player_lock))
             }
             TextButton(onClick = onClose) {
                 Text(text = stringResource(R.string.player_exit))
