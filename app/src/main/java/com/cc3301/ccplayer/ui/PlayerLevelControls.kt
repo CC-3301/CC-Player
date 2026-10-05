@@ -2,7 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import kotlin.math.roundToInt
 
-/** 屏幕亮度的读写，取值 0~1；真机写窗口属性。 */
+/** 屏幕亮度的读写，取值 0~1；写窗口属性。 */
 interface BrightnessControl {
     fun read(): Float
 
