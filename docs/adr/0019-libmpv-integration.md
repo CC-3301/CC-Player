@@ -7,3 +7,11 @@
 - 渲染：MPVView（libmpv OpenGL 渲染到 Surface）嵌入 Compose 的 AndroidView
 - 前台服务播放器：单一 PlaybackService 持有 mpv 实例与 MediaSession，Activity 仅绑定
 - 字幕渲染：交给 mpv 内部 libass（不使用外层叠加），外挂字幕通过 sub-add 加载
+
+## 版本与产物（实现时补记）
+- libmpv：`mpv v0.41.0`，libass 静态链入 `libmpv.so`
+- 来源：mpv-android release tag `2026-09-17` 的 `app-default-arm64-v8a-release.apk`，取其中 `lib/arm64-v8a/` 全部 `.so` 存入 `app/src/main/jniLibs/arm64-v8a/`
+- ABI：仅 arm64-v8a
+- 源码：官方 `MPVLib.kt`（MIT）原样复制到 `app/src/main/java/is/xyz/mpv/`；`MpvSurfaceView` 按官方 `BaseMPVView.kt` 的 Surface 挂载顺序改写
+- 渲染入口：`MPVLib.attachSurface(Surface)`，libmpv 的 render API 直接把画面画到视图的 Surface 上，承担官方 `MPVView` 的渲染职责，因此不需要单独移植 `MPVView`
+- 许可文本：`third_party/mpv-android/LICENSE`
