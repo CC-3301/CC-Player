@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -88,6 +89,39 @@ class SettingsRepositoryTest {
         dataStore.edit { preferences -> preferences[stringPreferencesKey("orientation_mode")] = "Sideways" }
 
         assertEquals(OrientationMode.System, settings.orientationMode.first())
+    }
+
+    @Test
+    fun `默认播放上次位置`() = runTest {
+        assertEquals(ResumeMode.LastPosition, settings.resumeMode.first())
+    }
+
+    @Test
+    fun `续播模式写入后读回`() = runTest {
+        settings.setResumeMode(ResumeMode.FromStart)
+
+        assertEquals(ResumeMode.FromStart, settings.resumeMode.first())
+    }
+
+    @Test
+    fun `默认进入列表自动滚动到上次播放位置`() = runTest {
+        assertTrue(settings.autoScrollToLastPlayed.first())
+    }
+
+    @Test
+    fun `自动滚动开关写入后读回`() = runTest {
+        settings.setAutoScrollToLastPlayed(false)
+
+        assertFalse(settings.autoScrollToLastPlayed.first())
+    }
+
+    @Test
+    fun `没播过时上次播放位置为空，写入后读回`() = runTest {
+        assertNull(settings.lastPlayedLocation.first())
+
+        settings.setLastPlayedLocation("content://root/a")
+
+        assertEquals("content://root/a", settings.lastPlayedLocation.first())
     }
 
     @Test

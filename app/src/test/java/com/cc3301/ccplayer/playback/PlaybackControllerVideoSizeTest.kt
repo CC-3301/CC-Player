@@ -1,13 +1,20 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerVideoSizeTest {
 
     private val engine = FakePlaybackEngine()
-    private val controller = PlaybackController(engine)
+    private val progress = FakePlaybackProgressRepository()
+    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
 
     @Test
     fun `no reported video size leaves the aspect ratio unknown`() {

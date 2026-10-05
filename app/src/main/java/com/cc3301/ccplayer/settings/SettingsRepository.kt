@@ -15,6 +15,9 @@ import kotlinx.coroutines.flow.map
 /** 列表视图偏好：单列列表或网格。 */
 enum class ViewMode { List, Grid }
 
+/** 起播位置：始终从头播，或接着上次位置播。 */
+enum class ResumeMode { FromStart, LastPosition }
+
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
@@ -48,6 +51,19 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             ?: DEFAULT_ORIENTATION_MODE
     }
 
+    /** 起播位置设置，默认接着上次位置播。 */
+    val resumeMode: Flow<ResumeMode> = dataStore.data.map { preferences ->
+        ResumeMode.entries.firstOrNull { it.name == preferences[RESUME_MODE] } ?: DEFAULT_RESUME_MODE
+    }
+
+    /** "进入列表自动滚动到上次播放位置"开关，默认开。 */
+    val autoScrollToLastPlayed: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[AUTO_SCROLL_TO_LAST_PLAYED] ?: DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED
+    }
+
+    /** 最近起播的媒体位置，列表据此滚动；还没播过时为 null。 */
+    val lastPlayedLocation: Flow<String?> = dataStore.data.map { preferences -> preferences[LAST_PLAYED_LOCATION] }
+
     suspend fun addRoot(location: String) {
         dataStore.edit { preferences ->
             val roots = preferences.rootLocations()
@@ -76,6 +92,18 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[ORIENTATION_MODE] = mode.name }
     }
 
+    suspend fun setResumeMode(mode: ResumeMode) {
+        dataStore.edit { preferences -> preferences[RESUME_MODE] = mode.name }
+    }
+
+    suspend fun setAutoScrollToLastPlayed(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[AUTO_SCROLL_TO_LAST_PLAYED] = enabled }
+    }
+
+    suspend fun setLastPlayedLocation(location: String) {
+        dataStore.edit { preferences -> preferences[LAST_PLAYED_LOCATION] = location }
+    }
+
     companion object {
         /** 网格可选的列数。 */
         val GRID_COLUMN_CHOICES = listOf(2, 3, 4)
@@ -83,6 +111,8 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val DEFAULT_SORT_ORDER = SortOrder.NameAscending
         const val DEFAULT_AUTO_PLAY_NEXT = true
         val DEFAULT_ORIENTATION_MODE = OrientationMode.System
+        val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
+        const val DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED = true
 
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
@@ -94,6 +124,9 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val SORT_ORDER = stringPreferencesKey("sort_order")
         private val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
         private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
+        private val RESUME_MODE = stringPreferencesKey("resume_mode")
+        private val AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
+        private val LAST_PLAYED_LOCATION = stringPreferencesKey("last_played_location")
 
         private fun Preferences.rootLocations(): List<String> =
             this[ROOTS].orEmpty().lines().filter { it.isNotBlank() }
