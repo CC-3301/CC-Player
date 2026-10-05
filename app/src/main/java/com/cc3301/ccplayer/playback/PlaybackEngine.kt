@@ -21,6 +21,9 @@ interface PlaybackEngine {
     /** 跳到指定播放位置，单位毫秒。 */
     fun seekTo(positionMillis: Long)
 
+    /** 从当前位置起对音频输出做淡入，时长 [durationMillis]；画面不受影响。 */
+    fun fadeInAudio(durationMillis: Long)
+
     /** 设置本次会话的解码模式。 */
     fun setDecodeMode(mode: DecodeMode)
 

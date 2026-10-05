@@ -47,6 +47,9 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
     /** 会话里是否有已打开的媒体。 */
     private var active = false
 
+    /** 下发给引擎的暂停意图；媒体加载完成时据此上报状态。 */
+    private var paused = false
+
     init {
         engine.setListener(this)
     }
@@ -72,6 +75,7 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         active = true
         _state.value = PlaybackState.Loading
         engine.start(media.location)
+        engine.fadeInAudio(FADE_IN_MILLIS)
     }
 
     /** 名称自然排序下的一集；列表末尾时不动作。 */
@@ -85,11 +89,23 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
     }
 
     fun pause() {
-        if (active) engine.pause()
+        if (!active) return
+        paused = true
+        engine.pause()
     }
 
     fun resume() {
-        if (active) engine.resume()
+        if (!active) return
+        paused = false
+        engine.resume()
+    }
+
+    /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
+    fun handleAudioOutputLost() {
+        if (!active) return
+        paused = true
+        engine.pause()
+        _state.value = PlaybackState.Paused
     }
 
     fun togglePlayPause() {
@@ -102,6 +118,7 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
 
     fun stop() {
         active = false
+        paused = false
         engine.stop()
         _state.value = PlaybackState.Idle
         _seekPreviewMillis.value = null
@@ -121,6 +138,7 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         _seekPreviewMillis.value = null
         if (!active) return
         engine.seekTo(target)
+        engine.fadeInAudio(FADE_IN_MILLIS)
     }
 
     fun setDecodeMode(mode: DecodeMode) {
@@ -153,11 +171,12 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
 
     override fun onMediaLoaded() {
         if (!active) return
-        _state.value = PlaybackState.Playing
+        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
+        this.paused = paused
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
@@ -178,7 +197,10 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         _progress.value = PlaybackProgress(positionMillis, durationMillis)
     }
 
-    private companion object {
-        const val NO_MEDIA = -1
+    companion object {
+        /** 起播与跳转后的音频淡入时长，固定值。 */
+        const val FADE_IN_MILLIS = 500L
+
+        private const val NO_MEDIA = -1
     }
 }

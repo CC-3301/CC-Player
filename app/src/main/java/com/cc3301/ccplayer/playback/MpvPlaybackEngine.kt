@@ -39,6 +39,8 @@ class MpvPlaybackEngine(
     }
 
     override fun start(url: String) {
+        positionSeconds = 0.0
+        durationSeconds = 0.0
         MPVLib.command(arrayOf("loadfile", url, "replace"))
     }
 
@@ -55,7 +57,14 @@ class MpvPlaybackEngine(
     }
 
     override fun seekTo(positionMillis: Long) {
+        positionSeconds = positionMillis / 1000.0
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+    }
+
+    /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
+    override fun fadeInAudio(durationMillis: Long) {
+        val fade = "afade=t=in:st=${formatSeconds(toMillis(positionSeconds))}:d=${formatSeconds(durationMillis)}"
+        MPVLib.command(arrayOf("af", "set", "lavfi=[$fade]"))
     }
 
     override fun setDecodeMode(mode: DecodeMode) {
