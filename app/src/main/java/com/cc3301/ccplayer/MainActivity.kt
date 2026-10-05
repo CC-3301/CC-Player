@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Surface
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -28,14 +29,23 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
+import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaPreviewSource
+import com.cc3301.ccplayer.library.MediaSource
+import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.network.DataStoreBookmarkStore
+import com.cc3301.ccplayer.network.EncryptedCredentialStore
+import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.smb.SmbJConnector
+import com.cc3301.ccplayer.smb.SmbLocator
+import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
@@ -43,6 +53,8 @@ import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
+import com.cc3301.ccplayer.ui.mediaFailureText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
@@ -60,6 +72,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var pendingPlaylist: List<MediaFile> = emptyList()
     private var pendingMedia: MediaFile? = null
     private var stateCollection: Job? = null
+    private var streams: SmbStreams? = null
 
     private var playerVisible by mutableStateOf(false)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
@@ -148,11 +161,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         state = libraryState,
                         mediaPreview = mediaPreview,
                         onPickRoot = { picker.launch(null) },
+                        onOpenNetworkSourceForm = library::openNetworkSourceForm,
+                        onDismissNetworkSourceForm = library::dismissNetworkSourceForm,
+                        onAddNetworkSource = library::addNetworkSource,
                         onOpenEntry = { entry ->
                             if (entry.isDirectory) {
                                 library.enter(entry)
                             } else {
-                                openMedia(entry, library.state.value.entries)
+                                openEntry(entry, library.state.value.entries)
                             }
                         },
                         onNavigateUp = library::navigateUp,
@@ -179,6 +195,56 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun addRoot(uri: Uri) {
         runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         library.addRoot(uri.toString())
+    }
+
+    /**
+     * 本地文件直接把位置交给播放核心；网络文件先试连一次，再把整个播放列表换成回环地址，
+     * 上一集/下一集也就能照常按名称顺序播。
+     */
+    private fun openEntry(entry: MediaFile, entries: List<MediaFile>) {
+        if (entry.source != MediaSource.Network) {
+            openMedia(entry, entries)
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                networkStreams().probe(entry.location)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: MediaSourceException) {
+                showFailure(failure.failure)
+                return@launch
+            } catch (failure: Exception) {
+                showFailure(MediaFailure.Unknown)
+                return@launch
+            }
+            val playable = entries.map(::playableEntry)
+            openMedia(playableEntry(entry), playable)
+        }
+    }
+
+    /** 起播前连不上时用提示条告知，不进播放页。 */
+    private fun showFailure(failure: MediaFailure) {
+        Toast.makeText(this, getString(mediaFailureText(failure)), Toast.LENGTH_LONG).show()
+    }
+
+    /** 网络位置换成回环地址；本地位置与目录原样保留。 */
+    private fun playableEntry(entry: MediaFile): MediaFile =
+        if (entry.isDirectory || entry.source != MediaSource.Network) {
+            entry
+        } else {
+            entry.copy(location = networkStreams().urlFor(entry.location))
+        }
+
+    /** 回环代理与 SMB 会话按需建立，关播放页时一并释放。 */
+    private fun networkStreams(): SmbStreams = streams ?: createNetworkStreams().also { streams = it }
+
+    private fun createNetworkStreams(): SmbStreams {
+        val sources = NetworkSourceRepository(
+            store = DataStoreBookmarkStore.create(applicationContext),
+            credentials = EncryptedCredentialStore.create(applicationContext),
+        )
+        return SmbStreams(SmbJConnector(), SmbLocator(sources))
     }
 
     /** mpv 直接吃 content:// URI：ffmpeg 的 android_content 协议经应用 ContentResolver 读文件。 */
@@ -233,7 +299,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware
         loopMode = LoopMode.Sequential
+        releaseNetworkStreams()
         stopPlaybackService()
+    }
+
+    private fun releaseNetworkStreams() {
+        streams?.close()
+        streams = null
     }
 
     private fun stopPlaybackService() {
@@ -258,6 +330,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onDestroy() {
+        releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()
     }
