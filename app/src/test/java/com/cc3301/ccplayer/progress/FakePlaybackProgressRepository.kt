@@ -35,7 +35,7 @@ class FakePlaybackProgressRepository : PlaybackProgressRepository {
 
     override suspend fun removeMissingUnder(directoryLocation: String, presentLocations: Set<String>) {
         records.keys
-            .filter { it !in presentLocations && isUnderDirectory(directoryLocation, it) }
+            .filter { it !in presentLocations && isDirectChildOf(directoryLocation, it) }
             .forEach { records.remove(it) }
     }
 }

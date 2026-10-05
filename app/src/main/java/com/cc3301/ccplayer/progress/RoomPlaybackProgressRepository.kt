@@ -21,10 +21,10 @@ class RoomPlaybackProgressRepository private constructor(private val dao: Progre
 
     override suspend fun clear(location: String) = dao.remove(location)
 
-    /** 记录条数按播过的媒体增长，清理时把全表位置读出来按目录前缀过滤。 */
+    /** 记录条数按播过的媒体增长，清理时把全表位置读出来按目录的直接子项过滤。 */
     override suspend fun removeMissingUnder(directoryLocation: String, presentLocations: Set<String>) {
         val missing = dao.locations().filter {
-            it !in presentLocations && isUnderDirectory(directoryLocation, it)
+            it !in presentLocations && isDirectChildOf(directoryLocation, it)
         }
         if (missing.isNotEmpty()) dao.removeAll(missing)
     }

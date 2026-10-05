@@ -15,7 +15,7 @@ interface PlaybackProgressRepository {
     suspend fun clear(location: String)
 
     /**
-     * 清理 [directoryLocation] 下已不存在的媒体的记录。
+     * 清理目录直接子项里已不存在的媒体的记录。
      * [presentLocations] 是本次列举出的位置集合；该目录之外的记录不动。
      */
     suspend fun removeMissingUnder(directoryLocation: String, presentLocations: Set<String>)

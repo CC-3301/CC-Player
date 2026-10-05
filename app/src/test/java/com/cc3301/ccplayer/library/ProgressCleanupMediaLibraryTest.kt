@@ -39,6 +39,17 @@ class ProgressCleanupMediaLibraryTest {
     }
 
     @Test
+    fun `子目录里的媒体记录不在本层判断`() = runTest {
+        val series = testDirectory("第二季", "${root.location}%2F第二季")
+        tree.addDirectory(root, series)
+        progress.records["${series.location}%2F第01集.mkv"] = record("${series.location}%2F第01集.mkv")
+
+        library.list(root)
+
+        assertTrue(progress.records.containsKey("${series.location}%2F第01集.mkv"))
+    }
+
+    @Test
     fun `目录读不出来时不清理记录`() = runTest {
         tree.addDirectory(root).markUnreadable(root.location)
         progress.records["${root.location}%2F已移走.mkv"] = record("${root.location}%2F已移走.mkv")

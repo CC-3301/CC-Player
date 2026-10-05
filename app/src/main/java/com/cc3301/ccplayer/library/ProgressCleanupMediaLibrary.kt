@@ -4,7 +4,7 @@ import com.cc3301.ccplayer.progress.PlaybackProgressRepository
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * 列举目录后清掉已不存在的媒体的进度记录：记录只留给还在的媒体。
+ * 列举目录后清掉已不存在的媒体的进度记录：只按本次列举出的直接子项判断，记录只留给还在的媒体。
  *
  * 清理失败只影响记录，列表结果照常返回。
  */
