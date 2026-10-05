@@ -72,6 +72,9 @@ class PlaybackController(
     /** 会话里是否有已打开的媒体。 */
     private var active = false
 
+    /** 下发给引擎的暂停意图；媒体加载完成时据此上报状态。 */
+    private var paused = false
+
     /** 当前媒体的位置与时长，来自引擎回调，落库时用。 */
     private var playedPositionMillis = 0L
     private var playedDurationMillis = 0L
@@ -119,6 +122,7 @@ class PlaybackController(
         mediaLoaded = false
         _state.value = PlaybackState.Loading
         engine.start(media.location)
+        engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(media)
     }
 
@@ -133,11 +137,23 @@ class PlaybackController(
     }
 
     fun pause() {
-        if (active) engine.pause()
+        if (!active) return
+        paused = true
+        engine.pause()
     }
 
     fun resume() {
-        if (active) engine.resume()
+        if (!active) return
+        paused = false
+        engine.resume()
+    }
+
+    /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
+    fun handleAudioOutputLost() {
+        if (!active) return
+        paused = true
+        engine.pause()
+        _state.value = PlaybackState.Paused
     }
 
     fun togglePlayPause() {
@@ -151,6 +167,7 @@ class PlaybackController(
     fun stop() {
         if (active) currentMedia()?.let { savePosition(media = it, force = true) }
         active = false
+        paused = false
         engine.stop()
         _state.value = PlaybackState.Idle
         _seekPreviewMillis.value = null
@@ -171,6 +188,7 @@ class PlaybackController(
         _seekPreviewMillis.value = null
         if (!active) return
         engine.seekTo(target)
+        engine.fadeInAudio(FADE_IN_MILLIS)
     }
 
     fun setDecodeMode(mode: DecodeMode) {
@@ -208,12 +226,13 @@ class PlaybackController(
     override fun onMediaLoaded() {
         if (!active) return
         mediaLoaded = true
-        _state.value = PlaybackState.Playing
+        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
         applyResumePosition()
     }
 
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
+        this.paused = paused
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
@@ -290,13 +309,16 @@ class PlaybackController(
         _videoAspectRatio.value = width.toDouble() / height
     }
 
-    private companion object {
-        const val NO_MEDIA = -1
+    companion object {
+        /** 起播与跳转后的音频淡入时长，固定值。 */
+        const val FADE_IN_MILLIS = 500L
+
+        private const val NO_MEDIA = -1
 
         /** 引擎的位置回调比落库所需的频率高得多。 */
-        const val SAVE_INTERVAL_MILLIS = 5_000L
+        private const val SAVE_INTERVAL_MILLIS = 5_000L
 
         /** 位置与时长的差在这个范围内就算播到了结尾。 */
-        const val END_TOLERANCE_MILLIS = 1_000L
+        private const val END_TOLERANCE_MILLIS = 1_000L
     }
 }
