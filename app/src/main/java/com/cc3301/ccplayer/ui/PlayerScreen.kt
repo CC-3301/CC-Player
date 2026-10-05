@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +40,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
+import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
 import kotlinx.coroutines.delay
@@ -52,6 +54,8 @@ fun PlayerScreen(
     playlist: List<MediaFile>,
     currentIndex: Int,
     decodeMode: DecodeMode,
+    loopMode: LoopMode,
+    autoPlayNext: Boolean,
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     onTogglePlayPause: () -> Unit,
@@ -62,6 +66,8 @@ fun PlayerScreen(
     onSeekBy: (Long) -> Unit,
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
+    onToggleLoopMode: () -> Unit,
+    onToggleAutoPlayNext: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -108,6 +114,8 @@ fun PlayerScreen(
                     playlist = playlist,
                     currentIndex = currentIndex,
                     decodeMode = decodeMode,
+                    loopMode = loopMode,
+                    autoPlayNext = autoPlayNext,
                     playlistVisible = playlistVisible,
                     onTogglePlayPause = onTogglePlayPause,
                     onPrevious = onPrevious,
@@ -116,6 +124,8 @@ fun PlayerScreen(
                     onSeekCommit = onSeekCommit,
                     onPlaylistSelect = onPlaylistSelect,
                     onToggleDecodeMode = onToggleDecodeMode,
+                    onToggleLoopMode = onToggleLoopMode,
+                    onToggleAutoPlayNext = onToggleAutoPlayNext,
                     onTogglePlaylist = { playlistVisible = !playlistVisible },
                     onLock = { lock.tapLockButton() },
                     onClose = onClose,
@@ -233,6 +243,8 @@ private fun Controls(
     playlist: List<MediaFile>,
     currentIndex: Int,
     decodeMode: DecodeMode,
+    loopMode: LoopMode,
+    autoPlayNext: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -241,6 +253,8 @@ private fun Controls(
     onSeekCommit: () -> Unit,
     onPlaylistSelect: (Int) -> Unit,
     onToggleDecodeMode: () -> Unit,
+    onToggleLoopMode: () -> Unit,
+    onToggleAutoPlayNext: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onLock: () -> Unit,
     onClose: () -> Unit,
@@ -255,7 +269,13 @@ private fun Controls(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (playlistVisible) {
-            PlaylistPanel(playlist = playlist, currentIndex = currentIndex, onSelect = onPlaylistSelect)
+            PlaylistPanel(
+                playlist = playlist,
+                currentIndex = currentIndex,
+                autoPlayNext = autoPlayNext,
+                onToggleAutoPlayNext = onToggleAutoPlayNext,
+                onSelect = onPlaylistSelect,
+            )
         }
         SeekBar(
             positionMillis = progress.positionMillis,
@@ -281,6 +301,9 @@ private fun Controls(
             }
             TextButton(onClick = onNext, enabled = currentIndex in 0 until playlist.lastIndex) {
                 Text(text = stringResource(R.string.player_next))
+            }
+            TextButton(onClick = onToggleLoopMode) {
+                Text(text = stringResource(loopModeLabel(loopMode)))
             }
         }
         Row(
@@ -344,22 +367,43 @@ private fun SeekBar(
 }
 
 @Composable
-private fun PlaylistPanel(playlist: List<MediaFile>, currentIndex: Int, onSelect: (Int) -> Unit) {
-    LazyColumn(
+private fun PlaylistPanel(
+    playlist: List<MediaFile>,
+    currentIndex: Int,
+    autoPlayNext: Boolean,
+    onToggleAutoPlayNext: () -> Unit,
+    onSelect: (Int) -> Unit,
+) {
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
             .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
     ) {
-        itemsIndexed(playlist) { index, media ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = media.name,
-                color = if (index == currentIndex) MaterialTheme.colorScheme.primary else Color.White,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelect(index) }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                text = stringResource(R.string.player_auto_play_next),
+                color = Color.White,
+                modifier = Modifier.weight(1f),
             )
+            Switch(checked = autoPlayNext, onCheckedChange = { onToggleAutoPlayNext() })
+        }
+        LazyColumn(modifier = Modifier.fillMaxWidth()) {
+            itemsIndexed(playlist) { index, media ->
+                Text(
+                    text = media.name,
+                    color = if (index == currentIndex) MaterialTheme.colorScheme.primary else Color.White,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(index) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                )
+            }
         }
     }
 }
@@ -367,4 +411,10 @@ private fun PlaylistPanel(playlist: List<MediaFile>, currentIndex: Int, onSelect
 private fun decodeModeLabel(mode: DecodeMode): Int = when (mode) {
     DecodeMode.Hardware -> R.string.player_decode_hardware
     DecodeMode.Software -> R.string.player_decode_software
+}
+
+private fun loopModeLabel(mode: LoopMode): Int = when (mode) {
+    LoopMode.Sequential -> R.string.player_loop_sequential
+    LoopMode.ListLoop -> R.string.player_loop_list
+    LoopMode.SingleLoop -> R.string.player_loop_single
 }

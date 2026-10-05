@@ -10,7 +10,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * 播放控制层：把播放指令翻译成引擎调用，把引擎回调汇成 [PlaybackState]。
  *
  * 播放列表取自当前目录的媒体文件，恒按名称自然排序（ADR-0007）；上一集/下一集取该序列的相邻项，
- * 与列表视图当前的排序无关。解码模式的快捷切换只作用于本次会话。
+ * 与列表视图当前的排序无关。当前媒体播完后按循环模式与自动连播开关决定下一步。
+ * 循环模式与解码模式的快捷切换只作用于本次会话。
  */
 class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Listener {
 
@@ -33,6 +34,13 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
 
     private val _decodeMode = MutableStateFlow(DecodeMode.Hardware)
     val decodeMode: StateFlow<DecodeMode> = _decodeMode.asStateFlow()
+
+    private val _loopMode = MutableStateFlow(LoopMode.Sequential)
+    val loopMode: StateFlow<LoopMode> = _loopMode.asStateFlow()
+
+    /** "自动播放下一个"：关时顺序播放与列表循环播完即停，单集循环不受影响。 */
+    private val _autoPlayNext = MutableStateFlow(true)
+    val autoPlayNext: StateFlow<Boolean> = _autoPlayNext.asStateFlow()
 
     private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
 
@@ -98,6 +106,7 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         _state.value = PlaybackState.Idle
         _seekPreviewMillis.value = null
         _decodeMode.value = DecodeMode.Hardware
+        _loopMode.value = LoopMode.Sequential
     }
 
     /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
@@ -123,6 +132,25 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         setDecodeMode(if (_decodeMode.value == DecodeMode.Hardware) DecodeMode.Software else DecodeMode.Hardware)
     }
 
+    fun setLoopMode(mode: LoopMode) {
+        _loopMode.value = mode
+    }
+
+    /** 按顺序播放 → 列表循环 → 单集循环轮换。 */
+    fun cycleLoopMode() {
+        setLoopMode(
+            when (_loopMode.value) {
+                LoopMode.Sequential -> LoopMode.ListLoop
+                LoopMode.ListLoop -> LoopMode.SingleLoop
+                LoopMode.SingleLoop -> LoopMode.Sequential
+            },
+        )
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        _autoPlayNext.value = enabled
+    }
+
     override fun onMediaLoaded() {
         if (!active) return
         _state.value = PlaybackState.Playing
@@ -136,7 +164,13 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
     override fun onPlaybackEnded() {
         if (!active) return
         active = false
-        _state.value = PlaybackState.Ended
+        when {
+            _loopMode.value == LoopMode.SingleLoop -> playAt(_currentIndex.value)
+            !_autoPlayNext.value -> _state.value = PlaybackState.Ended
+            _currentIndex.value < _playlist.value.lastIndex -> playAt(_currentIndex.value + 1)
+            _loopMode.value == LoopMode.ListLoop -> playAt(0)
+            else -> _state.value = PlaybackState.Ended
+        }
     }
 
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
