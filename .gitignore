@@ -20,6 +20,7 @@ local.properties
 
 #项目记忆
 AGENTS.md
+SUBAGENT.md
 
 # 交接文档
 HANDOFF.md
