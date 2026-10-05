@@ -1,6 +1,6 @@
 package com.cc3301.ccplayer.webdav
 
-import java.io.Closeable
+import com.cc3301.ccplayer.streaming.ByteSource
 
 /** WebDAV 目录项。 */
 data class WebDavEntry(
@@ -25,11 +25,5 @@ interface WebDavTransport {
     suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle
 }
 
-/** 可按位置随机读的 WebDAV 文件句柄。 */
-interface WebDavReadHandle : Closeable {
-
-    val size: Long
-
-    /** 从 [position] 起读最多 [length] 字节到 [buffer] 的 [offset]；读到末尾返回 0。 */
-    fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int
-}
+/** 可按位置随机读的 WebDAV 文件句柄，直接作为回环代理的字节源。 */
+interface WebDavReadHandle : ByteSource

@@ -30,6 +30,14 @@ class RoutingMediaFileTreeTest {
     }
 
     @Test
+    fun `方案大小写不影响分派`() = runTest {
+        val directory = testDirectory("media", "SMB://nas/media")
+        network.addDirectory(directory, testVideo("电影.mkv", "SMB://nas/media/电影.mkv"))
+
+        assertEquals(listOf("电影.mkv"), tree.children(directory).map { it.name })
+    }
+
+    @Test
     fun `解析按方案分派`() = runTest {
         val localRoot = testDirectory("媒体", "content://root/媒体")
         val networkRoot = testDirectory("media", "smb://nas/media")

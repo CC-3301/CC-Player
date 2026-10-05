@@ -13,13 +13,10 @@ class RoutingMediaFileTree(private val treesByScheme: Map<String, MediaFileTree>
         return tree.children(directory)
     }
 
-    private fun treeFor(location: String): MediaFileTree? =
-        treesByScheme[location.substringBefore(SCHEME_SEPARATOR, missingDelimiterValue = "")]
+    private fun treeFor(location: String): MediaFileTree? = treesByScheme[schemeOf(location)]
 
     companion object {
         /** 本地 SAF 位置的方案名。 */
         const val SAF_SCHEME = "content"
-
-        private const val SCHEME_SEPARATOR = "://"
     }
 }
