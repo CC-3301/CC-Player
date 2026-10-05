@@ -43,6 +43,7 @@ import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
@@ -55,6 +56,8 @@ import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.ScreenOrientation
+import com.cc3301.ccplayer.ui.SettingsScreen
+import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.resolvedOrientation
@@ -66,6 +69,8 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext) }
+
+    private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 
     private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext) }
 
@@ -80,6 +85,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var streams: SmbStreams? = null
 
     private var playerVisible by mutableStateOf(false)
+    private var settingsVisible by mutableStateOf(false)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -87,6 +93,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var currentIndex by mutableStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
     private var loopMode by mutableStateOf(LoopMode.Sequential)
+    private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
 
     private val connection = object : ServiceConnection {
@@ -101,9 +108,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.currentIndex.collect { currentIndex = it } }
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
                 launch { binder.controller.loopMode.collect { loopMode = it } }
+                launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
+                launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
                 launch {
                     combine(binder.controller.playlist, binder.controller.currentIndex) { playlist, index ->
                         playlist.getOrNull(index)
@@ -125,6 +134,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 val libraryState by library.state.collectAsState()
+                val settingsState by settingsViewModel.state.collectAsState()
                 val autoPlayNext by settings.autoPlayNext.collectAsState(
                     initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
                 )
@@ -180,7 +190,24 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onToggleAutoPlayNext = {
                             lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
                         },
+                        onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
+                        onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
+                        sleepTimerState = sleepTimerState,
                         onClose = { closePlayer() },
+                    )
+                } else if (settingsVisible) {
+                    BackHandler { settingsVisible = false }
+                    SettingsScreen(
+                        state = settingsState,
+                        onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
+                        onSetResumeMode = settingsViewModel::setResumeMode,
+                        onSetAutoScrollToLastPlayed = settingsViewModel::setAutoScrollToLastPlayed,
+                        onSetDecodeMode = settingsViewModel::setDecodeMode,
+                        onSetOrientationMode = settingsViewModel::setOrientationMode,
+                        onSetViewMode = settingsViewModel::setViewMode,
+                        onSetGridColumns = settingsViewModel::setGridColumns,
+                        onSetSortOrder = settingsViewModel::setSortOrder,
+                        onClose = { settingsVisible = false },
                     )
                 } else {
                     BackHandler(enabled = libraryState.stack.isNotEmpty()) { library.navigateUp() }
@@ -203,6 +230,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onSortOrderChange = library::setSortOrder,
                         onViewModeChange = library::setViewMode,
                         onGridColumnsChange = library::setGridColumns,
+                        onOpenSettings = { settingsVisible = true },
                     )
                 }
             }
@@ -326,6 +354,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware
         loopMode = LoopMode.Sequential
+        sleepTimerState = SleepTimerState.Off
         videoAspectRatio = null
         releaseNetworkStreams()
         stopPlaybackService()

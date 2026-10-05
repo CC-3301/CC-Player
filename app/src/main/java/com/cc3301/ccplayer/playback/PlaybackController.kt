@@ -6,6 +6,8 @@ import com.cc3301.ccplayer.progress.MediaProgress
 import com.cc3301.ccplayer.progress.PlaybackProgressRepository
 import com.cc3301.ccplayer.settings.ResumeMode
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,6 +22,8 @@ import kotlin.math.abs
  * 循环模式与解码模式的快捷切换只作用于本次会话。
  *
  * 起播位置按 [ResumeMode] 取上次位置或从头；播放中按间隔落进度记录，位置到达时长（播到 100%）时清除记录。
+ *
+ * 定时暂停按 [SleepTimerOption] 到点暂停，或等当前文件自然播完时暂停（ADR-0015）；定时随会话结束清除。
  */
 class PlaybackController(
     private val engine: PlaybackEngine,
@@ -67,6 +71,10 @@ class PlaybackController(
     private val _resumeMode = MutableStateFlow(ResumeMode.LastPosition)
     val resumeMode: StateFlow<ResumeMode> = _resumeMode.asStateFlow()
 
+    /** 定时暂停的会话状态；剩余时间不对外提供。 */
+    private val _sleepTimerState = MutableStateFlow(SleepTimerState.Off)
+    val sleepTimerState: StateFlow<SleepTimerState> = _sleepTimerState.asStateFlow()
+
     private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
 
     /** 会话里是否有已打开的媒体。 */
@@ -84,6 +92,12 @@ class PlaybackController(
 
     /** 当前媒体是否已播到结尾；看过一遍就不再落记录。 */
     private var watchedToEnd = false
+
+    /** 到点暂停的等待任务；没有倒计时时为 null。 */
+    private var sleepTimerJob: Job? = null
+
+    /** 播放已停在当前文件的末尾：再按播放时从头重播当前文件。 */
+    private var pausedAtEpisodeEnd = false
 
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
@@ -117,6 +131,7 @@ class PlaybackController(
         resumePositionMillis = null
         watchedToEnd = false
         mediaLoaded = false
+        pausedAtEpisodeEnd = false
         _state.value = PlaybackState.Loading
         engine.start(media.location)
         lookUpResumePosition(media)
@@ -136,8 +151,16 @@ class PlaybackController(
         if (active) engine.pause()
     }
 
+    /**
+     * 继续播放；播放位置停在文件末尾时从头重播当前文件，否则接在暂停处继续。
+     */
     fun resume() {
-        if (active) engine.resume()
+        if (!active) return
+        if (stoppedAtEndOfEpisode()) {
+            playAt(_currentIndex.value)
+            return
+        }
+        engine.resume()
     }
 
     fun togglePlayPause() {
@@ -157,6 +180,30 @@ class PlaybackController(
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
         _videoAspectRatio.value = null
+        pausedAtEpisodeEnd = false
+        cancelSleepTimer()
+    }
+
+    /** 设定定时暂停：替换已有的定时，不叠加。 */
+    fun startSleepTimer(option: SleepTimerOption) {
+        cancelSleepTimer()
+        when (option) {
+            SleepTimerOption.EndOfEpisode -> _sleepTimerState.value = SleepTimerState.EndOfEpisode
+            is SleepTimerOption.AfterDuration -> {
+                _sleepTimerState.value = SleepTimerState.Countdown
+                sleepTimerJob = scope.launch {
+                    delay(option.minutes * MINUTE_MILLIS)
+                    pauseOnSleepTimerElapsed()
+                }
+            }
+        }
+    }
+
+    /** 取消定时暂停；没设定时或已经到点时也回到关。 */
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimerState.value = SleepTimerState.Off
     }
 
     /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
@@ -219,6 +266,12 @@ class PlaybackController(
 
     override fun onPlaybackEnded() {
         if (!active) return
+        if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
+            _sleepTimerState.value = SleepTimerState.Off
+            pausedAtEpisodeEnd = true
+            _state.value = PlaybackState.Paused
+            return
+        }
         active = false
         when {
             _loopMode.value == LoopMode.SingleLoop -> playAt(_currentIndex.value)
@@ -243,6 +296,19 @@ class PlaybackController(
             savePosition(media)
         }
     }
+
+    /** 倒计时到点：只暂停会话，不退出播放页。 */
+    private fun pauseOnSleepTimerElapsed() {
+        sleepTimerJob = null
+        _sleepTimerState.value = SleepTimerState.Off
+        if (!active) return
+        engine.pause()
+        _state.value = PlaybackState.Paused
+    }
+
+    /** 播放已停在当前文件的末尾：位置到结尾，或文件播完时被定时暂停。 */
+    private fun stoppedAtEndOfEpisode(): Boolean =
+        _state.value == PlaybackState.Paused && (pausedAtEpisodeEnd || reachedEnd())
 
     /** 当前媒体条目；会话没打开媒体时为 null。 */
     private fun currentMedia(): MediaFile? = _playlist.value.getOrNull(_currentIndex.value)
@@ -298,5 +364,7 @@ class PlaybackController(
 
         /** 位置与时长的差在这个范围内就算播到了结尾。 */
         const val END_TOLERANCE_MILLIS = 1_000L
+
+        const val MINUTE_MILLIS = 60_000L
     }
 }

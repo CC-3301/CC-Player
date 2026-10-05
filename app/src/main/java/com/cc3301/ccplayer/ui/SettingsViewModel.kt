@@ -1,0 +1,125 @@
+package com.cc3301.ccplayer.ui
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.playback.DecodeMode
+import com.cc3301.ccplayer.settings.OrientationMode
+import com.cc3301.ccplayer.settings.ResumeMode
+import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.settings.ViewMode
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
+
+/** 设置页展示的全部持久设置项。 */
+data class SettingsState(
+    val autoPlayNext: Boolean = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
+    val resumeMode: ResumeMode = SettingsRepository.DEFAULT_RESUME_MODE,
+    val autoScrollToLastPlayed: Boolean = SettingsRepository.DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED,
+    val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
+    val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
+    val viewMode: ViewMode = ViewMode.List,
+    val gridColumns: Int = SettingsRepository.DEFAULT_GRID_COLUMNS,
+    val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
+)
+
+/**
+ * 设置页的状态持有者：把持久设置汇集给界面，并把界面上的改动写回设置。
+ */
+class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() {
+
+    private val _state = MutableStateFlow(SettingsState())
+    val state: StateFlow<SettingsState> = _state.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            val playback = combine(
+                settings.autoPlayNext,
+                settings.resumeMode,
+                settings.autoScrollToLastPlayed,
+                settings.decodeMode,
+                settings.orientationMode,
+            ) { autoPlayNext, resumeMode, autoScroll, decodeMode, orientationMode ->
+                PlaybackSettings(autoPlayNext, resumeMode, autoScroll, decodeMode, orientationMode)
+            }
+            val display = combine(
+                settings.viewMode,
+                settings.gridColumns,
+                settings.sortOrder,
+            ) { viewMode, gridColumns, sortOrder -> DisplaySettings(viewMode, gridColumns, sortOrder) }
+            combine(playback, display) { playbackSettings, displaySettings ->
+                SettingsState(
+                    autoPlayNext = playbackSettings.autoPlayNext,
+                    resumeMode = playbackSettings.resumeMode,
+                    autoScrollToLastPlayed = playbackSettings.autoScrollToLastPlayed,
+                    decodeMode = playbackSettings.decodeMode,
+                    orientationMode = playbackSettings.orientationMode,
+                    viewMode = displaySettings.viewMode,
+                    gridColumns = displaySettings.gridColumns,
+                    sortOrder = displaySettings.sortOrder,
+                )
+            }.collect { _state.value = it }
+        }
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        viewModelScope.launch { settings.setAutoPlayNext(enabled) }
+    }
+
+    fun setResumeMode(mode: ResumeMode) {
+        viewModelScope.launch { settings.setResumeMode(mode) }
+    }
+
+    fun setAutoScrollToLastPlayed(enabled: Boolean) {
+        viewModelScope.launch { settings.setAutoScrollToLastPlayed(enabled) }
+    }
+
+    fun setDecodeMode(mode: DecodeMode) {
+        viewModelScope.launch { settings.setDecodeMode(mode) }
+    }
+
+    fun setOrientationMode(mode: OrientationMode) {
+        viewModelScope.launch { settings.setOrientationMode(mode) }
+    }
+
+    fun setViewMode(mode: ViewMode) {
+        viewModelScope.launch { settings.setViewMode(mode) }
+    }
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch { settings.setGridColumns(columns) }
+    }
+
+    fun setSortOrder(order: SortOrder) {
+        viewModelScope.launch { settings.setSortOrder(order) }
+    }
+
+    /** 播放相关的设置项。 */
+    private data class PlaybackSettings(
+        val autoPlayNext: Boolean,
+        val resumeMode: ResumeMode,
+        val autoScrollToLastPlayed: Boolean,
+        val decodeMode: DecodeMode,
+        val orientationMode: OrientationMode,
+    )
+
+    /** 列表展示相关的设置项。 */
+    private data class DisplaySettings(
+        val viewMode: ViewMode,
+        val gridColumns: Int,
+        val sortOrder: SortOrder,
+    )
+
+    companion object {
+        fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
+            initializer { SettingsViewModel(SettingsRepository.create(context.applicationContext)) }
+        }
+    }
+}
