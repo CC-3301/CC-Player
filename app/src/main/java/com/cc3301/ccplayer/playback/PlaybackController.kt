@@ -1,28 +1,79 @@
 package com.cc3301.ccplayer.playback
 
+import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.compareNatural
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * 播放控制层：把播放指令翻译成引擎调用，把引擎回调汇成 [PlaybackState]。
+ *
+ * 播放列表取自当前目录的媒体文件，恒按名称自然排序（ADR-0007）；上一集/下一集取该序列的相邻项，
+ * 与列表视图当前的排序无关。解码模式的快捷切换只作用于本次会话。
  */
 class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Listener {
 
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
-    /** 会话里是否有已打开的媒体；没有时忽略控制指令与引擎回调。 */
+    private val _playlist = MutableStateFlow<List<MediaFile>>(emptyList())
+    val playlist: StateFlow<List<MediaFile>> = _playlist.asStateFlow()
+
+    /** 当前播放在 [playlist] 里的下标；没有播放时是 -1。 */
+    private val _currentIndex = MutableStateFlow(NO_MEDIA)
+    val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
+
+    private val _progress = MutableStateFlow(PlaybackProgress())
+    val progress: StateFlow<PlaybackProgress> = _progress.asStateFlow()
+
+    /** 拖动进度条时预览的目标位置；不在拖动时为 null。 */
+    private val _seekPreviewMillis = MutableStateFlow<Long?>(null)
+    val seekPreviewMillis: StateFlow<Long?> = _seekPreviewMillis.asStateFlow()
+
+    private val _decodeMode = MutableStateFlow(DecodeMode.Hardware)
+    val decodeMode: StateFlow<DecodeMode> = _decodeMode.asStateFlow()
+
+    private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
+
+    /** 会话里是否有已打开的媒体。 */
     private var active = false
 
     init {
         engine.setListener(this)
     }
 
-    fun open(url: String) {
+    /**
+     * 以 [files] 为播放列表起播 [current]；列表只收媒体文件，按名称自然排序。
+     * [current] 不在列表里时不动作。
+     */
+    fun openPlaylist(files: List<MediaFile>, current: MediaFile) {
+        val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
+        val index = playlist.indexOfFirst { it.location == current.location }
+        if (index < 0) return
+        _playlist.value = playlist
+        playAt(index)
+    }
+
+    /** 切换到播放列表第 [index] 项；超出范围时不动作。 */
+    fun playAt(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
+        _currentIndex.value = index
+        _progress.value = PlaybackProgress()
+        _seekPreviewMillis.value = null
         active = true
         _state.value = PlaybackState.Loading
-        engine.start(url)
+        engine.start(media.location)
+    }
+
+    /** 名称自然排序下的一集；列表末尾时不动作。 */
+    fun next() {
+        playAt(_currentIndex.value + 1)
+    }
+
+    /** 名称自然排序下的上一集；列表开头时不动作。 */
+    fun previous() {
+        playAt(_currentIndex.value - 1)
     }
 
     fun pause() {
@@ -45,6 +96,31 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         active = false
         engine.stop()
         _state.value = PlaybackState.Idle
+        _seekPreviewMillis.value = null
+        _decodeMode.value = DecodeMode.Hardware
+    }
+
+    /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
+    fun updateSeekPreview(positionMillis: Long) {
+        if (!active) return
+        _seekPreviewMillis.value = positionMillis.coerceAtLeast(0)
+    }
+
+    /** 松手：跳到预览位置并收起气泡；没有预览时不动作。 */
+    fun commitSeekPreview() {
+        val target = _seekPreviewMillis.value ?: return
+        _seekPreviewMillis.value = null
+        if (!active) return
+        engine.seekTo(target)
+    }
+
+    fun setDecodeMode(mode: DecodeMode) {
+        _decodeMode.value = mode
+        engine.setDecodeMode(mode)
+    }
+
+    fun toggleDecodeMode() {
+        setDecodeMode(if (_decodeMode.value == DecodeMode.Hardware) DecodeMode.Software else DecodeMode.Hardware)
     }
 
     override fun onMediaLoaded() {
@@ -61,5 +137,14 @@ class PlaybackController(private val engine: PlaybackEngine) : PlaybackEngine.Li
         if (!active) return
         active = false
         _state.value = PlaybackState.Ended
+    }
+
+    override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
+        if (!active) return
+        _progress.value = PlaybackProgress(positionMillis, durationMillis)
+    }
+
+    private companion object {
+        const val NO_MEDIA = -1
     }
 }

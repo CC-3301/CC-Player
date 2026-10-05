@@ -22,6 +22,13 @@
     <string name="library_entry_audio">音频</string>
     <string name="player_pause">暂停</string>
     <string name="player_resume">继续</string>
+    <string name="player_previous">上一集</string>
+    <string name="player_next">下一集</string>
+    <string name="player_playlist">播放列表</string>
+    <string name="player_decode_hardware">硬解</string>
+    <string name="player_decode_software">软解</string>
+    <string name="player_lock">锁定</string>
+    <string name="player_unlock">解锁</string>
     <string name="player_exit">退出</string>
     <string name="notification_channel_playback">播放</string>
     <string name="notification_playing">正在播放</string>

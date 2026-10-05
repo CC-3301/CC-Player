@@ -27,7 +27,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
+import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaPreviewSource
+import com.cc3301.ccplayer.playback.DecodeMode
+import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.ui.LibraryScreen
@@ -46,18 +49,29 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
     private var surface: Surface? = null
-    private var pendingUrl: String? = null
+    private var pendingPlaylist: List<MediaFile> = emptyList()
+    private var pendingMedia: MediaFile? = null
     private var stateCollection: Job? = null
 
     private var playerVisible by mutableStateOf(false)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
+    private var progress by mutableStateOf(PlaybackProgress())
+    private var seekPreviewMillis by mutableStateOf<Long?>(null)
+    private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
+    private var currentIndex by mutableStateOf(NO_MEDIA)
+    private var decodeMode by mutableStateOf(DecodeMode.Hardware)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
             stateCollection = lifecycleScope.launch {
-                binder.controller.state.collect { playbackState = it }
+                launch { binder.controller.state.collect { playbackState = it } }
+                launch { binder.controller.progress.collect { progress = it } }
+                launch { binder.controller.seekPreviewMillis.collect { seekPreviewMillis = it } }
+                launch { binder.controller.playlist.collect { playlist = it } }
+                launch { binder.controller.currentIndex.collect { currentIndex = it } }
+                launch { binder.controller.decodeMode.collect { decodeMode = it } }
             }
             surface?.let { binder.engine.attachSurface(it) }
             startPendingPlayback()
@@ -84,8 +98,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     BackHandler { closePlayer() }
                     PlayerScreen(
                         state = playbackState,
+                        progress = progress,
+                        seekPreviewMillis = seekPreviewMillis,
+                        playlist = playlist,
+                        currentIndex = currentIndex,
+                        decodeMode = decodeMode,
                         surfaceCallback = this@MainActivity,
                         onTogglePlayPause = { playback?.controller?.togglePlayPause() },
+                        onPrevious = { playback?.controller?.previous() },
+                        onNext = { playback?.controller?.next() },
+                        onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
+                        onSeekCommit = { playback?.controller?.commitSeekPreview() },
+                        onPlaylistSelect = { playback?.controller?.playAt(it) },
+                        onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
                         onClose = { closePlayer() },
                     )
                 } else {
@@ -95,7 +120,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         mediaPreview = mediaPreview,
                         onPickRoot = { picker.launch(null) },
                         onOpenEntry = { entry ->
-                            if (entry.isDirectory) library.enter(entry) else openMedia(entry.location)
+                            if (entry.isDirectory) {
+                                library.enter(entry)
+                            } else {
+                                openMedia(entry, library.state.value.entries)
+                            }
                         },
                         onNavigateUp = library::navigateUp,
                         onRetry = library::retry,
@@ -115,8 +144,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /** mpv 直接吃 content:// URI：ffmpeg 的 android_content 协议经应用 ContentResolver 读文件。 */
-    private fun openMedia(location: String) {
-        pendingUrl = location
+    private fun openMedia(current: MediaFile, files: List<MediaFile>) {
+        pendingPlaylist = files
+        pendingMedia = current
         playerVisible = true
         if (!bound) {
             val intent = Intent(this, PlaybackService::class.java)
@@ -129,11 +159,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 引擎就绪且 Surface 已就位时才开始播放。 */
     private fun startPendingPlayback() {
-        val url = pendingUrl ?: return
+        val current = pendingMedia ?: return
         val binder = playback ?: return
         if (surface == null) return
-        pendingUrl = null
-        binder.controller.open(url)
+        pendingMedia = null
+        binder.controller.openPlaylist(pendingPlaylist, current)
     }
 
     override fun onSurfaceReady(surface: Surface) {
@@ -155,9 +185,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun closePlayer() {
         playback?.controller?.stop()
         onSurfaceReleased()
-        pendingUrl = null
+        pendingPlaylist = emptyList()
+        pendingMedia = null
         playerVisible = false
         playbackState = PlaybackState.Idle
+        progress = PlaybackProgress()
+        seekPreviewMillis = null
+        playlist = emptyList()
+        currentIndex = NO_MEDIA
+        decodeMode = DecodeMode.Hardware
         stopPlaybackService()
     }
 
@@ -185,5 +221,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onDestroy() {
         stopPlaybackService()
         super.onDestroy()
+    }
+
+    private companion object {
+        const val NO_MEDIA = -1
     }
 }
