@@ -49,6 +49,8 @@ import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerState
+import com.cc3301.ccplayer.playback.SubtitleSelection
+import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
@@ -64,6 +66,7 @@ import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
+import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.resolvedOrientation
@@ -93,6 +96,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var surface: Surface? = null
     private var pendingPlaylist: List<MediaFile> = emptyList()
     private var pendingMedia: MediaFile? = null
+
+    /** 当前目录的原始条目（含外挂字幕），起播时交给控制层做字幕匹配。 */
+    private var pendingDirectoryEntries: List<MediaFile> = emptyList()
     private var stateCollection: Job? = null
     private var streams: NetworkStreams? = null
 
@@ -107,6 +113,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var loopMode by mutableStateOf(LoopMode.Sequential)
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
+    private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
+    private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
+    private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -122,6 +131,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.loopMode.collect { loopMode = it } }
                 launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
+                launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
+                launch { binder.controller.externalSubtitles.collect { externalSubtitles = it } }
+                launch { binder.controller.subtitleSelection.collect { subtitleSelection = it } }
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
@@ -187,6 +199,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         levelControls = levelControls,
                         surfaceCallback = this@MainActivity,
                         videoAspectRatio = videoAspectRatio,
+                        subtitleTracks = subtitleTracks,
+                        externalSubtitles = externalSubtitles,
+                        subtitleSelection = subtitleSelection,
                         onTogglePlayPause = { playback?.controller?.togglePlayPause() },
                         onPrevious = { playback?.controller?.previous() },
                         onNext = { playback?.controller?.next() },
@@ -205,6 +220,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
                         onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
                         sleepTimerState = sleepTimerState,
+                        onSelectSubtitle = { item ->
+                            val controller = playback?.controller
+                            when (item) {
+                                is SubtitleMenuItem.Embedded -> controller?.selectEmbeddedSubtitle(item.trackId)
+                                is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
+                                is SubtitleMenuItem.Off -> controller?.disableSubtitles()
+                            }
+                        },
                         onClose = { closePlayer() },
                     )
                 } else if (settingsVisible) {
@@ -267,14 +290,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /**
      * 本地文件直接把位置交给播放核心；网络文件先试连一次，再把整个播放列表换成回环地址，
-     * 上一集/下一集也就能照常按名称顺序播。
+     * 上一集/下一集也就能照常按名称顺序播。两份列表都带上当前目录的原始条目，供外挂字幕匹配。
      */
     private fun openEntry(entry: MediaFile, entries: List<MediaFile>) {
-        if (entry.source != MediaSource.Network) {
-            openMedia(entry, entries)
-            return
-        }
         lifecycleScope.launch {
+            val plainEntries = library.directoryEntries()
+            if (entry.source != MediaSource.Network) {
+                openMedia(entry, entries, plainEntries)
+                return@launch
+            }
             try {
                 networkStreams().probe(entry.location)
             } catch (cancellation: CancellationException) {
@@ -286,8 +310,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 showFailure(MediaFailure.Unknown)
                 return@launch
             }
-            val playable = entries.map(::playableEntry)
-            openMedia(playableEntry(entry), playable)
+            openMedia(playableEntry(entry), entries.map(::playableEntry), plainEntries.map(::playableEntry))
         }
     }
 
@@ -323,9 +346,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /** mpv 直接吃 content:// URI：ffmpeg 的 android_content 协议经应用 ContentResolver 读文件。 */
-    private fun openMedia(current: MediaFile, files: List<MediaFile>) {
+    private fun openMedia(current: MediaFile, files: List<MediaFile>, directoryEntries: List<MediaFile>) {
         pendingPlaylist = files
         pendingMedia = current
+        pendingDirectoryEntries = directoryEntries
         playerVisible = true
         requestNotificationPermission()
         if (!bound) {
@@ -343,7 +367,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         val binder = playback ?: return
         if (surface == null) return
         pendingMedia = null
-        binder.controller.openPlaylist(pendingPlaylist, current)
+        binder.controller.openPlaylist(pendingPlaylist, current, pendingDirectoryEntries)
     }
 
     /** 通知栏要能显示就得有这个权限（Android 13 起）。 */
@@ -386,6 +410,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         onSurfaceReleased()
         pendingPlaylist = emptyList()
         pendingMedia = null
+        pendingDirectoryEntries = emptyList()
         playerVisible = false
         playbackState = PlaybackState.Idle
         progress = PlaybackProgress()
@@ -396,6 +421,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         loopMode = LoopMode.Sequential
         sleepTimerState = SleepTimerState.Off
         videoAspectRatio = null
+        subtitleTracks = emptyList()
+        externalSubtitles = emptyList()
+        subtitleSelection = SubtitleSelection.Off
         releaseNetworkStreams()
         stopPlaybackService()
     }

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.MediaFileTree
 import com.cc3301.ccplayer.library.MediaLibrary
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.ProgressCleanupMediaLibrary
@@ -122,9 +123,12 @@ data class LibraryState(
 
 /**
  * 媒体列表的状态持有者：读设置里的本地根目录与书签里的网络源，按当前目录向 [MediaLibrary] 要列表。
+ *
+ * 外挂字幕发现需要当前目录的原始条目（字幕文件不在媒体列表里），因此同时持有 [files]。
  */
 class LibraryViewModel(
     private val library: MediaLibrary,
+    private val files: MediaFileTree,
     private val settings: SettingsRepository,
     private val sources: NetworkSourceRepository,
     private val verifier: NetworkSourceVerifier,
@@ -260,6 +264,18 @@ class LibraryViewModel(
         viewModelScope.launch { settings.setGridColumns(columns) }
     }
 
+    /** 当前目录的原始条目：媒体列表过滤掉的字幕文件也在；停在根目录或读不出来时为空。 */
+    suspend fun directoryEntries(): List<MediaFile> {
+        val directory = _state.value.currentDirectory ?: return emptyList()
+        return try {
+            files.children(directory)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            emptyList()
+        }
+    }
+
     private fun load(directory: MediaFile) {
         loadJob?.cancel()
         _state.update { it.copy(loading = true, failure = null) }
@@ -316,20 +332,20 @@ class LibraryViewModel(
                 val smbLocator = SmbLocator(sources)
                 val webDavTransport = OkHttpWebDavTransport()
                 val webDavLocator = WebDavLocator(sources)
+                val tree = RoutingMediaFileTree(
+                    mapOf(
+                        RoutingMediaFileTree.SAF_SCHEME to SafMediaFileTree(appContext),
+                        SmbLocation.SCHEME to SmbMediaFileTree(smbConnector, smbLocator),
+                        WebDavAddress.SCHEME_HTTP to WebDavMediaFileTree(webDavTransport, webDavLocator),
+                        WebDavAddress.SCHEME_HTTPS to WebDavMediaFileTree(webDavTransport, webDavLocator),
+                    ),
+                )
                 LibraryViewModel(
                     library = ProgressCleanupMediaLibrary(
-                        DirectoryMediaLibrary(
-                            RoutingMediaFileTree(
-                                mapOf(
-                                    RoutingMediaFileTree.SAF_SCHEME to SafMediaFileTree(appContext),
-                                    SmbLocation.SCHEME to SmbMediaFileTree(smbConnector, smbLocator),
-                                    WebDavAddress.SCHEME_HTTP to WebDavMediaFileTree(webDavTransport, webDavLocator),
-                                    WebDavAddress.SCHEME_HTTPS to WebDavMediaFileTree(webDavTransport, webDavLocator),
-                                ),
-                            ),
-                        ),
+                        DirectoryMediaLibrary(tree),
                         RoomPlaybackProgressRepository.create(appContext),
                     ),
+                    files = tree,
                     settings = SettingsRepository.create(appContext),
                     sources = sources,
                     verifier = RoutingNetworkSourceVerifier(

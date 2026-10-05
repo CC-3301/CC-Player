@@ -39,6 +39,9 @@
     <string name="player_previous">上一集</string>
     <string name="player_next">下一集</string>
     <string name="player_playlist">播放列表</string>
+    <string name="player_subtitles">字幕</string>
+    <string name="player_subtitle_embedded">内嵌 %1$s</string>
+    <string name="player_subtitle_off">关闭字幕</string>
     <string name="player_decode_hardware">硬解</string>
     <string name="player_decode_software">软解</string>
     <string name="player_loop_sequential">顺序</string>

@@ -27,6 +27,21 @@ interface PlaybackEngine {
     /** 设置本次会话的解码模式。 */
     fun setDecodeMode(mode: DecodeMode)
 
+    /** 当前媒体的内嵌字幕轨道；没有媒体或没有内嵌字幕时为空。 */
+    fun embeddedSubtitleTracks(): List<SubtitleTrack>
+
+    /** 把外挂字幕加载进轨道列表；不改变当前显示的哪一路。 */
+    fun addExternalSubtitle(location: String)
+
+    /** 显示内嵌字幕轨道 [trackId]；外挂字幕随之停显。 */
+    fun selectEmbeddedSubtitle(trackId: Int)
+
+    /** 显示已加载的外挂字幕 [location]；内嵌字幕随之停显。 */
+    fun selectExternalSubtitle(location: String)
+
+    /** 关闭字幕显示。 */
+    fun disableSubtitles()
+
     /** 把画面接到视图的 Surface 上。 */
     fun attachSurface(surface: Surface)
 
