@@ -39,6 +39,10 @@ android {
         jniLibs {
             useLegacyPackaging = false
         }
+        resources {
+            // bcprov 与 jspecify 都带这个多版本目录清单，合包时只能留一份。
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
     }
 }
 
@@ -61,6 +65,8 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.security.crypto)
+    implementation(libs.smbj)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

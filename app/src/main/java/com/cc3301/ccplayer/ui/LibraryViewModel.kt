@@ -7,15 +7,28 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
+import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaLibrary
+import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.ProgressCleanupMediaLibrary
+import com.cc3301.ccplayer.library.RoutingMediaFileTree
 import com.cc3301.ccplayer.library.SafMediaFileTree
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.sortedForDisplay
+import com.cc3301.ccplayer.network.DataStoreBookmarkStore
+import com.cc3301.ccplayer.network.EncryptedCredentialStore
+import com.cc3301.ccplayer.network.NetworkSourceRepository
+import com.cc3301.ccplayer.network.NetworkSourceVerifier
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
+import com.cc3301.ccplayer.smb.SmbJConnector
+import com.cc3301.ccplayer.smb.SmbLocation
+import com.cc3301.ccplayer.smb.SmbLocator
+import com.cc3301.ccplayer.smb.SmbMediaFileTree
+import com.cc3301.ccplayer.smb.SmbSourceVerifier
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +37,14 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+/** 新增网络源表单的状态。 */
+data class NetworkSourceForm(
+    /** 正在校验连通性。 */
+    val adding: Boolean = false,
+    /** 上次校验失败的原因；成功或未提交时为 null。 */
+    val failure: MediaFailure? = null,
+)
 
 /** 媒体列表界面的状态。 */
 data class LibraryState(
@@ -48,7 +69,10 @@ data class LibraryState(
     /** 每次定出滚动目标时递增：界面据此滚动一次。 */
     val scrollRevision: Int = 0,
     val loading: Boolean = false,
-    val failed: Boolean = false,
+    /** 当前目录读取失败的原因；成功时为 null。 */
+    val failure: MediaFailure? = null,
+    /** 新增网络源表单；null 表示表单没打开。 */
+    val networkSourceForm: NetworkSourceForm? = null,
 ) {
     val currentDirectory: MediaFile? get() = stack.lastOrNull()
 
@@ -60,12 +84,12 @@ data class LibraryState(
         copy(sortOrder = order, sortRevision = if (order == sortOrder) sortRevision else sortRevision + 1)
 
     /** 目录读完后套用结果，并定出进入列表要滚动到的条目。 */
-    fun withLoadedEntries(entries: List<MediaFile>, failed: Boolean): LibraryState {
+    fun withLoadedEntries(entries: List<MediaFile>, failure: MediaFailure?): LibraryState {
         val target = scrollTargetIn(entries)
         return copy(
             entries = entries,
             loading = false,
-            failed = failed,
+            failure = failure,
             scrollTargetLocation = target,
             scrollRevision = if (target == null) scrollRevision else scrollRevision + 1,
         )
@@ -86,11 +110,13 @@ data class LibraryState(
 }
 
 /**
- * 媒体列表的状态持有者：读设置里的根目录与视图偏好，按当前目录向 [MediaLibrary] 要列表。
+ * 媒体列表的状态持有者：读设置里的本地根目录与书签里的网络源，按当前目录向 [MediaLibrary] 要列表。
  */
 class LibraryViewModel(
     private val library: MediaLibrary,
     private val settings: SettingsRepository,
+    private val sources: NetworkSourceRepository,
+    private val verifier: NetworkSourceVerifier,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryState())
@@ -100,9 +126,10 @@ class LibraryViewModel(
 
     init {
         viewModelScope.launch {
-            settings.rootLocations.collect { locations ->
-                _state.update { it.copy(ready = true, roots = resolveRoots(locations)) }
-            }
+            combine(settings.rootLocations, sources.locations) { local, network -> local + network }
+                .collect { locations ->
+                    _state.update { it.copy(ready = true, roots = resolveRoots(locations)) }
+                }
         }
         viewModelScope.launch {
             combine(
@@ -131,11 +158,36 @@ class LibraryViewModel(
         }
     }
 
-    /** 目录选择器返回后调用。 */
+    /** 本地目录选择器返回后调用。 */
     fun addRoot(location: String) {
         viewModelScope.launch {
             settings.addRoot(location)
-            _state.update { it.copy(roots = resolveRoots(settings.rootLocations.first())) }
+            refreshRoots()
+        }
+    }
+
+    /** 打开新增网络源表单。 */
+    fun openNetworkSourceForm() {
+        _state.update { it.copy(networkSourceForm = NetworkSourceForm()) }
+    }
+
+    fun dismissNetworkSourceForm() {
+        _state.update { it.copy(networkSourceForm = null) }
+    }
+
+    /** 校验凭据后保存书签；校验不过时保留表单并给出失败原因。 */
+    fun addNetworkSource(host: String, share: String, username: String, password: String) {
+        viewModelScope.launch {
+            _state.update { it.copy(networkSourceForm = NetworkSourceForm(adding = true)) }
+            val url = SmbLocation.shareUrl(host, share)
+            val failure = verify(url, username, password)
+            if (failure != null) {
+                _state.update { it.copy(networkSourceForm = NetworkSourceForm(failure = failure)) }
+                return@launch
+            }
+            sources.add(url = url, username = username, password = password)
+            _state.update { it.copy(networkSourceForm = null) }
+            refreshRoots()
         }
     }
 
@@ -151,7 +203,7 @@ class LibraryViewModel(
         _state.update { it.copy(stack = stack.dropLast(1)) }
         if (parent == null) {
             loadJob?.cancel()
-            _state.update { it.copy(entries = emptyList(), loading = false, failed = false) }
+            _state.update { it.copy(entries = emptyList(), loading = false, failure = null) }
         } else {
             load(parent)
         }
@@ -176,14 +228,35 @@ class LibraryViewModel(
 
     private fun load(directory: MediaFile) {
         loadJob?.cancel()
-        _state.update { it.copy(loading = true, failed = false) }
+        _state.update { it.copy(loading = true, failure = null) }
         loadJob = viewModelScope.launch {
             val result = library.list(directory)
-            _state.update { it.withLoadedEntries(result.getOrDefault(emptyList()), result.isFailure) }
+            _state.update {
+                it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure())
+            }
         }
     }
 
-    /** 位置读不出来的根目录不展示：授权已失效时它在界面上没有用处。 */
+    private suspend fun verify(url: String, username: String, password: String): MediaFailure? = try {
+        verifier.verify(url, username, password)
+        null
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (problem: Exception) {
+        problem.toFailure()
+    }
+
+    private suspend fun refreshRoots() {
+        _state.update { it.copy(roots = resolveRoots(settings.rootLocations.first() + sources.locations.first())) }
+    }
+
+    private fun Throwable?.toFailure(): MediaFailure? = when (this) {
+        null -> null
+        is MediaSourceException -> failure
+        else -> MediaFailure.Unknown
+    }
+
+    /** 位置读不出来的根目录不展示：授权失效或连不上时它在界面上没有用处。 */
     private suspend fun resolveRoots(locations: List<String>): List<MediaFile> =
         locations.mapNotNull { library.resolveDirectory(it) }
 
@@ -197,15 +270,31 @@ class LibraryViewModel(
     )
 
     companion object {
-        /** 生产入口：SAF 文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置。 */
+        /** 生产入口：本地 SAF 与 SMB 各自的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
+                val appContext = context.applicationContext
+                val sources = NetworkSourceRepository(
+                    store = DataStoreBookmarkStore.create(appContext),
+                    credentials = EncryptedCredentialStore.create(appContext),
+                )
+                val connector = SmbJConnector()
+                val locator = SmbLocator(sources)
                 LibraryViewModel(
                     library = ProgressCleanupMediaLibrary(
-                        DirectoryMediaLibrary(SafMediaFileTree(context)),
-                        RoomPlaybackProgressRepository.create(context),
+                        DirectoryMediaLibrary(
+                            RoutingMediaFileTree(
+                                mapOf(
+                                    RoutingMediaFileTree.SAF_SCHEME to SafMediaFileTree(appContext),
+                                    SmbLocation.SCHEME to SmbMediaFileTree(connector, locator),
+                                ),
+                            ),
+                        ),
+                        RoomPlaybackProgressRepository.create(appContext),
                     ),
-                    settings = SettingsRepository.create(context),
+                    settings = SettingsRepository.create(appContext),
+                    sources = sources,
+                    verifier = SmbSourceVerifier(connector),
                 )
             }
         }

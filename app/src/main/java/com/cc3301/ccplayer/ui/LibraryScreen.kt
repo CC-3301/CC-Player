@@ -72,6 +72,9 @@ fun LibraryScreen(
     state: LibraryState,
     mediaPreview: MediaPreviewSource,
     onPickRoot: () -> Unit,
+    onOpenNetworkSourceForm: () -> Unit,
+    onDismissNetworkSourceForm: () -> Unit,
+    onAddNetworkSource: (host: String, share: String, username: String, password: String) -> Unit,
     onOpenEntry: (MediaFile) -> Unit,
     onNavigateUp: () -> Unit,
     onRetry: () -> Unit,
@@ -82,6 +85,23 @@ fun LibraryScreen(
 ) {
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+
+    state.networkSourceForm?.let { form ->
+        NetworkSourceDialog(
+            title = stringResource(R.string.network_source_title),
+            fields = listOf(
+                NetworkSourceField(stringResource(R.string.network_source_host)),
+                NetworkSourceField(stringResource(R.string.network_source_share)),
+                NetworkSourceField(stringResource(R.string.network_source_username)),
+                NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
+            ),
+            state = form,
+            onDismiss = onDismissNetworkSourceForm,
+            onConfirm = { values ->
+                onAddNetworkSource(values[0], values[1], values[2], values[3])
+            },
+        )
+    }
 
     // 换排序后回到列表最顶部。
     LaunchedEffect(state.sortRevision) {
@@ -106,6 +126,7 @@ fun LibraryScreen(
                 state = state,
                 onNavigateUp = onNavigateUp,
                 onPickRoot = onPickRoot,
+                onOpenNetworkSourceForm = onOpenNetworkSourceForm,
                 onSortOrderChange = onSortOrderChange,
                 onViewModeChange = onViewModeChange,
                 onGridColumnsChange = onGridColumnsChange,
@@ -113,10 +134,10 @@ fun LibraryScreen(
         }
         when {
             !state.ready -> Centered { CircularProgressIndicator() }
-            state.roots.isEmpty() -> Onboarding(onPickRoot = onPickRoot)
+            state.roots.isEmpty() -> Onboarding(onPickRoot = onPickRoot, onOpenNetworkSourceForm = onOpenNetworkSourceForm)
             state.loading -> Centered { CircularProgressIndicator() }
-            state.failed -> Centered {
-                Message(text = stringResource(R.string.library_load_failed), onRetry = onRetry)
+            state.failure != null -> Centered {
+                Message(text = stringResource(mediaFailureText(state.failure)), onRetry = onRetry)
             }
             state.visibleEntries.isEmpty() -> Centered { Message(text = stringResource(R.string.library_empty)) }
             else -> EntryArea(
@@ -135,6 +156,7 @@ private fun Header(
     state: LibraryState,
     onNavigateUp: () -> Unit,
     onPickRoot: () -> Unit,
+    onOpenNetworkSourceForm: () -> Unit,
     onSortOrderChange: (SortOrder) -> Unit,
     onViewModeChange: (ViewMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
@@ -167,6 +189,9 @@ private fun Header(
             onGridColumnsChange = onGridColumnsChange,
         )
         if (state.stack.isEmpty()) {
+            TextButton(onClick = onOpenNetworkSourceForm) {
+                Text(text = stringResource(R.string.library_add_network_source))
+            }
             TextButton(onClick = onPickRoot) {
                 Text(text = stringResource(R.string.library_add_root))
             }
@@ -358,7 +383,7 @@ private fun placeholderIcon(entry: MediaFile): Int = when {
 }
 
 @Composable
-private fun Onboarding(onPickRoot: () -> Unit) {
+private fun Onboarding(onPickRoot: () -> Unit, onOpenNetworkSourceForm: () -> Unit) {
     Centered {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(text = stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
@@ -372,6 +397,9 @@ private fun Onboarding(onPickRoot: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
             Button(onClick = onPickRoot) {
                 Text(text = stringResource(R.string.library_pick_root))
+            }
+            TextButton(onClick = onOpenNetworkSourceForm) {
+                Text(text = stringResource(R.string.library_add_network_source))
             }
         }
     }
