@@ -20,6 +20,16 @@ class FakePlaybackEngine : PlaybackEngine {
     val fadeInDurations = mutableListOf<Long>()
     val decodeModes = mutableListOf<DecodeMode>()
 
+    /** 当前媒体的内嵌字幕轨道，测试自己摆。 */
+    var embeddedTracks: List<SubtitleTrack> = emptyList()
+
+    val addedExternalSubtitles = mutableListOf<String>()
+    val selectedEmbeddedTracks = mutableListOf<Int>()
+    val selectedExternalSubtitles = mutableListOf<String>()
+
+    var disableSubtitleCalls = 0
+        private set
+
     override fun setListener(listener: PlaybackEngine.Listener) {
         this.listener = listener
     }
@@ -50,6 +60,24 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun setDecodeMode(mode: DecodeMode) {
         decodeModes += mode
+    }
+
+    override fun embeddedSubtitleTracks(): List<SubtitleTrack> = embeddedTracks
+
+    override fun addExternalSubtitle(location: String) {
+        addedExternalSubtitles += location
+    }
+
+    override fun selectEmbeddedSubtitle(trackId: Int) {
+        selectedEmbeddedTracks += trackId
+    }
+
+    override fun selectExternalSubtitle(location: String) {
+        selectedExternalSubtitles += location
+    }
+
+    override fun disableSubtitles() {
+        disableSubtitleCalls++
     }
 
     override fun attachSurface(surface: Surface) = Unit

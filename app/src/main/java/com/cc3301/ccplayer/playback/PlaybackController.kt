@@ -67,6 +67,18 @@ class PlaybackController(
     private val _resumeMode = MutableStateFlow(ResumeMode.LastPosition)
     val resumeMode: StateFlow<ResumeMode> = _resumeMode.asStateFlow()
 
+    /** 当前媒体的内嵌字幕轨道，媒体加载完成后刷新。 */
+    private val _subtitleTracks = MutableStateFlow<List<SubtitleTrack>>(emptyList())
+    val subtitleTracks: StateFlow<List<SubtitleTrack>> = _subtitleTracks.asStateFlow()
+
+    /** 与当前媒体匹配的外挂字幕，按得分从高到低；已加载进轨道列表，起播不自动显示。 */
+    private val _externalSubtitles = MutableStateFlow<List<MediaFile>>(emptyList())
+    val externalSubtitles: StateFlow<List<MediaFile>> = _externalSubtitles.asStateFlow()
+
+    /** 生效中的字幕；默认按起播规则定。 */
+    private val _subtitleSelection = MutableStateFlow<SubtitleSelection>(SubtitleSelection.Off)
+    val subtitleSelection: StateFlow<SubtitleSelection> = _subtitleSelection.asStateFlow()
+
     private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
 
     /** 会话里是否有已打开的媒体。 */
@@ -78,6 +90,9 @@ class PlaybackController(
     /** 当前媒体的位置与时长，来自引擎回调，落库时用。 */
     private var playedPositionMillis = 0L
     private var playedDurationMillis = 0L
+
+    /** 本次会话当前目录的原始条目，供外挂字幕匹配。 */
+    private var directoryEntries: List<MediaFile> = emptyList()
 
     /** 上一次落库时的位置；间隔不足 [SAVE_INTERVAL_MILLIS] 的更新不写库。 */
     private var savedPositionMillis = 0L
@@ -97,13 +112,15 @@ class PlaybackController(
 
     /**
      * 以 [files] 为播放列表起播 [current]；列表只收媒体文件，按名称自然排序。
+     * [directoryEntries] 是当前目录的原始条目（含被媒体列表过滤掉的外挂字幕），用于外挂字幕匹配。
      * [current] 不在列表里时不动作。
      */
-    fun openPlaylist(files: List<MediaFile>, current: MediaFile) {
+    fun openPlaylist(files: List<MediaFile>, current: MediaFile, directoryEntries: List<MediaFile> = emptyList()) {
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) return
         _playlist.value = playlist
+        this.directoryEntries = directoryEntries
         playAt(index)
     }
 
@@ -113,6 +130,9 @@ class PlaybackController(
         _currentIndex.value = index
         _progress.value = PlaybackProgress()
         _seekPreviewMillis.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
         active = true
         playedPositionMillis = 0
         playedDurationMillis = 0
@@ -174,6 +194,10 @@ class PlaybackController(
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
         _videoAspectRatio.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        directoryEntries = emptyList()
     }
 
     /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
@@ -223,11 +247,30 @@ class PlaybackController(
         _resumeMode.value = mode
     }
 
+    /** 显示内嵌字幕轨道 [trackId]；外挂字幕随之停显。 */
+    fun selectEmbeddedSubtitle(trackId: Int) {
+        if (!active) return
+        applySubtitleSelection(SubtitleSelection.Embedded(trackId))
+    }
+
+    /** 显示外挂字幕 [location]；内嵌字幕随之停显。 */
+    fun selectExternalSubtitle(location: String) {
+        if (!active) return
+        applySubtitleSelection(SubtitleSelection.External(location))
+    }
+
+    /** 关闭字幕显示。 */
+    fun disableSubtitles() {
+        if (!active) return
+        applySubtitleSelection(SubtitleSelection.Off)
+    }
+
     override fun onMediaLoaded() {
         if (!active) return
         mediaLoaded = true
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
         applyResumePosition()
+        applyStartSubtitles()
     }
 
     override fun onPauseChanged(paused: Boolean) {
@@ -288,6 +331,27 @@ class PlaybackController(
         resumePositionMillis = null
         savedPositionMillis = position
         engine.seekTo(position)
+    }
+
+    /** 起播字幕：匹配到的外挂一律加载进轨道列表，显示哪一路由 [subtitleStartDecision] 定。 */
+    private fun applyStartSubtitles() {
+        val media = currentMedia() ?: return
+        val tracks = engine.embeddedSubtitleTracks()
+        val start = subtitleStartDecision(media.name, tracks, directoryEntries)
+        start.externalToLoad.forEach { engine.addExternalSubtitle(it.location) }
+        _subtitleTracks.value = tracks
+        _externalSubtitles.value = start.externalToLoad
+        applySubtitleSelection(start.selection)
+    }
+
+    /** 把选择交给引擎：切到另一路时前一路停显。 */
+    private fun applySubtitleSelection(selection: SubtitleSelection) {
+        when (selection) {
+            is SubtitleSelection.Embedded -> engine.selectEmbeddedSubtitle(selection.trackId)
+            is SubtitleSelection.External -> engine.selectExternalSubtitle(selection.location)
+            SubtitleSelection.Off -> engine.disableSubtitles()
+        }
+        _subtitleSelection.value = selection
     }
 
     /** 落进度记录；[force] 为假时位置变化不足 [SAVE_INTERVAL_MILLIS] 就不写库。 */

@@ -76,6 +76,41 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString(HWDEC_PROPERTY, hwdec)
     }
 
+    /** 遍历 track-list，只取非外挂的字幕轨道。 */
+    override fun embeddedSubtitleTracks(): List<SubtitleTrack> = trackIndexes().mapNotNull { index ->
+        if (trackPropertyString(index, TYPE_ENTRY) != SUBTITLE_TRACK_TYPE) return@mapNotNull null
+        if (trackPropertyBoolean(index, EXTERNAL_ENTRY) == true) return@mapNotNull null
+        val id = trackPropertyInt(index, ID_ENTRY) ?: return@mapNotNull null
+        SubtitleTrack(
+            id = id,
+            language = trackPropertyString(index, LANGUAGE_ENTRY),
+            title = trackPropertyString(index, TITLE_ENTRY),
+        )
+    }
+
+    override fun addExternalSubtitle(location: String) {
+        if (externalSubtitleTrackId(location) != null) return
+        MPVLib.command(arrayOf("sub-add", location))
+    }
+
+    override fun selectEmbeddedSubtitle(trackId: Int) {
+        MPVLib.setPropertyInt(SID_PROPERTY, trackId)
+    }
+
+    /** 已加载过的外挂直接按轨道号选中，避免 sub-add 反复加出重份轨道。 */
+    override fun selectExternalSubtitle(location: String) {
+        val trackId = externalSubtitleTrackId(location)
+        if (trackId == null) {
+            MPVLib.command(arrayOf("sub-add", location, SUB_ADD_SELECT))
+        } else {
+            MPVLib.setPropertyInt(SID_PROPERTY, trackId)
+        }
+    }
+
+    override fun disableSubtitles() {
+        MPVLib.setPropertyString(SID_PROPERTY, SID_OFF)
+    }
+
     override fun attachSurface(surface: Surface) {
         if (videoOutputStopped) {
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
@@ -139,6 +174,27 @@ class MpvPlaybackEngine(
     private fun toMillis(seconds: Double): Long =
         if (seconds.isNaN() || seconds < 0) 0 else (seconds * 1000).toLong()
 
+    private fun trackIndexes(): IntRange = 0 until (MPVLib.getPropertyInt(TRACK_COUNT_PROPERTY) ?: 0)
+
+    private fun trackPropertyInt(index: Int, entry: String): Int? =
+        MPVLib.getPropertyInt(trackProperty(index, entry))
+
+    private fun trackPropertyString(index: Int, entry: String): String? =
+        MPVLib.getPropertyString(trackProperty(index, entry))
+
+    private fun trackPropertyBoolean(index: Int, entry: String): Boolean? =
+        MPVLib.getPropertyBoolean(trackProperty(index, entry))
+
+    private fun trackProperty(index: Int, entry: String): String = "track-list/$index/$entry"
+
+    /** 已加载的外挂字幕文件的轨道号；没加载过时为 null。 */
+    private fun externalSubtitleTrackId(location: String): Int? = trackIndexes().firstNotNullOfOrNull { index ->
+        if (trackPropertyString(index, TYPE_ENTRY) != SUBTITLE_TRACK_TYPE) return@firstNotNullOfOrNull null
+        if (trackPropertyBoolean(index, EXTERNAL_ENTRY) != true) return@firstNotNullOfOrNull null
+        if (trackPropertyString(index, EXTERNAL_FILENAME_ENTRY) != location) return@firstNotNullOfOrNull null
+        trackPropertyInt(index, ID_ENTRY)
+    }
+
     private fun formatSeconds(millis: Long): String = String.format(Locale.US, "%.3f", millis / 1000.0)
 
     private companion object {
@@ -148,5 +204,18 @@ class MpvPlaybackEngine(
         const val DURATION_PROPERTY = "duration"
         const val WIDTH_PROPERTY = "width"
         const val HEIGHT_PROPERTY = "height"
+        const val SID_PROPERTY = "sid"
+        const val TRACK_COUNT_PROPERTY = "track-list/count"
+        const val TYPE_ENTRY = "type"
+        const val ID_ENTRY = "id"
+        const val LANGUAGE_ENTRY = "lang"
+        const val TITLE_ENTRY = "title"
+        const val EXTERNAL_ENTRY = "external"
+        const val EXTERNAL_FILENAME_ENTRY = "external-filename"
+        const val SUBTITLE_TRACK_TYPE = "sub"
+        const val SUB_ADD_SELECT = "select"
+
+        /** `sid` 取该值表示不显示字幕。 */
+        const val SID_OFF = "no"
     }
 }
