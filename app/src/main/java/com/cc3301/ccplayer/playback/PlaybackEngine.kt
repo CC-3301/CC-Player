@@ -18,6 +18,12 @@ interface PlaybackEngine {
 
     fun stop()
 
+    /** 跳到指定播放位置，单位毫秒。 */
+    fun seekTo(positionMillis: Long)
+
+    /** 设置本次会话的解码模式。 */
+    fun setDecodeMode(mode: DecodeMode)
+
     /** 把画面接到视图的 Surface 上。 */
     fun attachSurface(surface: Surface)
 
@@ -38,5 +44,8 @@ interface PlaybackEngine {
 
         /** 当前媒体播放结束。 */
         fun onPlaybackEnded()
+
+        /** 播放位置或时长更新，单位毫秒。 */
+        fun onPositionChanged(positionMillis: Long, durationMillis: Long)
     }
 }
