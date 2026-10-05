@@ -1,10 +1,13 @@
 package com.cc3301.ccplayer
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Surface
@@ -75,6 +78,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext) }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
+
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
@@ -307,6 +312,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         pendingPlaylist = files
         pendingMedia = current
         playerVisible = true
+        requestNotificationPermission()
         if (!bound) {
             val intent = Intent(this, PlaybackService::class.java)
             ContextCompat.startForegroundService(this, intent)
@@ -323,6 +329,25 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (surface == null) return
         pendingMedia = null
         binder.controller.openPlaylist(pendingPlaylist, current)
+    }
+
+    /** 通知栏要能显示就得有这个权限（Android 13 起）。 */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /** 退到后台停止画面渲染，音频继续；回前台接回同一块 Surface，媒体不重新打开。 */
+    override fun onStop() {
+        super.onStop()
+        playback?.engine?.detachSurface()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        surface?.let { playback?.engine?.attachSurface(it) }
     }
 
     override fun onSurfaceReady(surface: Surface) {

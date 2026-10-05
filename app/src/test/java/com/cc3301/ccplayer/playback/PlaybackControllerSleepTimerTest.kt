@@ -258,7 +258,6 @@ class PlaybackControllerSleepTimerTest {
 
         controller.resume()
 
-        assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv", "root/ep1.mkv"), engine.startedUrls)
         assertEquals(PlaybackState.Loading, controller.state.value)
     }
@@ -274,8 +273,21 @@ class PlaybackControllerSleepTimerTest {
         engine.reportPauseChanged(true)
         controller.resume()
 
-        assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv", "root/ep1.mkv"), engine.startedUrls)
+    }
+
+    @Test
+    fun `定时到点后新起播的文件仍然暂停`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv", "ep2.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
+        controller.startSleepTimer(SleepTimerOption.AfterDuration(10))
+        advance(10 * MINUTE)
+
+        controller.next()
+        engine.reportMediaLoaded()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test

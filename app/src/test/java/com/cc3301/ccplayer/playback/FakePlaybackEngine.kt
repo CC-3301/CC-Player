@@ -17,6 +17,7 @@ class FakePlaybackEngine : PlaybackEngine {
     var stopCalls = 0
         private set
     val seekPositions = mutableListOf<Long>()
+    val fadeInDurations = mutableListOf<Long>()
     val decodeModes = mutableListOf<DecodeMode>()
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -41,6 +42,10 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun seekTo(positionMillis: Long) {
         seekPositions += positionMillis
+    }
+
+    override fun fadeInAudio(durationMillis: Long) {
+        fadeInDurations += durationMillis
     }
 
     override fun setDecodeMode(mode: DecodeMode) {
