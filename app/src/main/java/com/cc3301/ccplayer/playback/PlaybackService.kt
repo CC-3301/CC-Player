@@ -13,6 +13,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.R
+import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,6 +24,8 @@ import kotlinx.coroutines.launch
  * 前台播放服务：唯一持有 mpv 实例、播放控制层与 MediaSession，界面只绑定取用。
  */
 class PlaybackService : Service() {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private lateinit var playbackEngine: MpvPlaybackEngine
     private lateinit var playbackController: PlaybackController
@@ -38,7 +41,7 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath)
-        playbackController = PlaybackController(playbackEngine)
+        playbackController = PlaybackController(playbackEngine, RoomPlaybackProgressRepository.create(this), scope)
         playbackEngine.initialize()
         audioOutputMonitor = AndroidAudioOutputMonitor(this)
         audioOutputMonitor.start(playbackController::handleAudioOutputLost)
@@ -62,6 +65,7 @@ class PlaybackService : Service() {
 
     override fun onDestroy() {
         stateScope.cancel()
+        scope.cancel()
         audioOutputMonitor.stop()
         mediaSession.isActive = false
         mediaSession.release()

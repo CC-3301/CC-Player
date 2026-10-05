@@ -1,16 +1,22 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
  * 音频体验：起播与跳转后的淡入请求，音频输出中断后的暂停。
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerAudioTest {
 
     private val engine = FakePlaybackEngine()
-    private val controller = PlaybackController(engine)
+    private val progress = FakePlaybackProgressRepository()
+    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
 
     @Test
     fun `fade in lasts the fixed 500 milliseconds`() {

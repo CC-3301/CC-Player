@@ -1,6 +1,10 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -8,10 +12,12 @@ import org.junit.Test
 /**
  * 通知栏媒体动作到控制层的映射，以及播放/暂停按钮随播放状态切换。
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class MediaSessionActionTest {
 
     private val engine = FakePlaybackEngine()
-    private val controller = PlaybackController(engine)
+    private val progress = FakePlaybackProgressRepository()
+    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
 
     @Test
     fun `the pause action pauses the session`() {
