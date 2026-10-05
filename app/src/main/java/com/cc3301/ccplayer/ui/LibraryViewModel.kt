@@ -71,6 +71,15 @@ data class LibraryState(
         )
     }
 
+    /** 上次播放的位置变了（比如在播放器里切了集）：按下目前读出的目录重定滚动目标。 */
+    fun withRefreshedScrollTarget(): LibraryState {
+        val target = scrollTargetIn(entries)
+        return copy(
+            scrollTargetLocation = target,
+            scrollRevision = if (target == null) scrollRevision else scrollRevision + 1,
+        )
+    }
+
     /** 滚动目标：开关关、还没播过、或上次播放的条目不在 [entries] 里时为空。 */
     private fun scrollTargetIn(entries: List<MediaFile>): String? =
         lastPlayedLocation?.takeIf { autoScrollToLastPlayed && entries.any { entry -> entry.location == it } }
@@ -105,13 +114,18 @@ class LibraryViewModel(
             ) { mode, columns, order, autoScroll, lastPlayed ->
                 ListPreferences(mode, columns, order, autoScroll, lastPlayed)
             }.collect { preferences ->
-                _state.update {
-                    it.withSortOrder(preferences.sortOrder).copy(
+                _state.update { current ->
+                    val updated = current.withSortOrder(preferences.sortOrder).copy(
                         viewMode = preferences.viewMode,
                         gridColumns = preferences.gridColumns,
                         autoScrollToLastPlayed = preferences.autoScrollToLastPlayed,
                         lastPlayedLocation = preferences.lastPlayedLocation,
                     )
+                    if (updated.lastPlayedLocation == current.lastPlayedLocation) {
+                        updated
+                    } else {
+                        updated.withRefreshedScrollTarget()
+                    }
                 }
             }
         }
@@ -183,7 +197,7 @@ class LibraryViewModel(
     )
 
     companion object {
-        /** 生产入口：SAF 文件树 + DataStore 设置。 */
+        /** 生产入口：SAF 文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 LibraryViewModel(

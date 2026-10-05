@@ -79,4 +79,15 @@ class LibraryStateTest {
         assertNull(loaded.scrollTargetLocation)
         assertEquals(0, loaded.scrollRevision)
     }
+
+    @Test
+    fun `在播放器里切了集后重定当前目录的滚动目标`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState(lastPlayedLocation = "root/ep1.mkv").withLoadedEntries(entries, failed = false)
+
+        val switched = loaded.copy(lastPlayedLocation = "root/ep2.mkv").withRefreshedScrollTarget()
+
+        assertEquals("root/ep2.mkv", switched.scrollTargetLocation)
+        assertEquals(2, switched.scrollRevision)
+    }
 }
