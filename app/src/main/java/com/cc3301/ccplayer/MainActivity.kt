@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -46,6 +47,7 @@ import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
@@ -55,8 +57,10 @@ import com.cc3301.ccplayer.ui.MediaVolumeControl
 import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
+import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
+import com.cc3301.ccplayer.ui.resolvedOrientation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
@@ -88,6 +92,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var currentIndex by mutableStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
     private var loopMode by mutableStateOf(LoopMode.Sequential)
+    private var videoAspectRatio by mutableStateOf<Double?>(null)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -101,6 +106,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.currentIndex.collect { currentIndex = it } }
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
                 launch { binder.controller.loopMode.collect { loopMode = it } }
+                launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch {
@@ -127,7 +133,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 val autoPlayNext by settings.autoPlayNext.collectAsState(
                     initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
                 )
+                val orientationMode by settings.orientationMode.collectAsState(
+                    initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
+                )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
+                LaunchedEffect(playerVisible, orientationMode, videoAspectRatio) {
+                    applyOrientation(
+                        if (playerVisible) resolvedOrientation(orientationMode, videoAspectRatio)
+                        else ScreenOrientation.System,
+                    )
+                }
 
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
@@ -150,9 +165,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         currentIndex = currentIndex,
                         decodeMode = decodeMode,
                         loopMode = loopMode,
+                        orientationMode = orientationMode,
                         autoPlayNext = autoPlayNext,
                         levelControls = levelControls,
                         surfaceCallback = this@MainActivity,
+                        videoAspectRatio = videoAspectRatio,
                         onTogglePlayPause = { playback?.controller?.togglePlayPause() },
                         onPrevious = { playback?.controller?.previous() },
                         onNext = { playback?.controller?.next() },
@@ -162,6 +179,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onPlaylistSelect = { playback?.controller?.playAt(it) },
                         onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
                         onToggleLoopMode = { playback?.controller?.cycleLoopMode() },
+                        onCycleOrientationMode = {
+                            lifecycleScope.launch { settings.setOrientationMode(orientationMode.next()) }
+                        },
                         onToggleAutoPlayNext = {
                             lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
                         },
@@ -331,6 +351,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware
         loopMode = LoopMode.Sequential
+        videoAspectRatio = null
         releaseNetworkStreams()
         stopPlaybackService()
     }
@@ -358,6 +379,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    /** 播放页按设置施加朝向；离开播放页时交回系统自动旋转设置。 */
+    private fun applyOrientation(orientation: ScreenOrientation) {
+        requestedOrientation = when (orientation) {
+            ScreenOrientation.System -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            ScreenOrientation.Landscape -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            ScreenOrientation.Portrait -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 

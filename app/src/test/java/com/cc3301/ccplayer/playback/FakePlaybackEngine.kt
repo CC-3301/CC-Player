@@ -68,4 +68,6 @@ class FakePlaybackEngine : PlaybackEngine {
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
         listener?.onPositionChanged(positionMillis, durationMillis)
+
+    fun reportVideoSizeChanged(width: Int, height: Int) = listener?.onVideoSizeChanged(width, height)
 }

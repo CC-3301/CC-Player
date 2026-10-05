@@ -23,6 +23,8 @@ class MpvPlaybackEngine(
 
     private var positionSeconds = 0.0
     private var durationSeconds = 0.0
+    private var videoWidth = 0
+    private var videoHeight = 0
 
     fun initialize() {
         MPVLib.create(context.applicationContext)
@@ -32,6 +34,8 @@ class MpvPlaybackEngine(
         MPVLib.observeProperty(PAUSE_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         MPVLib.observeProperty(TIME_POS_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
+        MPVLib.observeProperty(WIDTH_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
+        MPVLib.observeProperty(HEIGHT_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -107,7 +111,14 @@ class MpvPlaybackEngine(
 
     override fun eventProperty(property: String) = Unit
 
-    override fun eventProperty(property: String, value: Long) = Unit
+    override fun eventProperty(property: String, value: Long) {
+        when (property) {
+            WIDTH_PROPERTY -> videoWidth = value.toInt()
+            HEIGHT_PROPERTY -> videoHeight = value.toInt()
+            else -> return
+        }
+        listener?.onVideoSizeChanged(videoWidth, videoHeight)
+    }
 
     override fun eventProperty(property: String, value: Double) {
         when (property) {
@@ -135,5 +146,7 @@ class MpvPlaybackEngine(
         const val HWDEC_PROPERTY = "hwdec"
         const val TIME_POS_PROPERTY = "time-pos"
         const val DURATION_PROPERTY = "duration"
+        const val WIDTH_PROPERTY = "width"
+        const val HEIGHT_PROPERTY = "height"
     }
 }
