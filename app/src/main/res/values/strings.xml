@@ -15,6 +15,9 @@
     <string name="network_source_title">添加网络源</string>
     <string name="network_source_host">主机</string>
     <string name="network_source_share">共享名</string>
+    <string name="network_source_smb">SMB 共享</string>
+    <string name="network_source_webdav">WebDAV 地址</string>
+    <string name="network_source_address">地址</string>
     <string name="network_source_username">用户名</string>
     <string name="network_source_password">密码</string>
     <string name="network_source_confirm">保存</string>
