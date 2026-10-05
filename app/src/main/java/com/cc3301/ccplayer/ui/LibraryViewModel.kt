@@ -21,6 +21,7 @@ import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkSourceVerifier
+import com.cc3301.ccplayer.network.RoutingNetworkSourceVerifier
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
@@ -29,6 +30,11 @@ import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbMediaFileTree
 import com.cc3301.ccplayer.smb.SmbSourceVerifier
+import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
+import com.cc3301.ccplayer.webdav.WebDavAddress
+import com.cc3301.ccplayer.webdav.WebDavLocator
+import com.cc3301.ccplayer.webdav.WebDavMediaFileTree
+import com.cc3301.ccplayer.webdav.WebDavSourceVerifier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,8 +45,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** 网络源的两种接入协议。 */
+enum class NetworkSourceProtocol { Smb, WebDav }
+
 /** 新增网络源表单的状态。 */
 data class NetworkSourceForm(
+    /** 正在填写的协议；打开表单时定下，填写中不变。 */
+    val protocol: NetworkSourceProtocol,
     /** 正在校验连通性。 */
     val adding: Boolean = false,
     /** 上次校验失败的原因；成功或未提交时为 null。 */
@@ -171,27 +182,50 @@ class LibraryViewModel(
     }
 
     /** 打开新增网络源表单。 */
-    fun openNetworkSourceForm() {
-        _state.update { it.copy(networkSourceForm = NetworkSourceForm()) }
+    fun openNetworkSourceForm(protocol: NetworkSourceProtocol) {
+        _state.update { it.copy(networkSourceForm = NetworkSourceForm(protocol = protocol)) }
     }
 
     fun dismissNetworkSourceForm() {
         _state.update { it.copy(networkSourceForm = null) }
     }
 
-    /** 校验凭据后保存书签；校验不过时保留表单并给出失败原因。 */
-    fun addNetworkSource(host: String, share: String, username: String, password: String) {
+    /** 校验凭据后保存 SMB 书签；校验不过时保留表单并给出失败原因。 */
+    fun addSmbSource(host: String, share: String, username: String, password: String) {
+        saveNetworkSource(url = SmbLocation.shareUrl(host, share), username = username, password = password)
+    }
+
+    /** 校验凭据后保存 WebDAV 书签；地址不合法或校验不过时保留表单并给出失败原因。 */
+    fun addWebDavSource(address: String, username: String, password: String) {
+        val url = WebDavAddress.normalize(address)
+        if (url == null) {
+            failNetworkSourceForm(MediaFailure.NotFound)
+            return
+        }
+        saveNetworkSource(url = url, username = username, password = password)
+    }
+
+    /** 校验连通性后保存书签；校验不过时保留表单并给出失败原因。 */
+    private fun saveNetworkSource(url: String, username: String, password: String) {
+        val form = _state.value.networkSourceForm ?: return
         viewModelScope.launch {
-            _state.update { it.copy(networkSourceForm = NetworkSourceForm(adding = true)) }
-            val url = SmbLocation.shareUrl(host, share)
+            _state.update { it.copy(networkSourceForm = form.copy(adding = true, failure = null)) }
             val failure = verify(url, username, password)
             if (failure != null) {
-                _state.update { it.copy(networkSourceForm = NetworkSourceForm(failure = failure)) }
+                failNetworkSourceForm(failure)
                 return@launch
             }
             sources.add(url = url, username = username, password = password)
             _state.update { it.copy(networkSourceForm = null) }
             refreshRoots()
+        }
+    }
+
+    /** 保留表单并给出失败原因。 */
+    private fun failNetworkSourceForm(failure: MediaFailure) {
+        _state.update { current ->
+            val form = current.networkSourceForm ?: return@update current
+            current.copy(networkSourceForm = form.copy(adding = false, failure = failure))
         }
     }
 
@@ -286,7 +320,7 @@ class LibraryViewModel(
     )
 
     companion object {
-        /** 生产入口：本地 SAF 与 SMB 各自的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
+        /** 生产入口：本地 SAF 与各网络协议的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val appContext = context.applicationContext
@@ -294,12 +328,16 @@ class LibraryViewModel(
                     store = DataStoreBookmarkStore.create(appContext),
                     credentials = EncryptedCredentialStore.create(appContext),
                 )
-                val connector = SmbJConnector()
-                val locator = SmbLocator(sources)
+                val smbConnector = SmbJConnector()
+                val smbLocator = SmbLocator(sources)
+                val webDavTransport = OkHttpWebDavTransport()
+                val webDavLocator = WebDavLocator(sources)
                 val tree = RoutingMediaFileTree(
                     mapOf(
                         RoutingMediaFileTree.SAF_SCHEME to SafMediaFileTree(appContext),
-                        SmbLocation.SCHEME to SmbMediaFileTree(connector, locator),
+                        SmbLocation.SCHEME to SmbMediaFileTree(smbConnector, smbLocator),
+                        WebDavAddress.SCHEME_HTTP to WebDavMediaFileTree(webDavTransport, webDavLocator),
+                        WebDavAddress.SCHEME_HTTPS to WebDavMediaFileTree(webDavTransport, webDavLocator),
                     ),
                 )
                 LibraryViewModel(
@@ -310,7 +348,13 @@ class LibraryViewModel(
                     files = tree,
                     settings = SettingsRepository.create(appContext),
                     sources = sources,
-                    verifier = SmbSourceVerifier(connector),
+                    verifier = RoutingNetworkSourceVerifier(
+                        mapOf(
+                            SmbLocation.SCHEME to SmbSourceVerifier(smbConnector),
+                            WebDavAddress.SCHEME_HTTP to WebDavSourceVerifier(webDavTransport),
+                            WebDavAddress.SCHEME_HTTPS to WebDavSourceVerifier(webDavTransport),
+                        ),
+                    ),
                 )
             }
         }

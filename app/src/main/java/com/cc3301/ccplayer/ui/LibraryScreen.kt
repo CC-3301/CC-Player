@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -72,9 +73,10 @@ fun LibraryScreen(
     state: LibraryState,
     mediaPreview: MediaPreviewSource,
     onPickRoot: () -> Unit,
-    onOpenNetworkSourceForm: () -> Unit,
+    onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit,
     onDismissNetworkSourceForm: () -> Unit,
-    onAddNetworkSource: (host: String, share: String, username: String, password: String) -> Unit,
+    onAddSmbSource: (host: String, share: String, username: String, password: String) -> Unit,
+    onAddWebDavSource: (address: String, username: String, password: String) -> Unit,
     onOpenEntry: (MediaFile) -> Unit,
     onNavigateUp: () -> Unit,
     onRetry: () -> Unit,
@@ -89,16 +91,14 @@ fun LibraryScreen(
     state.networkSourceForm?.let { form ->
         NetworkSourceDialog(
             title = stringResource(R.string.network_source_title),
-            fields = listOf(
-                NetworkSourceField(stringResource(R.string.network_source_host)),
-                NetworkSourceField(stringResource(R.string.network_source_share)),
-                NetworkSourceField(stringResource(R.string.network_source_username)),
-                NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
-            ),
+            fields = networkSourceFields(form.protocol),
             state = form,
             onDismiss = onDismissNetworkSourceForm,
             onConfirm = { values ->
-                onAddNetworkSource(values[0], values[1], values[2], values[3])
+                when (form.protocol) {
+                    NetworkSourceProtocol.Smb -> onAddSmbSource(values[0], values[1], values[2], values[3])
+                    NetworkSourceProtocol.WebDav -> onAddWebDavSource(values[0], values[1], values[2])
+                }
             },
         )
     }
@@ -156,7 +156,7 @@ private fun Header(
     state: LibraryState,
     onNavigateUp: () -> Unit,
     onPickRoot: () -> Unit,
-    onOpenNetworkSourceForm: () -> Unit,
+    onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit,
     onSortOrderChange: (SortOrder) -> Unit,
     onViewModeChange: (ViewMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
@@ -189,14 +189,57 @@ private fun Header(
             onGridColumnsChange = onGridColumnsChange,
         )
         if (state.stack.isEmpty()) {
-            TextButton(onClick = onOpenNetworkSourceForm) {
-                Text(text = stringResource(R.string.library_add_network_source))
-            }
+            NetworkSourceMenu(onOpenNetworkSourceForm = onOpenNetworkSourceForm)
             TextButton(onClick = onPickRoot) {
                 Text(text = stringResource(R.string.library_add_root))
             }
         }
     }
+}
+
+/** 表单字段随协议不同：SMB 要共享名，WebDAV 要完整地址。 */
+@Composable
+private fun networkSourceFields(protocol: NetworkSourceProtocol): List<NetworkSourceField> = when (protocol) {
+    NetworkSourceProtocol.Smb -> listOf(
+        NetworkSourceField(stringResource(R.string.network_source_host)),
+        NetworkSourceField(stringResource(R.string.network_source_share)),
+        NetworkSourceField(stringResource(R.string.network_source_username)),
+        NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
+    )
+
+    NetworkSourceProtocol.WebDav -> listOf(
+        NetworkSourceField(stringResource(R.string.network_source_address)),
+        NetworkSourceField(stringResource(R.string.network_source_username)),
+        NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
+    )
+}
+
+/** 新增网络源的入口：两种协议共用同一套表单。 */
+@Composable
+private fun NetworkSourceMenu(onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text(text = stringResource(R.string.library_add_network_source))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            NetworkSourceProtocol.entries.forEach { protocol ->
+                DropdownMenuItem(
+                    text = { Text(text = stringResource(networkSourceProtocolLabel(protocol))) },
+                    onClick = {
+                        expanded = false
+                        onOpenNetworkSourceForm(protocol)
+                    },
+                )
+            }
+        }
+    }
+}
+
+@StringRes
+private fun networkSourceProtocolLabel(protocol: NetworkSourceProtocol): Int = when (protocol) {
+    NetworkSourceProtocol.Smb -> R.string.network_source_smb
+    NetworkSourceProtocol.WebDav -> R.string.network_source_webdav
 }
 
 @Composable
@@ -383,7 +426,7 @@ private fun placeholderIcon(entry: MediaFile): Int = when {
 }
 
 @Composable
-private fun Onboarding(onPickRoot: () -> Unit, onOpenNetworkSourceForm: () -> Unit) {
+private fun Onboarding(onPickRoot: () -> Unit, onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit) {
     Centered {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(text = stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
@@ -398,9 +441,7 @@ private fun Onboarding(onPickRoot: () -> Unit, onOpenNetworkSourceForm: () -> Un
             Button(onClick = onPickRoot) {
                 Text(text = stringResource(R.string.library_pick_root))
             }
-            TextButton(onClick = onOpenNetworkSourceForm) {
-                Text(text = stringResource(R.string.library_add_network_source))
-            }
+            NetworkSourceMenu(onOpenNetworkSourceForm = onOpenNetworkSourceForm)
         }
     }
 }
