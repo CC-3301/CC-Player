@@ -41,6 +41,8 @@ import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
+import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.RoutingNetworkStreams
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
@@ -49,6 +51,7 @@ import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
+import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.ui.LibraryScreen
@@ -61,6 +64,10 @@ import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.resolvedOrientation
+import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
+import com.cc3301.ccplayer.webdav.WebDavAddress
+import com.cc3301.ccplayer.webdav.WebDavLocator
+import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.combine
@@ -82,7 +89,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var pendingPlaylist: List<MediaFile> = emptyList()
     private var pendingMedia: MediaFile? = null
     private var stateCollection: Job? = null
-    private var streams: SmbStreams? = null
+    private var streams: NetworkStreams? = null
 
     private var playerVisible by mutableStateOf(false)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
@@ -195,7 +202,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onPickRoot = { picker.launch(null) },
                         onOpenNetworkSourceForm = library::openNetworkSourceForm,
                         onDismissNetworkSourceForm = library::dismissNetworkSourceForm,
-                        onAddNetworkSource = library::addNetworkSource,
+                        onAddSmbSource = library::addSmbSource,
+                        onAddWebDavSource = library::addWebDavSource,
                         onOpenEntry = { entry ->
                             if (entry.isDirectory) {
                                 library.enter(entry)
@@ -268,15 +276,22 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             entry.copy(location = networkStreams().urlFor(entry.location))
         }
 
-    /** 回环代理与 SMB 会话按需建立，关播放页时一并释放。 */
-    private fun networkStreams(): SmbStreams = streams ?: createNetworkStreams().also { streams = it }
+    /** 回环代理与网络会话按需建立，关播放页时一并释放。 */
+    private fun networkStreams(): NetworkStreams = streams ?: createNetworkStreams().also { streams = it }
 
-    private fun createNetworkStreams(): SmbStreams {
+    private fun createNetworkStreams(): NetworkStreams {
         val sources = NetworkSourceRepository(
             store = DataStoreBookmarkStore.create(applicationContext),
             credentials = EncryptedCredentialStore.create(applicationContext),
         )
-        return SmbStreams(SmbJConnector(), SmbLocator(sources))
+        val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources))
+        return RoutingNetworkStreams(
+            mapOf(
+                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources)),
+                WebDavAddress.SCHEME_HTTP to webDavStreams,
+                WebDavAddress.SCHEME_HTTPS to webDavStreams,
+            ),
+        )
     }
 
     /** mpv 直接吃 content:// URI：ffmpeg 的 android_content 协议经应用 ContentResolver 读文件。 */
