@@ -30,9 +30,11 @@ import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.playback.DecodeMode
+import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MpvSurfaceView
@@ -45,6 +47,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext) }
 
     private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext) }
+
+    private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
@@ -60,6 +64,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
     private var currentIndex by mutableStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
+    private var loopMode by mutableStateOf(LoopMode.Sequential)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -72,6 +77,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.playlist.collect { playlist = it } }
                 launch { binder.controller.currentIndex.collect { currentIndex = it } }
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
+                launch { binder.controller.loopMode.collect { loopMode = it } }
+                launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
             }
             surface?.let { binder.engine.attachSurface(it) }
             startPendingPlayback()
@@ -88,6 +95,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 val libraryState by library.state.collectAsState()
+                val autoPlayNext by settings.autoPlayNext.collectAsState(
+                    initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
+                )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
 
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -103,6 +113,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         playlist = playlist,
                         currentIndex = currentIndex,
                         decodeMode = decodeMode,
+                        loopMode = loopMode,
+                        autoPlayNext = autoPlayNext,
                         surfaceCallback = this@MainActivity,
                         onTogglePlayPause = { playback?.controller?.togglePlayPause() },
                         onPrevious = { playback?.controller?.previous() },
@@ -111,6 +123,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onSeekCommit = { playback?.controller?.commitSeekPreview() },
                         onPlaylistSelect = { playback?.controller?.playAt(it) },
                         onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
+                        onToggleLoopMode = { playback?.controller?.cycleLoopMode() },
+                        onToggleAutoPlayNext = {
+                            lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
+                        },
                         onClose = { closePlayer() },
                     )
                 } else {
@@ -194,6 +210,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         playlist = emptyList()
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware
+        loopMode = LoopMode.Sequential
         stopPlaybackService()
     }
 

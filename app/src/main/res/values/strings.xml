@@ -27,6 +27,10 @@
     <string name="player_playlist">播放列表</string>
     <string name="player_decode_hardware">硬解</string>
     <string name="player_decode_software">软解</string>
+    <string name="player_loop_sequential">顺序</string>
+    <string name="player_loop_list">列表循环</string>
+    <string name="player_loop_single">单集循环</string>
+    <string name="player_auto_play_next">自动播放下一个</string>
     <string name="player_lock">锁定</string>
     <string name="player_unlock">解锁</string>
     <string name="player_exit">退出</string>
