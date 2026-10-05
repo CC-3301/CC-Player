@@ -1,7 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">CC Player</string>
-    <string name="home_open_video">打开本地视频</string>
+    <string name="library_onboarding_hint">选一个放视频或音频的文件夹。App 只读你选的目录，不问系统要任何存储权限。</string>
+    <string name="library_pick_root">选择目录</string>
+    <string name="library_roots_title">媒体目录</string>
+    <string name="library_add_root">添加目录</string>
+    <string name="library_up">上一级</string>
+    <string name="library_empty">这个目录里没有可播放的媒体</string>
+    <string name="library_load_failed">读不了这个目录。检查授权，或换一个目录。</string>
+    <string name="library_retry">重试</string>
+    <string name="library_entry_directory">文件夹</string>
+    <string name="library_entry_video">视频</string>
+    <string name="library_entry_audio">音频</string>
     <string name="player_pause">暂停</string>
     <string name="player_resume">继续</string>
     <string name="player_exit">退出</string>
