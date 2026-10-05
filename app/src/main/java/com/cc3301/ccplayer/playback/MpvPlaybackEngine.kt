@@ -85,6 +85,7 @@ class MpvPlaybackEngine(
             id = id,
             language = trackPropertyString(index, LANGUAGE_ENTRY),
             title = trackPropertyString(index, TITLE_ENTRY),
+            isDefault = trackPropertyBoolean(index, DEFAULT_ENTRY) == true,
         )
     }
 
@@ -211,6 +212,7 @@ class MpvPlaybackEngine(
         const val LANGUAGE_ENTRY = "lang"
         const val TITLE_ENTRY = "title"
         const val EXTERNAL_ENTRY = "external"
+        const val DEFAULT_ENTRY = "default"
         const val EXTERNAL_FILENAME_ENTRY = "external-filename"
         const val SUBTITLE_TRACK_TYPE = "sub"
         const val SUB_ADD_SELECT = "select"

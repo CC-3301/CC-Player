@@ -16,7 +16,8 @@ data class SubtitleStart(
 /**
  * 起播字幕决策：同目录匹配到的外挂字幕一律加载进轨道列表，显示哪一路按内嵌优先定。
  *
- * 有内嵌字幕轨道时显示第一条内嵌；没有内嵌时显示得分最高的外挂；都没有则不显示字幕。
+ * 有内嵌字幕轨道时显示带默认标记的那条，没有默认标记时显示第一条；没有内嵌时显示得分最高的外挂；
+ * 都没有则不显示字幕。
  */
 fun subtitleStartDecision(
     mediaName: String,
@@ -24,7 +25,8 @@ fun subtitleStartDecision(
     directoryEntries: List<MediaFile>,
 ): SubtitleStart {
     val external = matchExternalSubtitles(mediaName, directoryEntries)
-    val selection = tracks.firstOrNull()
+    val embedded = tracks.firstOrNull { it.isDefault } ?: tracks.firstOrNull()
+    val selection = embedded
         ?.let { SubtitleSelection.Embedded(it.id) }
         ?: external.firstOrNull()?.let { SubtitleSelection.External(it.location) }
         ?: SubtitleSelection.Off

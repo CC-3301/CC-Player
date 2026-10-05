@@ -19,12 +19,22 @@ class PlaybackControllerSubtitleTest {
         CoroutineScope(UnconfinedTestDispatcher()),
     )
 
-    private val chinese = SubtitleTrack(id = 3, language = "chs", title = null)
-    private val english = SubtitleTrack(id = 5, language = "eng", title = null)
+    private val chinese = SubtitleTrack(id = 3, language = "chs", title = null, isDefault = false)
+    private val english = SubtitleTrack(id = 5, language = "eng", title = null, isDefault = true)
+
+    @Test
+    fun `带 default 标记的内嵌轨道优先显示`() {
+        engine.embeddedTracks = listOf(chinese, english)
+
+        openEpisode("ep01.mkv", "ep01.srt")
+
+        assertEquals(listOf(5), engine.selectedEmbeddedTracks)
+        assertEquals(SubtitleSelection.Embedded(5), controller.subtitleSelection.value)
+    }
 
     @Test
     fun `起播时匹配到的外挂全部加载，显示内嵌轨道`() {
-        engine.embeddedTracks = listOf(chinese, english)
+        engine.embeddedTracks = listOf(chinese)
 
         openEpisode("ep01.mkv", "ep01.cht.ass", "ep01.srt")
 
@@ -32,7 +42,7 @@ class PlaybackControllerSubtitleTest {
         assertEquals(listOf(3), engine.selectedEmbeddedTracks)
         assertEquals(emptyList<String>(), engine.selectedExternalSubtitles)
         assertEquals(SubtitleSelection.Embedded(3), controller.subtitleSelection.value)
-        assertEquals(listOf(chinese, english), controller.subtitleTracks.value)
+        assertEquals(listOf(chinese), controller.subtitleTracks.value)
         assertEquals(listOf("ep01.srt", "ep01.cht.ass"), controller.externalSubtitles.value.map { it.name })
     }
 

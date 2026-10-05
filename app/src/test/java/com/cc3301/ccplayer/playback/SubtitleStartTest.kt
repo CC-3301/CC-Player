@@ -8,8 +8,8 @@ import org.junit.Test
 /** 表驱动：起播时加载哪几路外挂、显示哪一路字幕。 */
 class SubtitleStartTest {
 
-    private val firstEmbedded = SubtitleTrack(id = 3, language = "chs", title = "简体")
-    private val secondEmbedded = SubtitleTrack(id = 5, language = "eng", title = null)
+    private val firstEmbedded = SubtitleTrack(id = 3, language = "chs", title = "简体", isDefault = false)
+    private val secondEmbedded = SubtitleTrack(id = 5, language = "eng", title = null, isDefault = false)
 
     @Test
     fun `有内嵌也有外挂：外挂全部加载，显示内嵌`() {
@@ -45,6 +45,21 @@ class SubtitleStartTest {
 
     @Test
     fun `内嵌轨道取第一条`() {
+        val decision = subtitleStartDecision("ep01.mkv", listOf(firstEmbedded, secondEmbedded), emptyList())
+
+        assertEquals(SubtitleSelection.Embedded(3), decision.selection)
+    }
+
+    @Test
+    fun `内嵌轨道里带 default 标记的那条优先，即使它不是第一条`() {
+        val marked = secondEmbedded.copy(isDefault = true)
+        val decision = subtitleStartDecision("ep01.mkv", listOf(firstEmbedded, marked), entries("ep01.srt"))
+
+        assertEquals(SubtitleSelection.Embedded(5), decision.selection)
+    }
+
+    @Test
+    fun `内嵌轨道都没有 default 标记时取第一条`() {
         val decision = subtitleStartDecision("ep01.mkv", listOf(firstEmbedded, secondEmbedded), emptyList())
 
         assertEquals(SubtitleSelection.Embedded(3), decision.selection)

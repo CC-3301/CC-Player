@@ -9,8 +9,8 @@ import org.junit.Test
 /** 字幕菜单构成：内嵌轨道 + 可匹配外挂 + 关闭，当前生效项标出来。 */
 class SubtitleMenuTest {
 
-    private val chinese = SubtitleTrack(id = 3, language = "chs", title = "简体")
-    private val english = SubtitleTrack(id = 5, language = "eng", title = null)
+    private val chinese = SubtitleTrack(id = 3, language = "chs", title = "简体", isDefault = false)
+    private val english = SubtitleTrack(id = 5, language = "eng", title = null, isDefault = false)
     private val externalChinese = document("ep01.chs.ass")
     private val externalPlain = document("ep01.srt")
 
@@ -64,8 +64,8 @@ class SubtitleMenuTest {
 
     @Test
     fun `内嵌轨道没有语言与标题时用轨道号`() {
-        assertEquals("7", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = null)))
-        assertEquals("简体", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = "简体")))
+        assertEquals("7", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = null, isDefault = false)))
+        assertEquals("简体", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = "简体", isDefault = false)))
     }
 
     private fun document(name: String): MediaFile = MediaFile(name = name, location = "root/$name")
