@@ -6,12 +6,11 @@ import org.junit.Test
 class PlayerLayoutTest {
 
     @Test
-    fun `比例未知时铺满可用区域`() {
+    fun `比例未知时铺满容器`() {
         val viewport = videoViewport(
             containerWidth = 1000f,
             containerHeight = 1000f,
             videoAspectRatio = null,
-            topReservedHeight = 0f,
         )
 
         assertViewport(0f, 0f, 1000f, 1000f, viewport)
@@ -23,7 +22,6 @@ class PlayerLayoutTest {
             containerWidth = 1000f,
             containerHeight = 1000f,
             videoAspectRatio = 2.0,
-            topReservedHeight = 0f,
         )
 
         assertViewport(0f, 250f, 1000f, 500f, viewport)
@@ -35,7 +33,6 @@ class PlayerLayoutTest {
             containerWidth = 1000f,
             containerHeight = 1000f,
             videoAspectRatio = 0.5,
-            topReservedHeight = 0f,
         )
 
         assertViewport(250f, 0f, 500f, 1000f, viewport)
@@ -47,44 +44,18 @@ class PlayerLayoutTest {
             containerWidth = 1000f,
             containerHeight = 400f,
             videoAspectRatio = 1.0,
-            topReservedHeight = 0f,
         )
 
         assertViewport(300f, 0f, 400f, 400f, viewport)
     }
 
     @Test
-    fun `顶部预留的高度从可用区域里扣除，画面在剩余区域内居中`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 1000f,
-            videoAspectRatio = 2.0,
-            topReservedHeight = 200f,
-        )
-
-        assertViewport(0f, 350f, 1000f, 500f, viewport)
-    }
-
-    @Test
-    fun `预留高度超过容器高度时回落铺满容器`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 500f,
-            videoAspectRatio = 2.0,
-            topReservedHeight = 900f,
-        )
-
-        assertViewport(0f, 0f, 1000f, 500f, viewport)
-    }
-
-    @Test
-    fun `比例非正或非有限时铺满可用区域`() {
+    fun `比例非正或非有限时铺满容器`() {
         listOf(0.0, -2.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { aspect ->
             val viewport = videoViewport(
                 containerWidth = 1000f,
                 containerHeight = 500f,
                 videoAspectRatio = aspect,
-                topReservedHeight = 0f,
             )
 
             assertViewport(0f, 0f, 1000f, 500f, viewport)
@@ -97,7 +68,6 @@ class PlayerLayoutTest {
             containerWidth = 0f,
             containerHeight = -100f,
             videoAspectRatio = 1.0,
-            topReservedHeight = 0f,
         )
 
         assertViewport(0f, 0f, 0f, 0f, viewport)

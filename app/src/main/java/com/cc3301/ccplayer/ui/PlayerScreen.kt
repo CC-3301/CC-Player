@@ -1,10 +1,10 @@
 package com.cc3301.ccplayer.ui
 
-import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -36,12 +36,14 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -82,8 +84,6 @@ fun PlayerScreen(
     onToggleAutoPlayNext: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
-    /** 竖屏时视频区上方预留给标题/控制位的带高，见 [PLAYER_TOP_RESERVED_HEIGHT]。 */
-    videoTopReservedHeight: Dp = PLAYER_TOP_RESERVED_HEIGHT,
 ) {
     val lock = remember { PlayerLock() }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -102,12 +102,10 @@ fun PlayerScreen(
         .fillMaxSize()
         .background(Color.Black)) {
         val density = LocalDensity.current
-        val portrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
             videoAspectRatio = videoAspectRatio,
-            topReservedHeight = with(density) { if (portrait) videoTopReservedHeight.toPx() else 0f },
         )
         AndroidView(
             factory = { context ->
@@ -134,6 +132,11 @@ fun PlayerScreen(
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
             if (controlsVisible) {
+                PlayerTitleBar(
+                    title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
+                    onBack = onClose,
+                    modifier = Modifier.align(Alignment.TopStart),
+                )
                 Controls(
                     state = state,
                     progress = progress,
@@ -245,6 +248,46 @@ private fun LevelHintLabel(hint: LevelHint, modifier: Modifier = Modifier) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
     )
 }
+
+/**
+ * 叠加在画面之上的标题栏：返回按钮 + 当前文件名。透明底，不占布局高度，文字靠阴影在任意画面上可读。
+ *
+ * 整条区域吞掉点按与拖动，标题栏上的手势不落到下面的手势层上；返回按钮吃掉自己的点击。
+ */
+@Composable
+private fun PlayerTitleBar(title: String, onBack: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            )
+            .safeDrawingPadding()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        TextButton(onClick = onBack) {
+            Text(text = stringResource(R.string.player_title_back), style = playerOverlayTextStyle())
+        }
+        Text(
+            text = title,
+            style = playerOverlayTextStyle(),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 透明底上的白字：阴影保证画面亮时也看得清。 */
+@Composable
+private fun playerOverlayTextStyle(): TextStyle = MaterialTheme.typography.titleMedium.copy(
+    color = Color.White,
+    shadow = Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 4f),
+)
 
 /** 锁定态下唯一可见的控件：点两次解锁，第一次点后给出「再点一次解锁」提示。 */
 @Composable
