@@ -13,9 +13,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -26,13 +28,16 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
-import com.cc3301.ccplayer.ui.HomeScreen
+import com.cc3301.ccplayer.ui.LibraryScreen
+import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.PlayerScreen
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
+
+    private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext) }
 
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
@@ -64,10 +69,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                val libraryState by library.state.collectAsState()
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
 
-                val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                    if (uri != null) openVideo(uri)
+                val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+                    if (uri != null) addRoot(uri)
                 }
 
                 if (playerVisible) {
@@ -79,15 +85,30 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         onClose = { closePlayer() },
                     )
                 } else {
-                    HomeScreen(onOpenVideo = { picker.launch(arrayOf("video/*")) })
+                    BackHandler(enabled = libraryState.stack.isNotEmpty()) { library.navigateUp() }
+                    LibraryScreen(
+                        state = libraryState,
+                        onPickRoot = { picker.launch(null) },
+                        onOpenEntry = { entry ->
+                            if (entry.isDirectory) library.enter(entry) else openMedia(entry.location)
+                        },
+                        onNavigateUp = library::navigateUp,
+                        onRetry = library::retry,
+                    )
                 }
             }
         }
     }
 
+    /** 取持久读授权：目录选定后重启仍可读，不需要任何存储权限。 */
+    private fun addRoot(uri: Uri) {
+        runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        library.addRoot(uri.toString())
+    }
+
     /** mpv 直接吃 content:// URI：ffmpeg 的 android_content 协议经应用 ContentResolver 读文件。 */
-    private fun openVideo(uri: Uri) {
-        pendingUrl = uri.toString()
+    private fun openMedia(location: String) {
+        pendingUrl = location
         playerVisible = true
         if (!bound) {
             val intent = Intent(this, PlaybackService::class.java)
