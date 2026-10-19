@@ -44,11 +44,30 @@ class SmbLocationTest {
     }
 
     @Test
+    fun `解析服务器根：共享为空`() {
+        listOf("smb://nas", "smb://nas/").forEach { url ->
+            val location = SmbLocation.parse(url)
+
+            assertEquals("nas", location?.host)
+            assertEquals(445, location?.port)
+            assertEquals("", location?.share)
+            assertEquals("", location?.path)
+            assertEquals("smb://nas", location?.url)
+        }
+    }
+
+    @Test
+    fun `服务器根带自定义端口`() {
+        val location = SmbLocation.parse("smb://nas:1445")
+
+        assertEquals(1445, location?.port)
+        assertEquals("smb://nas:1445", location?.url)
+    }
+
+    @Test
     fun `不合法位置解析为空`() {
         listOf(
             "content://root/a",
-            "smb://nas",
-            "smb://nas/",
             "smb:///media",
             "smb://nas:abc/media",
             "smb://nas:0/media",

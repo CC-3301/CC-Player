@@ -19,12 +19,15 @@ import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.sortedForDisplay
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
+import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkSourceVerifier
 import com.cc3301.ccplayer.network.RoutingNetworkSourceVerifier
+import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
+import com.cc3301.ccplayer.smb.SmbAddress
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
@@ -45,24 +48,54 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** 网络源的两种接入协议。 */
-enum class NetworkSourceProtocol { Smb, WebDav }
+/** 一条连接源：源列表展示 [name]，进入库页面时以 [root] 为根目录。 */
+data class ConnectionSource(
+    val protocol: SourceProtocol,
+    val name: String,
+    /** 持久化位置：本地是 SAF 树 URI，网络源是书签地址。 */
+    val location: String,
+    val root: MediaFile,
+) {
+    /** 只有网络源可以编辑；本地连接源只提供删除。 */
+    val editable: Boolean get() = protocol != SourceProtocol.Local
+}
 
-/** 新增网络源表单的状态。 */
+/** 新增或编辑网络源的表单状态。 */
 data class NetworkSourceForm(
-    /** 正在填写的协议；打开表单时定下，填写中不变。 */
-    val protocol: NetworkSourceProtocol,
-    /** 正在校验连通性。 */
-    val adding: Boolean = false,
-    /** 上次校验失败的原因；成功或未提交时为 null。 */
+    val protocol: SourceProtocol,
+    /** 编辑时的原地址；null 表示新增。 */
+    val originalUrl: String? = null,
+    val name: String = "",
+    val address: String = "",
+    val path: String = "",
+    val username: String = "",
+    val password: String = "",
+    val saving: Boolean = false,
+    /** 服务器地址缺失或格式不对。 */
+    val addressInvalid: Boolean = false,
+    /** 上次连通性校验失败的原因。 */
     val failure: MediaFailure? = null,
-)
+) {
+    val editing: Boolean get() = originalUrl != null
+}
 
-/** 媒体列表界面的状态。 */
-data class LibraryState(
-    /** 设置读出来没有；没读出来时先不显示首次引导。 */
+/** 首页与源列表的状态。 */
+data class SourcesState(
     val ready: Boolean = false,
-    val roots: List<MediaFile> = emptyList(),
+    val local: List<ConnectionSource> = emptyList(),
+    val smb: List<ConnectionSource> = emptyList(),
+    val webDav: List<ConnectionSource> = emptyList(),
+    val form: NetworkSourceForm? = null,
+) {
+    fun sources(protocol: SourceProtocol): List<ConnectionSource> = when (protocol) {
+        SourceProtocol.Local -> local
+        SourceProtocol.Smb -> smb
+        SourceProtocol.WebDav -> webDav
+    }
+}
+
+/** 库页面的状态。 */
+data class LibraryState(
     /** 浏览路径，最后一项是当前目录；为空表示停在根目录这一层。 */
     val stack: List<MediaFile> = emptyList(),
     /** 当前目录读出的条目，未排序；展示次序见 [visibleEntries]。 */
@@ -83,8 +116,6 @@ data class LibraryState(
     val loading: Boolean = false,
     /** 当前目录读取失败的原因；成功时为 null。 */
     val failure: MediaFailure? = null,
-    /** 新增网络源表单；null 表示表单没打开。 */
-    val networkSourceForm: NetworkSourceForm? = null,
 ) {
     val currentDirectory: MediaFile? get() = stack.lastOrNull()
 
@@ -122,7 +153,7 @@ data class LibraryState(
 }
 
 /**
- * 媒体列表的状态持有者：读设置里的本地根目录与书签里的网络源，按当前目录向 [MediaLibrary] 要列表。
+ * 应用状态持有者：管理本地与网络连接源、网络源表单，以及单个连接源的目录浏览。
  *
  * 外挂字幕发现需要当前目录的原始条目（字幕文件不在媒体列表里），因此同时持有 [files]。
  */
@@ -137,13 +168,23 @@ class LibraryViewModel(
     private val _state = MutableStateFlow(LibraryState())
     val state: StateFlow<LibraryState> = _state.asStateFlow()
 
+    private val _sourcesState = MutableStateFlow(SourcesState())
+    val sourcesState: StateFlow<SourcesState> = _sourcesState.asStateFlow()
+
     private var loadJob: Job? = null
 
     init {
         viewModelScope.launch {
-            combine(settings.rootLocations, sources.locations) { local, network -> local + network }
-                .collect { locations ->
-                    _state.update { it.copy(ready = true, roots = resolveRoots(locations)) }
+            combine(settings.rootLocations, sources.bookmarks) { local, network -> local to network }
+                .collect { (local, network) ->
+                    _sourcesState.update { current ->
+                        current.copy(
+                            ready = true,
+                            local = local.mapNotNull { resolveLocalSource(it) },
+                            smb = network.filter { it.protocol == SourceProtocol.Smb }.mapNotNull { resolveNetworkSource(it) },
+                            webDav = network.filter { it.protocol == SourceProtocol.WebDav }.mapNotNull { resolveNetworkSource(it) },
+                        )
+                    }
                 }
         }
         viewModelScope.launch {
@@ -173,60 +214,119 @@ class LibraryViewModel(
         }
     }
 
-    /** 本地目录选择器返回后调用。 */
-    fun addRoot(location: String) {
+    /** 本地文件夹选择器返回后调用。 */
+    fun addLocalRoot(location: String) {
+        viewModelScope.launch { settings.addRoot(location) }
+    }
+
+    /** 删除连接源：只删本地记录与凭据，不动远程文件或本地文件夹。 */
+    fun removeSource(source: ConnectionSource) {
         viewModelScope.launch {
-            settings.addRoot(location)
-            refreshRoots()
+            if (source.protocol == SourceProtocol.Local) {
+                settings.removeRoot(source.location)
+            } else {
+                sources.remove(source.location)
+            }
         }
     }
 
-    /** 打开新增网络源表单。 */
-    fun openNetworkSourceForm(protocol: NetworkSourceProtocol) {
-        _state.update { it.copy(networkSourceForm = NetworkSourceForm(protocol = protocol)) }
+    /** 打开新增网络源表单；本地连接源不需要表单。 */
+    fun openNewSourceForm(protocol: SourceProtocol) {
+        if (protocol == SourceProtocol.Local) return
+        _sourcesState.update { it.copy(form = NetworkSourceForm(protocol = protocol)) }
+    }
+
+    /** 打开编辑表单并带出已保存的字段与密码。 */
+    fun openEditSourceForm(source: ConnectionSource) {
+        if (!source.editable) return
+        viewModelScope.launch {
+            val bookmark = sources.bookmarks.first().firstOrNull { it.url == source.location } ?: return@launch
+            val password = sources.password(bookmark.url).orEmpty()
+            _sourcesState.update { current ->
+                if (current.form != null) {
+                    current
+                } else {
+                    current.copy(
+                        form = NetworkSourceForm(
+                            protocol = bookmark.protocol,
+                            originalUrl = bookmark.url,
+                            name = bookmark.name,
+                            address = bookmark.address,
+                            path = bookmark.path,
+                            username = bookmark.username,
+                            password = password,
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     fun dismissNetworkSourceForm() {
-        _state.update { it.copy(networkSourceForm = null) }
+        _sourcesState.update { current ->
+            if (current.form?.saving == true) current else current.copy(form = null)
+        }
     }
 
-    /** 校验凭据后保存 SMB 书签；校验不过时保留表单并给出失败原因。 */
-    fun addSmbSource(host: String, share: String, username: String, password: String) {
-        saveNetworkSource(url = SmbLocation.shareUrl(host, share), username = username, password = password)
+    /** 表单字段按「名称、服务器地址、路径或起始目录、用户名、密码」排列。 */
+    fun updateFormField(index: Int, value: String) {
+        _sourcesState.update { current ->
+            val form = current.form ?: return@update current
+            val updated = when (index) {
+                NAME_FIELD -> form.copy(name = value)
+                ADDRESS_FIELD -> form.copy(address = value)
+                PATH_FIELD -> form.copy(path = value)
+                USERNAME_FIELD -> form.copy(username = value)
+                PASSWORD_FIELD -> form.copy(password = value)
+                else -> form
+            }
+            current.copy(form = updated.copy(addressInvalid = false, failure = null))
+        }
     }
 
-    /** 校验凭据后保存 WebDAV 书签；地址不合法或校验不过时保留表单并给出失败原因。 */
-    fun addWebDavSource(address: String, username: String, password: String) {
-        val url = WebDavAddress.normalize(address)
-        if (url == null) {
-            failNetworkSourceForm(MediaFailure.NotFound)
+    /** 校验地址并试连后保存；地址不合法或连不上时保留表单并给出原因。 */
+    fun saveNetworkSourceForm() {
+        val form = _sourcesState.value.form ?: return
+        if (form.saving) return
+        val bookmark = normalizedBookmark(form)
+        if (bookmark == null) {
+            _sourcesState.update { current ->
+                current.copy(form = current.form?.copy(addressInvalid = true, failure = null))
+            }
             return
         }
-        saveNetworkSource(url = url, username = username, password = password)
-    }
-
-    /** 校验连通性后保存书签；校验不过时保留表单并给出失败原因。 */
-    private fun saveNetworkSource(url: String, username: String, password: String) {
-        val form = _state.value.networkSourceForm ?: return
         viewModelScope.launch {
-            _state.update { it.copy(networkSourceForm = form.copy(adding = true, failure = null)) }
-            val failure = verify(url, username, password)
+            _sourcesState.update { current ->
+                current.copy(form = current.form?.copy(saving = true, addressInvalid = false, failure = null))
+            }
+            val failure = verify(bookmark.url, bookmark.username, form.password)
             if (failure != null) {
-                failNetworkSourceForm(failure)
+                _sourcesState.update { current ->
+                    current.copy(form = current.form?.copy(saving = false, failure = failure))
+                }
                 return@launch
             }
-            sources.add(url = url, username = username, password = password)
-            _state.update { it.copy(networkSourceForm = null) }
-            refreshRoots()
+            if (form.originalUrl != null) {
+                sources.update(previousUrl = form.originalUrl, bookmark = bookmark, password = form.password)
+            } else {
+                sources.add(bookmark = bookmark, password = form.password)
+            }
+            _sourcesState.update { it.copy(form = null) }
         }
     }
 
-    /** 保留表单并给出失败原因。 */
-    private fun failNetworkSourceForm(failure: MediaFailure) {
-        _state.update { current ->
-            val form = current.networkSourceForm ?: return@update current
-            current.copy(networkSourceForm = form.copy(adding = false, failure = failure))
+    /** 进入某个连接源的库页面，根目录为该连接源的根。 */
+    fun openSource(source: ConnectionSource) {
+        _state.update {
+            it.copy(
+                stack = listOf(source.root),
+                entries = emptyList(),
+                loading = true,
+                failure = null,
+                scrollTargetLocation = null,
+            )
         }
+        load(source.root)
     }
 
     fun enter(directory: MediaFile) {
@@ -234,34 +334,18 @@ class LibraryViewModel(
         load(directory)
     }
 
+    /** 回到上一级；停在连接源根目录时不动，由界面离开库页面。 */
     fun navigateUp() {
         val stack = _state.value.stack
-        if (stack.isEmpty()) return
-        val parent = stack.dropLast(1).lastOrNull()
+        if (stack.size <= 1) return
+        val parent = stack.dropLast(1).last()
         _state.update { it.copy(stack = stack.dropLast(1)) }
-        if (parent == null) {
-            loadJob?.cancel()
-            _state.update { it.copy(entries = emptyList(), loading = false, failure = null) }
-        } else {
-            load(parent)
-        }
+        load(parent)
     }
 
     /** 重新读取当前目录。 */
     fun retry() {
         _state.value.currentDirectory?.let { load(it) }
-    }
-
-    fun setSortOrder(order: SortOrder) {
-        viewModelScope.launch { settings.setSortOrder(order) }
-    }
-
-    fun setViewMode(mode: ViewMode) {
-        viewModelScope.launch { settings.setViewMode(mode) }
-    }
-
-    fun setGridColumns(columns: Int) {
-        viewModelScope.launch { settings.setGridColumns(columns) }
     }
 
     /** 当前目录的原始条目：媒体列表过滤掉的字幕文件也在；停在根目录或读不出来时为空。 */
@@ -287,6 +371,39 @@ class LibraryViewModel(
         }
     }
 
+    private suspend fun resolveLocalSource(location: String): ConnectionSource? =
+        runCatching { library.resolveDirectory(location) }.getOrNull()?.let { root ->
+            ConnectionSource(protocol = SourceProtocol.Local, name = root.name, location = location, root = root)
+        }
+
+    private suspend fun resolveNetworkSource(bookmark: NetworkBookmark): ConnectionSource? =
+        runCatching { library.resolveDirectory(bookmark.url) }.getOrNull()?.let { root ->
+            ConnectionSource(
+                protocol = bookmark.protocol,
+                name = bookmark.displayName,
+                location = bookmark.url,
+                root = root.copy(name = bookmark.displayName),
+            )
+        }
+
+    private fun normalizedBookmark(form: NetworkSourceForm): NetworkBookmark? {
+        val address = when (form.protocol) {
+            SourceProtocol.Smb -> SmbAddress.normalize(form.address)
+            SourceProtocol.WebDav -> WebDavAddress.normalize(form.address)
+            SourceProtocol.Local -> null
+        } ?: return null
+        return NetworkBookmark(
+            protocol = form.protocol,
+            name = form.name.trim(),
+            address = address,
+            path = normalizePath(form.path),
+            username = form.username,
+        )
+    }
+
+    private fun normalizePath(path: String): String =
+        path.trim().split('/').filter { it.isNotEmpty() }.joinToString("/")
+
     private suspend fun verify(url: String, username: String, password: String): MediaFailure? = try {
         verifier.verify(url, username, password)
         null
@@ -296,19 +413,11 @@ class LibraryViewModel(
         problem.toFailure()
     }
 
-    private suspend fun refreshRoots() {
-        _state.update { it.copy(roots = resolveRoots(settings.rootLocations.first() + sources.locations.first())) }
-    }
-
     private fun Throwable?.toFailure(): MediaFailure? = when (this) {
         null -> null
         is MediaSourceException -> failure
         else -> MediaFailure.Unknown
     }
-
-    /** 位置读不出来的根目录不展示：授权失效或连不上时它在界面上没有用处。 */
-    private suspend fun resolveRoots(locations: List<String>): List<MediaFile> =
-        locations.mapNotNull { library.resolveDirectory(it) }
 
     /** 影响列表展示与滚动的设置项。 */
     private data class ListPreferences(
@@ -320,6 +429,12 @@ class LibraryViewModel(
     )
 
     companion object {
+        private const val NAME_FIELD = 0
+        private const val ADDRESS_FIELD = 1
+        private const val PATH_FIELD = 2
+        private const val USERNAME_FIELD = 3
+        private const val PASSWORD_FIELD = 4
+
         /** 生产入口：本地 SAF 与各网络协议的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {

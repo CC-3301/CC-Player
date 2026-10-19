@@ -2,10 +2,9 @@ package com.cc3301.ccplayer.network
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 
 /**
- * 网络源集合：书签的增删查与按地址取密码。与具体协议无关，各协议共用同一套。
+ * 网络源集合：书签的增删改查与按地址取密码。与具体协议无关，SMB 与 WebDAV 共用同一套。
  */
 class NetworkSourceRepository(
     private val store: BookmarkStore,
@@ -14,14 +13,24 @@ class NetworkSourceRepository(
 
     val bookmarks: Flow<List<NetworkBookmark>> = store.bookmarks
 
-    /** 全部网络源的根位置，顺序即添加顺序。 */
-    val locations: Flow<List<String>> = store.bookmarks.map { bookmarks -> bookmarks.map { it.url } }
-
-    /** 新增或更新一条书签：同一地址只保留一条。 */
-    suspend fun add(url: String, username: String, password: String) {
+    /** 新增一条书签：同一地址只保留一条，顺序即添加顺序。 */
+    suspend fun add(bookmark: NetworkBookmark, password: String) {
         val bookmarks = store.bookmarks.first()
-        store.save(bookmarks.filterNot { it.url == url } + NetworkBookmark(url = url, username = username))
-        credentials.put(url, password)
+        store.save(bookmarks.filterNot { it.url == bookmark.url } + bookmark)
+        credentials.put(bookmark.url, password)
+    }
+
+    /** 用 [bookmark] 替换 [previousUrl] 对应的书签；地址变了就把密码搬到新地址下。 */
+    suspend fun update(previousUrl: String, bookmark: NetworkBookmark, password: String) {
+        val bookmarks = store.bookmarks.first()
+        val previousIndex = bookmarks.indexOfFirst { it.url == previousUrl }
+        val others = bookmarks.filterNot { it.url == previousUrl || it.url == bookmark.url }
+        val updated = others.toMutableList().apply {
+            add(previousIndex.coerceIn(0, size), bookmark)
+        }
+        store.save(updated)
+        if (previousUrl != bookmark.url) credentials.remove(previousUrl)
+        credentials.put(bookmark.url, password)
     }
 
     suspend fun remove(url: String) {

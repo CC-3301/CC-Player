@@ -6,10 +6,10 @@ import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 
-/** 内存 DataStore：单测里代替磁盘上的 Preferences 文件。 */
-class FakePreferencesDataStore : DataStore<Preferences> {
+/** 内存 DataStore：单测里代替磁盘上的 Preferences 文件；可带初始内容。 */
+class FakePreferencesDataStore(initial: Preferences = emptyPreferences()) : DataStore<Preferences> {
 
-    private val state = MutableStateFlow(emptyPreferences())
+    private val state = MutableStateFlow(initial)
 
     override val data: Flow<Preferences> get() = state
 

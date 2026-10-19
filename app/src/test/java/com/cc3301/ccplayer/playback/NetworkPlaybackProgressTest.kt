@@ -6,6 +6,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.ProgressCleanupMediaLibrary
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
+import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.network.RoutingNetworkStreams
@@ -57,9 +58,13 @@ class NetworkPlaybackProgressTest {
         openedStreams.forEach { streams -> streams.close() }
     }
 
+    private suspend fun addSource(url: String, username: String = "cc") {
+        sources.add(NetworkBookmark.fromUrl(url, username)!!, password = "secret")
+    }
+
     @Test
     fun `SMB 媒体的记录键是原始位置，交给引擎的是回环地址`() = runTest {
-        sources.add(url = smbRoot, username = "cc", password = "secret")
+        addSource(smbRoot)
         smbConnector.addFile("media", "电影.mkv", payload)
         val entry = playable(smbMovie)
 
@@ -75,7 +80,7 @@ class NetworkPlaybackProgressTest {
 
     @Test
     fun `WebDAV 媒体的记录键是原始位置，交给引擎的是回环地址`() = runTest {
-        sources.add(url = webDavRoot, username = "cc", password = "secret")
+        addSource(webDavRoot)
         webDavTransport.addFile(webDavMovie.location, payload)
         val entry = playable(webDavMovie)
 
@@ -91,7 +96,7 @@ class NetworkPlaybackProgressTest {
 
     @Test
     fun `重启后回环地址变了，按同一原始位置仍能续播`() = runTest {
-        sources.add(url = smbRoot, username = "cc", password = "secret")
+        addSource(smbRoot)
         smbConnector.addFile("media", "电影.mkv", payload)
         val first = playable(smbMovie)
 
@@ -111,7 +116,7 @@ class NetworkPlaybackProgressTest {
 
     @Test
     fun `进度仓储的调用位置里没有回环地址`() = runTest {
-        sources.add(url = smbRoot, username = "cc", password = "secret")
+        addSource(smbRoot)
         smbConnector.addFile("media", "电影.mkv", payload)
         val entry = playable(smbMovie)
         val controller = open(this, entry)
@@ -128,7 +133,7 @@ class NetworkPlaybackProgressTest {
 
     @Test
     fun `网络媒体移走后清理按原始位置删掉记录`() = runTest {
-        sources.add(url = smbRoot, username = "cc", password = "secret")
+        addSource(smbRoot)
         smbConnector.addDirectory("media", "", fileEntry("还在.mkv"))
         progress.records["$smbRoot/还在.mkv"] = record("$smbRoot/还在.mkv")
         progress.records["$smbRoot/已移走.mkv"] = record("$smbRoot/已移走.mkv")

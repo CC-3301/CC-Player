@@ -43,6 +43,7 @@ import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.network.RoutingNetworkStreams
+import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.network.withPlaybackLocation
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
@@ -58,6 +59,7 @@ import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
+import com.cc3301.ccplayer.ui.HomeScreen
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
@@ -67,6 +69,7 @@ import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
+import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
@@ -104,7 +107,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var streams: NetworkStreams? = null
 
     private var playerVisible by mutableStateOf(false)
-    private var settingsVisible by mutableStateOf(false)
+    private var screen by mutableStateOf(AppScreen.Home)
+    private var sourcesProtocol by mutableStateOf(SourceProtocol.Local)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -159,6 +163,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 val libraryState by library.state.collectAsState()
+                val sourcesState by library.sourcesState.collectAsState()
                 val settingsState by settingsViewModel.state.collectAsState()
                 val autoPlayNext by settings.autoPlayNext.collectAsState(
                     initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
@@ -185,90 +190,128 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     )
                 }
 
-                if (playerVisible) {
-                    BackHandler { closePlayer() }
-                    PlayerScreen(
-                        state = playbackState,
-                        progress = progress,
-                        seekPreviewMillis = seekPreviewMillis,
-                        playlist = playlist,
-                        currentIndex = currentIndex,
-                        decodeMode = decodeMode,
-                        loopMode = loopMode,
-                        orientationMode = orientationMode,
-                        autoPlayNext = autoPlayNext,
-                        levelControls = levelControls,
-                        surfaceCallback = this@MainActivity,
-                        videoAspectRatio = videoAspectRatio,
-                        subtitleTracks = subtitleTracks,
-                        externalSubtitles = externalSubtitles,
-                        subtitleSelection = subtitleSelection,
-                        onTogglePlayPause = { playback?.controller?.togglePlayPause() },
-                        onPrevious = { playback?.controller?.previous() },
-                        onNext = { playback?.controller?.next() },
-                        onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
-                        onSeekCommit = { playback?.controller?.commitSeekPreview() },
-                        onSeekBy = { seekBy(it) },
-                        onPlaylistSelect = { playback?.controller?.playAt(it) },
-                        onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
-                        onToggleLoopMode = { playback?.controller?.cycleLoopMode() },
-                        onCycleOrientationMode = {
-                            lifecycleScope.launch { settings.setOrientationMode(orientationMode.next()) }
+                val leaveLibrary: () -> Unit = {
+                    if (libraryState.stack.size > 1) {
+                        library.navigateUp()
+                    } else {
+                        screen = AppScreen.Sources
+                    }
+                }
+
+                when {
+                    playerVisible -> {
+                        BackHandler { closePlayer() }
+                        PlayerScreen(
+                            state = playbackState,
+                            progress = progress,
+                            seekPreviewMillis = seekPreviewMillis,
+                            playlist = playlist,
+                            currentIndex = currentIndex,
+                            decodeMode = decodeMode,
+                            loopMode = loopMode,
+                            orientationMode = orientationMode,
+                            autoPlayNext = autoPlayNext,
+                            levelControls = levelControls,
+                            surfaceCallback = this@MainActivity,
+                            videoAspectRatio = videoAspectRatio,
+                            subtitleTracks = subtitleTracks,
+                            externalSubtitles = externalSubtitles,
+                            subtitleSelection = subtitleSelection,
+                            onTogglePlayPause = { playback?.controller?.togglePlayPause() },
+                            onPrevious = { playback?.controller?.previous() },
+                            onNext = { playback?.controller?.next() },
+                            onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
+                            onSeekCommit = { playback?.controller?.commitSeekPreview() },
+                            onSeekBy = { seekBy(it) },
+                            onPlaylistSelect = { playback?.controller?.playAt(it) },
+                            onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
+                            onToggleLoopMode = { playback?.controller?.cycleLoopMode() },
+                            onCycleOrientationMode = {
+                                lifecycleScope.launch { settings.setOrientationMode(orientationMode.next()) }
+                            },
+                            onToggleAutoPlayNext = {
+                                lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
+                            },
+                            onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
+                            onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
+                            sleepTimerState = sleepTimerState,
+                            onSelectSubtitle = { item ->
+                                val controller = playback?.controller
+                                when (item) {
+                                    is SubtitleMenuItem.Embedded -> controller?.selectEmbeddedSubtitle(item.trackId)
+                                    is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
+                                    is SubtitleMenuItem.Off -> controller?.disableSubtitles()
+                                }
+                            },
+                            onClose = { closePlayer() },
+                        )
+                    }
+
+                    screen == AppScreen.Settings -> {
+                        BackHandler { screen = AppScreen.Home }
+                        SettingsScreen(
+                            state = settingsState,
+                            onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
+                            onSetResumeMode = settingsViewModel::setResumeMode,
+                            onSetAutoScrollToLastPlayed = settingsViewModel::setAutoScrollToLastPlayed,
+                            onSetDecodeMode = settingsViewModel::setDecodeMode,
+                            onSetOrientationMode = settingsViewModel::setOrientationMode,
+                            onSetViewMode = settingsViewModel::setViewMode,
+                            onSetGridColumns = settingsViewModel::setGridColumns,
+                            onSetSortOrder = settingsViewModel::setSortOrder,
+                            onClose = { screen = AppScreen.Home },
+                        )
+                    }
+
+                    screen == AppScreen.Home -> HomeScreen(
+                        onOpenProtocol = { protocol ->
+                            sourcesProtocol = protocol
+                            screen = AppScreen.Sources
                         },
-                        onToggleAutoPlayNext = {
-                            lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
-                        },
-                        onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
-                        onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
-                        sleepTimerState = sleepTimerState,
-                        onSelectSubtitle = { item ->
-                            val controller = playback?.controller
-                            when (item) {
-                                is SubtitleMenuItem.Embedded -> controller?.selectEmbeddedSubtitle(item.trackId)
-                                is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
-                                is SubtitleMenuItem.Off -> controller?.disableSubtitles()
-                            }
-                        },
-                        onClose = { closePlayer() },
+                        onOpenSettings = { screen = AppScreen.Settings },
                     )
-                } else if (settingsVisible) {
-                    BackHandler { settingsVisible = false }
-                    SettingsScreen(
-                        state = settingsState,
-                        onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
-                        onSetResumeMode = settingsViewModel::setResumeMode,
-                        onSetAutoScrollToLastPlayed = settingsViewModel::setAutoScrollToLastPlayed,
-                        onSetDecodeMode = settingsViewModel::setDecodeMode,
-                        onSetOrientationMode = settingsViewModel::setOrientationMode,
-                        onSetViewMode = settingsViewModel::setViewMode,
-                        onSetGridColumns = settingsViewModel::setGridColumns,
-                        onSetSortOrder = settingsViewModel::setSortOrder,
-                        onClose = { settingsVisible = false },
-                    )
-                } else {
-                    BackHandler(enabled = libraryState.stack.isNotEmpty()) { library.navigateUp() }
-                    LibraryScreen(
-                        state = libraryState,
-                        mediaPreview = mediaPreview,
-                        onPickRoot = { picker.launch(null) },
-                        onOpenNetworkSourceForm = library::openNetworkSourceForm,
-                        onDismissNetworkSourceForm = library::dismissNetworkSourceForm,
-                        onAddSmbSource = library::addSmbSource,
-                        onAddWebDavSource = library::addWebDavSource,
-                        onOpenEntry = { entry ->
-                            if (entry.isDirectory) {
-                                library.enter(entry)
-                            } else {
-                                openEntry(entry, library.state.value.entries)
-                            }
-                        },
-                        onNavigateUp = library::navigateUp,
-                        onRetry = library::retry,
-                        onSortOrderChange = library::setSortOrder,
-                        onViewModeChange = library::setViewMode,
-                        onGridColumnsChange = library::setGridColumns,
-                        onOpenSettings = { settingsVisible = true },
-                    )
+
+                    screen == AppScreen.Sources -> {
+                        BackHandler { screen = AppScreen.Home }
+                        SourceListScreen(
+                            protocol = sourcesProtocol,
+                            state = sourcesState,
+                            onBack = { screen = AppScreen.Home },
+                            onAdd = {
+                                if (sourcesProtocol == SourceProtocol.Local) {
+                                    picker.launch(null)
+                                } else {
+                                    library.openNewSourceForm(sourcesProtocol)
+                                }
+                            },
+                            onOpenSource = { source ->
+                                library.openSource(source)
+                                screen = AppScreen.Library
+                            },
+                            onEditSource = library::openEditSourceForm,
+                            onDeleteSource = library::removeSource,
+                            onFormFieldChange = library::updateFormField,
+                            onDismissForm = library::dismissNetworkSourceForm,
+                            onSaveForm = library::saveNetworkSourceForm,
+                        )
+                    }
+
+                    else -> {
+                        BackHandler { leaveLibrary() }
+                        LibraryScreen(
+                            state = libraryState,
+                            mediaPreview = mediaPreview,
+                            onOpenEntry = { entry ->
+                                if (entry.isDirectory) {
+                                    library.enter(entry)
+                                } else {
+                                    openEntry(entry, library.state.value.entries)
+                                }
+                            },
+                            onBack = leaveLibrary,
+                            onRetry = library::retry,
+                        )
+                    }
                 }
             }
         }
@@ -286,7 +329,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 取持久读授权：目录选定后重启仍可读，不需要任何存储权限。 */
     private fun addRoot(uri: Uri) {
         runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-        library.addRoot(uri.toString())
+        library.addLocalRoot(uri.toString())
     }
 
     /**
@@ -467,6 +510,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         stopPlaybackService()
         super.onDestroy()
     }
+
+    private enum class AppScreen { Home, Sources, Library, Settings }
 
     private companion object {
         const val NO_MEDIA = -1

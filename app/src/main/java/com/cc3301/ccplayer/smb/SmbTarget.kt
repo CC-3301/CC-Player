@@ -4,6 +4,7 @@ package com.cc3301.ccplayer.smb
 data class SmbTarget(
     val host: String,
     val port: Int,
+    /** 共享名；服务器根为空串。 */
     val share: String,
     /** 共享内路径；共享根为空串。 */
     val path: String,
@@ -14,8 +15,21 @@ data class SmbTarget(
     /** 本参数指向的位置的字符串形式。 */
     val url: String get() = SmbLocation(host, port, share, path).url
 
-    /** 本参数指向的条目名：共享根是共享名，否则是路径最后一段。 */
-    val name: String get() = path.takeIf { it.isNotEmpty() }?.substringAfterLast('/') ?: share
+    /** 本参数指向的条目名：服务器根用主机名，共享根用共享名，否则是路径最后一段。 */
+    val name: String
+        get() = when {
+            path.isNotEmpty() -> path.substringAfterLast('/')
+            share.isNotEmpty() -> share
+            else -> host
+        }
+
+    /** 子项在本参数下的位置；服务器根的子项是共享。 */
+    fun childLocation(name: String): String =
+        if (share.isEmpty()) {
+            SmbLocation(host, port, name, "").url
+        } else {
+            SmbLocation(host, port, share, childPath(name)).url
+        }
 
     /** 子项在本共享内的路径。 */
     fun childPath(name: String): String = if (path.isEmpty()) name else "$path/$name"

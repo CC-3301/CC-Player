@@ -4,6 +4,7 @@ import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
+import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.streaming.httpRequest
 import kotlinx.coroutines.test.runTest
@@ -28,9 +29,13 @@ class WebDavStreamsTest {
         streams.close()
     }
 
+    private suspend fun addSource(url: String, username: String = "cc") {
+        sources.add(NetworkBookmark.fromUrl(url, username)!!, password = "secret")
+    }
+
     @Test
     fun `把 WebDAV 文件摊成本机地址，播放器拿到的是回环地址`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addFile(movie, payload)
 
         val url = streams.urlFor(movie)
@@ -41,7 +46,7 @@ class WebDavStreamsTest {
 
     @Test
     fun `本机地址支持 Range 请求`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addFile(movie, payload)
 
         val response = httpRequest(streams.urlFor(movie), range = "bytes=100-199")
@@ -52,7 +57,7 @@ class WebDavStreamsTest {
 
     @Test
     fun `同一个位置恒得同一个地址`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addFile(movie, payload)
 
         assertEquals(streams.urlFor(movie), streams.urlFor(movie))
@@ -60,7 +65,7 @@ class WebDavStreamsTest {
 
     @Test
     fun `起播前试连能发现连不上的服务器`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
         val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
@@ -77,7 +82,7 @@ class WebDavStreamsTest {
 
     @Test
     fun `关闭后已建立的读句柄一并关闭`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addFile(movie, payload)
         httpRequest(streams.urlFor(movie))
 

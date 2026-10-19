@@ -30,17 +30,23 @@ class SmbMediaFileTree(
     override suspend fun children(directory: MediaFile): List<MediaFile> {
         val target = locator.locate(directory.location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：${directory.location}")
-        return connector.connect(
-            host = target.host,
-            port = target.port,
-            share = target.share,
-            username = target.username,
-            password = target.password,
-        ).use { connection ->
-            connection.list(target.path).map { entry ->
-                entry.asMediaFile(SmbLocation(target.host, target.port, target.share, target.childPath(entry.name)).url)
-            }
+        val entries = if (target.share.isEmpty()) {
+            connector.shares(
+                host = target.host,
+                port = target.port,
+                username = target.username,
+                password = target.password,
+            ).map { share -> SmbEntry(name = share, isDirectory = true, size = 0, lastModified = 0) }
+        } else {
+            connector.connect(
+                host = target.host,
+                port = target.port,
+                share = target.share,
+                username = target.username,
+                password = target.password,
+            ).use { connection -> connection.list(target.path) }
         }
+        return entries.map { entry -> entry.asMediaFile(target.childLocation(entry.name)) }
     }
 }
 
