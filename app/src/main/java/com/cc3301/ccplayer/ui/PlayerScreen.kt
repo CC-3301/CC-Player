@@ -78,6 +78,15 @@ import kotlin.math.roundToInt
 private val PlayerPanelColor = AppColors.SurfaceHigh.copy(alpha = 0.96f)
 private val PlayerPanelShape = RoundedCornerShape(AppRadius.Lg)
 
+/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
+private fun Modifier.playerPanel(): Modifier = this
+    .background(PlayerPanelColor, PlayerPanelShape)
+    .border(1.dp, AppColors.Line, PlayerPanelShape)
+
+/** 工具按钮颜色：面板展开或定时已设置时用强调色，其余用弱化文字色。 */
+private fun playerToolColor(active: Boolean): Color =
+    if (active) AppColors.Accent else AppColors.Muted
+
 /** 播放器次级文字按钮：统一字号、内边距与禁用态。 */
 @Composable
 private fun PlayerTextButton(
@@ -154,7 +163,7 @@ fun PlayerScreen(
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
-        .background(Color.Black)) {
+        .background(MaterialTheme.colorScheme.scrim)) {
         val density = LocalDensity.current
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
@@ -315,8 +324,7 @@ private fun LevelHintLabel(hint: LevelHint, modifier: Modifier = Modifier) {
         style = MaterialTheme.typography.titleMedium,
         color = AppColors.Foreground,
         modifier = modifier
-            .background(PlayerPanelColor, PlayerPanelShape)
-            .border(1.dp, AppColors.Line, PlayerPanelShape)
+            .playerPanel()
             .padding(horizontal = AppSpacing.Xl, vertical = AppSpacing.Sm),
     )
 }
@@ -331,11 +339,6 @@ private fun PlayerTitleBar(title: String, onBack: () -> Unit, modifier: Modifier
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    listOf(Color.Black.copy(alpha = 0.78f), Color.Transparent),
-                ),
-            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -370,7 +373,11 @@ private fun PlayerTitleBar(title: String, onBack: () -> Unit, modifier: Modifier
 @Composable
 private fun playerOverlayTextStyle(): TextStyle = MaterialTheme.typography.titleMedium.copy(
     color = AppColors.Foreground,
-    shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 6f),
+    shadow = Shadow(
+        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.85f),
+        offset = Offset(0f, 2f),
+        blurRadius = 6f,
+    ),
 )
 
 /** 锁定态下唯一可见的控件：点两次解锁，第一次点后给出「再点一次解锁」提示。 */
@@ -381,8 +388,7 @@ private fun UnlockButton(unlockPending: Boolean, onTap: () -> Unit, modifier: Mo
         modifier = modifier
             .safeDrawingPadding()
             .padding(AppSpacing.Md)
-            .background(PlayerPanelColor, PlayerPanelShape)
-            .border(1.dp, AppColors.Line, PlayerPanelShape),
+            .playerPanel(),
         colors = ButtonDefaults.textButtonColors(
             contentColor = if (unlockPending) AppColors.Accent else AppColors.Foreground,
         ),
@@ -435,12 +441,13 @@ private fun Controls(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scrim = MaterialTheme.colorScheme.scrim
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(
                 Brush.verticalGradient(
-                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.86f)),
+                    listOf(scrim.copy(alpha = 0.55f), scrim.copy(alpha = 0.88f)),
                 ),
             )
             .safeDrawingPadding()
@@ -491,7 +498,7 @@ private fun Controls(
                 shape = RoundedCornerShape(AppRadius.Md),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AppColors.Accent,
-                    contentColor = Color.White,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
                 ),
                 contentPadding = PaddingValues(horizontal = AppSpacing.Xl, vertical = AppSpacing.Sm),
             ) {
@@ -521,13 +528,13 @@ private fun Controls(
             PlayerTextButton(
                 text = stringResource(R.string.player_playlist),
                 onClick = onTogglePlaylist,
-                color = if (playlistVisible) AppColors.Accent else AppColors.Muted,
+                color = playerToolColor(playlistVisible),
                 style = MaterialTheme.typography.labelMedium,
             )
             PlayerTextButton(
                 text = stringResource(R.string.player_subtitles),
                 onClick = onToggleSubtitleMenu,
-                color = if (subtitleMenuVisible) AppColors.Accent else AppColors.Muted,
+                color = playerToolColor(subtitleMenuVisible),
                 style = MaterialTheme.typography.labelMedium,
             )
             PlayerTextButton(
@@ -539,7 +546,7 @@ private fun Controls(
                     },
                 ),
                 onClick = onToggleSleepTimer,
-                color = if (sleepTimerState != SleepTimerState.Off) AppColors.Accent else AppColors.Muted,
+                color = playerToolColor(sleepTimerState != SleepTimerState.Off),
                 style = MaterialTheme.typography.labelMedium,
             )
             PlayerTextButton(
@@ -613,9 +620,9 @@ private fun SeekBar(
             valueRange = 0f..maximum.toFloat(),
             modifier = Modifier.fillMaxWidth(),
             colors = SliderDefaults.colors(
-                thumbColor = Color.White,
+                thumbColor = MaterialTheme.colorScheme.onPrimary,
                 activeTrackColor = AppColors.Accent,
-                inactiveTrackColor = Color.White.copy(alpha = 0.22f),
+                inactiveTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f),
                 activeTickColor = Color.Transparent,
                 inactiveTickColor = Color.Transparent,
             ),
@@ -635,8 +642,7 @@ private fun SleepTimerPanel(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PlayerPanelColor, PlayerPanelShape)
-            .border(1.dp, AppColors.Line, PlayerPanelShape)
+            .playerPanel()
             .padding(horizontal = AppSpacing.Md, vertical = AppSpacing.Sm),
     ) {
         fixedSleepTimerChoices.chunked(4).forEach { row ->
@@ -731,8 +737,7 @@ private fun PlaylistPanel(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
-            .background(PlayerPanelColor, PlayerPanelShape)
-            .border(1.dp, AppColors.Line, PlayerPanelShape),
+            .playerPanel(),
     ) {
         Row(
             modifier = Modifier
@@ -750,7 +755,7 @@ private fun PlaylistPanel(
                 checked = autoPlayNext,
                 onCheckedChange = { onToggleAutoPlayNext() },
                 colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                     checkedTrackColor = AppColors.AccentDeep,
                     uncheckedThumbColor = AppColors.SwitchThumb,
                     uncheckedTrackColor = AppColors.SurfaceHighest,
@@ -781,8 +786,7 @@ private fun SubtitlePanel(menu: List<SubtitleMenuItem>, onSelect: (SubtitleMenuI
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
-            .background(PlayerPanelColor, PlayerPanelShape)
-            .border(1.dp, AppColors.Line, PlayerPanelShape),
+            .playerPanel(),
     ) {
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             items(items = menu) { item ->
