@@ -24,7 +24,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1"
+        versionName = "0.1.0"
     }
 
     signingConfigs {
@@ -62,6 +62,15 @@ android {
         resources {
             // bcprov 与 jspecify 都带这个多版本目录清单，合包时只能留一份。
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+        }
+    }
+
+    applicationVariants.all {
+        if (buildType.name == "release") {
+            outputs.all {
+                (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl).outputFileName =
+                    "CC-Player-v$versionName.apk"
+            }
         }
     }
 }
