@@ -34,4 +34,7 @@ interface SmbConnector {
 
     /** 按给定参数连上共享；调用方负责关闭返回的连接。连接失败抛出来源失败异常。 */
     suspend fun connect(host: String, port: Int, share: String, username: String, password: String?): SmbConnection
+
+    /** 列出服务器上的共享名；连不上或没有权限时抛出来源失败异常。 */
+    suspend fun shares(host: String, port: Int, username: String, password: String?): List<String>
 }

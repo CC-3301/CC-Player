@@ -152,4 +152,14 @@ class SettingsRepositoryTest {
 
         assertEquals(listOf("content://root/a", "content://root/b"), settings.rootLocations.first())
     }
+
+    @Test
+    fun `移除本地连接源只删记录`() = runTest {
+        settings.addRoot("content://root/a")
+        settings.addRoot("content://root/b")
+
+        settings.removeRoot("content://root/a")
+
+        assertEquals(listOf("content://root/b"), settings.rootLocations.first())
+    }
 }

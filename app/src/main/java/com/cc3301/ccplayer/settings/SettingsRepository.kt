@@ -77,6 +77,13 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         }
     }
 
+    /** 移除本地连接源；只删记录，不动文件夹与其中的文件。 */
+    suspend fun removeRoot(location: String) {
+        dataStore.edit { preferences ->
+            preferences[ROOTS] = preferences.rootLocations().filterNot { it == location }.joinToString("\n")
+        }
+    }
+
     suspend fun setViewMode(mode: ViewMode) {
         dataStore.edit { preferences -> preferences[VIEW_MODE] = mode.name }
     }

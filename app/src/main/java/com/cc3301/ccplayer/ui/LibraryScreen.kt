@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.ui
 
-import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,12 +25,8 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,10 +35,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,49 +52,25 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreview
 import com.cc3301.ccplayer.library.MediaPreviewSource
-import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.mediaKindOf
-import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
 
 /**
- * 媒体列表：首次启动引导选目录，之后按「当前目录即列表」浏览，点条目进入子目录或起播。
+ * 库页面：按「当前目录即列表」浏览单个连接源，点条目进入子目录或起播。
+ *
+ * 顶栏只有返回与当前目录名；排序与视图只在设置页。
  */
 @Composable
 fun LibraryScreen(
     state: LibraryState,
     mediaPreview: MediaPreviewSource,
-    onPickRoot: () -> Unit,
-    onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit,
-    onDismissNetworkSourceForm: () -> Unit,
-    onAddSmbSource: (host: String, share: String, username: String, password: String) -> Unit,
-    onAddWebDavSource: (address: String, username: String, password: String) -> Unit,
     onOpenEntry: (MediaFile) -> Unit,
-    onNavigateUp: () -> Unit,
+    onBack: () -> Unit,
     onRetry: () -> Unit,
-    onSortOrderChange: (SortOrder) -> Unit,
-    onViewModeChange: (ViewMode) -> Unit,
-    onGridColumnsChange: (Int) -> Unit,
-    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
-
-    state.networkSourceForm?.let { form ->
-        NetworkSourceDialog(
-            title = stringResource(R.string.network_source_title),
-            fields = networkSourceFields(form.protocol),
-            state = form,
-            onDismiss = onDismissNetworkSourceForm,
-            onConfirm = { values ->
-                when (form.protocol) {
-                    NetworkSourceProtocol.Smb -> onAddSmbSource(values[0], values[1], values[2], values[3])
-                    NetworkSourceProtocol.WebDav -> onAddWebDavSource(values[0], values[1], values[2])
-                }
-            },
-        )
-    }
 
     // 换排序后回到列表最顶部。
     LaunchedEffect(state.sortRevision) {
@@ -122,21 +90,8 @@ fun LibraryScreen(
             .fillMaxSize()
             .safeDrawingPadding(),
     ) {
-        if (state.ready && (state.stack.isNotEmpty() || state.roots.isNotEmpty())) {
-            Header(
-                state = state,
-                onNavigateUp = onNavigateUp,
-                onPickRoot = onPickRoot,
-                onOpenNetworkSourceForm = onOpenNetworkSourceForm,
-                onSortOrderChange = onSortOrderChange,
-                onViewModeChange = onViewModeChange,
-                onGridColumnsChange = onGridColumnsChange,
-                onOpenSettings = onOpenSettings,
-            )
-        }
+        Header(state = state, onBack = onBack)
         when {
-            !state.ready -> Centered { CircularProgressIndicator() }
-            state.roots.isEmpty() -> Onboarding(onPickRoot = onPickRoot, onOpenNetworkSourceForm = onOpenNetworkSourceForm)
             state.loading -> Centered { CircularProgressIndicator() }
             state.failure != null -> Centered {
                 Message(text = stringResource(mediaFailureText(state.failure)), onRetry = onRetry)
@@ -154,29 +109,18 @@ fun LibraryScreen(
 }
 
 @Composable
-private fun Header(
-    state: LibraryState,
-    onNavigateUp: () -> Unit,
-    onPickRoot: () -> Unit,
-    onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit,
-    onSortOrderChange: (SortOrder) -> Unit,
-    onViewModeChange: (ViewMode) -> Unit,
-    onGridColumnsChange: (Int) -> Unit,
-    onOpenSettings: () -> Unit,
-) {
+private fun Header(state: LibraryState, onBack: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (state.stack.isNotEmpty()) {
-            TextButton(onClick = onNavigateUp) {
-                Text(text = stringResource(R.string.library_up))
-            }
+        TextButton(onClick = onBack) {
+            Text(text = stringResource(R.string.library_back))
         }
         Text(
-            text = state.currentDirectory?.name ?: stringResource(R.string.library_roots_title),
+            text = state.currentDirectory?.name.orEmpty(),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -184,133 +128,7 @@ private fun Header(
                 .weight(1f)
                 .padding(horizontal = 12.dp),
         )
-        SortMenu(sortOrder = state.sortOrder, onSortOrderChange = onSortOrderChange)
-        ViewMenu(
-            viewMode = state.viewMode,
-            gridColumns = state.gridColumns,
-            onViewModeChange = onViewModeChange,
-            onGridColumnsChange = onGridColumnsChange,
-        )
-        if (state.stack.isEmpty()) {
-            NetworkSourceMenu(onOpenNetworkSourceForm = onOpenNetworkSourceForm)
-            TextButton(onClick = onPickRoot) {
-                Text(text = stringResource(R.string.library_add_root))
-            }
-        }
-        TextButton(onClick = onOpenSettings) {
-            Text(text = stringResource(R.string.settings_open))
-        }
     }
-}
-
-/** 表单字段随协议不同：SMB 要共享名，WebDAV 要完整地址。 */
-@Composable
-private fun networkSourceFields(protocol: NetworkSourceProtocol): List<NetworkSourceField> = when (protocol) {
-    NetworkSourceProtocol.Smb -> listOf(
-        NetworkSourceField(stringResource(R.string.network_source_host)),
-        NetworkSourceField(stringResource(R.string.network_source_share)),
-        NetworkSourceField(stringResource(R.string.network_source_username)),
-        NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
-    )
-
-    NetworkSourceProtocol.WebDav -> listOf(
-        NetworkSourceField(stringResource(R.string.network_source_address)),
-        NetworkSourceField(stringResource(R.string.network_source_username)),
-        NetworkSourceField(stringResource(R.string.network_source_password), secret = true),
-    )
-}
-
-/** 新增网络源的入口：两种协议共用同一套表单。 */
-@Composable
-private fun NetworkSourceMenu(onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(text = stringResource(R.string.library_add_network_source))
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            NetworkSourceProtocol.entries.forEach { protocol ->
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(networkSourceProtocolLabel(protocol))) },
-                    onClick = {
-                        expanded = false
-                        onOpenNetworkSourceForm(protocol)
-                    },
-                )
-            }
-        }
-    }
-}
-
-@StringRes
-private fun networkSourceProtocolLabel(protocol: NetworkSourceProtocol): Int = when (protocol) {
-    NetworkSourceProtocol.Smb -> R.string.network_source_smb
-    NetworkSourceProtocol.WebDav -> R.string.network_source_webdav
-}
-
-@Composable
-private fun SortMenu(sortOrder: SortOrder, onSortOrderChange: (SortOrder) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(text = stringResource(R.string.library_sort_title))
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            SortOrder.entries.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(sortLabel(option))) },
-                    onClick = {
-                        expanded = false
-                        onSortOrderChange(option)
-                    },
-                    trailingIcon = { SelectedMark(selected = option == sortOrder) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ViewMenu(
-    viewMode: ViewMode,
-    gridColumns: Int,
-    onViewModeChange: (ViewMode) -> Unit,
-    onGridColumnsChange: (Int) -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TextButton(onClick = { expanded = true }) {
-            Text(text = stringResource(R.string.library_view_title))
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text(text = stringResource(R.string.library_view_list)) },
-                onClick = {
-                    expanded = false
-                    onViewModeChange(ViewMode.List)
-                },
-                trailingIcon = { SelectedMark(selected = viewMode == ViewMode.List) },
-            )
-            SettingsRepository.GRID_COLUMN_CHOICES.forEach { columns ->
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(R.string.library_view_grid_columns, columns)) },
-                    onClick = {
-                        expanded = false
-                        onGridColumnsChange(columns)
-                        onViewModeChange(ViewMode.Grid)
-                    },
-                    trailingIcon = {
-                        SelectedMark(selected = viewMode == ViewMode.Grid && columns == gridColumns)
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun SelectedMark(selected: Boolean) {
-    if (selected) Icon(imageVector = Icons.Filled.Check, contentDescription = null)
 }
 
 @Composable
@@ -429,27 +247,6 @@ private fun placeholderIcon(entry: MediaFile): Int = when {
     entry.isDirectory -> R.drawable.ic_media_folder
     mediaKindOf(entry.name) == MediaKind.Audio -> R.drawable.ic_media_audio
     else -> R.drawable.ic_media_video
-}
-
-@Composable
-private fun Onboarding(onPickRoot: () -> Unit, onOpenNetworkSourceForm: (NetworkSourceProtocol) -> Unit) {
-    Centered {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = stringResource(R.string.library_onboarding_hint),
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 32.dp),
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = onPickRoot) {
-                Text(text = stringResource(R.string.library_pick_root))
-            }
-            NetworkSourceMenu(onOpenNetworkSourceForm = onOpenNetworkSourceForm)
-        }
-    }
 }
 
 @Composable

@@ -7,6 +7,7 @@ import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation
 import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2Dialect
+import com.hierynomus.mssmb2.SMB2ImpersonationLevel
 import com.hierynomus.mssmb2.SMB2ShareAccess
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
@@ -14,6 +15,7 @@ import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.share.DiskShare
 import com.hierynomus.smbj.share.File
+import com.hierynomus.smbj.share.PipeShare
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,7 +60,44 @@ class SmbJConnector(private val config: SmbConfig = smb2OnlyConfig()) : SmbConne
             AuthenticationContext(username, password.orEmpty().toCharArray(), null)
         }
 
+    /** 共享枚举走 IPC$ 上的 srvsvc 命名管道；SMBJ 没有现成接口，报文由 [SrvsvcShareEnum] 编解码。 */
+    override suspend fun shares(host: String, port: Int, username: String, password: String?): List<String> =
+        withContext(Dispatchers.IO) {
+            var connection: Connection? = null
+            try {
+                connection = client.connect(host, port)
+                val session = connection.authenticate(authenticationOf(username, password))
+                val ipc = session.connectShare(IPC_SHARE)
+                if (ipc !is PipeShare) {
+                    throw MediaSourceException(MediaFailure.Unknown, "服务器没有提供 $IPC_SHARE")
+                }
+                ipc.use { share ->
+                    share.open(
+                        SRVSVC_PIPE,
+                        SMB2ImpersonationLevel.Impersonation,
+                        EnumSet.of(AccessMask.GENERIC_READ, AccessMask.GENERIC_WRITE),
+                        null,
+                        SMB2ShareAccess.ALL,
+                        SMB2CreateDisposition.FILE_OPEN,
+                        null,
+                    ).use { pipe ->
+                        SrvsvcShareEnum.ensureBound(pipe.transact(SrvsvcShareEnum.bindRequest()))
+                        SrvsvcShareEnum.parseShares(pipe.transact(SrvsvcShareEnum.shareEnumRequest()))
+                    }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                throw failure.asSourceFailure("列不出 SMB 服务器 $host 的共享")
+            } finally {
+                runCatching { connection?.close() }
+            }
+        }
+
     companion object {
+        private const val IPC_SHARE = "IPC$"
+        private const val SRVSVC_PIPE = "srvsvc"
+
         /** 只放 SMB2/3 方言并关掉 SMB1 多协议协商；超时避免连不上时长时间挂起。 */
         fun smb2OnlyConfig(): SmbConfig = SmbConfig.builder()
             .withDialects(

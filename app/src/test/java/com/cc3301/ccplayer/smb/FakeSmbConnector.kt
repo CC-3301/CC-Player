@@ -15,6 +15,9 @@ class FakeSmbConnector : SmbConnector {
     /** 已建立连接时给的共享名。 */
     val shares = mutableListOf<String>()
 
+    /** 服务器共享枚举返回的名称。 */
+    var shareNames: List<String> = emptyList()
+
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
 
@@ -29,6 +32,17 @@ class FakeSmbConnector : SmbConnector {
     fun addFile(share: String, path: String, bytes: ByteArray): FakeSmbConnector {
         bytesByPath["$share/$path"] = bytes
         return this
+    }
+
+    override suspend fun shares(
+        host: String,
+        port: Int,
+        username: String,
+        password: String?,
+    ): List<String> {
+        failure?.let { throw it }
+        logins += username to password
+        return shareNames
     }
 
     override suspend fun connect(

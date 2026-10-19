@@ -7,6 +7,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
+import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -23,12 +24,16 @@ class WebDavMediaFileTreeTest {
 
     private val root = "https://dav.example.com/remote.php/dav/files/cc"
 
+    private suspend fun addSource(url: String, username: String = "cc") {
+        sources.add(NetworkBookmark.fromUrl(url, username)!!, password = "secret")
+    }
+
     private fun directory(name: String, location: String) =
         MediaFile(name = name, location = location, isDirectory = true, source = MediaSource.Network)
 
     @Test
     fun `目录子项映射成网络源条目`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addDirectory(
             root,
             webDavDirectory("剧集"),
@@ -48,7 +53,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `深层目录的子项位置带上级路径`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addDirectory("$root/剧集", webDavFile("第01集.mkv"))
 
         val children = tree.children(directory("剧集", "$root/剧集"))
@@ -58,7 +63,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `书签带起始路径时源内路径随之偏移`() = runTest {
-        sources.add(url = "$root/剧集", username = "cc", password = "secret")
+        addSource("$root/剧集")
         transport.addDirectory("$root/剧集", webDavFile("第01集.mkv"))
 
         val children = tree.children(directory("剧集", "$root/剧集"))
@@ -68,7 +73,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `读目录用书签里的用户名、密码与地址`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
 
         tree.children(directory("cc", root))
 
@@ -78,7 +83,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `连接失败时抛出来源失败原因`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
         val result = library.list(directory("cc", root))
@@ -97,7 +102,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `非媒体文件被过滤而子目录保留`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.addDirectory(
             root,
             webDavDirectory("剧集"),
@@ -113,14 +118,14 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `解析源根得到书签指向的目录`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
 
         assertEquals(directory("dav.example.com/remote.php/dav/files/cc", root), tree.resolve(root))
     }
 
     @Test
     fun `解析子目录得到带名字的目录条目`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
 
         val resolved = tree.resolve("$root/剧集/第二季")
 
@@ -136,7 +141,7 @@ class WebDavMediaFileTreeTest {
 
     @Test
     fun `服务器连不上时根目录仍然可见，读目录才报失败`() = runTest {
-        sources.add(url = root, username = "cc", password = "secret")
+        addSource(root)
         transport.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
         val resolved = tree.resolve(root)
