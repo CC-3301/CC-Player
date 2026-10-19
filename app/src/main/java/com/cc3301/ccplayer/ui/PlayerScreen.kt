@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,10 +25,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.input.pointer.pointerInput
@@ -61,8 +68,48 @@ import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.playback.customSleepMinutes
 import com.cc3301.ccplayer.settings.OrientationMode
+import com.cc3301.ccplayer.ui.theme.AppColors
+import com.cc3301.ccplayer.ui.theme.AppRadius
+import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+
+/** 播放器浮层的半透明面板与圆角，叠在画面上也保持主题一致。 */
+private val PlayerPanelColor = AppColors.SurfaceHigh.copy(alpha = 0.96f)
+private val PlayerPanelShape = RoundedCornerShape(AppRadius.Lg)
+
+/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
+private fun Modifier.playerPanel(): Modifier = this
+    .background(PlayerPanelColor, PlayerPanelShape)
+    .border(1.dp, AppColors.Line, PlayerPanelShape)
+
+/** 工具按钮颜色：面板展开或定时已设置时用强调色，其余用弱化文字色。 */
+private fun playerToolColor(active: Boolean): Color =
+    if (active) AppColors.Accent else AppColors.Muted
+
+/** 播放器次级文字按钮：统一字号、内边距与禁用态。 */
+@Composable
+private fun PlayerTextButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    color: Color = AppColors.Foreground,
+    style: TextStyle = MaterialTheme.typography.labelLarge,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = color,
+            disabledContentColor = AppColors.Faint.copy(alpha = 0.45f),
+        ),
+        contentPadding = PaddingValues(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
+    ) {
+        Text(text = text, style = style, maxLines = 1)
+    }
+}
 
 @Composable
 fun PlayerScreen(
@@ -116,7 +163,7 @@ fun PlayerScreen(
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
-        .background(Color.Black)) {
+        .background(MaterialTheme.colorScheme.scrim)) {
         val density = LocalDensity.current
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
@@ -275,10 +322,10 @@ private fun LevelHintLabel(hint: LevelHint, modifier: Modifier = Modifier) {
             (hint.fraction * 100).roundToInt(),
         ),
         style = MaterialTheme.typography.titleMedium,
-        color = Color.White,
+        color = AppColors.Foreground,
         modifier = modifier
-            .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .playerPanel()
+            .padding(horizontal = AppSpacing.Xl, vertical = AppSpacing.Sm),
     )
 }
 
@@ -298,12 +345,19 @@ private fun PlayerTitleBar(title: String, onBack: () -> Unit, modifier: Modifier
                 onClick = {},
             )
             .safeDrawingPadding()
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
     ) {
-        TextButton(onClick = onBack) {
-            Text(text = stringResource(R.string.player_title_back), style = playerOverlayTextStyle())
+        TextButton(
+            onClick = onBack,
+            contentPadding = PaddingValues(horizontal = AppSpacing.Md, vertical = AppSpacing.Xs),
+        ) {
+            Text(
+                text = stringResource(R.string.player_title_back),
+                style = playerOverlayTextStyle(),
+                maxLines = 1,
+            )
         }
         Text(
             text = title,
@@ -318,8 +372,12 @@ private fun PlayerTitleBar(title: String, onBack: () -> Unit, modifier: Modifier
 /** 透明底上的白字：阴影保证画面亮时也看得清。 */
 @Composable
 private fun playerOverlayTextStyle(): TextStyle = MaterialTheme.typography.titleMedium.copy(
-    color = Color.White,
-    shadow = Shadow(color = Color.Black, offset = Offset(0f, 2f), blurRadius = 4f),
+    color = AppColors.Foreground,
+    shadow = Shadow(
+        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.85f),
+        offset = Offset(0f, 2f),
+        blurRadius = 6f,
+    ),
 )
 
 /** 锁定态下唯一可见的控件：点两次解锁，第一次点后给出「再点一次解锁」提示。 */
@@ -329,13 +387,18 @@ private fun UnlockButton(unlockPending: Boolean, onTap: () -> Unit, modifier: Mo
         onClick = onTap,
         modifier = modifier
             .safeDrawingPadding()
-            .padding(12.dp)
-            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(8.dp)),
+            .padding(AppSpacing.Md)
+            .playerPanel(),
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = if (unlockPending) AppColors.Accent else AppColors.Foreground,
+        ),
     ) {
         Text(
             text = stringResource(
                 if (unlockPending) R.string.player_unlock_confirm else R.string.player_unlock,
             ),
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
         )
     }
 }
@@ -378,13 +441,18 @@ private fun Controls(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scrim = MaterialTheme.colorScheme.scrim
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.5f))
+            .background(
+                Brush.verticalGradient(
+                    listOf(scrim.copy(alpha = 0.55f), scrim.copy(alpha = 0.88f)),
+                ),
+            )
             .safeDrawingPadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
+        verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
     ) {
         if (playlistVisible) {
             PlaylistPanel(
@@ -417,66 +485,100 @@ private fun Controls(
         )
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onPrevious, enabled = currentIndex > 0) {
-                Text(text = stringResource(R.string.player_previous))
-            }
-            Button(onClick = onTogglePlayPause) {
+            PlayerTextButton(
+                text = stringResource(R.string.player_previous),
+                onClick = onPrevious,
+                enabled = currentIndex > 0,
+            )
+            Button(
+                onClick = onTogglePlayPause,
+                shape = RoundedCornerShape(AppRadius.Md),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AppColors.Accent,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+                contentPadding = PaddingValues(horizontal = AppSpacing.Xl, vertical = AppSpacing.Sm),
+            ) {
                 Text(
                     text = stringResource(
                         if (state == PlaybackState.Playing) R.string.player_pause else R.string.player_resume,
                     ),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
                 )
             }
-            TextButton(onClick = onNext, enabled = currentIndex in 0 until playlist.lastIndex) {
-                Text(text = stringResource(R.string.player_next))
-            }
-            TextButton(onClick = onToggleLoopMode) {
-                Text(text = stringResource(loopModeLabel(loopMode)))
-            }
+            PlayerTextButton(
+                text = stringResource(R.string.player_next),
+                onClick = onNext,
+                enabled = currentIndex in 0 until playlist.lastIndex,
+            )
+            PlayerTextButton(
+                text = stringResource(loopModeLabel(loopMode)),
+                onClick = onToggleLoopMode,
+            )
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onTogglePlaylist) {
-                Text(text = stringResource(R.string.player_playlist))
-            }
-            TextButton(onClick = onToggleSubtitleMenu) {
-                Text(text = stringResource(R.string.player_subtitles))
-            }
-            TextButton(onClick = onToggleSleepTimer) {
-                Text(
-                    text = stringResource(
-                        if (sleepTimerState == SleepTimerState.Off) {
-                            R.string.player_sleep_timer
-                        } else {
-                            R.string.player_sleep_timer_armed
-                        },
-                    ),
-                )
-            }
-            TextButton(onClick = onToggleDecodeMode) {
-                Text(text = stringResource(decodeModeLabel(decodeMode)))
-            }
-            TextButton(onClick = onCycleOrientationMode) {
-                Text(text = stringResource(orientationModeLabel(orientationMode)))
-            }
+            PlayerTextButton(
+                text = stringResource(R.string.player_playlist),
+                onClick = onTogglePlaylist,
+                color = playerToolColor(playlistVisible),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            PlayerTextButton(
+                text = stringResource(R.string.player_subtitles),
+                onClick = onToggleSubtitleMenu,
+                color = playerToolColor(subtitleMenuVisible),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            PlayerTextButton(
+                text = stringResource(
+                    if (sleepTimerState == SleepTimerState.Off) {
+                        R.string.player_sleep_timer
+                    } else {
+                        R.string.player_sleep_timer_armed
+                    },
+                ),
+                onClick = onToggleSleepTimer,
+                color = playerToolColor(sleepTimerState != SleepTimerState.Off),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            PlayerTextButton(
+                text = stringResource(decodeModeLabel(decodeMode)),
+                onClick = onToggleDecodeMode,
+                color = AppColors.Muted,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            PlayerTextButton(
+                text = stringResource(orientationModeLabel(orientationMode)),
+                onClick = onCycleOrientationMode,
+                color = AppColors.Muted,
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onLock) {
-                Text(text = stringResource(R.string.player_lock))
-            }
-            TextButton(onClick = onClose) {
-                Text(text = stringResource(R.string.player_exit))
-            }
+            PlayerTextButton(
+                text = stringResource(R.string.player_lock),
+                onClick = onLock,
+                color = AppColors.Muted,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            PlayerTextButton(
+                text = stringResource(R.string.player_exit),
+                onClick = onClose,
+                color = AppColors.Muted,
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
     }
 }
@@ -503,10 +605,11 @@ private fun SeekBar(
                 Text(
                     text = formatDuration(previewMillis),
                     style = MaterialTheme.typography.labelLarge,
-                    color = Color.White,
+                    color = AppColors.Foreground,
                     modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                        .background(PlayerPanelColor, RoundedCornerShape(AppRadius.Sm))
+                        .border(1.dp, AppColors.Line, RoundedCornerShape(AppRadius.Sm))
+                        .padding(horizontal = AppSpacing.Md, vertical = 2.dp),
                 )
             }
         }
@@ -516,6 +619,13 @@ private fun SeekBar(
             onValueChangeFinished = onCommit,
             valueRange = 0f..maximum.toFloat(),
             modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.onPrimary,
+                activeTrackColor = AppColors.Accent,
+                inactiveTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f),
+                activeTickColor = Color.Transparent,
+                inactiveTickColor = Color.Transparent,
+            ),
         )
     }
 }
@@ -532,8 +642,8 @@ private fun SleepTimerPanel(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .playerPanel()
+            .padding(horizontal = AppSpacing.Md, vertical = AppSpacing.Sm),
     ) {
         fixedSleepTimerChoices.chunked(4).forEach { row ->
             Row(
@@ -542,15 +652,16 @@ private fun SleepTimerPanel(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 row.forEach { (label, option) ->
-                    TextButton(onClick = { onSelect(option) }) {
-                        Text(text = stringResource(label))
-                    }
+                    PlayerTextButton(
+                        text = stringResource(label),
+                        onClick = { onSelect(option) },
+                    )
                 }
             }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
@@ -562,9 +673,23 @@ private fun SleepTimerPanel(
                 singleLine = true,
                 label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
                 isError = customRejected,
+                shape = RoundedCornerShape(AppRadius.Sm),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = AppColors.Foreground,
+                    unfocusedTextColor = AppColors.Foreground,
+                    focusedBorderColor = AppColors.Accent,
+                    unfocusedBorderColor = AppColors.Line,
+                    focusedLabelColor = AppColors.Accent,
+                    unfocusedLabelColor = AppColors.Muted,
+                    cursorColor = AppColors.Accent,
+                    errorBorderColor = AppColors.Danger,
+                    errorLabelColor = AppColors.Danger,
+                    errorCursorColor = AppColors.Danger,
+                ),
                 modifier = Modifier.weight(1f),
             )
-            TextButton(
+            PlayerTextButton(
+                text = stringResource(R.string.player_sleep_timer_custom_confirm),
                 onClick = {
                     val minutes = customSleepMinutes(customMinutes)
                     if (minutes == null) {
@@ -573,21 +698,20 @@ private fun SleepTimerPanel(
                         onSelect(SleepTimerOption.AfterDuration(minutes))
                     }
                 },
-            ) {
-                Text(text = stringResource(R.string.player_sleep_timer_custom_confirm))
-            }
+            )
         }
         if (customRejected) {
             Text(
                 text = stringResource(R.string.player_sleep_timer_custom_invalid),
                 style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
+                color = AppColors.Danger,
             )
         }
         if (sleepTimerState != SleepTimerState.Off) {
-            TextButton(onClick = onCancel) {
-                Text(text = stringResource(R.string.player_sleep_timer_cancel))
-            }
+            PlayerTextButton(
+                text = stringResource(R.string.player_sleep_timer_cancel),
+                onClick = onCancel,
+            )
         }
     }
 }
@@ -613,30 +737,42 @@ private fun PlaylistPanel(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
-            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
+            .playerPanel(),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
+                .padding(horizontal = AppSpacing.Md, vertical = AppSpacing.Sm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = stringResource(R.string.player_auto_play_next),
-                color = Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                color = AppColors.Foreground,
                 modifier = Modifier.weight(1f),
             )
-            Switch(checked = autoPlayNext, onCheckedChange = { onToggleAutoPlayNext() })
+            Switch(
+                checked = autoPlayNext,
+                onCheckedChange = { onToggleAutoPlayNext() },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                    checkedTrackColor = AppColors.AccentDeep,
+                    uncheckedThumbColor = AppColors.SwitchThumb,
+                    uncheckedTrackColor = AppColors.SurfaceHighest,
+                    uncheckedBorderColor = Color.Transparent,
+                ),
+            )
         }
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             itemsIndexed(playlist) { index, media ->
                 Text(
                     text = media.name,
-                    color = if (index == currentIndex) MaterialTheme.colorScheme.primary else Color.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (index == currentIndex) AppColors.Accent else AppColors.Foreground,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onSelect(index) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }
         }
@@ -650,19 +786,20 @@ private fun SubtitlePanel(menu: List<SubtitleMenuItem>, onSelect: (SubtitleMenuI
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
-            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp)),
+            .playerPanel(),
     ) {
         LazyColumn(modifier = Modifier.fillMaxWidth()) {
             items(items = menu) { item ->
                 Text(
                     text = subtitleItemLabel(item),
-                    color = if (item.active) MaterialTheme.colorScheme.primary else Color.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (item.active) AppColors.Accent else AppColors.Foreground,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onSelect(item) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }
         }
