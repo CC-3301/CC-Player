@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">CC Player</string>
     <string name="library_back">返回</string>
+    <string name="library_empty_title">空目录</string>
     <string name="library_empty">这个目录里没有可播放的媒体</string>
     <string name="library_load_failed">读不了这个目录。检查授权，或换一个目录。</string>
     <string name="library_network_unreachable">连不上网络源。检查地址、电源与网络，然后重试。</string>
@@ -10,9 +11,12 @@
     <string name="source_protocol_local">本地</string>
     <string name="source_protocol_smb">SMB</string>
     <string name="source_protocol_webdav">WebDAV</string>
-    <string name="sources_empty_local">还没有本地连接源。点右下角加号选择文件夹。</string>
-    <string name="sources_empty_smb">还没有 SMB 连接。点右下角加号新增。</string>
-    <string name="sources_empty_webdav">还没有 WebDAV 连接。点右下角加号新增。</string>
+    <string name="sources_empty_title_local">还没有本地文件夹</string>
+    <string name="sources_empty_title_smb">还没有 SMB 连接</string>
+    <string name="sources_empty_title_webdav">还没有 WebDAV 连接</string>
+    <string name="sources_empty_local">点右下角的加号，选择手机里的媒体文件夹。</string>
+    <string name="sources_empty_smb">点右下角的加号，填写服务器地址和共享路径。</string>
+    <string name="sources_empty_webdav">点右下角的加号，填写服务器地址和起始目录。</string>
     <string name="sources_add">添加连接</string>
     <string name="sources_menu">更多</string>
     <string name="sources_edit">编辑</string>
@@ -37,9 +41,9 @@
     <string name="library_retry">重试</string>
     <string name="library_sort_name_ascending">名称升序</string>
     <string name="library_sort_name_descending">名称降序</string>
-    <string name="library_sort_time_newest_first">修改时间（最新在前）</string>
-    <string name="library_sort_time_oldest_first">修改时间（最旧在前）</string>
-    <string name="library_view_list">单列列表</string>
+    <string name="library_sort_time_newest_first">修改时间 新→旧</string>
+    <string name="library_sort_time_oldest_first">修改时间 旧→新</string>
+    <string name="library_view_list">列表</string>
     <string name="library_view_grid_columns">网格 %1$d 列</string>
     <string name="library_entry_directory">文件夹</string>
     <string name="library_entry_video">视频</string>
@@ -90,8 +94,10 @@
     <string name="settings_resume_title">起播位置</string>
     <string name="settings_resume_last_position">播放上次位置</string>
     <string name="settings_resume_from_start">始终从头播放</string>
-    <string name="settings_auto_scroll">进入列表自动滚动到上次播放位置</string>
-    <string name="settings_decode_title">解码模式</string>
+    <string name="settings_auto_restore_position">进入目录时自动回到上次停留的位置</string>
+    <string name="settings_decode_title">解码方式</string>
+    <string name="settings_decode_hardware">硬件解码</string>
+    <string name="settings_decode_software">软件解码</string>
     <string name="settings_orientation_title">屏幕方向</string>
     <string name="settings_view_title">视图</string>
     <string name="settings_sort_title">排序</string>

@@ -49,13 +49,13 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `默认值为连播开、续播、自动滚动开、硬解、屏幕方向、单列、3 列、名称升序`() = runTest {
+    fun `默认值为连播开、续播、位置记忆开、硬解、屏幕方向、单列、3 列、名称升序`() = runTest {
         advanceUntilIdle()
 
         val state = viewModel.state.value
         assertTrue(state.autoPlayNext)
         assertEquals(ResumeMode.LastPosition, state.resumeMode)
-        assertTrue(state.autoScrollToLastPlayed)
+        assertTrue(state.autoRestorePosition)
         assertEquals(DecodeMode.Hardware, state.decodeMode)
         assertEquals(OrientationMode.System, state.orientationMode)
         assertEquals(ViewMode.List, state.viewMode)
@@ -82,12 +82,12 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `自动滚动开关改动写回设置并反映到状态`() = runTest {
-        viewModel.setAutoScrollToLastPlayed(false)
+    fun `位置记忆开关改动写回设置并反映到状态`() = runTest {
+        viewModel.setAutoRestorePosition(false)
         advanceUntilIdle()
 
-        assertFalse(settings.autoScrollToLastPlayed.first())
-        assertFalse(viewModel.state.value.autoScrollToLastPlayed)
+        assertFalse(settings.autoRestorePosition.first())
+        assertFalse(viewModel.state.value.autoRestorePosition)
     }
 
     @Test
@@ -133,7 +133,7 @@ class SettingsViewModelTest {
     fun `已保存的设置项在状态里读出`() = runTest {
         settings.setAutoPlayNext(false)
         settings.setResumeMode(ResumeMode.FromStart)
-        settings.setAutoScrollToLastPlayed(false)
+        settings.setAutoRestorePosition(false)
         settings.setDecodeMode(DecodeMode.Software)
         settings.setOrientationMode(OrientationMode.Landscape)
         settings.setViewMode(ViewMode.Grid)
@@ -144,7 +144,7 @@ class SettingsViewModelTest {
         val state = viewModel.state.value
         assertFalse(state.autoPlayNext)
         assertEquals(ResumeMode.FromStart, state.resumeMode)
-        assertFalse(state.autoScrollToLastPlayed)
+        assertFalse(state.autoRestorePosition)
         assertEquals(DecodeMode.Software, state.decodeMode)
         assertEquals(OrientationMode.Landscape, state.orientationMode)
         assertEquals(ViewMode.Grid, state.viewMode)

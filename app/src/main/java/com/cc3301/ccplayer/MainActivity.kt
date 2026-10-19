@@ -13,14 +13,13 @@ import android.os.IBinder
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -74,13 +73,13 @@ import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.resolvedOrientation
+import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
@@ -142,11 +141,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
-                launch {
-                    combine(binder.controller.playlist, binder.controller.currentIndex) { playlist, index ->
-                        playlist.getOrNull(index)
-                    }.collect { media -> if (media != null) settings.setLastPlayedLocation(media.location) }
-                }
             }
             surface?.let { binder.engine.attachSurface(it) }
             startPendingPlayback()
@@ -159,9 +153,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // 深色界面统一用浅色系统栏图标。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            CcPlayerTheme {
                 val libraryState by library.state.collectAsState()
                 val sourcesState by library.sourcesState.collectAsState()
                 val settingsState by settingsViewModel.state.collectAsState()
@@ -253,7 +251,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
                             onSetResumeMode = settingsViewModel::setResumeMode,
-                            onSetAutoScrollToLastPlayed = settingsViewModel::setAutoScrollToLastPlayed,
+                            onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
                             onSetOrientationMode = settingsViewModel::setOrientationMode,
                             onSetViewMode = settingsViewModel::setViewMode,
@@ -317,6 +315,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             },
                             onBack = leaveLibrary,
                             onRetry = library::retry,
+                            onSavePosition = library::savePosition,
                         )
                     }
                 }

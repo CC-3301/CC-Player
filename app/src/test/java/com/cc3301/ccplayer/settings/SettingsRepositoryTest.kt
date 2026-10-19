@@ -1,7 +1,9 @@
 package com.cc3301.ccplayer.settings
 
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
@@ -19,6 +21,9 @@ class SettingsRepositoryTest {
 
     private val dataStore = FakePreferencesDataStore()
     private val settings = SettingsRepository(dataStore)
+
+    private val LEGACY_AUTO_SCROLL_KEY = booleanPreferencesKey("auto_scroll_to_last_played")
+    private val AUTO_RESTORE_KEY = booleanPreferencesKey("auto_restore_position")
 
     @Test
     fun `默认单列列表、3 列网格与名称升序`() = runTest {
@@ -105,24 +110,39 @@ class SettingsRepositoryTest {
     }
 
     @Test
-    fun `默认进入列表自动滚动到上次播放位置`() = runTest {
-        assertTrue(settings.autoScrollToLastPlayed.first())
+    fun `默认开启进入目录时回到上次停留的位置`() = runTest {
+        assertTrue(settings.autoRestorePosition.first())
     }
 
     @Test
-    fun `自动滚动开关写入后读回`() = runTest {
-        settings.setAutoScrollToLastPlayed(false)
+    fun `位置记忆开关写入后读回`() = runTest {
+        settings.setAutoRestorePosition(false)
 
-        assertFalse(settings.autoScrollToLastPlayed.first())
+        assertFalse(settings.autoRestorePosition.first())
     }
 
     @Test
-    fun `没播过时上次播放位置为空，写入后读回`() = runTest {
-        assertNull(settings.lastPlayedLocation.first())
+    fun `旧位置记忆开关 false 迁移到新键并删除旧键`() = runTest {
+        val storage = FakePreferencesDataStore(preferencesOf(LEGACY_AUTO_SCROLL_KEY to false))
+        val repository = SettingsRepository(storage)
 
-        settings.setLastPlayedLocation("content://root/a")
+        assertFalse(repository.autoRestorePosition.first())
 
-        assertEquals("content://root/a", settings.lastPlayedLocation.first())
+        val preferences = storage.data.first()
+        assertFalse(preferences[AUTO_RESTORE_KEY] ?: true)
+        assertNull(preferences[LEGACY_AUTO_SCROLL_KEY])
+    }
+
+    @Test
+    fun `旧位置记忆开关 true 迁移到新键并删除旧键`() = runTest {
+        val storage = FakePreferencesDataStore(preferencesOf(LEGACY_AUTO_SCROLL_KEY to true))
+        val repository = SettingsRepository(storage)
+
+        assertTrue(repository.autoRestorePosition.first())
+
+        val preferences = storage.data.first()
+        assertTrue(preferences[AUTO_RESTORE_KEY] ?: false)
+        assertNull(preferences[LEGACY_AUTO_SCROLL_KEY])
     }
 
     @Test

@@ -3,10 +3,12 @@ package com.cc3301.ccplayer.ui
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -18,6 +20,8 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFailure
+import com.cc3301.ccplayer.ui.theme.AppColors
+import com.cc3301.ccplayer.ui.theme.AppRadius
 
 /** 网络源表单的字段；顺序由展示方决定，状态更新按字段本身分派。 */
 enum class NetworkSourceFieldKind { Name, Address, Path, Username, Password }
@@ -50,6 +54,10 @@ fun NetworkSourceDialog(
 
     AlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
+        containerColor = AppColors.Surface,
+        titleContentColor = AppColors.Foreground,
+        textContentColor = AppColors.Muted,
+        shape = RoundedCornerShape(AppRadius.Sheet),
         title = { Text(text = title) },
         text = {
             Column {
@@ -62,6 +70,15 @@ fun NetworkSourceDialog(
                         enabled = !saving,
                         visualTransformation = if (field.secret) PasswordVisualTransformation() else VisualTransformation.None,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AppColors.Accent,
+                            unfocusedBorderColor = AppColors.Line,
+                            focusedLabelColor = AppColors.Accent,
+                            unfocusedLabelColor = AppColors.Muted,
+                            focusedTextColor = AppColors.Foreground,
+                            unfocusedTextColor = AppColors.Foreground,
+                            cursorColor = AppColors.Accent,
+                        ),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 8.dp),
@@ -76,12 +93,12 @@ fun NetworkSourceDialog(
         },
         confirmButton = {
             TextButton(enabled = filled && !saving, onClick = onConfirm) {
-                Text(text = stringResource(R.string.network_source_confirm))
+                Text(text = stringResource(R.string.network_source_confirm), color = AppColors.Accent)
             }
         },
         dismissButton = {
             TextButton(enabled = !saving, onClick = onDismiss) {
-                Text(text = stringResource(R.string.network_source_cancel))
+                Text(text = stringResource(R.string.network_source_cancel), color = AppColors.Muted)
             }
         },
     )

@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.library.DirectoryPosition
+import com.cc3301.ccplayer.library.DirectoryScrollTarget
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.settings.ViewMode
@@ -28,66 +30,125 @@ class LibraryStateTest {
         assertEquals(listOf("ep10.mkv", "ep2.mkv"), state.visibleEntries.map { it.name })
         assertEquals(
             listOf("ep2.mkv", "ep10.mkv"),
-            state.withSortOrder(SortOrder.NameAscending).visibleEntries.map { it.name },
+            state.withDisplayPreferences(
+                viewMode = ViewMode.List,
+                gridColumns = 3,
+                sortOrder = SortOrder.NameAscending,
+                autoRestorePosition = true,
+            ).visibleEntries.map { it.name },
         )
     }
 
     @Test
-    fun `排序选项变化时递增回到顶部的序号`() {
-        val state = LibraryState()
-
-        val changed = state.withSortOrder(SortOrder.NameDescending)
-        val unchanged = changed.withSortOrder(SortOrder.NameDescending)
-
-        assertEquals(1, changed.sortRevision)
-        assertEquals(1, unchanged.sortRevision)
-        assertEquals(2, unchanged.withSortOrder(SortOrder.LastModifiedOldestFirst).sortRevision)
-    }
-
-    private fun entry(name: String, lastModified: Long) =
-        MediaFile(name = name, location = "root/$name", lastModified = lastModified)
-
-    @Test
-    fun `默认开启自动滚动到上次播放位置`() {
-        assertTrue(LibraryState().autoScrollToLastPlayed)
+    fun `默认开启位置记忆`() {
+        assertTrue(LibraryState().autoRestorePosition)
     }
 
     @Test
-    fun `目录读完后把上次播放的条目定为滚动目标`() {
-        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+    fun `目录读完后恢复记录的第一个可见条目与偏移`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2), entry("ep3.mkv", 3))
 
-        val loaded = LibraryState(lastPlayedLocation = "root/ep2.mkv").withLoadedEntries(entries, failure = null)
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64),
+        )
 
-        assertEquals("root/ep2.mkv", loaded.scrollTargetLocation)
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 64), loaded.scrollTarget)
         assertEquals(1, loaded.scrollRevision)
     }
 
     @Test
-    fun `上次播放的条目不在当前目录时不滚动`() {
-        val loaded = LibraryState(lastPlayedLocation = "root/别的/第01集.mkv")
-            .withLoadedEntries(listOf(entry("ep1.mkv", 1)), failure = null)
+    fun `记录条目不存在时停在列表末尾`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2), entry("ep3.mkv", 3))
 
-        assertNull(loaded.scrollTargetLocation)
-        assertEquals(0, loaded.scrollRevision)
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/已删除.mkv", scrollOffset = 40),
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 2, offset = 0), loaded.scrollTarget)
     }
 
     @Test
-    fun `自动滚动开关关时不滚`() {
-        val loaded = LibraryState(lastPlayedLocation = "root/ep1.mkv", autoScrollToLastPlayed = false)
-            .withLoadedEntries(listOf(entry("ep1.mkv", 1)), failure = null)
-
-        assertNull(loaded.scrollTargetLocation)
-        assertEquals(0, loaded.scrollRevision)
-    }
-
-    @Test
-    fun `在播放器里切了集后重定当前目录的滚动目标`() {
+    fun `关闭位置记忆后从顶部开始`() {
         val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
-        val loaded = LibraryState(lastPlayedLocation = "root/ep1.mkv").withLoadedEntries(entries, failure = null)
 
-        val switched = loaded.copy(lastPlayedLocation = "root/ep2.mkv").withRefreshedScrollTarget()
+        val loaded = LibraryState(autoRestorePosition = false).withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64),
+        )
 
-        assertEquals("root/ep2.mkv", switched.scrollTargetLocation)
-        assertEquals(2, switched.scrollRevision)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
     }
+
+    @Test
+    fun `没有记录时从顶部开始`() {
+        val loaded = LibraryState().withLoadedEntries(
+            entries = listOf(entry("ep1.mkv", 1)),
+            failure = null,
+            position = null,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
+    }
+
+    @Test
+    fun `空目录没有滚动目标`() {
+        val loaded = LibraryState().withLoadedEntries(emptyList(), failure = null, position = null)
+
+        assertNull(loaded.scrollTarget)
+    }
+
+    @Test
+    fun `记录按可见次序定位而不是原始次序`() {
+        val entries = listOf(entry("ep10.mkv", 2), entry("ep2.mkv", 1))
+
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep10.mkv", scrollOffset = 8),
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 8), loaded.scrollTarget)
+    }
+
+    @Test
+    fun `排序变化后按记录条目重新定位`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep1.mkv", scrollOffset = 12),
+        )
+
+        val resorted = loaded.withDisplayPreferences(
+            viewMode = ViewMode.List,
+            gridColumns = 3,
+            sortOrder = SortOrder.NameDescending,
+            autoRestorePosition = true,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 12), resorted.scrollTarget)
+        assertEquals(2, resorted.scrollRevision)
+    }
+
+    @Test
+    fun `设置未变化时不重复触发滚动`() {
+        val state = LibraryState().withLoadedEntries(listOf(entry("ep1.mkv", 1)), null, null)
+
+        val unchanged = state.withDisplayPreferences(
+            viewMode = state.viewMode,
+            gridColumns = state.gridColumns,
+            sortOrder = state.sortOrder,
+            autoRestorePosition = state.autoRestorePosition,
+        )
+
+        assertEquals(state.scrollRevision, unchanged.scrollRevision)
+    }
+
+    private fun entry(name: String, lastModified: Long) =
+        MediaFile(name = name, location = "root/$name", lastModified = lastModified)
 }

@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,7 +13,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
@@ -31,11 +35,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.network.SourceProtocol
+import com.cc3301.ccplayer.ui.theme.AppColors
+import com.cc3301.ccplayer.ui.theme.AppRadius
+import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
  * 源列表：只显示连接源名称，右下角加号新增；网络源可从条目的更多菜单编辑或删除。
@@ -60,47 +70,46 @@ fun SourceListScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .safeDrawingPadding(),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onBack) {
-                    Text(text = stringResource(R.string.library_back))
-                }
-                Text(
-                    text = sourceProtocolLabel(protocol),
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 12.dp),
-                )
-            }
+            ScreenHeader(
+                title = sourceProtocolLabel(protocol),
+                leading = {
+                    HeaderIconButton(
+                        icon = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.library_back),
+                        onClick = onBack,
+                    )
+                },
+            )
             when {
                 !state.ready -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(color = AppColors.Accent)
                 }
 
-                sources.isEmpty() -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = stringResource(emptyMessage(protocol)),
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 32.dp),
-                    )
-                }
+                sources.isEmpty() -> EmptyState(
+                    painter = painterResource(sourceProtocolIcon(protocol)),
+                    tint = protocolTint(protocol),
+                    background = protocolBackground(protocol),
+                    title = stringResource(emptyTitle(protocol)),
+                    message = stringResource(emptyMessage(protocol)),
+                    modifier = Modifier.fillMaxSize(),
+                )
 
                 else -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    contentPadding = PaddingValues(
+                        start = AppSpacing.Lg,
+                        end = AppSpacing.Lg,
+                        top = AppSpacing.Sm,
+                        bottom = 96.dp,
+                    ),
                 ) {
                     items(sources, key = { it.location }) { source ->
                         SourceRow(
+                            protocol = protocol,
                             source = source,
                             onOpen = { onOpenSource(source) },
                             onEdit = { onEditSource(source) },
@@ -112,9 +121,12 @@ fun SourceListScreen(
         }
         FloatingActionButton(
             onClick = onAdd,
+            containerColor = AppColors.AccentDeep,
+            contentColor = Color.White,
+            shape = RoundedCornerShape(AppRadius.Fab),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(24.dp),
+                .padding(AppSpacing.Xl),
         ) {
             Icon(imageVector = Icons.Filled.Add, contentDescription = stringResource(R.string.sources_add))
         }
@@ -123,6 +135,10 @@ fun SourceListScreen(
     pendingDelete?.let { source ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
+            containerColor = AppColors.Surface,
+            titleContentColor = AppColors.Foreground,
+            textContentColor = AppColors.Muted,
+            shape = RoundedCornerShape(AppRadius.Sheet),
             title = { Text(text = stringResource(R.string.sources_delete_title)) },
             text = {
                 Text(
@@ -142,12 +158,12 @@ fun SourceListScreen(
                         onDeleteSource(source)
                     },
                 ) {
-                    Text(text = stringResource(R.string.sources_delete_confirm))
+                    Text(text = stringResource(R.string.sources_delete_confirm), color = AppColors.Danger)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) {
-                    Text(text = stringResource(R.string.sources_cancel))
+                    Text(text = stringResource(R.string.sources_cancel), color = AppColors.Muted)
                 }
             },
         )
@@ -174,31 +190,56 @@ fun SourceListScreen(
 
 @Composable
 private fun SourceRow(
+    protocol: SourceProtocol,
     source: ConnectionSource,
     onOpen: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(AppRadius.Lg)
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(vertical = AppSpacing.Xs)
+            .clip(shape)
+            .background(AppColors.Surface)
+            .border(1.dp, AppColors.Line, shape)
             .clickable(onClick = onOpen)
-            .padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+            .padding(start = 13.dp, end = 10.dp, top = 13.dp, bottom = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        IconTile(
+            painter = painterResource(sourceProtocolIcon(protocol)),
+            tint = protocolTint(protocol),
+            background = protocolBackground(protocol),
+            size = 40.dp,
+            iconSize = 22.dp,
+        )
         Text(
             text = source.name,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.titleMedium,
+            color = AppColors.Foreground,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = AppSpacing.Md),
         )
         Box {
             IconButton(onClick = { expanded = true }) {
-                Icon(imageVector = Icons.Filled.MoreVert, contentDescription = stringResource(R.string.sources_menu))
+                Icon(
+                    imageVector = Icons.Filled.MoreVert,
+                    contentDescription = stringResource(R.string.sources_menu),
+                    tint = AppColors.Muted,
+                )
             }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                containerColor = AppColors.SurfaceHigh,
+                shape = RoundedCornerShape(AppRadius.Md),
+            ) {
                 if (source.editable) {
                     DropdownMenuItem(
                         text = { Text(text = stringResource(R.string.sources_edit)) },
@@ -209,7 +250,7 @@ private fun SourceRow(
                     )
                 }
                 DropdownMenuItem(
-                    text = { Text(text = stringResource(R.string.sources_delete)) },
+                    text = { Text(text = stringResource(R.string.sources_delete), color = AppColors.Danger) },
                     onClick = {
                         expanded = false
                         onDelete()
@@ -256,6 +297,12 @@ private fun networkSourceFields(form: NetworkSourceForm): List<NetworkSourceFiel
 
         SourceProtocol.Local -> emptyList()
     }
+}
+
+private fun emptyTitle(protocol: SourceProtocol): Int = when (protocol) {
+    SourceProtocol.Local -> R.string.sources_empty_title_local
+    SourceProtocol.Smb -> R.string.sources_empty_title_smb
+    SourceProtocol.WebDav -> R.string.sources_empty_title_webdav
 }
 
 private fun emptyMessage(protocol: SourceProtocol): Int = when (protocol) {
