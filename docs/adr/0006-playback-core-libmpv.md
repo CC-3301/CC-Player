@@ -1,6 +1,6 @@
 # ADR-0006 播放核心：libmpv
 
-状态：已接受（2026-10-05，第 2 轮 Q1，经 MX Player / nPlayer 内核调查后确认）
+状态：已接受
 
 ## 决策
 - 播放核心采用 **libmpv**（FFmpeg + 完整播放引擎 + libass）

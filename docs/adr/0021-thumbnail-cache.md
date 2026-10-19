@@ -1,6 +1,6 @@
 # ADR-0021 缩略图缓存
 
-状态：已接受（2026-10-05，实现层，无需用户决策）
+状态：已接受
 
 ## 决策
 - 视频抽帧：本地文件用 MediaMetadataRetriever 取帧，存 files/thumbnails/ 磁盘缓存（Coil 管理加载），LRU 上限
