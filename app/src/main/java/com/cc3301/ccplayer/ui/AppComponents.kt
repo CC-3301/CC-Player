@@ -29,7 +29,7 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
-/** 顶栏：左、右各留一个 44dp 的操作位，标题居中。 */
+/** 顶栏：两侧各留一个图标按钮的位置，标题居中。 */
 @Composable
 fun ScreenHeader(
     title: String,
