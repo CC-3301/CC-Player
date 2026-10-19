@@ -10,7 +10,7 @@ import com.cc3301.ccplayer.library.MediaSourceException
  * SMB 文件树：位置经 [SmbLocator] 取到凭据后连上共享，再列举子项。
  *
  * 每次操作独立建连并在结束时关闭，不长期占用服务器会话。[resolve] 只看书签，不连服务器，
- * 否则服务器临时不可达时根目录会从列表里消失。
+ * 否则服务器临时不可达时根目录会从列表里消失。服务器根只列可浏览的共享，隐藏的管理共享不列。
  */
 class SmbMediaFileTree(
     private val connector: SmbConnector,
@@ -36,7 +36,8 @@ class SmbMediaFileTree(
                 port = target.port,
                 username = target.username,
                 password = target.password,
-            ).map { share -> SmbEntry(name = share, isDirectory = true, size = 0, lastModified = 0) }
+            ).filterNot { share -> share.endsWith("$") }
+                .map { share -> SmbEntry(name = share, isDirectory = true, size = 0, lastModified = 0) }
         } else {
             connector.connect(
                 host = target.host,

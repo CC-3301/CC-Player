@@ -5,6 +5,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NetworkSourceRepositoryTest {
@@ -94,13 +95,54 @@ class NetworkSourceRepositoryTest {
     }
 
     @Test
+    fun `编辑成已存在地址时拒绝且不动另一条源`() = runTest {
+        val other = nas.copy(address = "nas2")
+        sources.add(nas, password = "secret")
+        sources.add(other, password = "secret2")
+
+        val failure = runCatching {
+            sources.update(previousUrl = nas.url, bookmark = nas.copy(address = "nas2"), password = "secret3")
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalArgumentException)
+        assertEquals(listOf(nas, other), store.current())
+        assertEquals("secret", sources.password(nas.url))
+        assertEquals("secret2", sources.password(other.url))
+    }
+
+    @Test
+    fun `旧地址带尾斜杠时密码迁移到当前地址`() = runTest {
+        store.save(listOf(nas))
+        credentials.put("${nas.url}/", "secret")
+
+        sources.bookmarks.first()
+        val migrated = sources.password(nas.url)
+
+        assertEquals("secret", migrated)
+        assertNull(credentials.get("${nas.url}/"))
+    }
+
+    @Test
+    fun `旧地址没有尾斜杠时密码原样可读`() = runTest {
+        store.save(listOf(nas))
+        credentials.put(nas.url, "secret")
+
+        sources.bookmarks.first()
+
+        assertEquals("secret", sources.password(nas.url))
+        assertNull(credentials.get("${nas.url}/"))
+    }
+
+    @Test
     fun `删除书签同时清掉密码`() = runTest {
         sources.add(nas, password = "secret")
+        credentials.put("${nas.url}/", "legacy")
 
         sources.remove(nas.url)
 
         assertEquals(emptyList<NetworkBookmark>(), store.current())
         assertNull(sources.password(nas.url))
+        assertNull(credentials.get("${nas.url}/"))
     }
 
     @Test

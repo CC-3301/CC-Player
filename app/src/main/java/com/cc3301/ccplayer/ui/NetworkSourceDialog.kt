@@ -19,8 +19,12 @@ import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFailure
 
+/** 网络源表单的字段；顺序由展示方决定，状态更新按字段本身分派。 */
+enum class NetworkSourceFieldKind { Name, Address, Path, Username, Password }
+
 /** 网络源表单里的一个输入框。 */
 data class NetworkSourceField(
+    val kind: NetworkSourceFieldKind,
     val label: String,
     val value: String,
     val secret: Boolean = false,
@@ -36,8 +40,9 @@ fun NetworkSourceDialog(
     fields: List<NetworkSourceField>,
     saving: Boolean,
     addressInvalid: Boolean,
+    duplicateAddress: Boolean,
     failure: MediaFailure?,
-    onFieldChange: (Int, String) -> Unit,
+    onFieldChange: (NetworkSourceFieldKind, String) -> Unit,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -48,10 +53,10 @@ fun NetworkSourceDialog(
         title = { Text(text = title) },
         text = {
             Column {
-                fields.forEachIndexed { index, field ->
+                fields.forEach { field ->
                     OutlinedTextField(
                         value = field.value,
-                        onValueChange = { onFieldChange(index, it) },
+                        onValueChange = { onFieldChange(field.kind, it) },
                         label = { Text(text = field.label) },
                         singleLine = true,
                         enabled = !saving,
@@ -64,6 +69,7 @@ fun NetworkSourceDialog(
                 }
                 when {
                     addressInvalid -> ErrorText(text = stringResource(R.string.network_source_address_invalid))
+                    duplicateAddress -> ErrorText(text = stringResource(R.string.network_source_address_duplicate))
                     failure != null -> ErrorText(text = stringResource(mediaFailureText(failure)))
                 }
             }

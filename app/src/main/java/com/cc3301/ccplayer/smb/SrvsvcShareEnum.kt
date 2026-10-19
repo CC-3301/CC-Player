@@ -82,7 +82,13 @@ internal object SrvsvcShareEnum {
         if (level != 1 || tag != 1) throw MediaSourceException(MediaFailure.Unknown, "SMB 共享枚举层级不是 1")
         val entriesRead = u32(stub, 12)
         val bufferReferent = u32(stub, 16)
-        if (entriesRead == 0 || bufferReferent == 0) return emptyList()
+        if (entriesRead == 0 || bufferReferent == 0) {
+            val errorCode = u32OrZero(stub, EMPTY_BUFFER_ERROR_OFFSET)
+            if (errorCode != 0) {
+                throw MediaSourceException(MediaFailure.Unknown, "SMB 共享枚举失败：$errorCode")
+            }
+            return emptyList()
+        }
 
         val maximumCount = u32(stub, 20)
         if (entriesRead !in 1..MAX_ENTRIES || maximumCount !in entriesRead..MAX_ENTRIES) {
@@ -109,8 +115,9 @@ internal object SrvsvcShareEnum {
             names.add(name)
         }
 
-        val errorCode = if (cursor + 8 <= stub.size) u32(stub, cursor + 8) else 0
-        if (errorCode != 0 && names.isEmpty()) {
+        // 游标在延迟字符串之后，依次是 TotalEntries、ResumeHandle 指针、ErrorCode。
+        val errorCode = u32OrZero(stub, cursor + ERROR_CODE_AFTER_STRINGS)
+        if (errorCode != 0) {
             throw MediaSourceException(MediaFailure.Unknown, "SMB 共享枚举失败：$errorCode")
         }
         return names
@@ -158,6 +165,9 @@ internal object SrvsvcShareEnum {
             ((data[offset + 2].toInt() and 0xff) shl 16) or
             ((data[offset + 3].toInt() and 0xff) shl 24)
 
+    private fun u32OrZero(data: ByteArray, offset: Int): Int =
+        if (offset + 4 <= data.size) u32(data, offset) else 0
+
     private const val RPC_VERSION: Byte = 5
     private const val RPC_VERSION_MINOR: Byte = 0
     private const val PDU_REQUEST: Int = 0
@@ -177,6 +187,10 @@ internal object SrvsvcShareEnum {
     private const val ENUM_STUB_SIZE = 32
     private const val LEVEL_ONE_FIXED_SIZE = 24
     private const val SHARE_INFO_ONE_SIZE = 12
+    /** 缓冲为空时：层级、标签、容器指针、条目数、缓冲指针之后是 TotalEntries、ResumeHandle、ErrorCode。 */
+    private const val EMPTY_BUFFER_ERROR_OFFSET = 28
+    /** 有共享时：游标指向 TotalEntries，ErrorCode 再隔两个 DWORD。 */
+    private const val ERROR_CODE_AFTER_STRINGS = 8
     private const val STRING_HEADER_SIZE = 12
     private const val MAX_FRAGMENT = 4280
     private const val OPNUM_SHARE_ENUM = 15

@@ -29,6 +29,7 @@
     <string name="network_source_add_title">添加 %1$s 连接</string>
     <string name="network_source_edit_title">编辑 %1$s 连接</string>
     <string name="network_source_address_invalid">地址不合法。</string>
+    <string name="network_source_address_duplicate">这个地址已经是一个连接源。</string>
     <string name="network_source_username">用户名</string>
     <string name="network_source_password">密码</string>
     <string name="network_source_confirm">保存</string>

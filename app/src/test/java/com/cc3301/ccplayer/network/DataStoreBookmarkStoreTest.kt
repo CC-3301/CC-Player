@@ -6,11 +6,13 @@ import com.cc3301.ccplayer.settings.FakePreferencesDataStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DataStoreBookmarkStoreTest {
 
-    private val store = DataStoreBookmarkStore(FakePreferencesDataStore())
+    private val dataStore = FakePreferencesDataStore()
+    private val store = DataStoreBookmarkStore(dataStore)
 
     @Test
     fun `默认没有书签`() = runTest {
@@ -60,6 +62,14 @@ class DataStoreBookmarkStoreTest {
     }
 
     @Test
+    fun `旧 SMB 书签带尾斜杠迁移后地址不带尾斜杠`() = runTest {
+        val bookmark = legacyStore("smb://nas/media/\tcc").bookmarks.first().single()
+
+        assertEquals("smb://nas/media", bookmark.url)
+        assertEquals("media", bookmark.path)
+    }
+
+    @Test
     fun `旧 WebDAV 书签迁移成服务器地址与起始目录`() = runTest {
         val legacy = legacyStore("https://dav.example.com/dav/files/cc\t")
 
@@ -74,6 +84,18 @@ class DataStoreBookmarkStoreTest {
         val legacy = legacyStore("smb://nas/media\tDOM\\cc\tadmin")
 
         assertEquals("DOM\\cc\tadmin", legacy.bookmarks.first().single().username)
+    }
+
+    @Test
+    fun `认不出的旧行在保存后仍原样保留`() = runTest {
+        val seeded = FakePreferencesDataStore(preferencesOf(stringPreferencesKey("bookmarks") to "认不出的旧行"))
+        val seededStore = DataStoreBookmarkStore(seeded)
+
+        seededStore.save(listOf(NetworkBookmark(SourceProtocol.Smb, "NAS", "nas", "media", "cc")))
+
+        val raw = seeded.data.first()[stringPreferencesKey("bookmarks")].orEmpty()
+        assertTrue(raw.lines().any { it == "认不出的旧行" })
+        assertEquals(listOf(NetworkBookmark(SourceProtocol.Smb, "NAS", "nas", "media", "cc")), seededStore.bookmarks.first())
     }
 
     private fun legacyStore(line: String): DataStoreBookmarkStore = DataStoreBookmarkStore(

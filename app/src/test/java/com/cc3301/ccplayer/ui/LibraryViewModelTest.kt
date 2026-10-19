@@ -209,7 +209,7 @@ class LibraryViewModelTest {
         viewModel.openEditSourceForm(viewModel.sourcesState.value.smb.single())
         advanceUntilIdle()
 
-        viewModel.updateFormField(0, "书房")
+        viewModel.updateFormField(NetworkSourceFieldKind.Name, "书房")
         viewModel.saveNetworkSourceForm()
         advanceUntilIdle()
 
@@ -290,6 +290,51 @@ class LibraryViewModelTest {
     }
 
     @Test
+    fun `离开源列表时清空表单`() = runTest {
+        viewModel.openNewSourceForm(SourceProtocol.WebDav)
+
+        viewModel.clearNetworkSourceForm()
+
+        assertNull(viewModel.sourcesState.value.form)
+    }
+
+    @Test
+    fun `本地授权失效的源仍然列出并可删除`() = runTest {
+        settings.addRoot("content://tree/lost")
+        advanceUntilIdle()
+
+        val source = viewModel.sourcesState.value.local.single()
+        assertEquals("lost", source.name)
+        assertFalse(source.editable)
+
+        viewModel.removeSource(source)
+        advanceUntilIdle()
+
+        assertEquals(emptyList<ConnectionSource>(), viewModel.sourcesState.value.local)
+        assertEquals(emptyList<String>(), settings.rootLocations.first())
+    }
+
+    @Test
+    fun `编辑成已存在地址时保留表单并拒绝保存`() = runTest {
+        tree.addDirectory(smbRoot)
+        tree.addDirectory(testDirectory("media", "smb://nas2/media"))
+        openSmbForm(name = "书房", address = "nas", path = "media")
+        advanceUntilIdle()
+        openSmbForm(name = "客厅", address = "nas2", path = "media")
+        advanceUntilIdle()
+        viewModel.openEditSourceForm(viewModel.sourcesState.value.smb.first { it.name == "书房" })
+        advanceUntilIdle()
+
+        viewModel.updateFormField(NetworkSourceFieldKind.Address, "nas2")
+        viewModel.saveNetworkSourceForm()
+        advanceUntilIdle()
+
+        assertTrue(viewModel.sourcesState.value.form?.duplicateAddress == true)
+        assertEquals(listOf("书房", "客厅"), viewModel.sourcesState.value.smb.map { it.name })
+        assertEquals(2, store.current().size)
+    }
+
+    @Test
     fun `网络目录读不到时状态带来源失败原因`() = runTest {
         val series = testDirectory("剧集", "smb://nas/media/剧集")
         tree.addDirectory(smbRoot, series)
@@ -367,10 +412,10 @@ class LibraryViewModelTest {
     }
 
     private fun fillForm(name: String, address: String, path: String, username: String, password: String) {
-        viewModel.updateFormField(0, name)
-        viewModel.updateFormField(1, address)
-        viewModel.updateFormField(2, path)
-        viewModel.updateFormField(3, username)
-        viewModel.updateFormField(4, password)
+        viewModel.updateFormField(NetworkSourceFieldKind.Name, name)
+        viewModel.updateFormField(NetworkSourceFieldKind.Address, address)
+        viewModel.updateFormField(NetworkSourceFieldKind.Path, path)
+        viewModel.updateFormField(NetworkSourceFieldKind.Username, username)
+        viewModel.updateFormField(NetworkSourceFieldKind.Password, password)
     }
 }

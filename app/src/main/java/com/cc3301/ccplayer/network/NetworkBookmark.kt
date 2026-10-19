@@ -40,28 +40,25 @@ data class NetworkBookmark(
             return when {
                 trimmed.startsWith("smb://", ignoreCase = true) -> {
                     val rest = trimmed.substringAfter("://")
-                    val address = rest.substringBefore('/')
-                    if (address.isEmpty()) return null
+                    val address = rest.substringBefore('/').trim()
+                    if (SmbAuthorityParser.parse(address) == null) return null
                     NetworkBookmark(
                         protocol = SourceProtocol.Smb,
                         name = "",
                         address = address,
-                        path = rest.substringAfter('/', "").segments(),
+                        path = normalizeRelativePath(rest.substringAfter('/', "")),
                         username = username,
                     )
                 }
 
                 trimmed.startsWith("http://", ignoreCase = true) ||
                     trimmed.startsWith("https://", ignoreCase = true) -> {
-                    val scheme = trimmed.substringBefore("://").lowercase()
-                    val rest = trimmed.substringAfter("://")
-                    val authority = rest.substringBefore('/')
-                    if (authority.isEmpty()) return null
+                    val source = WebDavSourceAddress.split(trimmed) ?: return null
                     NetworkBookmark(
                         protocol = SourceProtocol.WebDav,
                         name = "",
-                        address = "$scheme://$authority",
-                        path = rest.substringAfter('/', "").segments(),
+                        address = source.address,
+                        path = source.path,
                         username = username,
                     )
                 }
@@ -69,8 +66,5 @@ data class NetworkBookmark(
                 else -> null
             }
         }
-
-        private fun String.segments(): String =
-            split('/').filter { it.isNotEmpty() }.joinToString("/")
     }
 }

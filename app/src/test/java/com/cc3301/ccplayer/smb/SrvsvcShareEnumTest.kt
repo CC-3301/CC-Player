@@ -62,6 +62,13 @@ class SrvsvcShareEnumTest {
     }
 
     @Test
+    fun `没有共享但错误码非零时抛出失败原因`() {
+        val stub = hex("0100000001000000000200000000000000000000000000000000000005000000")
+
+        assertThrows(MediaSourceException::class.java) { SrvsvcShareEnum.parseShareNames(stub) }
+    }
+
+    @Test
     fun `RPC 层错误应答抛出失败原因`() {
         val fault = hex("05000003100000001000000002000000")
         val response = ByteArray(24)

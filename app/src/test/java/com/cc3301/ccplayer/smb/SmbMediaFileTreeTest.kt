@@ -31,7 +31,7 @@ class SmbMediaFileTreeTest {
     @Test
     fun `路径为空时列举服务器共享作为根`() = runTest {
         addSource("smb://nas")
-        connector.shareNames = listOf("media", "剧集")
+        connector.shareNames = listOf("media", "剧集", "IPC$", "ADMIN$", "C$")
 
         val resolved = tree.resolve("smb://nas")
         val children = tree.children(resolved!!)

@@ -19,26 +19,32 @@ private val Context.bookmarksDataStore: DataStore<Preferences> by preferencesDat
 class DataStoreBookmarkStore(private val dataStore: DataStore<Preferences>) : BookmarkStore {
 
     override val bookmarks: Flow<List<NetworkBookmark>> = dataStore.data.map { preferences ->
-        preferences[BOOKMARKS].orEmpty().lines().filter { it.isNotBlank() }.mapNotNull { line ->
-            if (line.startsWith(LEGACY_SMB_PREFIX) || line.startsWith(LEGACY_HTTP_PREFIX) || line.startsWith(LEGACY_HTTPS_PREFIX)) {
-                NetworkBookmark.fromUrl(
-                    url = line.substringBefore(FIELD_SEPARATOR),
-                    username = line.substringAfter(FIELD_SEPARATOR, ""),
-                )
-            } else {
-                bookmarkOf(decodeFields(line))
-            }
+        preferences[BOOKMARKS].orEmpty().lines().filter { it.isNotBlank() }.mapNotNull(::decodeBookmark)
+    }
+
+    /** 整表覆盖已知书签；认不出的行原样保留，避免后续保存把旧数据抹掉。 */
+    override suspend fun save(bookmarks: List<NetworkBookmark>) {
+        dataStore.edit { preferences ->
+            val unknownLines = preferences[BOOKMARKS].orEmpty().lines()
+                .filter { it.isNotBlank() && decodeBookmark(it) == null }
+            val saved = bookmarks.map(::encodeBookmark) + unknownLines
+            preferences[BOOKMARKS] = saved.joinToString("\n")
         }
     }
 
-    override suspend fun save(bookmarks: List<NetworkBookmark>) {
-        dataStore.edit { preferences ->
-            preferences[BOOKMARKS] = bookmarks.joinToString("\n") { bookmark ->
-                listOf(bookmark.protocol.name, bookmark.name, bookmark.address, bookmark.path, bookmark.username)
-                    .joinToString(FIELD_SEPARATOR.toString()) { encodeField(it) }
-            }
+    private fun decodeBookmark(line: String): NetworkBookmark? =
+        if (line.startsWith(LEGACY_SMB_PREFIX) || line.startsWith(LEGACY_HTTP_PREFIX) || line.startsWith(LEGACY_HTTPS_PREFIX)) {
+            NetworkBookmark.fromUrl(
+                url = line.substringBefore(FIELD_SEPARATOR),
+                username = line.substringAfter(FIELD_SEPARATOR, ""),
+            )
+        } else {
+            bookmarkOf(decodeFields(line))
         }
-    }
+
+    private fun encodeBookmark(bookmark: NetworkBookmark): String =
+        listOf(bookmark.protocol.name, bookmark.name, bookmark.address, bookmark.path, bookmark.username)
+            .joinToString(FIELD_SEPARATOR.toString()) { encodeField(it) }
 
     private fun bookmarkOf(fields: List<String>): NetworkBookmark? {
         if (fields.size < FIELD_COUNT) return null

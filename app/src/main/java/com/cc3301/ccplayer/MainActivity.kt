@@ -265,6 +265,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
                     screen == AppScreen.Home -> HomeScreen(
                         onOpenProtocol = { protocol ->
+                            library.clearNetworkSourceForm()
                             sourcesProtocol = protocol
                             screen = AppScreen.Sources
                         },
@@ -272,11 +273,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     )
 
                     screen == AppScreen.Sources -> {
-                        BackHandler { screen = AppScreen.Home }
+                        BackHandler {
+                            library.clearNetworkSourceForm()
+                            screen = AppScreen.Home
+                        }
                         SourceListScreen(
                             protocol = sourcesProtocol,
                             state = sourcesState,
-                            onBack = { screen = AppScreen.Home },
+                            onBack = {
+                                library.clearNetworkSourceForm()
+                                screen = AppScreen.Home
+                            },
                             onAdd = {
                                 if (sourcesProtocol == SourceProtocol.Local) {
                                     picker.launch(null)

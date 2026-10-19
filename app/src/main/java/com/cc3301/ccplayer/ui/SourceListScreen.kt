@@ -49,7 +49,7 @@ fun SourceListScreen(
     onOpenSource: (ConnectionSource) -> Unit,
     onEditSource: (ConnectionSource) -> Unit,
     onDeleteSource: (ConnectionSource) -> Unit,
-    onFormFieldChange: (Int, String) -> Unit,
+    onFormFieldChange: (NetworkSourceFieldKind, String) -> Unit,
     onDismissForm: () -> Unit,
     onSaveForm: () -> Unit,
     modifier: Modifier = Modifier,
@@ -163,6 +163,7 @@ fun SourceListScreen(
             fields = networkSourceFields(form),
             saving = form.saving,
             addressInvalid = form.addressInvalid,
+            duplicateAddress = form.duplicateAddress,
             failure = form.failure,
             onFieldChange = onFormFieldChange,
             onDismiss = onDismissForm,
@@ -219,18 +220,28 @@ private fun SourceRow(
     }
 }
 
-/** 表单字段顺序固定为名称、服务器地址、路径或起始目录、用户名、密码。 */
+/** 表单字段按协议给出；状态更新按字段本身分派，不依赖列表下标。 */
 @Composable
 private fun networkSourceFields(form: NetworkSourceForm): List<NetworkSourceField> {
-    val name = NetworkSourceField(stringResource(R.string.network_source_name), form.name)
-    val address = NetworkSourceField(stringResource(R.string.network_source_server_address), form.address, required = true)
-    val username = NetworkSourceField(stringResource(R.string.network_source_username), form.username)
-    val password = NetworkSourceField(stringResource(R.string.network_source_password), form.password, secret = true)
+    val name = NetworkSourceField(NetworkSourceFieldKind.Name, stringResource(R.string.network_source_name), form.name)
+    val address = NetworkSourceField(
+        kind = NetworkSourceFieldKind.Address,
+        label = stringResource(R.string.network_source_server_address),
+        value = form.address,
+        required = true,
+    )
+    val username = NetworkSourceField(NetworkSourceFieldKind.Username, stringResource(R.string.network_source_username), form.username)
+    val password = NetworkSourceField(
+        kind = NetworkSourceFieldKind.Password,
+        label = stringResource(R.string.network_source_password),
+        value = form.password,
+        secret = true,
+    )
     return when (form.protocol) {
         SourceProtocol.Smb -> listOf(
             name,
             address,
-            NetworkSourceField(stringResource(R.string.network_source_share_path), form.path),
+            NetworkSourceField(NetworkSourceFieldKind.Path, stringResource(R.string.network_source_share_path), form.path),
             username,
             password,
         )
@@ -238,7 +249,7 @@ private fun networkSourceFields(form: NetworkSourceForm): List<NetworkSourceFiel
         SourceProtocol.WebDav -> listOf(
             name,
             address,
-            NetworkSourceField(stringResource(R.string.network_source_start_directory), form.path),
+            NetworkSourceField(NetworkSourceFieldKind.Path, stringResource(R.string.network_source_start_directory), form.path),
             username,
             password,
         )

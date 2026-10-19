@@ -24,6 +24,7 @@ import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkSourceVerifier
 import com.cc3301.ccplayer.network.RoutingNetworkSourceVerifier
 import com.cc3301.ccplayer.network.SourceProtocol
+import com.cc3301.ccplayer.network.normalizeRelativePath
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
@@ -73,6 +74,8 @@ data class NetworkSourceForm(
     val saving: Boolean = false,
     /** 服务器地址缺失或格式不对。 */
     val addressInvalid: Boolean = false,
+    /** 编辑后的地址与另一条连接源重复。 */
+    val duplicateAddress: Boolean = false,
     /** 上次连通性校验失败的原因。 */
     val failure: MediaFailure? = null,
 ) {
@@ -268,36 +271,47 @@ class LibraryViewModel(
         }
     }
 
-    /** 表单字段按「名称、服务器地址、路径或起始目录、用户名、密码」排列。 */
-    fun updateFormField(index: Int, value: String) {
+    /** 离开源列表或切换协议时清掉表单，避免把旧表单带进另一协议。 */
+    fun clearNetworkSourceForm() {
+        _sourcesState.update { it.copy(form = null) }
+    }
+
+    /** 按字段本身更新表单，不依赖字段在界面上的位置。 */
+    fun updateFormField(kind: NetworkSourceFieldKind, value: String) {
         _sourcesState.update { current ->
             val form = current.form ?: return@update current
-            val updated = when (index) {
-                NAME_FIELD -> form.copy(name = value)
-                ADDRESS_FIELD -> form.copy(address = value)
-                PATH_FIELD -> form.copy(path = value)
-                USERNAME_FIELD -> form.copy(username = value)
-                PASSWORD_FIELD -> form.copy(password = value)
-                else -> form
+            val updated = when (kind) {
+                NetworkSourceFieldKind.Name -> form.copy(name = value)
+                NetworkSourceFieldKind.Address -> form.copy(address = value)
+                NetworkSourceFieldKind.Path -> form.copy(path = value)
+                NetworkSourceFieldKind.Username -> form.copy(username = value)
+                NetworkSourceFieldKind.Password -> form.copy(password = value)
             }
-            current.copy(form = updated.copy(addressInvalid = false, failure = null))
+            current.copy(form = updated.copy(addressInvalid = false, duplicateAddress = false, failure = null))
         }
     }
 
-    /** 校验地址并试连后保存；地址不合法或连不上时保留表单并给出原因。 */
+    /** 校验地址并试连后保存；地址不合法、重复或连不上时保留表单并给出原因。 */
     fun saveNetworkSourceForm() {
         val form = _sourcesState.value.form ?: return
         if (form.saving) return
         val bookmark = normalizedBookmark(form)
         if (bookmark == null) {
             _sourcesState.update { current ->
-                current.copy(form = current.form?.copy(addressInvalid = true, failure = null))
+                current.copy(form = current.form?.copy(addressInvalid = true, duplicateAddress = false, failure = null))
             }
             return
         }
         viewModelScope.launch {
+            val duplicate = form.editing && sources.bookmarks.first().any { it.url == bookmark.url && it.url != form.originalUrl }
+            if (duplicate) {
+                _sourcesState.update { current ->
+                    current.copy(form = current.form?.copy(duplicateAddress = true, failure = null))
+                }
+                return@launch
+            }
             _sourcesState.update { current ->
-                current.copy(form = current.form?.copy(saving = true, addressInvalid = false, failure = null))
+                current.copy(form = current.form?.copy(saving = true, addressInvalid = false, duplicateAddress = false, failure = null))
             }
             val failure = verify(bookmark.url, bookmark.username, form.password)
             if (failure != null) {
@@ -306,10 +320,17 @@ class LibraryViewModel(
                 }
                 return@launch
             }
-            if (form.originalUrl != null) {
-                sources.update(previousUrl = form.originalUrl, bookmark = bookmark, password = form.password)
-            } else {
-                sources.add(bookmark = bookmark, password = form.password)
+            try {
+                if (form.originalUrl != null) {
+                    sources.update(previousUrl = form.originalUrl, bookmark = bookmark, password = form.password)
+                } else {
+                    sources.add(bookmark = bookmark, password = form.password)
+                }
+            } catch (duplicate: IllegalArgumentException) {
+                _sourcesState.update { current ->
+                    current.copy(form = current.form?.copy(saving = false, duplicateAddress = true))
+                }
+                return@launch
             }
             _sourcesState.update { it.copy(form = null) }
         }
@@ -371,10 +392,16 @@ class LibraryViewModel(
         }
     }
 
-    private suspend fun resolveLocalSource(location: String): ConnectionSource? =
-        runCatching { library.resolveDirectory(location) }.getOrNull()?.let { root ->
-            ConnectionSource(protocol = SourceProtocol.Local, name = root.name, location = location, root = root)
-        }
+    /** 本地源解析不出来（比如授权失效）时仍列出，好让用户能删除它。 */
+    private suspend fun resolveLocalSource(location: String): ConnectionSource {
+        val root = runCatching { library.resolveDirectory(location) }.getOrNull()
+            ?: MediaFile(
+                name = location.substringAfterLast('/').ifBlank { location },
+                location = location,
+                isDirectory = true,
+            )
+        return ConnectionSource(protocol = SourceProtocol.Local, name = root.name, location = location, root = root)
+    }
 
     private suspend fun resolveNetworkSource(bookmark: NetworkBookmark): ConnectionSource? =
         runCatching { library.resolveDirectory(bookmark.url) }.getOrNull()?.let { root ->
@@ -396,13 +423,10 @@ class LibraryViewModel(
             protocol = form.protocol,
             name = form.name.trim(),
             address = address,
-            path = normalizePath(form.path),
+            path = normalizeRelativePath(form.path),
             username = form.username,
         )
     }
-
-    private fun normalizePath(path: String): String =
-        path.trim().split('/').filter { it.isNotEmpty() }.joinToString("/")
 
     private suspend fun verify(url: String, username: String, password: String): MediaFailure? = try {
         verifier.verify(url, username, password)
@@ -429,12 +453,6 @@ class LibraryViewModel(
     )
 
     companion object {
-        private const val NAME_FIELD = 0
-        private const val ADDRESS_FIELD = 1
-        private const val PATH_FIELD = 2
-        private const val USERNAME_FIELD = 3
-        private const val PASSWORD_FIELD = 4
-
         /** 生产入口：本地 SAF 与各网络协议的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
