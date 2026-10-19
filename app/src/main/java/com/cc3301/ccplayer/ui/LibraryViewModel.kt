@@ -7,6 +7,10 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
+import com.cc3301.ccplayer.library.DirectoryPosition
+import com.cc3301.ccplayer.library.DirectoryPositionStore
+import com.cc3301.ccplayer.library.DirectoryScrollTarget
+import com.cc3301.ccplayer.library.DataStoreDirectoryPositionStore
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaFileTree
@@ -16,6 +20,8 @@ import com.cc3301.ccplayer.library.ProgressCleanupMediaLibrary
 import com.cc3301.ccplayer.library.RoutingMediaFileTree
 import com.cc3301.ccplayer.library.SafMediaFileTree
 import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.library.directoryScrollTarget
+import com.cc3301.ccplayer.library.relativeDirectoryPath
 import com.cc3301.ccplayer.library.sortedForDisplay
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
@@ -41,6 +47,8 @@ import com.cc3301.ccplayer.webdav.WebDavMediaFileTree
 import com.cc3301.ccplayer.webdav.WebDavSourceVerifier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -99,6 +107,8 @@ data class SourcesState(
 
 /** 库页面的状态。 */
 data class LibraryState(
+    /** 当前连接源的持久化位置；用于保存目录位置记录。 */
+    val sourceLocation: String = "",
     /** 浏览路径，最后一项是当前目录；为空表示停在根目录这一层。 */
     val stack: List<MediaFile> = emptyList(),
     /** 当前目录读出的条目，未排序；展示次序见 [visibleEntries]。 */
@@ -106,14 +116,12 @@ data class LibraryState(
     val viewMode: ViewMode = ViewMode.List,
     val gridColumns: Int = SettingsRepository.DEFAULT_GRID_COLUMNS,
     val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
-    /** 排序选项每次变化的递增序号：界面据此把列表回到顶部。 */
-    val sortRevision: Int = 0,
-    /** 最近起播的媒体位置；列表进入时据此滚动。 */
-    val lastPlayedLocation: String? = null,
-    /** "进入列表自动滚动到上次播放位置"开关，默认开。 */
-    val autoScrollToLastPlayed: Boolean = true,
-    /** 本次进入列表要滚动到的条目位置；没有目标时为 null。 */
-    val scrollTargetLocation: String? = null,
+    /** "进入目录时自动回到上次停留的位置"开关，默认开。 */
+    val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
+    /** 当前目录已保存的位置记录；没有记录时为 null。 */
+    val savedPosition: DirectoryPosition? = null,
+    /** 本次要滚动到的条目与偏移；空目录时为 null。 */
+    val scrollTarget: DirectoryScrollTarget? = null,
     /** 每次定出滚动目标时递增：界面据此滚动一次。 */
     val scrollRevision: Int = 0,
     val loading: Boolean = false,
@@ -125,34 +133,43 @@ data class LibraryState(
     /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
-    /** 套用排序偏好；排序选项变了才递增 [sortRevision]。 */
-    fun withSortOrder(order: SortOrder): LibraryState =
-        copy(sortOrder = order, sortRevision = if (order == sortOrder) sortRevision else sortRevision + 1)
-
-    /** 目录读完后套用结果，并定出进入列表要滚动到的条目。 */
-    fun withLoadedEntries(entries: List<MediaFile>, failure: MediaFailure?): LibraryState {
-        val target = scrollTargetIn(entries)
-        return copy(
-            entries = entries,
-            loading = false,
-            failure = failure,
-            scrollTargetLocation = target,
-            scrollRevision = if (target == null) scrollRevision else scrollRevision + 1,
+    /** 套用展示偏好；视图、列数、排序或位置记忆开关变了才重新定位。 */
+    fun withDisplayPreferences(
+        viewMode: ViewMode,
+        gridColumns: Int,
+        sortOrder: SortOrder,
+        autoRestorePosition: Boolean,
+    ): LibraryState {
+        val changed = viewMode != this.viewMode ||
+            gridColumns != this.gridColumns ||
+            sortOrder != this.sortOrder ||
+            autoRestorePosition != this.autoRestorePosition
+        val updated = copy(
+            viewMode = viewMode,
+            gridColumns = gridColumns,
+            sortOrder = sortOrder,
+            autoRestorePosition = autoRestorePosition,
         )
+        return if (changed) updated.retargeted() else updated
     }
 
-    /** 上次播放的位置变了（比如在播放器里切了集）：按下目前读出的目录重定滚动目标。 */
-    fun withRefreshedScrollTarget(): LibraryState {
-        val target = scrollTargetIn(entries)
-        return copy(
-            scrollTargetLocation = target,
-            scrollRevision = if (target == null) scrollRevision else scrollRevision + 1,
-        )
-    }
+    /** 目录读完后套用结果，并按位置记录定出滚动目标。 */
+    fun withLoadedEntries(
+        entries: List<MediaFile>,
+        failure: MediaFailure?,
+        position: DirectoryPosition?,
+    ): LibraryState = copy(
+        entries = entries,
+        loading = false,
+        failure = failure,
+        savedPosition = position,
+    ).retargeted()
 
-    /** 滚动目标：开关关、还没播过、或上次播放的条目不在 [entries] 里时为空。 */
-    private fun scrollTargetIn(entries: List<MediaFile>): String? =
-        lastPlayedLocation?.takeIf { autoScrollToLastPlayed && entries.any { entry -> entry.location == it } }
+    /** 按当前可见次序重新计算滚动目标并递增序号。 */
+    private fun retargeted(): LibraryState = copy(
+        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, autoRestorePosition),
+        scrollRevision = scrollRevision + 1,
+    )
 }
 
 /**
@@ -166,6 +183,7 @@ class LibraryViewModel(
     private val settings: SettingsRepository,
     private val sources: NetworkSourceRepository,
     private val verifier: NetworkSourceVerifier,
+    private val positions: DirectoryPositionStore,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryState())
@@ -195,23 +213,17 @@ class LibraryViewModel(
                 settings.viewMode,
                 settings.gridColumns,
                 settings.sortOrder,
-                settings.autoScrollToLastPlayed,
-                settings.lastPlayedLocation,
-            ) { mode, columns, order, autoScroll, lastPlayed ->
-                ListPreferences(mode, columns, order, autoScroll, lastPlayed)
+                settings.autoRestorePosition,
+            ) { mode, columns, order, autoRestore ->
+                ListPreferences(mode, columns, order, autoRestore)
             }.collect { preferences ->
                 _state.update { current ->
-                    val updated = current.withSortOrder(preferences.sortOrder).copy(
+                    current.withDisplayPreferences(
                         viewMode = preferences.viewMode,
                         gridColumns = preferences.gridColumns,
-                        autoScrollToLastPlayed = preferences.autoScrollToLastPlayed,
-                        lastPlayedLocation = preferences.lastPlayedLocation,
+                        sortOrder = preferences.sortOrder,
+                        autoRestorePosition = preferences.autoRestorePosition,
                     )
-                    if (updated.lastPlayedLocation == current.lastPlayedLocation) {
-                        updated
-                    } else {
-                        updated.withRefreshedScrollTarget()
-                    }
                 }
             }
         }
@@ -222,7 +234,7 @@ class LibraryViewModel(
         viewModelScope.launch { settings.addRoot(location) }
     }
 
-    /** 删除连接源：只删本地记录与凭据，不动远程文件或本地文件夹。 */
+    /** 删除连接源：只删本地记录与凭据，不动远程文件或本地文件夹；位置记录一并清理。 */
     fun removeSource(source: ConnectionSource) {
         viewModelScope.launch {
             if (source.protocol == SourceProtocol.Local) {
@@ -230,6 +242,7 @@ class LibraryViewModel(
             } else {
                 sources.remove(source.location)
             }
+            positions.clearSource(source.location)
         }
     }
 
@@ -340,11 +353,13 @@ class LibraryViewModel(
     fun openSource(source: ConnectionSource) {
         _state.update {
             it.copy(
+                sourceLocation = source.location,
                 stack = listOf(source.root),
                 entries = emptyList(),
                 loading = true,
                 failure = null,
-                scrollTargetLocation = null,
+                savedPosition = null,
+                scrollTarget = null,
             )
         }
         load(source.root)
@@ -381,13 +396,34 @@ class LibraryViewModel(
         }
     }
 
+    /** 记录某个目录的第一个可见条目与滚动偏移；关闭位置记忆时保留已有记录不覆盖。 */
+    fun savePosition(sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) {
+        if (sourceLocation.isBlank()) return
+        if (!_state.value.autoRestorePosition) return
+        val position = DirectoryPosition(entryLocation, scrollOffset)
+        _state.update { current ->
+            if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
+                current.copy(savedPosition = position)
+            } else {
+                current
+            }
+        }
+        viewModelScope.launch {
+            positions.save(sourceLocation, relativePath, position)
+        }
+    }
+
     private fun load(directory: MediaFile) {
         loadJob?.cancel()
         _state.update { it.copy(loading = true, failure = null) }
         loadJob = viewModelScope.launch {
+            val sourceLocation = _state.value.sourceLocation
+            val relativePath = relativeDirectoryPath(_state.value.stack)
+            val position = positions.load(sourceLocation, relativePath)
             val result = library.list(directory)
+            currentCoroutineContext().ensureActive()
             _state.update {
-                it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure())
+                it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position)
             }
         }
     }
@@ -448,8 +484,7 @@ class LibraryViewModel(
         val viewMode: ViewMode,
         val gridColumns: Int,
         val sortOrder: SortOrder,
-        val autoScrollToLastPlayed: Boolean,
-        val lastPlayedLocation: String?,
+        val autoRestorePosition: Boolean,
     )
 
     companion object {
@@ -488,6 +523,7 @@ class LibraryViewModel(
                             WebDavAddress.SCHEME_HTTPS to WebDavSourceVerifier(webDavTransport),
                         ),
                     ),
+                    positions = DataStoreDirectoryPositionStore.create(appContext),
                 )
             }
         }

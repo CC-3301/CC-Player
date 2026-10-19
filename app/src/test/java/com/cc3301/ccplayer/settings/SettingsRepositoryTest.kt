@@ -10,7 +10,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -105,24 +104,15 @@ class SettingsRepositoryTest {
     }
 
     @Test
-    fun `默认进入列表自动滚动到上次播放位置`() = runTest {
-        assertTrue(settings.autoScrollToLastPlayed.first())
+    fun `默认开启进入目录时回到上次停留的位置`() = runTest {
+        assertTrue(settings.autoRestorePosition.first())
     }
 
     @Test
-    fun `自动滚动开关写入后读回`() = runTest {
-        settings.setAutoScrollToLastPlayed(false)
+    fun `位置记忆开关写入后读回`() = runTest {
+        settings.setAutoRestorePosition(false)
 
-        assertFalse(settings.autoScrollToLastPlayed.first())
-    }
-
-    @Test
-    fun `没播过时上次播放位置为空，写入后读回`() = runTest {
-        assertNull(settings.lastPlayedLocation.first())
-
-        settings.setLastPlayedLocation("content://root/a")
-
-        assertEquals("content://root/a", settings.lastPlayedLocation.first())
+        assertFalse(settings.autoRestorePosition.first())
     }
 
     @Test

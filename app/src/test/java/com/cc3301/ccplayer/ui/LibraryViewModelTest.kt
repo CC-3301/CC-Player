@@ -1,10 +1,13 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.library.DataStoreDirectoryPositionStore
+import com.cc3301.ccplayer.library.DirectoryScrollTarget
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
 import com.cc3301.ccplayer.library.FakeMediaFileTree
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.testDirectory
 import com.cc3301.ccplayer.library.testDocument
 import com.cc3301.ccplayer.library.testVideo
@@ -53,6 +56,7 @@ class LibraryViewModelTest {
     private val credentials = FakeCredentialStore()
     private val verifier = RecordingVerifier()
     private val sources = NetworkSourceRepository(store, credentials)
+    private val positions = DataStoreDirectoryPositionStore(FakePreferencesDataStore())
 
     private val localRoot = testDirectory("媒体", "content://root/媒体")
     private val smbRoot = testDirectory("media", "smb://nas/media")
@@ -63,7 +67,7 @@ class LibraryViewModelTest {
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
-        viewModel = LibraryViewModel(DirectoryMediaLibrary(tree), tree, settings, sources, verifier)
+        viewModel = LibraryViewModel(DirectoryMediaLibrary(tree), tree, settings, sources, verifier, positions)
     }
 
     @After
@@ -385,6 +389,157 @@ class LibraryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(emptyList<MediaFile>(), viewModel.directoryEntries())
+    }
+
+    @Test
+    fun `重新进入同一目录时恢复第一个可见条目与偏移`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 48)
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 48), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `不同连接源与不同目录分别记录位置`() = runTest {
+        val series = testDirectory("剧集", "smb://nas/media/剧集")
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            series,
+        )
+        tree.addDirectory(series, testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"))
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/a.mkv", 20)
+        viewModel.enter(series)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "剧集", "smb://nas/media/剧集/第01集.mkv", 72)
+        advanceUntilIdle()
+
+        viewModel.openSource(source)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 20), viewModel.state.value.scrollTarget)
+
+        viewModel.enter(series)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 72), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `关闭位置记忆后进入目录从顶部开始`() = runTest {
+        tree.addDirectory(smbRoot, testVideo("b.mkv", "smb://nas/media/b.mkv"))
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 64)
+        advanceUntilIdle()
+
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `记录条目不存在时停在末尾`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/已删除.mkv", 16)
+        advanceUntilIdle()
+
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 0), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `切换排序不删除位置记录`() = runTest {
+        tree.addDirectory(smbRoot, testVideo("a.mkv", "smb://nas/media/a.mkv"))
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/a.mkv", 24)
+        advanceUntilIdle()
+
+        settings.setSortOrder(SortOrder.NameDescending)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 24), viewModel.state.value.scrollTarget)
+        assertEquals(
+            "smb://nas/media/a.mkv",
+            positions.load("smb://nas/media", "")?.entryLocation,
+        )
+    }
+
+    @Test
+    fun `关闭位置记忆期间浏览不覆盖已有记录`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/a.mkv", 20)
+        advanceUntilIdle()
+
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 60)
+        advanceUntilIdle()
+
+        val saved = positions.load("smb://nas/media", "")
+        assertEquals("smb://nas/media/a.mkv", saved?.entryLocation)
+        assertEquals(20, saved?.scrollOffset)
+    }
+
+    @Test
+    fun `删除连接源清理其目录位置记录`() = runTest {
+        tree.addDirectory(smbRoot, testVideo("a.mkv", "smb://nas/media/a.mkv"))
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/a.mkv", 12)
+        advanceUntilIdle()
+
+        viewModel.removeSource(source)
+        advanceUntilIdle()
+
+        assertNull(positions.load("smb://nas/media", ""))
     }
 
     private fun openSmbForm(

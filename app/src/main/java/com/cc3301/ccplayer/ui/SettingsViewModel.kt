@@ -22,7 +22,7 @@ import kotlinx.coroutines.launch
 data class SettingsState(
     val autoPlayNext: Boolean = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
     val resumeMode: ResumeMode = SettingsRepository.DEFAULT_RESUME_MODE,
-    val autoScrollToLastPlayed: Boolean = SettingsRepository.DEFAULT_AUTO_SCROLL_TO_LAST_PLAYED,
+    val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
     val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
     val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
     val viewMode: ViewMode = ViewMode.List,
@@ -43,11 +43,11 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             val playback = combine(
                 settings.autoPlayNext,
                 settings.resumeMode,
-                settings.autoScrollToLastPlayed,
+                settings.autoRestorePosition,
                 settings.decodeMode,
                 settings.orientationMode,
-            ) { autoPlayNext, resumeMode, autoScroll, decodeMode, orientationMode ->
-                PlaybackSettings(autoPlayNext, resumeMode, autoScroll, decodeMode, orientationMode)
+            ) { autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode ->
+                PlaybackSettings(autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode)
             }
             val display = combine(
                 settings.viewMode,
@@ -58,7 +58,7 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
                 SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
                     resumeMode = playbackSettings.resumeMode,
-                    autoScrollToLastPlayed = playbackSettings.autoScrollToLastPlayed,
+                    autoRestorePosition = playbackSettings.autoRestorePosition,
                     decodeMode = playbackSettings.decodeMode,
                     orientationMode = playbackSettings.orientationMode,
                     viewMode = displaySettings.viewMode,
@@ -77,8 +77,8 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
         viewModelScope.launch { settings.setResumeMode(mode) }
     }
 
-    fun setAutoScrollToLastPlayed(enabled: Boolean) {
-        viewModelScope.launch { settings.setAutoScrollToLastPlayed(enabled) }
+    fun setAutoRestorePosition(enabled: Boolean) {
+        viewModelScope.launch { settings.setAutoRestorePosition(enabled) }
     }
 
     fun setDecodeMode(mode: DecodeMode) {
@@ -105,7 +105,7 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
     private data class PlaybackSettings(
         val autoPlayNext: Boolean,
         val resumeMode: ResumeMode,
-        val autoScrollToLastPlayed: Boolean,
+        val autoRestorePosition: Boolean,
         val decodeMode: DecodeMode,
         val orientationMode: OrientationMode,
     )

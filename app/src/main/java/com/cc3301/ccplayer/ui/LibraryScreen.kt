@@ -25,17 +25,22 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,12 +58,19 @@ import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreview
 import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.library.mediaKindOf
+import com.cc3301.ccplayer.library.relativeDirectoryPath
 import com.cc3301.ccplayer.settings.ViewMode
+import com.cc3301.ccplayer.ui.theme.AppColors
+import com.cc3301.ccplayer.ui.theme.AppRadius
+import com.cc3301.ccplayer.ui.theme.AppSpacing
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * 库页面：按「当前目录即列表」浏览单个连接源，点条目进入子目录或起播。
  *
  * 顶栏只有返回与当前目录名；排序与视图只在设置页。
+ * 离开目录或滚动停下时记录第一个可见条目与偏移，下次进入据此恢复。
  */
 @Composable
 fun LibraryScreen(
@@ -67,36 +79,94 @@ fun LibraryScreen(
     onOpenEntry: (MediaFile) -> Unit,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    onSavePosition: (sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
+    val latestState by rememberUpdatedState(state)
+    val latestSavePosition by rememberUpdatedState(onSavePosition)
+    val sourceLocation = state.sourceLocation
+    val relativePath = relativeDirectoryPath(state.stack)
 
-    // 换排序后回到列表最顶部。
-    LaunchedEffect(state.sortRevision) {
-        if (state.viewMode == ViewMode.List) listState.scrollToItem(0) else gridState.scrollToItem(0)
+    // 目录读完、排序、视图或位置记忆开关变化后，按状态给出的目标定位一次。
+    LaunchedEffect(state.scrollRevision) {
+        val target = state.scrollTarget
+        val index = target?.index ?: 0
+        val offset = target?.offset ?: 0
+        if (state.viewMode == ViewMode.List) {
+            listState.scrollToItem(index, offset)
+        } else {
+            gridState.scrollToItem(index, offset)
+        }
     }
 
-    // 进入目录后滚动到上次播放的条目。
-    LaunchedEffect(state.scrollRevision) {
-        val target = state.scrollTargetLocation ?: return@LaunchedEffect
-        val index = state.visibleEntries.indexOfFirst { it.location == target }
-        if (index < 0) return@LaunchedEffect
-        if (state.viewMode == ViewMode.List) listState.scrollToItem(index) else gridState.scrollToItem(index)
+    // 滚动停下后记录当前位置，避免拖拽期间频繁写盘。
+    LaunchedEffect(state.currentDirectory?.location, state.viewMode) {
+        val visible = snapshotFlow {
+            if (state.viewMode == ViewMode.List) {
+                listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            } else {
+                gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
+            }
+        }
+        visible.collectLatest { (index, offset) ->
+            delay(300)
+            latestState.visibleEntries.getOrNull(index)?.let { entry ->
+                latestSavePosition(sourceLocation, relativePath, entry.location, offset)
+            }
+        }
+    }
+
+    // 离开目录或离开库页面时补记一次，覆盖刚滚动就离开的情况。
+    DisposableEffect(state.currentDirectory?.location, state.viewMode) {
+        onDispose {
+            val current = latestState
+            val index = if (current.viewMode == ViewMode.List) {
+                listState.firstVisibleItemIndex
+            } else {
+                gridState.firstVisibleItemIndex
+            }
+            val offset = if (current.viewMode == ViewMode.List) {
+                listState.firstVisibleItemScrollOffset
+            } else {
+                gridState.firstVisibleItemScrollOffset
+            }
+            current.visibleEntries.getOrNull(index)?.let { entry ->
+                latestSavePosition(sourceLocation, relativePath, entry.location, offset)
+            }
+        }
     }
 
     Column(
         modifier = modifier
             .fillMaxSize()
+            .background(AppColors.Background)
             .safeDrawingPadding(),
     ) {
-        Header(state = state, onBack = onBack)
+        ScreenHeader(
+            title = state.currentDirectory?.name.orEmpty(),
+            leading = {
+                HeaderIconButton(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.library_back),
+                    onClick = onBack,
+                )
+            },
+        )
         when {
-            state.loading -> Centered { CircularProgressIndicator() }
+            state.loading -> Centered { CircularProgressIndicator(color = AppColors.Accent) }
             state.failure != null -> Centered {
                 Message(text = stringResource(mediaFailureText(state.failure)), onRetry = onRetry)
             }
-            state.visibleEntries.isEmpty() -> Centered { Message(text = stringResource(R.string.library_empty)) }
+            state.visibleEntries.isEmpty() -> EmptyState(
+                painter = painterResource(R.drawable.ic_media_folder),
+                tint = AppColors.Accent,
+                background = AppColors.SurfaceHigh,
+                title = stringResource(R.string.library_empty_title),
+                message = stringResource(R.string.library_empty),
+                modifier = Modifier.fillMaxSize(),
+            )
             else -> EntryArea(
                 state = state,
                 mediaPreview = mediaPreview,
@@ -105,29 +175,6 @@ fun LibraryScreen(
                 onOpenEntry = onOpenEntry,
             )
         }
-    }
-}
-
-@Composable
-private fun Header(state: LibraryState, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(onClick = onBack) {
-            Text(text = stringResource(R.string.library_back))
-        }
-        Text(
-            text = state.currentDirectory?.name.orEmpty(),
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 12.dp),
-        )
     }
 }
 
@@ -141,10 +188,18 @@ private fun EntryArea(
 ) {
     val entries = state.visibleEntries
     when (state.viewMode) {
-        ViewMode.List -> LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+        ViewMode.List -> LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = AppSpacing.Lg,
+                end = AppSpacing.Lg,
+                top = 6.dp,
+                bottom = 28.dp,
+            ),
+        ) {
             listItems(entries, key = { it.location }) { entry ->
-                EntryRow(entry = entry, onOpenEntry = onOpenEntry)
-                HorizontalDivider()
+                EntryRow(entry = entry, mediaPreview = mediaPreview, onOpenEntry = onOpenEntry)
             }
         }
 
@@ -152,9 +207,9 @@ private fun EntryArea(
             columns = GridCells.Fixed(state.gridColumns),
             state = gridState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             gridItems(entries, key = { it.location }) { entry ->
                 EntryCard(entry = entry, mediaPreview = mediaPreview, onOpenEntry = onOpenEntry)
@@ -164,77 +219,130 @@ private fun EntryArea(
 }
 
 @Composable
-private fun EntryRow(entry: MediaFile, onOpenEntry: (MediaFile) -> Unit) {
+private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
+    val preview by produceState<MediaPreview?>(initialValue = null, entry.location) {
+        value = mediaPreview.preview(entry)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(AppRadius.Md))
             .clickable { onOpenEntry(entry) }
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = AppSpacing.Sm, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
     ) {
-        Text(
-            text = entry.name,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        Text(text = stringResource(entryKindLabel(entry)), style = MaterialTheme.typography.labelMedium)
+        Thumbnail(entry = entry, preview = preview, width = 76.dp, height = 46.dp)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = entry.name,
+                style = MaterialTheme.typography.bodyLarge,
+                color = AppColors.Foreground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = stringResource(entryKindLabel(entry)),
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.Muted,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
+        if (entry.isDirectory) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = AppColors.Faint,
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 
-/** 网格卡片：缩略图（或占位图）+ 文件名 + 时长角标。 */
+/** 网格卡片：缩略图（或占位图）+ 文件名 + 种类。 */
 @Composable
 private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
     val preview by produceState<MediaPreview?>(initialValue = null, entry.location) {
         value = mediaPreview.preview(entry)
     }
     Column(modifier = Modifier.clickable { onOpenEntry(entry) }) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(cardAspectRatio(entry))
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center,
-        ) {
-            val image = preview?.image
-            if (image != null) {
-                AsyncImage(
-                    model = image,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Icon(
-                    painter = painterResource(placeholderIcon(entry)),
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(40.dp),
-                )
-            }
-            val duration = preview?.durationMillis
-            if (duration != null) {
-                Text(
-                    text = formatDuration(duration),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 1.dp),
-                )
-            }
-        }
+        Thumbnail(
+            entry = entry,
+            preview = preview,
+            width = null,
+            height = null,
+            aspectRatio = cardAspectRatio(entry),
+            cornerRadius = 10.dp,
+        )
         Text(
             text = entry.name,
             style = MaterialTheme.typography.bodySmall,
-            maxLines = 2,
+            color = AppColors.Foreground,
+            maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 4.dp, start = 2.dp, end = 2.dp),
+            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
         )
+        Text(
+            text = stringResource(entryKindLabel(entry)),
+            style = MaterialTheme.typography.labelSmall,
+            color = AppColors.Muted,
+            modifier = Modifier.padding(top = 1.dp, start = 2.dp, end = 2.dp),
+        )
+    }
+}
+
+/** 列表与网格共用的缩略图：目录用图标底座，文件有预览图就显示，否则用种类占位图。 */
+@Composable
+private fun Thumbnail(
+    entry: MediaFile,
+    preview: MediaPreview?,
+    width: androidx.compose.ui.unit.Dp?,
+    height: androidx.compose.ui.unit.Dp?,
+    aspectRatio: Float? = null,
+    cornerRadius: androidx.compose.ui.unit.Dp = 9.dp,
+) {
+    val shape = RoundedCornerShape(cornerRadius)
+    val background = if (entry.isDirectory) AppColors.SurfaceHigh else AppColors.SurfaceHighest
+    val base = when {
+        width != null && height != null -> Modifier.size(width = width, height = height)
+        aspectRatio != null -> Modifier.fillMaxWidth().aspectRatio(aspectRatio)
+        else -> Modifier.fillMaxWidth()
+    }
+    Box(
+        modifier = base
+            .clip(shape)
+            .background(background),
+        contentAlignment = Alignment.Center,
+    ) {
+        val image = preview?.image
+        if (image != null) {
+            AsyncImage(
+                model = image,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(
+                painter = painterResource(placeholderIcon(entry)),
+                contentDescription = null,
+                tint = if (entry.isDirectory) AppColors.Accent else AppColors.Muted,
+                modifier = Modifier.size(if (entry.isDirectory) 24.dp else 20.dp),
+            )
+        }
+        val duration = preview?.durationMillis
+        if (duration != null && !entry.isDirectory) {
+            Text(
+                text = formatDuration(duration),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(AppSpacing.Xs)
+                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = AppSpacing.Xs, vertical = 1.dp),
+            )
+        }
     }
 }
 
@@ -254,12 +362,21 @@ private fun Message(text: String, onRetry: (() -> Unit)? = null) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.Muted,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 32.dp),
         )
         if (onRetry != null) {
-            Spacer(modifier = Modifier.height(16.dp))
-            Button(onClick = onRetry) {
+            Spacer(modifier = Modifier.height(AppSpacing.Lg))
+            Button(
+                onClick = onRetry,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AppColors.AccentDeep,
+                    contentColor = Color.White,
+                ),
+                shape = RoundedCornerShape(AppRadius.Md),
+            ) {
                 Text(text = stringResource(R.string.library_retry))
             }
         }
