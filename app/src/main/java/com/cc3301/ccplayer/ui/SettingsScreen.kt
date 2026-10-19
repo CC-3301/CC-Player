@@ -68,7 +68,7 @@ fun SettingsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(AppColors.Background)
+            .background(MaterialTheme.colorScheme.background)
             .safeDrawingPadding(),
     ) {
         ScreenHeader(
@@ -107,7 +107,7 @@ fun SettingsScreen(
                     label = stringResource(R.string.settings_decode_title),
                     options = DecodeMode.entries,
                     selected = state.decodeMode,
-                    optionLabel = { OptionLabel(decodeModeLabel(it)) },
+                    optionLabel = { OptionLabel(settingsDecodeModeLabel(it)) },
                     onSelect = onSetDecodeMode,
                 )
                 RowDivider()
@@ -149,11 +149,6 @@ fun SettingsScreen(
     }
 }
 
-internal val viewChoices: List<ViewChoice> = buildList {
-    add(ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS))
-    SettingsRepository.GRID_COLUMN_CHOICES.forEach { columns -> add(ViewChoice(ViewMode.Grid, columns)) }
-}
-
 /** 当前视图：单列列表固定对应列表选项，网格按列数对应各自选项。 */
 private fun viewChoiceOf(state: SettingsState): ViewChoice = when (state.viewMode) {
     ViewMode.List -> ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS)
@@ -193,7 +188,7 @@ private fun ToggleSetting(label: String, checked: Boolean, onCheckedChange: (Boo
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = AppColors.AccentDeep,
-                uncheckedThumbColor = Color(0xFFC9D3E2),
+                uncheckedThumbColor = AppColors.SwitchThumb,
                 uncheckedTrackColor = AppColors.SurfaceHighest,
                 uncheckedBorderColor = Color.Transparent,
             ),
@@ -268,8 +263,8 @@ private fun <T> ChoiceSetting(
 private fun optionText(label: OptionLabel): String {
     val argument = label.formatArg
     return if (argument == null) {
-        stringResource(label.text)
+        stringResource(label.resourceId)
     } else {
-        stringResource(label.text, argument)
+        stringResource(label.resourceId, argument)
     }
 }

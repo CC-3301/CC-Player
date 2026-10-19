@@ -57,9 +57,22 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         ResumeMode.entries.firstOrNull { it.name == preferences[RESUME_MODE] } ?: DEFAULT_RESUME_MODE
     }
 
-    /** "进入目录时自动回到上次停留的位置"开关，默认开。 */
+    /** "进入目录时自动回到上次停留的位置"开关，默认开；旧键的值在首次读取时迁移。 */
     val autoRestorePosition: Flow<Boolean> = dataStore.data.map { preferences ->
-        preferences[AUTO_RESTORE_POSITION] ?: DEFAULT_AUTO_RESTORE_POSITION
+        val current = preferences[AUTO_RESTORE_POSITION]
+        if (current != null) return@map current
+        val legacy = preferences[LEGACY_AUTO_SCROLL_TO_LAST_PLAYED]
+        if (legacy == null) {
+            DEFAULT_AUTO_RESTORE_POSITION
+        } else {
+            runCatching {
+                dataStore.edit { editable ->
+                    if (editable[AUTO_RESTORE_POSITION] == null) editable[AUTO_RESTORE_POSITION] = legacy
+                    editable.remove(LEGACY_AUTO_SCROLL_TO_LAST_PLAYED)
+                }
+            }
+            legacy
+        }
     }
 
     /** 全局解码模式，默认硬解（解码失败由 mpv 回退软解）。 */
@@ -137,6 +150,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
         private val RESUME_MODE = stringPreferencesKey("resume_mode")
         private val AUTO_RESTORE_POSITION = booleanPreferencesKey("auto_restore_position")
+        private val LEGACY_AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
         private val DECODE_MODE = stringPreferencesKey("decode_mode")
 
         private fun Preferences.rootLocations(): List<String> =

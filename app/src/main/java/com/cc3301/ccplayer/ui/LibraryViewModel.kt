@@ -234,15 +234,15 @@ class LibraryViewModel(
         viewModelScope.launch { settings.addRoot(location) }
     }
 
-    /** 删除连接源：只删本地记录与凭据，不动远程文件或本地文件夹；位置记录一并清理。 */
+    /** 删除连接源：先清理位置记录，再移除本地记录与凭据；不动远程文件或本地文件夹。 */
     fun removeSource(source: ConnectionSource) {
         viewModelScope.launch {
+            positions.clearSource(source.location)
             if (source.protocol == SourceProtocol.Local) {
                 settings.removeRoot(source.location)
             } else {
                 sources.remove(source.location)
             }
-            positions.clearSource(source.location)
         }
     }
 
@@ -366,7 +366,7 @@ class LibraryViewModel(
     }
 
     fun enter(directory: MediaFile) {
-        _state.update { it.copy(stack = it.stack + directory) }
+        _state.update { it.copy(stack = it.stack + directory, entries = emptyList()) }
         load(directory)
     }
 
@@ -375,7 +375,7 @@ class LibraryViewModel(
         val stack = _state.value.stack
         if (stack.size <= 1) return
         val parent = stack.dropLast(1).last()
-        _state.update { it.copy(stack = stack.dropLast(1)) }
+        _state.update { it.copy(stack = stack.dropLast(1), entries = emptyList()) }
         load(parent)
     }
 
@@ -396,10 +396,11 @@ class LibraryViewModel(
         }
     }
 
-    /** 记录某个目录的第一个可见条目与滚动偏移；关闭位置记忆时保留已有记录不覆盖。 */
+    /** 记录某个目录的第一个可见条目与滚动偏移；关闭位置记忆或加载中不写。 */
     fun savePosition(sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) {
         if (sourceLocation.isBlank()) return
-        if (!_state.value.autoRestorePosition) return
+        val current = _state.value
+        if (!current.autoRestorePosition || current.loading) return
         val position = DirectoryPosition(entryLocation, scrollOffset)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
@@ -419,13 +420,22 @@ class LibraryViewModel(
         loadJob = viewModelScope.launch {
             val sourceLocation = _state.value.sourceLocation
             val relativePath = relativeDirectoryPath(_state.value.stack)
-            val position = positions.load(sourceLocation, relativePath)
+            val position = loadPosition(sourceLocation, relativePath)
             val result = library.list(directory)
             currentCoroutineContext().ensureActive()
             _state.update {
                 it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position)
             }
         }
+    }
+
+    /** 位置记录读取失败按没有记录处理，不阻断目录浏览。 */
+    private suspend fun loadPosition(sourceLocation: String, relativePath: String): DirectoryPosition? = try {
+        positions.load(sourceLocation, relativePath)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Exception) {
+        null
     }
 
     /** 本地源解析不出来（比如授权失效）时仍列出，好让用户能删除它。 */

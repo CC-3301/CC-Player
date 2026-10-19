@@ -56,8 +56,8 @@
     <string name="player_subtitles">字幕</string>
     <string name="player_subtitle_embedded">内嵌 %1$s</string>
     <string name="player_subtitle_off">关闭字幕</string>
-    <string name="player_decode_hardware">硬件解码</string>
-    <string name="player_decode_software">软件解码</string>
+    <string name="player_decode_hardware">硬解</string>
+    <string name="player_decode_software">软解</string>
     <string name="player_loop_sequential">顺序</string>
     <string name="player_loop_list">列表循环</string>
     <string name="player_loop_single">单集循环</string>
@@ -95,7 +95,9 @@
     <string name="settings_resume_last_position">播放上次位置</string>
     <string name="settings_resume_from_start">始终从头播放</string>
     <string name="settings_auto_restore_position">进入目录时自动回到上次停留的位置</string>
-    <string name="settings_decode_title">解码模式</string>
+    <string name="settings_decode_title">解码方式</string>
+    <string name="settings_decode_hardware">硬件解码</string>
+    <string name="settings_decode_software">软件解码</string>
     <string name="settings_orientation_title">屏幕方向</string>
     <string name="settings_view_title">视图</string>
     <string name="settings_sort_title">排序</string>

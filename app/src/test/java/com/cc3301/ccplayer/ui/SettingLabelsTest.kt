@@ -1,8 +1,10 @@
 package com.cc3301.ccplayer.ui
 
 import com.cc3301.ccplayer.R
+import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.ViewMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 /** 设置选项文案：网格选项必须带实际列数，不能留下占位符。 */
@@ -27,6 +29,15 @@ class SettingLabelsTest {
             ),
             viewChoices,
         )
+    }
+
+    @Test
+    fun `设置页解码文案与播放器文案分开`() {
+        assertEquals(R.string.settings_decode_hardware, settingsDecodeModeLabel(DecodeMode.Hardware))
+        assertEquals(R.string.settings_decode_software, settingsDecodeModeLabel(DecodeMode.Software))
+        assertEquals(R.string.player_decode_hardware, decodeModeLabel(DecodeMode.Hardware))
+        assertEquals(R.string.player_decode_software, decodeModeLabel(DecodeMode.Software))
+        assertNotEquals(settingsDecodeModeLabel(DecodeMode.Hardware), decodeModeLabel(DecodeMode.Hardware))
     }
 
     @Test

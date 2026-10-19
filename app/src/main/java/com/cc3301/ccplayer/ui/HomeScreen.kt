@@ -47,7 +47,7 @@ fun HomeScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(AppColors.Background)
+            .background(MaterialTheme.colorScheme.background)
             .safeDrawingPadding(),
     ) {
         ScreenHeader(
@@ -80,7 +80,7 @@ private fun ProtocolEntry(protocol: SourceProtocol, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(Brush.linearGradient(listOf(AppColors.Surface, Color(0xFF111722))))
+            .background(Brush.linearGradient(listOf(AppColors.Surface, AppColors.SurfaceGradientEnd)))
             .border(1.dp, AppColors.Line, shape)
             .clickable(onClick = onClick)
             .padding(horizontal = AppSpacing.Lg, vertical = 18.dp),

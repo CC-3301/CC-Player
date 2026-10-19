@@ -1,9 +1,13 @@
 package com.cc3301.ccplayer.library
 
+import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.FakePreferencesDataStore
+import com.cc3301.ccplayer.settings.SettingsRepository
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 目录位置记录：按连接源与相对目录分别保存，删除连接源时整源清理。 */
@@ -52,6 +56,24 @@ class DirectoryPositionStoreTest {
         assertNull(store.load("smb://nas/media", ""))
         assertNull(store.load("smb://nas/media", "剧集"))
         assertEquals("smb://nas/other/c.mkv", store.load("smb://nas/other", "")?.entryLocation)
+    }
+
+    @Test
+    fun `目录位置与设置和播放进度分开存放`() = runTest {
+        val settingsStorage = FakePreferencesDataStore()
+        val positionStorage = FakePreferencesDataStore()
+        val settings = SettingsRepository(settingsStorage)
+        val positionStore = DataStoreDirectoryPositionStore(positionStorage)
+
+        settings.setDecodeMode(DecodeMode.Software)
+        positionStore.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 12))
+
+        assertEquals(DecodeMode.Software, settings.decodeMode.first())
+        val settingsKeys = settingsStorage.data.first().asMap().keys.map { it.name }
+        val positionKeys = positionStorage.data.first().asMap().keys.map { it.name }
+        assertTrue(settingsKeys.none { it.startsWith("position_") })
+        assertTrue(positionKeys.isNotEmpty())
+        assertTrue(positionKeys.all { it.startsWith("position_") })
     }
 
     @Test

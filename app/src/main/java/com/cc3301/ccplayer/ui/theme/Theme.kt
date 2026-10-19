@@ -5,18 +5,19 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.cc3301.ccplayer.R
 
-/** 深色影院主题的取色：背景、表面、边框、文字与强调色。 */
+/** 深色影院主题的取色：表面、边框、文字与强调色。 */
 object AppColors {
-    val Page = Color(0xFF05070B)
-    val Background = Color(0xFF0B0F16)
     val Surface = Color(0xFF141A24)
     val SurfaceHigh = Color(0xFF1A2230)
     val SurfaceHighest = Color(0xFF222C3C)
+    val SurfaceGradientEnd = Color(0xFF111722)
     val Line = Color(0xFF232D3C)
     val Foreground = Color(0xFFE9EEF7)
     val Muted = Color(0xFF93A0B5)
@@ -26,11 +27,11 @@ object AppColors {
     val AccentSoft = Color(0xFF152844)
     val Danger = Color(0xFFFF6B6B)
     val DangerSoft = Color(0xFF3A1D22)
-    val Ok = Color(0xFF4ADE80)
     val LocalTint = Color(0xFF6EE7A0)
     val LocalSoft = Color(0xFF1D2A1F)
     val WebDavTint = Color(0xFFB197FC)
     val WebDavSoft = Color(0xFF241E33)
+    val SwitchThumb = Color(0xFFC9D3E2)
 }
 
 /** 间距令牌。 */
@@ -60,7 +61,6 @@ private val AppColorScheme = darkColorScheme(
     onPrimaryContainer = AppColors.Accent,
     secondary = AppColors.Accent,
     onSecondary = Color.White,
-    background = AppColors.Background,
     onBackground = AppColors.Foreground,
     surface = AppColors.Surface,
     onSurface = AppColors.Foreground,
@@ -88,11 +88,12 @@ private val AppTypography = Typography(
     labelSmall = TextStyle(fontSize = 10.sp),
 )
 
-/** 应用主题：替换 Material 默认配色与字号。 */
+/** 应用主题：替换 Material 默认配色与字号；背景以 colors.xml 为唯一来源。 */
 @Composable
 fun CcPlayerTheme(content: @Composable () -> Unit) {
+    val colorScheme = AppColorScheme.copy(background = colorResource(R.color.app_background))
     MaterialTheme(
-        colorScheme = AppColorScheme,
+        colorScheme = colorScheme,
         typography = AppTypography,
         content = content,
     )

@@ -5,13 +5,20 @@ import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.settings.OrientationMode
+import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
 
 /** 设置里的一个选项文案：字符串资源与可选格式参数（如网格列数）。 */
-data class OptionLabel(val text: Int, val formatArg: Int? = null)
+data class OptionLabel(val resourceId: Int, val formatArg: Int? = null)
 
 /** 视图选项：列表与 2/3/4 列网格。 */
 data class ViewChoice(val viewMode: ViewMode, val gridColumns: Int)
+
+/** 设置页的视图选项顺序：列表、2 列、3 列、4 列网格。 */
+val viewChoices: List<ViewChoice> = buildList {
+    add(ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS))
+    SettingsRepository.GRID_COLUMN_CHOICES.forEach { columns -> add(ViewChoice(ViewMode.Grid, columns)) }
+}
 
 /** 视图选项文案；网格选项带上实际列数，避免占位符漏填。 */
 fun viewChoiceLabel(choice: ViewChoice): OptionLabel = when (choice.viewMode) {
@@ -19,10 +26,16 @@ fun viewChoiceLabel(choice: ViewChoice): OptionLabel = when (choice.viewMode) {
     ViewMode.Grid -> OptionLabel(R.string.library_view_grid_columns, choice.gridColumns)
 }
 
-/** 控制条与设置页共用的取值文案，同一取值只在此处映射一次。 */
+/** 播放器控制条的解码文案。 */
 fun decodeModeLabel(mode: DecodeMode): Int = when (mode) {
     DecodeMode.Hardware -> R.string.player_decode_hardware
     DecodeMode.Software -> R.string.player_decode_software
+}
+
+/** 设置页的解码文案，与播放器文案分开。 */
+fun settingsDecodeModeLabel(mode: DecodeMode): Int = when (mode) {
+    DecodeMode.Hardware -> R.string.settings_decode_hardware
+    DecodeMode.Software -> R.string.settings_decode_software
 }
 
 fun loopModeLabel(mode: LoopMode): Int = when (mode) {

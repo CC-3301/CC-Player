@@ -141,7 +141,7 @@ fun LibraryScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(AppColors.Background)
+            .background(MaterialTheme.colorScheme.background)
             .safeDrawingPadding(),
     ) {
         ScreenHeader(

@@ -70,7 +70,7 @@ fun SourceListScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(AppColors.Background)
+            .background(MaterialTheme.colorScheme.background)
             .safeDrawingPadding(),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
