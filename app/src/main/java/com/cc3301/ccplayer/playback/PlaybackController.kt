@@ -87,6 +87,10 @@ class PlaybackController(
     private val _sleepTimerState = MutableStateFlow(SleepTimerState.Off)
     val sleepTimerState: StateFlow<SleepTimerState> = _sleepTimerState.asStateFlow()
 
+    /** 当前定时选项，供播放页标出勾选；未设定时或到点后为空。 */
+    private val _sleepTimerOption = MutableStateFlow<SleepTimerOption?>(null)
+    val sleepTimerOption: StateFlow<SleepTimerOption?> = _sleepTimerOption.asStateFlow()
+
     private val byNaturalName = Comparator<MediaFile> { left, right -> compareNatural(left.name, right.name) }
 
     /** 会话里是否有已打开的媒体。 */
@@ -224,6 +228,7 @@ class PlaybackController(
     /** 设定定时暂停：替换已有的定时，不叠加。 */
     fun startSleepTimer(option: SleepTimerOption) {
         cancelSleepTimer()
+        _sleepTimerOption.value = option
         when (option) {
             SleepTimerOption.EndOfEpisode -> _sleepTimerState.value = SleepTimerState.EndOfEpisode
             is SleepTimerOption.AfterDuration -> {
@@ -241,6 +246,7 @@ class PlaybackController(
         sleepTimerJob?.cancel()
         sleepTimerJob = null
         _sleepTimerState.value = SleepTimerState.Off
+        _sleepTimerOption.value = null
     }
 
     /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
@@ -326,6 +332,7 @@ class PlaybackController(
         if (!active) return
         if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
             _sleepTimerState.value = SleepTimerState.Off
+            _sleepTimerOption.value = null
             pausedAtEpisodeEnd = true
             _state.value = PlaybackState.Paused
             return
@@ -359,6 +366,7 @@ class PlaybackController(
     private fun pauseOnSleepTimerElapsed() {
         sleepTimerJob = null
         _sleepTimerState.value = SleepTimerState.Off
+        _sleepTimerOption.value = null
         if (!active) return
         paused = true
         engine.pause()

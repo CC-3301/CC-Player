@@ -78,6 +78,19 @@ class PlayerLevelControlsTest {
         assertEquals(emptyList<Int>(), muted.written)
     }
 
+    @Test
+    fun `外部改音量后下次拖动按新音量续算`() {
+        volume.current = 3
+        levels.dragVolume(dragAmount = -200f, viewHeight = 1_000)
+        assertEquals(6, volume.written.last())
+
+        volume.current = 12
+        levels.beginDrag()
+        levels.dragVolume(dragAmount = -100f, viewHeight = 1_000)
+
+        assertEquals(14, volume.written.last())
+    }
+
     private class FakeVolumeControl(private val max: Int, var current: Int) : VolumeControl {
         val written = mutableListOf<Int>()
 

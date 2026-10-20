@@ -21,6 +21,11 @@ class PlayerLevelControls(private val volume: VolumeControl) {
 
     private var volumeFraction: Float? = null
 
+    /** 每次拖动开始前重新读取系统音量，避免外部改过音量后沿用旧比例。 */
+    fun beginDrag() {
+        volumeFraction = null
+    }
+
     /** 拖动音量，返回新音量占满档的比例 0~1，供界面提示。 */
     fun dragVolume(dragAmount: Float, viewHeight: Int): Float {
         val max = volume.maxVolume

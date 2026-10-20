@@ -22,11 +22,13 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -66,8 +68,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -94,6 +100,30 @@ import kotlin.math.roundToInt
 /** 播放器浮层的半透明面板与圆角，叠在画面上也保持主题一致。 */
 private val PlayerPanelColor = AppColors.SurfaceHigh.copy(alpha = 0.96f)
 private val PlayerPanelShape = RoundedCornerShape(AppRadius.Lg)
+
+/** 顶栏内容高度；锁定键与“更多”面板据此贴在标题栏下方。 */
+private val PlayerTopBarHeight = 56.dp
+
+/** “更多”面板为底部控制条预留的高度。 */
+private val PlayerControlBarReserve = 224.dp
+
+/** 吞掉区域内触摸，避免落到下层手势层；不建立可点击语义。 */
+private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            awaitPointerEvent().changes.forEach { change ->
+                if (change.pressed) change.consume()
+            }
+        }
+    }
+}
+
+/** 无涟漪点击。 */
+@Composable
+private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
+    val interaction = remember { MutableInteractionSource() }
+    return clickable(interactionSource = interaction, indication = null, onClick = onClick)
+}
 
 /** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
 private fun Modifier.playerPanel(): Modifier = this
@@ -140,6 +170,7 @@ fun PlayerScreen(
     orientationMode: OrientationMode,
     autoPlayNext: Boolean,
     sleepTimerState: SleepTimerState,
+    sleepTimerOption: SleepTimerOption?,
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     videoAspectRatio: Double?,
@@ -168,7 +199,6 @@ fun PlayerScreen(
     var playlistVisible by remember { mutableStateOf(false) }
     var subtitleMenuVisible by remember { mutableStateOf(false) }
     var moreVisible by remember { mutableStateOf(false) }
-    var sleepTimerChoice by remember { mutableStateOf<SleepTimerOption?>(null) }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
     val locked = lock.locked
@@ -190,6 +220,9 @@ fun PlayerScreen(
             containerHeight = with(density) { maxHeight.toPx() },
             videoAspectRatio = videoAspectRatio,
         )
+        val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
+        val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
+            .coerceAtLeast(72.dp)
         AndroidView(
             factory = { context ->
                 MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
@@ -229,8 +262,9 @@ fun PlayerScreen(
                     moreVisible = moreVisible,
                     onBack = onClose,
                     onToggleMore = {
-                        moreVisible = !moreVisible
-                        if (!moreVisible) {
+                        val opening = !moreVisible
+                        moreVisible = opening
+                        if (opening) {
                             playlistVisible = false
                             subtitleMenuVisible = false
                         }
@@ -242,7 +276,7 @@ fun PlayerScreen(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .safeDrawingPadding()
-                        .padding(start = AppSpacing.Sm, top = 56.dp),
+                        .padding(start = AppSpacing.Sm, top = PlayerTopBarHeight),
                 )
                 if (moreVisible) {
                     MorePanel(
@@ -251,25 +285,25 @@ fun PlayerScreen(
                         orientationMode = orientationMode,
                         autoPlayNext = autoPlayNext,
                         sleepTimerState = sleepTimerState,
-                        selectedSleepTimerOption = sleepTimerChoice,
+                        selectedSleepTimerOption = sleepTimerOption,
                         onSelectDecodeMode = onSelectDecodeMode,
                         onSelectLoopMode = onSelectLoopMode,
                         onSelectOrientationMode = onSelectOrientationMode,
                         onToggleAutoPlayNext = onToggleAutoPlayNext,
                         onSelectSleepTimer = { option ->
-                            sleepTimerChoice = option
                             onSelectSleepTimer(option)
                             moreVisible = false
                         },
                         onCancelSleepTimer = {
-                            sleepTimerChoice = null
                             onCancelSleepTimer()
                             moreVisible = false
                         },
+                        panelWidth = morePanelWidth,
+                        panelMaxHeight = morePanelMaxHeight,
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .safeDrawingPadding()
-                            .padding(top = 56.dp, end = AppSpacing.Sm),
+                            .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
                     )
                 }
                 Controls(
@@ -289,8 +323,22 @@ fun PlayerScreen(
                     onSeekPreview = onSeekPreview,
                     onSeekCommit = onSeekCommit,
                     onPlaylistSelect = onPlaylistSelect,
-                    onTogglePlaylist = { playlistVisible = !playlistVisible },
-                    onToggleSubtitleMenu = { subtitleMenuVisible = !subtitleMenuVisible },
+                    onTogglePlaylist = {
+                        val opening = !playlistVisible
+                        playlistVisible = opening
+                        if (opening) {
+                            subtitleMenuVisible = false
+                            moreVisible = false
+                        }
+                    },
+                    onToggleSubtitleMenu = {
+                        val opening = !subtitleMenuVisible
+                        subtitleMenuVisible = opening
+                        if (opening) {
+                            playlistVisible = false
+                            moreVisible = false
+                        }
+                    },
                     onSelectSubtitle = onSelectSubtitle,
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
@@ -336,89 +384,109 @@ private fun PlayerGestureLayer(
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
     val latestDuration = rememberUpdatedState(durationMillis)
+    val tapGesture = remember { PlayerTapGesture() }
+    val dispatchTap: (TapGestureAction) -> Unit = { action ->
+        when (action) {
+            TapGestureAction.ToggleControls -> latestOnToggleControls.value()
+            is TapGestureAction.DoubleTap -> when (val doubleTap = action.action) {
+                is DoubleTapAction.Seek -> latestOnSeekBy.value(doubleTap.deltaMillis)
+                DoubleTapAction.TogglePlayPause -> latestOnTogglePlayPause.value()
+            }
+        }
+    }
 
     Box(
         modifier = modifier
             .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
-                detectPlayerTaps(
-                    onTap = { latestOnToggleControls.value() },
-                    onDoubleTap = { offset ->
-                        when (val action = doubleTapAction(offset.x, size.width)) {
-                            is DoubleTapAction.Seek -> latestOnSeekBy.value(action.deltaMillis)
-                            DoubleTapAction.TogglePlayPause -> latestOnTogglePlayPause.value()
-                        }
-                    },
-                )
+                if (!enabled) {
+                    tapGesture.cancel()
+                    return@pointerInput
+                }
+                detectPlayerTaps(tapGesture, dispatchTap)
             }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 val threshold = VOLUME_DRAG_THRESHOLD_DP.dp.toPx()
+                val touchSlop = viewConfiguration.touchSlop
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val pointerId = down.id
-                    val zone = gestureZone(down.position.x, size.width)
-                    val seekBaseMillis = latestPosition.value
-                    var gesture: DragGesture? = null
-                    var totalX = 0f
-                    var totalY = 0f
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                        if (!change.pressed) break
-                        val delta = change.position - change.previousPosition
-                        totalX += delta.x
-                        totalY += delta.y
-                        if (gesture == null) {
-                            gesture = dragGesture(zone, totalX, totalY, threshold)
-                        }
-                        if (gesture != null) {
-                            change.consume()
-                        }
-                        when (gesture) {
-                            DragGesture.Volume -> if (delta.y != 0f) {
-                                latestOnVolumeHint.value(levelControls.dragVolume(delta.y, size.height))
+                    val drag = PlayerDragGesture(threshold, touchSlop)
+                    drag.start(gestureZone(down.position.x, size.width))
+                    var seekDrag: PlayerSeekDrag? = null
+                    levelControls.beginDrag()
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            if (!change.pressed) break
+                            val delta = change.position - change.previousPosition
+                            val update = drag.update(delta.x, delta.y)
+                            if (update.consume) {
+                                change.consume()
+                                tapGesture.cancel()
                             }
-
-                            DragGesture.Seek -> {
-                                val duration = latestDuration.value
-                                if (duration > 0) {
-                                    val target = (seekBaseMillis + seekDeltaMillis(totalX, size.width))
-                                        .coerceIn(0L, duration)
-                                    latestOnSeekPreview.value(target)
-                                    latestOnSeekHint.value(SeekHint(target, target - seekBaseMillis))
+                            when (update.gesture) {
+                                DragGesture.Volume -> if (update.volumeDragY != 0f) {
+                                    latestOnVolumeHint.value(
+                                        levelControls.dragVolume(update.volumeDragY, size.height),
+                                    )
                                 }
-                            }
 
-                            null -> Unit
+                                DragGesture.Seek -> {
+                                    val seek = seekDrag ?: PlayerSeekDrag(
+                                        baseMillis = latestPosition.value,
+                                        durationMillis = latestDuration.value,
+                                        width = size.width,
+                                    ).also { seekDrag = it }
+                                    seek.preview(update.seekDragX)?.let { target ->
+                                        latestOnSeekPreview.value(target)
+                                        latestOnSeekHint.value(SeekHint(target, target - seek.baseMillis))
+                                    }
+                                }
+
+                                null -> Unit
+                            }
                         }
+                        if (drag.gesture == DragGesture.Seek && seekDrag?.finish() != null) {
+                            latestOnSeekCommit.value()
+                        }
+                    } finally {
+                        latestOnVolumeHint.value(null)
+                        latestOnSeekHint.value(null)
                     }
-                    if (gesture == DragGesture.Seek) latestOnSeekCommit.value()
-                    latestOnVolumeHint.value(null)
-                    latestOnSeekHint.value(null)
                 }
             },
     )
 }
 
-/** 300ms 内两次点击为双击；单击动作延迟到双击窗口结束才触发。 */
+/** 单击/双击统一交给 [PlayerTapGesture]：单击延迟到双击窗口结束，第二次按下转为拖动时明确取消。 */
 private suspend fun PointerInputScope.detectPlayerTaps(
-    onTap: (Offset) -> Unit,
-    onDoubleTap: (Offset) -> Unit,
+    gesture: PlayerTapGesture,
+    onAction: (TapGestureAction) -> Unit,
 ) {
     awaitEachGesture {
-        awaitFirstDown()
-        val firstUp = waitForUpOrCancellation() ?: return@awaitEachGesture
+        val firstDown = awaitFirstDown()
+        gesture.press(firstDown.uptimeMillis, firstDown.position)?.let(onAction)
+        val firstUp = waitForUpOrCancellation()
+        if (firstUp == null) {
+            gesture.cancel()
+            return@awaitEachGesture
+        }
+        gesture.release(firstUp.uptimeMillis, size.width)?.let(onAction)
         val secondDown = withTimeoutOrNull(DOUBLE_TAP_WINDOW_MILLIS) {
             awaitFirstDown(requireUnconsumed = false)
         }
         if (secondDown == null) {
-            onTap(firstUp.position)
+            gesture.timeout(firstUp.uptimeMillis + DOUBLE_TAP_WINDOW_MILLIS)?.let(onAction)
             return@awaitEachGesture
         }
+        gesture.press(secondDown.uptimeMillis, secondDown.position)?.let(onAction)
         val secondUp = waitForUpOrCancellation()
-        if (secondUp != null) {
-            onDoubleTap(secondUp.position)
+        if (secondUp == null) {
+            gesture.cancel()
+        } else {
+            gesture.release(secondUp.uptimeMillis, size.width)?.let(onAction)
         }
     }
 }
@@ -473,36 +541,38 @@ private fun PlayerTopBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
-            .safeDrawingPadding()
-            .padding(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
+            .blockPlayerGestures()
+            .safeDrawingPadding(),
     ) {
-        IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart)) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = stringResource(R.string.player_title_back),
-                tint = AppColors.Foreground,
-            )
-        }
-        Text(
-            text = title,
-            style = playerOverlayTextStyle(),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Box(
             modifier = Modifier
-                .align(Alignment.Center)
-                .padding(horizontal = 56.dp),
-        )
-        IconButton(onClick = onToggleMore, modifier = Modifier.align(Alignment.CenterEnd)) {
-            Icon(
-                imageVector = Icons.Filled.MoreVert,
-                contentDescription = stringResource(R.string.player_more),
-                tint = playerToolColor(moreVisible),
+                .fillMaxWidth()
+                .height(PlayerTopBarHeight)
+                .padding(horizontal = AppSpacing.Sm),
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart)) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.player_title_back),
+                    tint = AppColors.Foreground,
+                )
+            }
+            Text(
+                text = title,
+                style = playerOverlayTextStyle(),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(horizontal = 56.dp),
             )
+            IconButton(onClick = onToggleMore, modifier = Modifier.align(Alignment.CenterEnd)) {
+                Icon(
+                    imageVector = Icons.Filled.MoreVert,
+                    contentDescription = stringResource(R.string.player_more),
+                    tint = playerToolColor(moreVisible),
+                )
+            }
         }
     }
 }
@@ -585,11 +655,7 @@ private fun Controls(
                     listOf(scrim.copy(alpha = 0.55f), scrim.copy(alpha = 0.88f)),
                 ),
             )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
+            .blockPlayerGestures()
             .safeDrawingPadding()
             .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
@@ -629,7 +695,7 @@ private fun Controls(
     }
 }
 
-/** 底部图标条：播放/暂停严格居中，上一集在左，下一集、字幕与播放列表在右。 */
+/** 底部图标条：左/中/右三槽位，中间 56dp 固定，播放/暂停严格居中。 */
 @Composable
 private fun PlayerIconBar(
     playing: Boolean,
@@ -643,43 +709,63 @@ private fun PlayerIconBar(
     onToggleSubtitles: () -> Unit,
     onTogglePlaylist: () -> Unit,
 ) {
-    Box(modifier = Modifier
-        .fillMaxWidth()
-        .height(48.dp)) {
-        PlayerIconButton(
-            icon = R.drawable.ic_player_previous,
-            contentDescription = stringResource(R.string.player_previous),
-            onClick = onPrevious,
-            enabled = canGoPrevious,
-            modifier = Modifier.align(Alignment.CenterStart),
-        )
-        PlayerIconButton(
-            icon = if (playing) R.drawable.ic_player_pause else R.drawable.ic_player_play,
-            contentDescription = stringResource(
-                if (playing) R.string.player_pause else R.string.player_play,
-            ),
-            onClick = onTogglePlayPause,
-            modifier = Modifier.align(Alignment.Center),
-        )
-        Row(modifier = Modifier.align(Alignment.CenterEnd)) {
-            PlayerIconButton(
-                icon = R.drawable.ic_player_next,
-                contentDescription = stringResource(R.string.player_next),
-                onClick = onNext,
-                enabled = canGoNext,
-            )
-            PlayerIconButton(
-                icon = R.drawable.ic_player_subtitles,
-                contentDescription = stringResource(R.string.player_subtitles),
-                onClick = onToggleSubtitles,
-                active = subtitleMenuVisible,
-            )
-            PlayerIconButton(
-                icon = R.drawable.ic_player_playlist,
-                contentDescription = stringResource(R.string.player_playlist),
-                onClick = onTogglePlaylist,
-                active = playlistVisible,
-            )
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+    ) {
+        // 右侧槽位放三个图标，均分后不超过左右槽位，避免侵入中间的固定 56dp。
+        val iconSize = ((maxWidth - 56.dp) / 6).coerceIn(1.dp, 44.dp)
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                PlayerIconButton(
+                    icon = R.drawable.ic_player_previous,
+                    contentDescription = stringResource(R.string.player_previous),
+                    onClick = onPrevious,
+                    enabled = canGoPrevious,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
+            Box(modifier = Modifier.width(56.dp), contentAlignment = Alignment.Center) {
+                PlayerIconButton(
+                    icon = if (playing) R.drawable.ic_player_pause else R.drawable.ic_player_play,
+                    contentDescription = stringResource(
+                        if (playing) R.string.player_pause else R.string.player_play,
+                    ),
+                    onClick = onTogglePlayPause,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                PlayerIconButton(
+                    icon = R.drawable.ic_player_next,
+                    contentDescription = stringResource(R.string.player_next),
+                    onClick = onNext,
+                    enabled = canGoNext,
+                    modifier = Modifier.size(iconSize),
+                )
+                PlayerIconButton(
+                    icon = R.drawable.ic_player_subtitles,
+                    contentDescription = stringResource(R.string.player_subtitles),
+                    onClick = onToggleSubtitles,
+                    active = subtitleMenuVisible,
+                    modifier = Modifier.size(iconSize),
+                )
+                PlayerIconButton(
+                    icon = R.drawable.ic_player_playlist,
+                    contentDescription = stringResource(R.string.player_playlist),
+                    onClick = onTogglePlaylist,
+                    active = playlistVisible,
+                    modifier = Modifier.size(iconSize),
+                )
+            }
         }
     }
 }
@@ -773,6 +859,8 @@ private fun MorePanel(
     onToggleAutoPlayNext: () -> Unit,
     onSelectSleepTimer: (SleepTimerOption) -> Unit,
     onCancelSleepTimer: () -> Unit,
+    panelWidth: Dp,
+    panelMaxHeight: Dp,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf<MoreSection?>(null) }
@@ -783,14 +871,10 @@ private fun MorePanel(
 
     Column(
         modifier = modifier
-            .widthIn(max = 320.dp)
-            .heightIn(max = 420.dp)
+            .width(panelWidth)
+            .heightIn(max = panelMaxHeight)
             .playerPanel()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
+            .blockPlayerGestures()
             .verticalScroll(rememberScrollState()),
     ) {
         MoreChoiceRow(
@@ -859,8 +943,7 @@ private fun MorePanel(
             sleepTimerOptions.forEach { option ->
                 MoreOptionRow(
                     label = optionText(option.label),
-                    checked = isSleepTimerOptionChecked(option.value, sleepTimerState) ||
-                        option.value == selectedSleepTimerOption,
+                    checked = isSleepTimerOptionChecked(option.value, selectedSleepTimerOption),
                     onClick = { onSelectSleepTimer(option.value) },
                 )
             }
@@ -884,10 +967,14 @@ private fun MoreChoiceRow(
     expanded: Boolean,
     onClick: () -> Unit,
 ) {
+    val expandedState = stringResource(
+        if (expanded) R.string.player_more_expanded else R.string.player_more_collapsed,
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .noRippleClickable(onClick)
+            .semantics { stateDescription = expandedState }
             .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
@@ -917,10 +1004,17 @@ private fun MoreChoiceRow(
 /** 展开后的勾选项。 */
 @Composable
 private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .selectable(
+                selected = checked,
+                onClick = onClick,
+                role = Role.RadioButton,
+                interactionSource = interaction,
+                indication = null,
+            )
             .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -944,10 +1038,17 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
 /** 自动连播开关行。 */
 @Composable
 private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggle() }
+            .toggleable(
+                value = checked,
+                onValueChange = { onToggle() },
+                role = Role.Switch,
+                interactionSource = interaction,
+                indication = null,
+            )
             .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
@@ -960,7 +1061,7 @@ private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit)
         )
         Switch(
             checked = checked,
-            onCheckedChange = { onToggle() },
+            onCheckedChange = null,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                 checkedTrackColor = AppColors.AccentDeep,
@@ -1051,7 +1152,7 @@ private fun PlaylistPanel(
                     color = if (index == currentIndex) AppColors.Accent else AppColors.Foreground,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSelect(index) }
+                        .noRippleClickable { onSelect(index) }
                         .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }
@@ -1078,7 +1179,7 @@ private fun SubtitlePanel(menu: List<SubtitleMenuItem>, onSelect: (SubtitleMenuI
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSelect(item) }
+                        .noRippleClickable { onSelect(item) }
                         .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }

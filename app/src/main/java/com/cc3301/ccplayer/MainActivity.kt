@@ -51,6 +51,7 @@ import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
@@ -122,6 +123,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
     private var loopMode by mutableStateOf(LoopMode.Sequential)
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
+    private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
@@ -140,6 +142,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
                 launch { binder.controller.loopMode.collect { loopMode = it } }
                 launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
+                launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
                 launch { binder.controller.externalSubtitles.collect { externalSubtitles = it } }
@@ -228,6 +231,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
                             onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
                             sleepTimerState = sleepTimerState,
+                            sleepTimerOption = sleepTimerOption,
                             onSelectSubtitle = { item ->
                                 val controller = playback?.controller
                                 when (item) {
@@ -495,6 +499,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         decodeMode = DecodeMode.Hardware
         loopMode = LoopMode.Sequential
         sleepTimerState = SleepTimerState.Off
+        sleepTimerOption = null
         videoAspectRatio = null
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()

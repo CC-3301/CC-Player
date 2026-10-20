@@ -4,7 +4,6 @@ import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.SleepTimerOption
-import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -90,10 +89,11 @@ class PlayerMenuTest {
     }
 
     @Test
-    fun `定时只有播完本集能按状态标勾`() {
-        assertTrue(isSleepTimerOptionChecked(SleepTimerOption.EndOfEpisode, SleepTimerState.EndOfEpisode))
-        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.EndOfEpisode, SleepTimerState.Countdown))
-        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.AfterDuration(30), SleepTimerState.Countdown))
-        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.AfterDuration(30), SleepTimerState.Off))
+    fun `定时勾选由控制器当前选项推导`() {
+        assertTrue(isSleepTimerOptionChecked(SleepTimerOption.EndOfEpisode, SleepTimerOption.EndOfEpisode))
+        assertTrue(isSleepTimerOptionChecked(SleepTimerOption.AfterDuration(30), SleepTimerOption.AfterDuration(30)))
+        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.EndOfEpisode, null))
+        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.AfterDuration(30), null))
+        assertFalse(isSleepTimerOptionChecked(SleepTimerOption.AfterDuration(30), SleepTimerOption.AfterDuration(10)))
     }
 }

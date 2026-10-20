@@ -58,6 +58,8 @@
     <string name="player_playlist">播放列表</string>
     <string name="player_subtitles">字幕</string>
     <string name="player_more">更多</string>
+    <string name="player_more_expanded">已展开</string>
+    <string name="player_more_collapsed">已折叠</string>
     <string name="player_decode">解码</string>
     <string name="player_loop">循环</string>
     <string name="player_orientation">方向</string>
