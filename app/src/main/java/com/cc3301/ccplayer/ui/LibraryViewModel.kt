@@ -137,7 +137,7 @@ data class LibraryState(
     /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
-    /** 套用展示偏好；视图、列数、排序或位置记忆开关变了才重新定位。 */
+    /** 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。 */
     fun withDisplayPreferences(
         viewMode: ViewMode,
         gridColumns: Int,
