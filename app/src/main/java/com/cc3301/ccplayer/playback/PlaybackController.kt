@@ -155,6 +155,9 @@ class PlaybackController(
     /** 正在加载的目标下标；起播与切集共用。 */
     private var loadTargetIndex = NO_MEDIA
 
+    /** 正在加载的目标位置；ready 回调据此丢弃取消/恢复后迟到的目标事件。 */
+    private var loadTargetUrl: String? = null
+
     /** 切集前原视频的下标与位置，失败或取消时回到这里。 */
     private var switchOriginIndex = NO_MEDIA
     private var switchOriginPositionMillis = 0L
@@ -163,8 +166,14 @@ class PlaybackController(
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
-    /** 视频链重配后的稳定等待；避免在首帧真正上屏前撤掉冻结层。 */
-    private var frameSettleJob: Job? = null
+    /** 暂停态重配后的抓帧确认；确认到画面后才撤冻结层。 */
+    private var frameProbeJob: Job? = null
+
+    /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
+    private var seekPendingForReady = false
+
+    /** 加载完全无事件的看门狗；任一加载事件都会重置它。 */
+    private var loadWatchdogJob: Job? = null
 
     init {
         engine.setListener(if (marshalCallbacks) MarshallingListener(this, scope) else this)
@@ -240,11 +249,13 @@ class PlaybackController(
         mediaLoaded = false
         pausedAtEpisodeEnd = false
         loadTargetIndex = index
+        loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Initial
         _switching.value = false
         replaceFreezeFrame(null)
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
+        beginLoadWatchdog()
         engine.start(media.playbackLocation, paused = false)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -260,6 +271,7 @@ class PlaybackController(
         switchOriginDurationMillis = playedDurationMillis
         _currentIndex.value = index
         loadTargetIndex = index
+        loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Switching
         _switching.value = true
         _seekPreviewMillis.value = null
@@ -273,9 +285,10 @@ class PlaybackController(
         savedPositionMillis = 0
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
+        beginLoadWatchdog()
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
-        replaceFreezeFrame(engine.grabFrame())
+        replaceFreezeFrame(engine.grabFrame()?.bitmap)
         engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -291,6 +304,11 @@ class PlaybackController(
      * 继续播放；播放位置停在文件末尾时从头重播当前文件，否则接在暂停处继续。
      */
     fun resume() {
+        // 播完或失败后按播放：重开当前文件，和屏上播放键一致。
+        if (_state.value == PlaybackState.Ended) {
+            if (_currentIndex.value != NO_MEDIA) playAt(_currentIndex.value)
+            return
+        }
         if (!active) return
         paused = false
         // 切集加载中的继续只记为意图，等目标文件就绪再出声。
@@ -444,33 +462,62 @@ class PlaybackController(
     }
 
     /**
-     * 首帧可显示后才算就绪。视频链重配通常早于首帧上屏，
-     * 暂停态没有 PLAYBACK_RESTART，收到重配后再等 [FRAME_SETTLE_MILLIS] 才撤冻结层。
+     * 首帧可显示后才算就绪。播放中加载以 PLAYBACK_RESTART 为准；
+     * 暂停态只有 VIDEO_RECONFIG，它可能早于首帧上屏，必须抓帧确认才算数。
+     * 就绪信号一到就停掉 500ms 计时，撤冻结层可以稍晚。
      */
-    override fun onFirstFrameReady(fromVideoReconfig: Boolean) {
+    override fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?) {
         if (!active || !mediaLoaded) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
+        // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
+        if (targetUrl != null && targetUrl != loadTargetUrl) return
+        cancelBufferingTimer()
         if (!fromVideoReconfig) {
+            // PLAYBACK_RESTART 本身就是 seek 之后的新信号。
+            seekPendingForReady = false
             finishReady(phase)
             return
         }
-        frameSettleJob?.cancel()
-        frameSettleJob = scope.launch {
-            delay(FRAME_SETTLE_MILLIS)
-            if (loadPhase == phase && mediaLoaded) finishReady(phase)
+        probeFrameThenFinish(phase)
+    }
+
+    /** 重配后重试抓帧；连续抓不到就按加载失败处理，避免永久停在冻结画面。 */
+    private fun probeFrameThenFinish(phase: LoadPhase) {
+        frameProbeJob?.cancel()
+        frameProbeJob = scope.launch {
+            // 加载中的续播 seek 先落地，再确认画面，避免抓到 seek 前的帧。
+            if (seekPendingForReady) {
+                delay(FRAME_PROBE_INTERVAL_MILLIS)
+                seekPendingForReady = false
+            }
+            repeat(FRAME_PROBE_ATTEMPTS) {
+                if (loadPhase != phase) return@launch
+                if (engine.grabFrame() != null) {
+                    finishReady(phase)
+                    return@launch
+                }
+                delay(FRAME_PROBE_INTERVAL_MILLIS)
+            }
+            if (loadPhase == phase) handleLoadFailure()
         }
     }
 
     private fun finishReady(phase: LoadPhase) {
-        frameSettleJob?.cancel()
-        frameSettleJob = null
+        frameProbeJob?.cancel()
+        frameProbeJob = null
+        seekPendingForReady = false
         when (phase) {
             LoadPhase.Initial -> finishInitialLoad()
             LoadPhase.Switching -> finishSwitch()
             LoadPhase.Restoring -> finishRestore()
             LoadPhase.None -> Unit
         }
+    }
+
+    /** 加载相关事件到达：重置“完全无事件”看门狗。 */
+    override fun onLoadActivity() {
+        if (loadPhase != LoadPhase.None) beginLoadWatchdog()
     }
 
     override fun onPauseChanged(paused: Boolean) {
@@ -557,6 +604,7 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
+        endLoadWatchdog()
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
@@ -566,6 +614,7 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
+        endLoadWatchdog()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
@@ -588,8 +637,10 @@ class PlaybackController(
             return
         }
         endBufferingIndicator()
+        beginLoadWatchdog()
         loadPhase = LoadPhase.Restoring
         loadTargetIndex = switchOriginIndex
+        loadTargetUrl = origin.playbackLocation
         _currentIndex.value = switchOriginIndex
         playedPositionMillis = switchOriginPositionMillis
         playedDurationMillis = switchOriginDurationMillis
@@ -618,6 +669,7 @@ class PlaybackController(
         if (loadPhase != LoadPhase.Restoring) return
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
+        endLoadWatchdog()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
@@ -627,6 +679,9 @@ class PlaybackController(
     /** 加载失败或超时：按阶段收尾，切集中则回退原视频。 */
     private fun handleLoadFailure() {
         if (!active) return
+        endLoadWatchdog()
+        frameProbeJob?.cancel()
+        frameProbeJob = null
         when (loadPhase) {
             LoadPhase.Switching -> {
                 restoreOrigin()
@@ -669,10 +724,29 @@ class PlaybackController(
         }
     }
 
-    private fun endBufferingIndicator() {
+    /** 就绪信号到达即停掉提示计时；已经显示的提示留到本轮加载结束。 */
+    private fun cancelBufferingTimer() {
         bufferingJob?.cancel()
         bufferingJob = null
+    }
+
+    private fun endBufferingIndicator() {
+        cancelBufferingTimer()
         _buffering.value = false
+    }
+
+    /** 只兜底“完全无加载事件”的情况；任一 FILE_LOADED/reconfig/restart/end 都会重置。 */
+    private fun beginLoadWatchdog() {
+        loadWatchdogJob?.cancel()
+        loadWatchdogJob = scope.launch {
+            delay(LOAD_WATCHDOG_MILLIS)
+            if (loadPhase != LoadPhase.None) handleLoadFailure()
+        }
+    }
+
+    private fun endLoadWatchdog() {
+        loadWatchdogJob?.cancel()
+        loadWatchdogJob = null
     }
 
     /** 换掉冻结帧；位图交给 GC，不在 Compose 可能仍绘制时手动回收。 */
@@ -684,10 +758,13 @@ class PlaybackController(
     private fun resetLoadState() {
         loadPhase = LoadPhase.None
         endBufferingIndicator()
-        frameSettleJob?.cancel()
-        frameSettleJob = null
+        endLoadWatchdog()
+        frameProbeJob?.cancel()
+        frameProbeJob = null
         _switching.value = false
         loadTargetIndex = NO_MEDIA
+        loadTargetUrl = null
+        seekPendingForReady = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
     }
@@ -708,6 +785,7 @@ class PlaybackController(
         if (!mediaLoaded) return
         resumePositionMillis = null
         savedPositionMillis = position
+        if (loadPhase != LoadPhase.None) seekPendingForReady = true
         engine.seekTo(position)
     }
 
@@ -767,8 +845,12 @@ class PlaybackController(
             scope.launch { target.onMediaLoaded() }
         }
 
-        override fun onFirstFrameReady(fromVideoReconfig: Boolean) {
-            scope.launch { target.onFirstFrameReady(fromVideoReconfig) }
+        override fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?) {
+            scope.launch { target.onFirstFrameReady(fromVideoReconfig, targetUrl) }
+        }
+
+        override fun onLoadActivity() {
+            scope.launch { target.onLoadActivity() }
         }
 
         override fun onPauseChanged(paused: Boolean) {
@@ -799,8 +881,12 @@ class PlaybackController(
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 500L
 
-        /** 视频链重配后到首帧上屏的稳定等待。 */
-        const val FRAME_SETTLE_MILLIS = 80L
+        /** 暂停态重配后抓帧确认的尝试次数与间隔。 */
+        const val FRAME_PROBE_ATTEMPTS = 10
+        const val FRAME_PROBE_INTERVAL_MILLIS = 20L
+
+        /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
+        const val LOAD_WATCHDOG_MILLIS = 10_000L
 
         private const val NO_MEDIA = -1
 

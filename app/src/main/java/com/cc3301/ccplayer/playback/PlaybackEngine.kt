@@ -17,8 +17,13 @@ interface PlaybackEngine {
      */
     fun start(url: String, paused: Boolean = false, startPositionMillis: Long = 0)
 
-    /** 取当前画面的一帧，用于切集时冻结在原画面上；没有可取的画面时为 null。 */
-    fun grabFrame(): Bitmap?
+    /**
+     * 取当前画面的一帧。非 null 表示确实有帧可显示；位图本身可为 null 仅用于测试替身。
+     */
+    fun grabFrame(): Frame?
+
+    /** 引擎抓到的一帧画面。 */
+    class Frame(val bitmap: Bitmap?)
 
     fun pause()
 
@@ -67,9 +72,13 @@ interface PlaybackEngine {
 
         /**
          * 首帧已可显示。[fromVideoReconfig] 为真表示只收到视频链重配，
-         * 画面可能还没上屏，控制层要再等一小段时间才撤冻结层。
+         * 控制层要用抓帧确认画面确实存在后才算就绪。[targetUrl] 是本次加载的目标，
+         * 控制层据此丢弃取消/恢复之后迟到的 ready。
          */
-        fun onFirstFrameReady(fromVideoReconfig: Boolean)
+        fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?)
+
+        /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
+        fun onLoadActivity()
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)

@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.playback
 
-import android.graphics.Bitmap
 import android.view.Surface
 
 /**
@@ -17,9 +16,13 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 指令顺序，用于验证先暂停、再抓帧、再换文件。 */
     val actions = mutableListOf<String>()
 
-    /** 抓帧返回的画面；测试里保持 null，避免依赖 android.graphics 实现。 */
-    var frameToGrab: Bitmap? = null
+    /** 抓帧返回的画面；测试用不含位图的 Frame 模拟“有帧”。 */
+    var frameToGrab: PlaybackEngine.Frame? = null
     var grabFrameCalls = 0
+        private set
+
+    /** 最近一次 start 的目标，ready 回调带上它供控制层过滤迟到事件。 */
+    var currentTargetUrl: String? = null
         private set
     var pauseCalls = 0
         private set
@@ -50,9 +53,10 @@ class FakePlaybackEngine : PlaybackEngine {
         startedUrls += url
         startedPaused += paused
         startedPositions += startPositionMillis
+        currentTargetUrl = url
     }
 
-    override fun grabFrame(): Bitmap? {
+    override fun grabFrame(): PlaybackEngine.Frame? {
         actions += "grab"
         grabFrameCalls++
         return frameToGrab
@@ -112,24 +116,43 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
     fun reportMediaLoaded() {
+        listener?.onLoadActivity()
         listener?.onMediaLoaded()
-        listener?.onFirstFrameReady(fromVideoReconfig = false)
+        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = currentTargetUrl)
     }
 
     /** 只上报文件打开，首帧还没就绪。 */
-    fun reportFileLoaded() = listener?.onMediaLoaded()
+    fun reportFileLoaded() {
+        listener?.onLoadActivity()
+        listener?.onMediaLoaded()
+    }
 
     /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
-    fun reportFirstFrameReady() = listener?.onFirstFrameReady(fromVideoReconfig = false)
+    fun reportFirstFrameReady(targetUrl: String? = currentTargetUrl) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = targetUrl)
+    }
 
     /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
-    fun reportVideoReconfigured() = listener?.onFirstFrameReady(fromVideoReconfig = true)
+    fun reportVideoReconfigured(targetUrl: String? = currentTargetUrl) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(fromVideoReconfig = true, targetUrl = targetUrl)
+    }
+
+    /** 只上报加载活动，不给 ready/end。 */
+    fun reportLoadActivity() = listener?.onLoadActivity()
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
-    fun reportPlaybackEnded() = listener?.onPlaybackEnded()
+    fun reportPlaybackEnded() {
+        listener?.onLoadActivity()
+        listener?.onPlaybackEnded()
+    }
 
-    fun reportPlaybackFailed() = listener?.onPlaybackFailed()
+    fun reportPlaybackFailed() {
+        listener?.onLoadActivity()
+        listener?.onPlaybackFailed()
+    }
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
         listener?.onPositionChanged(positionMillis, durationMillis)

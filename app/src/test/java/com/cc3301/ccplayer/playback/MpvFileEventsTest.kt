@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.playback
 
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -130,6 +132,46 @@ class MpvFileEventsTest {
 
         assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
         assertTrue(events.onFileLoaded(isTarget = true))
+    }
+
+    @Test
+    fun `a FILE_LOADED arriving after stop is ignored`() {
+        events.onStart()
+        events.onStop()
+
+        assertFalse(events.onFileLoaded(isTarget = true))
+        assertFalse(events.isLoaded)
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+    }
+
+    @Test
+    fun `concurrent start and event calls stay consistent`() {
+        val pool = Executors.newFixedThreadPool(4)
+        repeat(500) {
+            pool.execute { events.onStart() }
+            pool.execute { events.onFileLoaded(isTarget = true) }
+            pool.execute { events.onEofChanged(true) }
+            pool.execute { events.onEndFile(atEndByPosition = false) }
+        }
+        pool.shutdown()
+        assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
+
+        events.reset()
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+        events.onEofChanged(true)
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = false))
+    }
+
+    @Test
+    fun `path comparison only rejects a present but different path`() {
+        assertTrue(isTargetPath(target = "root/ep1.mkv", path = "root/ep1.mkv"))
+        assertTrue(isTargetPath(target = null, path = "root/ep1.mkv"))
+        assertTrue(isTargetPath(target = "root/ep1.mkv", path = null))
+        assertFalse(isTargetPath(target = "root/ep1.mkv", path = "root/ep2.mkv"))
     }
 
     @Test

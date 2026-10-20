@@ -25,19 +25,25 @@ class MpvPlaybackEngine(
     /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
     private var attachedSurface: Surface? = null
 
-    /** 加载代际与结束事件判定。 */
+    /** 加载代际与结束事件判定；方法内部同步，控制层与事件线程都会调用。 */
     private val fileEvents = MpvFileEvents()
 
     /** 本次加载是否已经上报过首帧，避免 seek 后的重播事件重复上报。 */
+    @Volatile
     private var readyReported = false
 
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
+    @Volatile
     private var hasVideoTrack = false
 
     /** 本次 loadfile 的目标位置，用 mpv 的 path 属性识别迟到的旧 FILE_LOADED。 */
+    @Volatile
     private var targetUrl: String? = null
 
+    @Volatile
     private var positionSeconds = 0.0
+
+    @Volatile
     private var durationSeconds = 0.0
     private var videoWidth = 0
     private var videoHeight = 0
@@ -76,7 +82,8 @@ class MpvPlaybackEngine(
     }
 
     /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
-    override fun grabFrame(): Bitmap? = runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull()
+    override fun grabFrame(): PlaybackEngine.Frame? =
+        runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull()?.let(PlaybackEngine::Frame)
 
     override fun pause() {
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, true)
@@ -174,10 +181,19 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
+        fileEvents.reset()
         MPVLib.destroy()
     }
 
     override fun event(eventId: Int) {
+        when (eventId) {
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED,
+            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG,
+            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG,
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART,
+            MPVLib.MpvEvent.MPV_EVENT_END_FILE,
+            -> listener?.onLoadActivity()
+        }
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
@@ -203,11 +219,8 @@ class MpvPlaybackEngine(
     }
 
     /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
-    private fun isTargetFile(): Boolean {
-        val target = targetUrl ?: return true
-        val path = MPVLib.getPropertyString(PATH_PROPERTY) ?: return true
-        return path == target
-    }
+    private fun isTargetFile(): Boolean =
+        isTargetPath(targetUrl, MPVLib.getPropertyString(PATH_PROPERTY))
 
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
@@ -225,7 +238,7 @@ class MpvPlaybackEngine(
     private fun reportReady(fromVideoReconfig: Boolean = false) {
         if (readyReported) return
         readyReported = true
-        listener?.onFirstFrameReady(fromVideoReconfig)
+        listener?.onFirstFrameReady(fromVideoReconfig, targetUrl)
     }
 
     override fun eventProperty(property: String) = Unit
@@ -316,3 +329,7 @@ class MpvPlaybackEngine(
         const val EOF_TOLERANCE_SECONDS = 1.0
     }
 }
+
+/** path 属性缺失时不阻断加载；存在且与目标不同才判定为旧代际事件。 */
+internal fun isTargetPath(target: String?, path: String?): Boolean =
+    target == null || path == null || path == target

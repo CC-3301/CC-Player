@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import com.cc3301.ccplayer.progress.MediaProgress
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -236,18 +237,15 @@ class PlaybackControllerSwitchTest {
         engine.reportVideoReconfigured()
         assertTrue(controller.switching.value)
 
-        advanceTimeBy(PlaybackController.FRAME_SETTLE_MILLIS - 1)
-        runCurrent()
-        assertTrue(controller.switching.value)
-
-        advanceTimeBy(1)
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `a paused switch waits for the frame settle delay after video reconfig`() = runTest {
+    fun `a paused switch needs a grabbed frame after video reconfig`() = runTest {
         val controller = playingController()
         controller.pause()
 
@@ -255,12 +253,14 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
 
+        // 只有重配、抓不到帧时不能撤冻结层。
         assertTrue(controller.switching.value)
-        advanceTimeBy(PlaybackController.FRAME_SETTLE_MILLIS - 1)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
         runCurrent()
         assertTrue(controller.switching.value)
 
-        advanceTimeBy(1)
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -301,6 +301,111 @@ class PlaybackControllerSwitchTest {
 
         assertEquals(started, engine.startedUrls)
         assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `a load that never emits any event is caught by the watchdog`() = runTest {
+        val controller = controller()
+        val failures = collectFailures(controller)
+
+        open(controller, "ep1.mkv")
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a switch that never emits any event is caught by the watchdog`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `load activity resets the watchdog`() = runTest {
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        engine.reportLoadActivity()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        runCurrent()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `a first frame before 500ms cancels the indicator even if the probe finishes later`() = runTest {
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS - 20)
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+
+        // 就绪信号已到，计时被取消；抓帧探测可以晚于 500ms。
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        runCurrent()
+        assertFalse(controller.buffering.value)
+
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        runCurrent()
+        assertFalse(controller.buffering.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a late ready from the cancelled target is ignored during restore`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        controller.cancelSwitch()
+        engine.reportFileLoaded()
+
+        engine.reportFirstFrameReady(targetUrl = "root/ep2.mkv")
+        assertTrue(controller.switching.value)
+
+        engine.reportVideoReconfigured()
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a resume seek is applied before the ready frame is accepted`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        runCurrent()
+
+        controller.next()
+        runCurrent()
+        engine.reportFileLoaded()
+
+        assertEquals(20_000L, engine.seekPositions.last())
+
+        // 帧已可取，但续播 seek 刚发出：先等一个探测间隔再认首帧。
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        engine.reportVideoReconfigured()
+        assertTrue(controller.switching.value)
+
+        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
     }
 
     @Test
