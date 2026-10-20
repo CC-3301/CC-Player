@@ -239,6 +239,7 @@ class PlaybackControllerSwitchTest {
 
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
@@ -257,7 +258,28 @@ class PlaybackControllerSwitchTest {
 
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
         assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a paused restart also needs a grabbed frame`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv")
+        controller.pause()
+        engine.reportFileLoaded()
+
+        // 暂停态的 PLAYBACK_RESTART 不能单独证明画面已上屏。
+        engine.reportPausedRestart()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        runCurrent()
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
@@ -279,6 +301,7 @@ class PlaybackControllerSwitchTest {
 
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -291,6 +314,7 @@ class PlaybackControllerSwitchTest {
         controller.next()
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
+        runCurrent()
         val attempts = engine.grabFrameCalls
 
         advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
@@ -316,10 +340,12 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
+        engine.reportPositionChanged(20_000, 600_000)
         engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
 
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
+        assertEquals(600_000L, controller.progress.value.durationMillis)
     }
 
     @Test
@@ -330,10 +356,12 @@ class PlaybackControllerSwitchTest {
         open(controller, "ep1.mkv")
         controller.pause()
         engine.reportFileLoaded()
+        engine.reportPositionChanged(30_000, 600_000)
         engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
 
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(30_000L, controller.progress.value.positionMillis)
+        assertEquals(600_000L, controller.progress.value.durationMillis)
     }
 
     @Test
@@ -501,6 +529,7 @@ class PlaybackControllerSwitchTest {
         // 抓帧成功才撤掉提示并显示画面。
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -520,8 +549,23 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `resuming during a restore continues after the first frame`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        controller.cancelSwitch()
+        controller.resume()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
     }
 
     @Test
@@ -736,8 +780,14 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
     }
 
+    /** 抓帧用测试调度器，和虚拟时间一起推进；生产环境由控制器切到后台线程。 */
     private fun TestScope.controller(): PlaybackController =
-        PlaybackController(engine, progress, backgroundScope)
+        PlaybackController(
+            engine,
+            progress,
+            backgroundScope,
+            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
     private fun TestScope.playingController(): PlaybackController {

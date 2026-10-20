@@ -205,14 +205,17 @@ class MpvPlaybackEngine(
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> readySignals.onSeekEvent()
             // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
-            // 它可能早于首帧上屏，交给控制层做短暂延迟。
+            // 它可能早于首帧上屏，需要控制层抓帧确认。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
-                if (fileEvents.isLoaded && hasVideoTrack && isPaused()) reportReady(fromVideoReconfig = true)
+                if (fileEvents.isLoaded && hasVideoTrack && isPaused()) reportReady(needsFrameConfirmation = true)
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
                 if (fileEvents.isLoaded && !hasVideoTrack) reportReady()
             }
-            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (fileEvents.isLoaded) reportReady()
+            // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (fileEvents.isLoaded) {
+                reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+            }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
     }
@@ -244,12 +247,12 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * 同一 seek 序号内，重配与重播各上报一次；seek 之后序号变化，两类信号都能再次上报。
-     * 播放中的首帧以 PLAYBACK_RESTART 为准，暂停态则以 VIDEO_RECONFIG 加抓帧确认。
+     * 同一 seek 序号内，需抓帧确认与无需确认两类 ready 各只上报一次；
+     * seek 之后序号变化，两类信号都能再次上报。
      */
-    private fun reportReady(fromVideoReconfig: Boolean = false) {
-        val serial = readySignals.acceptReady(fromVideoReconfig) ?: return
-        listener?.onFirstFrameReady(fromVideoReconfig, targetUrl, serial)
+    private fun reportReady(needsFrameConfirmation: Boolean = false) {
+        val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
+        listener?.onFirstFrameReady(needsFrameConfirmation, targetUrl, serial)
     }
 
     override fun eventProperty(property: String) = Unit
@@ -341,6 +344,6 @@ class MpvPlaybackEngine(
     }
 }
 
-/** path 属性缺失时不阻断加载；存在且与目标不同才判定为旧代际事件。 */
+/** 只有目标与 mpv 当前 path 都存在且一致，才承认这次加载；其余都按旧代际事件丢弃。 */
 internal fun isTargetPath(target: String?, path: String?): Boolean =
-    target == null || path == null || path == target
+    target != null && path == target

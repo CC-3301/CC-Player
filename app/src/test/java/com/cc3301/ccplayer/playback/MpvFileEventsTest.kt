@@ -188,17 +188,17 @@ class MpvFileEventsTest {
     fun `a ready processed before the seek event keeps the old serial`() {
         val signals = MpvReadySignals()
         signals.onStart()
-        assertEquals(0, signals.acceptReady(fromVideoReconfig = true))
+        assertEquals(0, signals.acceptReady(needsFrameConfirmation = true))
 
         // seek 命令已下发，但旧的 PLAYBACK_RESTART 先于 MPV_EVENT_SEEK 被处理。
         val seekSerial = signals.onSeekIssued()
         assertEquals(1, seekSerial)
-        assertEquals(0, signals.acceptReady(fromVideoReconfig = false))
+        assertEquals(0, signals.acceptReady(needsFrameConfirmation = false))
 
         // SEEK 事件到达后，后续 ready 才使用新序号。
         signals.onSeekEvent()
-        assertEquals(1, signals.acceptReady(fromVideoReconfig = false))
-        assertEquals(1, signals.acceptReady(fromVideoReconfig = true))
+        assertEquals(1, signals.acceptReady(needsFrameConfirmation = false))
+        assertEquals(1, signals.acceptReady(needsFrameConfirmation = true))
     }
 
     @Test
@@ -210,10 +210,10 @@ class MpvFileEventsTest {
         assertEquals(2, signals.onSeekIssued())
 
         signals.onSeekEvent()
-        assertEquals(1, signals.acceptReady(fromVideoReconfig = false))
+        assertEquals(1, signals.acceptReady(needsFrameConfirmation = false))
 
         signals.onSeekEvent()
-        assertEquals(2, signals.acceptReady(fromVideoReconfig = true))
+        assertEquals(2, signals.acceptReady(needsFrameConfirmation = true))
     }
 
     @Test
@@ -221,17 +221,32 @@ class MpvFileEventsTest {
         val signals = MpvReadySignals()
         signals.onStart()
 
-        assertEquals(0, signals.acceptReady(fromVideoReconfig = true))
-        assertEquals(null, signals.acceptReady(fromVideoReconfig = true))
-        assertEquals(0, signals.acceptReady(fromVideoReconfig = false))
-        assertEquals(null, signals.acceptReady(fromVideoReconfig = false))
+        assertEquals(0, signals.acceptReady(needsFrameConfirmation = true))
+        assertEquals(null, signals.acceptReady(needsFrameConfirmation = true))
+        assertEquals(0, signals.acceptReady(needsFrameConfirmation = false))
+        assertEquals(null, signals.acceptReady(needsFrameConfirmation = false))
     }
 
     @Test
-    fun `path comparison only rejects a present but different path`() {
+    fun `a new load clears pending seeks and the accepted serial`() {
+        val signals = MpvReadySignals()
+        signals.onStart()
+        assertEquals(1, signals.onSeekIssued())
+
+        // 上一轮 seek 没等到 MPV_EVENT_SEEK 就开始了新加载。
+        signals.onStart()
+        assertEquals(0, signals.acceptReady(needsFrameConfirmation = false))
+
+        assertEquals(1, signals.onSeekIssued())
+        signals.onSeekEvent()
+        assertEquals(1, signals.acceptReady(needsFrameConfirmation = true))
+    }
+
+    @Test
+    fun `path comparison requires a present matching path`() {
         assertTrue(isTargetPath(target = "root/ep1.mkv", path = "root/ep1.mkv"))
-        assertTrue(isTargetPath(target = null, path = "root/ep1.mkv"))
-        assertTrue(isTargetPath(target = "root/ep1.mkv", path = null))
+        assertFalse(isTargetPath(target = null, path = "root/ep1.mkv"))
+        assertFalse(isTargetPath(target = "root/ep1.mkv", path = null))
         assertFalse(isTargetPath(target = "root/ep1.mkv", path = "root/ep2.mkv"))
     }
 

@@ -125,7 +125,7 @@ class FakePlaybackEngine : PlaybackEngine {
         listener?.onMediaLoaded()
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
         listener?.onFirstFrameReady(
-            fromVideoReconfig = false,
+            needsFrameConfirmation = false,
             targetUrl = currentTargetUrl,
             seekSerial = currentSeekSerial,
         )
@@ -143,7 +143,7 @@ class FakePlaybackEngine : PlaybackEngine {
         seekSerial: Int = currentSeekSerial,
     ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = targetUrl, seekSerial = seekSerial)
+        listener?.onFirstFrameReady(needsFrameConfirmation = false, targetUrl = targetUrl, seekSerial = seekSerial)
     }
 
     /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
@@ -152,7 +152,16 @@ class FakePlaybackEngine : PlaybackEngine {
         seekSerial: Int = currentSeekSerial,
     ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(fromVideoReconfig = true, targetUrl = targetUrl, seekSerial = seekSerial)
+        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
+    }
+
+    /** 暂停态下的 PLAYBACK_RESTART：同样需要控制层抓帧确认。 */
+    fun reportPausedRestart(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
     }
 
     /** 只上报加载活动，不给 ready/end。 */

@@ -74,12 +74,13 @@ interface PlaybackEngine {
         fun onMediaLoaded()
 
         /**
-         * 首帧已可显示。[fromVideoReconfig] 为真表示只收到视频链重配，
-         * 控制层要用抓帧确认画面确实存在后才算就绪。[targetUrl] 是本次加载的目标，
-         * 控制层据此丢弃取消/恢复之后迟到的 ready。[seekSerial] 是本次信号对应的 seek 序号，
-         * 控制层只接受续播 seek 之后的信号。seek 后引擎会再次上报 PLAYBACK_RESTART。
+         * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
+         * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要用抓帧确认后才算就绪。
+         * [targetUrl] 是本次加载的目标，控制层据此丢弃取消/恢复之后迟到的 ready。
+         * [seekSerial] 是本次信号对应的 seek 序号，控制层只接受续播 seek 之后的信号。
+         * seek 后引擎会再次上报 PLAYBACK_RESTART。
          */
-        fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?, seekSerial: Int)
+        fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int)
 
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()
