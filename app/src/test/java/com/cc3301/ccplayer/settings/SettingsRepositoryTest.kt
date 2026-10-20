@@ -54,6 +54,19 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `一次写入视图与列数且列表不改列数`() = runTest {
+        settings.setView(ViewMode.Grid, 4)
+
+        assertEquals(ViewMode.Grid, settings.viewMode.first())
+        assertEquals(4, settings.gridColumns.first())
+
+        settings.setView(ViewMode.List, 3)
+
+        assertEquals(ViewMode.List, settings.viewMode.first())
+        assertEquals(4, settings.gridColumns.first())
+    }
+
+    @Test
     fun `四种排序偏好写入后读回`() = runTest {
         SortOrder.entries.forEach { order ->
             settings.setSortOrder(order)

@@ -98,6 +98,15 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[VIEW_MODE] = mode.name }
     }
 
+    /** 一次写入视图与网格列数，避免两次偏好发射各自重新定位；列表视图不动已保存的列数。 */
+    suspend fun setView(mode: ViewMode, columns: Int) {
+        require(columns in GRID_COLUMN_CHOICES) { "网格列数只能是 $GRID_COLUMN_CHOICES 之一：$columns" }
+        dataStore.edit { preferences ->
+            if (mode == ViewMode.Grid) preferences[GRID_COLUMNS] = columns
+            preferences[VIEW_MODE] = mode.name
+        }
+    }
+
     suspend fun setGridColumns(columns: Int) {
         require(columns in GRID_COLUMN_CHOICES) { "网格列数只能是 $GRID_COLUMN_CHOICES 之一：$columns" }
         dataStore.edit { preferences -> preferences[GRID_COLUMNS] = columns }

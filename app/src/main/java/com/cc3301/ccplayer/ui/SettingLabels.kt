@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
@@ -8,22 +10,39 @@ import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.settings.ViewMode
 
-/** 设置里的一个选项文案：字符串资源与可选格式参数（如网格列数）。 */
+/** 设置与库页面共用的一个选项文案：字符串资源与可选格式参数（如网格列数）。 */
 data class OptionLabel(val resourceId: Int, val formatArg: Int? = null)
 
 /** 视图选项：列表与 2/3/4 列网格。 */
 data class ViewChoice(val viewMode: ViewMode, val gridColumns: Int)
 
-/** 设置页的视图选项顺序：列表、2 列、3 列、4 列网格。 */
+/** 库页面顶栏的视图选项顺序：列表、2 列、3 列、4 列网格。 */
 val viewChoices: List<ViewChoice> = buildList {
     add(ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS))
     SettingsRepository.GRID_COLUMN_CHOICES.forEach { columns -> add(ViewChoice(ViewMode.Grid, columns)) }
+}
+
+/** 当前视图：单列列表固定对应列表选项，网格按列数对应各自选项。 */
+fun viewChoiceOf(viewMode: ViewMode, gridColumns: Int): ViewChoice = when (viewMode) {
+    ViewMode.List -> ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS)
+    ViewMode.Grid -> ViewChoice(ViewMode.Grid, gridColumns)
 }
 
 /** 视图选项文案；网格选项带上实际列数，避免占位符漏填。 */
 fun viewChoiceLabel(choice: ViewChoice): OptionLabel = when (choice.viewMode) {
     ViewMode.List -> OptionLabel(R.string.library_view_list)
     ViewMode.Grid -> OptionLabel(R.string.library_view_grid_columns, choice.gridColumns)
+}
+
+/** 把选项文案转成界面文字。 */
+@Composable
+fun optionText(label: OptionLabel): String {
+    val argument = label.formatArg
+    return if (argument == null) {
+        stringResource(label.resourceId)
+    } else {
+        stringResource(label.resourceId, argument)
+    }
 }
 
 /** 播放器控制条的解码文案。 */

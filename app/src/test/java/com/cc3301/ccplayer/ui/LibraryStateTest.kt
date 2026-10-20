@@ -116,7 +116,7 @@ class LibraryStateTest {
     }
 
     @Test
-    fun `排序变化后按记录条目重新定位`() {
+    fun `排序变化后回到顶部`() {
         val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
@@ -131,8 +131,27 @@ class LibraryStateTest {
             autoRestorePosition = true,
         )
 
-        assertEquals(DirectoryScrollTarget(index = 1, offset = 12), resorted.scrollTarget)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), resorted.scrollTarget)
         assertEquals(2, resorted.scrollRevision)
+    }
+
+    @Test
+    fun `仅切换视图仍按记录条目定位`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+        )
+
+        val switched = loaded.withDisplayPreferences(
+            viewMode = ViewMode.Grid,
+            gridColumns = 4,
+            sortOrder = loaded.sortOrder,
+            autoRestorePosition = true,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 24), switched.scrollTarget)
     }
 
     @Test

@@ -1,8 +1,10 @@
 package com.cc3301.ccplayer.ui
 
 import android.content.Context
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -124,6 +126,8 @@ data class LibraryState(
     val scrollTarget: DirectoryScrollTarget? = null,
     /** 每次定出滚动目标时递增：界面据此滚动一次。 */
     val scrollRevision: Int = 0,
+    /** 加载期间切换了排序：目录读完后回到顶部，而不是按旧记录定位。 */
+    val pendingScrollToTop: Boolean = false,
     val loading: Boolean = false,
     /** 当前目录读取失败的原因；成功时为 null。 */
     val failure: MediaFailure? = null,
@@ -133,24 +137,30 @@ data class LibraryState(
     /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
-    /** 套用展示偏好；视图、列数、排序或位置记忆开关变了才重新定位。 */
+    /** 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。 */
     fun withDisplayPreferences(
         viewMode: ViewMode,
         gridColumns: Int,
         sortOrder: SortOrder,
         autoRestorePosition: Boolean,
+        sortChangeScrollsToTop: Boolean = true,
     ): LibraryState {
         val changed = viewMode != this.viewMode ||
             gridColumns != this.gridColumns ||
             sortOrder != this.sortOrder ||
             autoRestorePosition != this.autoRestorePosition
+        val sortChanged = sortChangeScrollsToTop && sortOrder != this.sortOrder
         val updated = copy(
             viewMode = viewMode,
             gridColumns = gridColumns,
             sortOrder = sortOrder,
             autoRestorePosition = autoRestorePosition,
         )
-        return if (changed) updated.retargeted() else updated
+        return when {
+            !changed -> updated
+            sortChanged -> updated.scrolledToTop(pendingWhileLoading = updated.loading)
+            else -> updated.retargeted()
+        }
     }
 
     /** 目录读完后套用结果，并按位置记录定出滚动目标。 */
@@ -158,17 +168,40 @@ data class LibraryState(
         entries: List<MediaFile>,
         failure: MediaFailure?,
         position: DirectoryPosition?,
-    ): LibraryState = copy(
-        entries = entries,
-        loading = false,
-        failure = failure,
-        savedPosition = position,
-    ).retargeted()
+    ): LibraryState {
+        val loaded = copy(
+            entries = entries,
+            loading = false,
+            failure = failure,
+            savedPosition = position,
+        )
+        return if (pendingScrollToTop) {
+            val topped = loaded.scrolledToTop()
+            topped.copy(
+                pendingScrollToTop = false,
+                savedPosition = topped.visibleEntries.firstOrNull()?.let { DirectoryPosition(it.location, 0) },
+            )
+        } else {
+            loaded.retargeted()
+        }
+    }
 
     /** 按当前可见次序重新计算滚动目标并递增序号。 */
     private fun retargeted(): LibraryState = copy(
         scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, autoRestorePosition),
         scrollRevision = scrollRevision + 1,
+    )
+
+    /** 回到顶部：按正常滚动规则把第一个可见条目记为当前位置。 */
+    fun scrolledToTop(pendingWhileLoading: Boolean = false): LibraryState = copy(
+        scrollTarget = if (visibleEntries.isEmpty()) null else DirectoryScrollTarget(index = 0, offset = 0),
+        scrollRevision = scrollRevision + 1,
+        pendingScrollToTop = pendingWhileLoading,
+        savedPosition = if (pendingWhileLoading) {
+            savedPosition
+        } else {
+            visibleEntries.firstOrNull()?.let { DirectoryPosition(it.location, 0) } ?: savedPosition
+        },
     )
 }
 
@@ -184,6 +217,7 @@ class LibraryViewModel(
     private val sources: NetworkSourceRepository,
     private val verifier: NetworkSourceVerifier,
     private val positions: DirectoryPositionStore,
+    private val savedState: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryState())
@@ -193,6 +227,9 @@ class LibraryViewModel(
     val sourcesState: StateFlow<SourcesState> = _sourcesState.asStateFlow()
 
     private var loadJob: Job? = null
+
+    /** 首次偏好读取只套用取值，不把排序差异当成用户切换。 */
+    private var displayPreferencesApplied = false
 
     init {
         viewModelScope.launch {
@@ -217,16 +254,20 @@ class LibraryViewModel(
             ) { mode, columns, order, autoRestore ->
                 ListPreferences(mode, columns, order, autoRestore)
             }.collect { preferences ->
+                val firstApply = !displayPreferencesApplied
+                displayPreferencesApplied = true
                 _state.update { current ->
                     current.withDisplayPreferences(
                         viewMode = preferences.viewMode,
                         gridColumns = preferences.gridColumns,
                         sortOrder = preferences.sortOrder,
                         autoRestorePosition = preferences.autoRestorePosition,
+                        sortChangeScrollsToTop = !firstApply,
                     )
                 }
             }
         }
+        restoreDirectoryStack()
     }
 
     /** 本地文件夹选择器返回后调用。 */
@@ -360,13 +401,16 @@ class LibraryViewModel(
                 failure = null,
                 savedPosition = null,
                 scrollTarget = null,
+                pendingScrollToTop = false,
             )
         }
+        persistDirectoryStack()
         load(source.root)
     }
 
     fun enter(directory: MediaFile) {
         _state.update { it.copy(stack = it.stack + directory, entries = emptyList()) }
+        persistDirectoryStack()
         load(directory)
     }
 
@@ -376,7 +420,16 @@ class LibraryViewModel(
         if (stack.size <= 1) return
         val parent = stack.dropLast(1).last()
         _state.update { it.copy(stack = stack.dropLast(1), entries = emptyList()) }
+        persistDirectoryStack()
         load(parent)
+    }
+
+    /** 长按排序按钮：按状态目标回到顶部，排序不变，位置按正常滚动规则记录。 */
+    fun scrollToTop() {
+        val current = _state.value
+        _state.update { it.scrolledToTop(pendingWhileLoading = it.loading) }
+        val topEntry = current.visibleEntries.firstOrNull() ?: return
+        savePosition(current.sourceLocation, relativeDirectoryPath(current.stack), topEntry.location, 0)
     }
 
     /** 重新读取当前目录。 */
@@ -404,7 +457,12 @@ class LibraryViewModel(
         val position = DirectoryPosition(entryLocation, scrollOffset)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
-                current.copy(savedPosition = position)
+                val index = current.visibleEntries.indexOfFirst { it.location == entryLocation }
+                current.copy(
+                    savedPosition = position,
+                    // 同步目标但不递增序号：离开再返回时据此定位，正常浏览时不触发滚动。
+                    scrollTarget = if (index >= 0) DirectoryScrollTarget(index, scrollOffset) else current.scrollTarget,
+                )
             } else {
                 current
             }
@@ -489,6 +547,38 @@ class LibraryViewModel(
         else -> MediaFailure.Unknown
     }
 
+    /** 把当前连接源与目录栈写进可恢复状态，进程重建后据此重新读取当前目录。 */
+    private fun persistDirectoryStack() {
+        val current = _state.value
+        savedState[KEY_SOURCE_LOCATION] = current.sourceLocation
+        savedState[KEY_STACK_LOCATIONS] = ArrayList(current.stack.map { it.location })
+        savedState[KEY_STACK_NAMES] = ArrayList(current.stack.map { it.name })
+    }
+
+    /** 进程重建后恢复连接源与目录栈，再按位置记录重新读取当前目录。 */
+    private fun restoreDirectoryStack() {
+        val sourceLocation = savedState.get<String>(KEY_SOURCE_LOCATION) ?: return
+        val locations = savedState.get<ArrayList<String>>(KEY_STACK_LOCATIONS) ?: return
+        val names = savedState.get<ArrayList<String>>(KEY_STACK_NAMES) ?: return
+        if (sourceLocation.isBlank() || locations.isEmpty() || locations.size != names.size) return
+        val stack = locations.indices.map { index ->
+            MediaFile(name = names[index], location = locations[index], isDirectory = true)
+        }
+        _state.update {
+            it.copy(
+                sourceLocation = sourceLocation,
+                stack = stack,
+                entries = emptyList(),
+                loading = true,
+                failure = null,
+                savedPosition = null,
+                scrollTarget = null,
+                pendingScrollToTop = false,
+            )
+        }
+        load(stack.last())
+    }
+
     /** 影响列表展示与滚动的设置项。 */
     private data class ListPreferences(
         val viewMode: ViewMode,
@@ -498,6 +588,10 @@ class LibraryViewModel(
     )
 
     companion object {
+        private const val KEY_SOURCE_LOCATION = "library_source_location"
+        private const val KEY_STACK_LOCATIONS = "library_stack_locations"
+        private const val KEY_STACK_NAMES = "library_stack_names"
+
         /** 生产入口：本地 SAF 与各网络协议的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
         fun factory(context: Context): ViewModelProvider.Factory = viewModelFactory {
             initializer {
@@ -534,6 +628,7 @@ class LibraryViewModel(
                         ),
                     ),
                     positions = DataStoreDirectoryPositionStore.create(appContext),
+                    savedState = createSavedStateHandle(),
                 )
             }
         }

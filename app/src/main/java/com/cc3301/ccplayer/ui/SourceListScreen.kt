@@ -15,8 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,12 +49,13 @@ import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
  * 源列表：只显示连接源名称，右下角加号新增；网络源可从条目的更多菜单编辑或删除。
+ * 顶栏左侧为汉堡按钮，不提供返回箭头。
  */
 @Composable
 fun SourceListScreen(
     protocol: SourceProtocol,
     state: SourcesState,
-    onBack: () -> Unit,
+    onOpenSettings: () -> Unit,
     onAdd: () -> Unit,
     onOpenSource: (ConnectionSource) -> Unit,
     onEditSource: (ConnectionSource) -> Unit,
@@ -78,9 +79,9 @@ fun SourceListScreen(
                 title = sourceProtocolLabel(protocol),
                 leading = {
                     HeaderIconButton(
-                        icon = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.library_back),
-                        onClick = onBack,
+                        icon = Icons.Filled.Menu,
+                        contentDescription = stringResource(R.string.settings_open),
+                        onClick = onOpenSettings,
                     )
                 },
             )

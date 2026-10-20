@@ -6,12 +6,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.ResumeMode
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.settings.ViewMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,9 +23,6 @@ data class SettingsState(
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
     val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
     val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
-    val viewMode: ViewMode = ViewMode.List,
-    val gridColumns: Int = SettingsRepository.DEFAULT_GRID_COLUMNS,
-    val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
 )
 
 /**
@@ -49,23 +44,15 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             ) { autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode ->
                 PlaybackSettings(autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode)
             }
-            val display = combine(
-                settings.viewMode,
-                settings.gridColumns,
-                settings.sortOrder,
-            ) { viewMode, gridColumns, sortOrder -> DisplaySettings(viewMode, gridColumns, sortOrder) }
-            combine(playback, display) { playbackSettings, displaySettings ->
-                SettingsState(
+            playback.collect { playbackSettings ->
+                _state.value = SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
                     resumeMode = playbackSettings.resumeMode,
                     autoRestorePosition = playbackSettings.autoRestorePosition,
                     decodeMode = playbackSettings.decodeMode,
                     orientationMode = playbackSettings.orientationMode,
-                    viewMode = displaySettings.viewMode,
-                    gridColumns = displaySettings.gridColumns,
-                    sortOrder = displaySettings.sortOrder,
                 )
-            }.collect { _state.value = it }
+            }
         }
     }
 
@@ -89,18 +76,6 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
         viewModelScope.launch { settings.setOrientationMode(mode) }
     }
 
-    fun setViewMode(mode: ViewMode) {
-        viewModelScope.launch { settings.setViewMode(mode) }
-    }
-
-    fun setGridColumns(columns: Int) {
-        viewModelScope.launch { settings.setGridColumns(columns) }
-    }
-
-    fun setSortOrder(order: SortOrder) {
-        viewModelScope.launch { settings.setSortOrder(order) }
-    }
-
     /** 播放相关的设置项。 */
     private data class PlaybackSettings(
         val autoPlayNext: Boolean,
@@ -108,13 +83,6 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
         val autoRestorePosition: Boolean,
         val decodeMode: DecodeMode,
         val orientationMode: OrientationMode,
-    )
-
-    /** 列表展示相关的设置项。 */
-    private data class DisplaySettings(
-        val viewMode: ViewMode,
-        val gridColumns: Int,
-        val sortOrder: SortOrder,
     )
 
     companion object {

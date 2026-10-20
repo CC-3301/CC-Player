@@ -37,19 +37,16 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
-import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.ResumeMode
-import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.settings.ViewMode
 import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
- * 设置页：按播放与列表分组，归总连播、起播位置、解码、屏幕方向、视图、排序与目录位置记忆。
- * 顶栏进入，改动即写入持久设置。
+ * 设置页：按播放与列表分组，归总连播、起播位置、解码、屏幕方向与目录位置记忆。
+ * 顶栏进入，改动即写入持久设置。视图与排序由库页面顶栏提供，不在设置页。
  */
 @Composable
 fun SettingsScreen(
@@ -59,9 +56,6 @@ fun SettingsScreen(
     onSetAutoRestorePosition: (Boolean) -> Unit,
     onSetDecodeMode: (DecodeMode) -> Unit,
     onSetOrientationMode: (OrientationMode) -> Unit,
-    onSetViewMode: (ViewMode) -> Unit,
-    onSetGridColumns: (Int) -> Unit,
-    onSetSortOrder: (SortOrder) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -120,25 +114,6 @@ fun SettingsScreen(
                 )
             }
             SettingsGroup(title = stringResource(R.string.settings_list_section)) {
-                ChoiceSetting(
-                    label = stringResource(R.string.settings_view_title),
-                    options = viewChoices,
-                    selected = viewChoiceOf(state),
-                    optionLabel = ::viewChoiceLabel,
-                    onSelect = { choice ->
-                        if (choice.viewMode == ViewMode.Grid) onSetGridColumns(choice.gridColumns)
-                        onSetViewMode(choice.viewMode)
-                    },
-                )
-                RowDivider()
-                ChoiceSetting(
-                    label = stringResource(R.string.settings_sort_title),
-                    options = SortOrder.entries,
-                    selected = state.sortOrder,
-                    optionLabel = { OptionLabel(sortLabel(it)) },
-                    onSelect = onSetSortOrder,
-                )
-                RowDivider()
                 ToggleSetting(
                     label = stringResource(R.string.settings_auto_restore_position),
                     checked = state.autoRestorePosition,
@@ -147,12 +122,6 @@ fun SettingsScreen(
             }
         }
     }
-}
-
-/** 当前视图：单列列表固定对应列表选项，网格按列数对应各自选项。 */
-private fun viewChoiceOf(state: SettingsState): ViewChoice = when (state.viewMode) {
-    ViewMode.List -> ViewChoice(ViewMode.List, SettingsRepository.DEFAULT_GRID_COLUMNS)
-    ViewMode.Grid -> ViewChoice(ViewMode.Grid, state.gridColumns)
 }
 
 private fun resumeModeLabel(mode: ResumeMode): Int = when (mode) {
@@ -256,15 +225,5 @@ private fun <T> ChoiceSetting(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun optionText(label: OptionLabel): String {
-    val argument = label.formatArg
-    return if (argument == null) {
-        stringResource(label.resourceId)
-    } else {
-        stringResource(label.resourceId, argument)
     }
 }

@@ -61,11 +61,15 @@ import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbMediaReads
 import com.cc3301.ccplayer.smb.SmbStreams
+import com.cc3301.ccplayer.ui.AppScreen
+import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
+import com.cc3301.ccplayer.ui.LibraryBackAction
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
 import com.cc3301.ccplayer.ui.MpvSurfaceView
+import com.cc3301.ccplayer.ui.NavigationViewModel
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.ScreenOrientation
@@ -92,6 +96,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 
+    private val navigation: NavigationViewModel by viewModels { NavigationViewModel.factory() }
+
     private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, createPreviewReads()) }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
@@ -110,8 +116,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var streams: NetworkStreams? = null
 
     private var playerVisible by mutableStateOf(false)
-    private var screen by mutableStateOf(AppScreen.Home)
-    private var sourcesProtocol by mutableStateOf(SourceProtocol.Local)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -167,6 +171,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 val libraryState by library.state.collectAsState()
                 val sourcesState by library.sourcesState.collectAsState()
                 val settingsState by settingsViewModel.state.collectAsState()
+                val navState by navigation.state.collectAsState()
                 val autoPlayNext by settings.autoPlayNext.collectAsState(
                     initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
                 )
@@ -180,7 +185,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         else ScreenOrientation.System,
                     )
                 }
-
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
                 }
@@ -190,14 +194,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         brightness = WindowBrightnessControl(this@MainActivity),
                         volume = MediaVolumeControl(this@MainActivity),
                     )
-                }
-
-                val leaveLibrary: () -> Unit = {
-                    if (libraryState.stack.size > 1) {
-                        library.navigateUp()
-                    } else {
-                        screen = AppScreen.Sources
-                    }
                 }
 
                 when {
@@ -249,8 +245,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         )
                     }
 
-                    screen == AppScreen.Settings -> {
-                        BackHandler { screen = AppScreen.Home }
+                    navState.screen == AppScreen.Settings -> {
+                        BackHandler { navigation.closeSettings() }
                         SettingsScreen(
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
@@ -258,44 +254,40 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
                             onSetOrientationMode = settingsViewModel::setOrientationMode,
-                            onSetViewMode = settingsViewModel::setViewMode,
-                            onSetGridColumns = settingsViewModel::setGridColumns,
-                            onSetSortOrder = settingsViewModel::setSortOrder,
-                            onClose = { screen = AppScreen.Home },
+                            onClose = navigation::closeSettings,
                         )
                     }
 
-                    screen == AppScreen.Home -> HomeScreen(
-                        onOpenProtocol = { protocol ->
-                            library.clearNetworkSourceForm()
-                            sourcesProtocol = protocol
-                            screen = AppScreen.Sources
-                        },
-                        onOpenSettings = { screen = AppScreen.Settings },
-                    )
+                    navState.screen == AppScreen.Home -> {
+                        BackHandler { handleHomeBack() }
+                        HomeScreen(
+                            onOpenProtocol = { protocol ->
+                                library.clearNetworkSourceForm()
+                                navigation.openProtocol(protocol)
+                            },
+                            onOpenSettings = navigation::openSettings,
+                        )
+                    }
 
-                    screen == AppScreen.Sources -> {
+                    navState.screen == AppScreen.Sources -> {
                         BackHandler {
                             library.clearNetworkSourceForm()
-                            screen = AppScreen.Home
+                            navigation.backToHome()
                         }
                         SourceListScreen(
-                            protocol = sourcesProtocol,
+                            protocol = navState.sourcesProtocol,
                             state = sourcesState,
-                            onBack = {
-                                library.clearNetworkSourceForm()
-                                screen = AppScreen.Home
-                            },
+                            onOpenSettings = navigation::openSettings,
                             onAdd = {
-                                if (sourcesProtocol == SourceProtocol.Local) {
+                                if (navState.sourcesProtocol == SourceProtocol.Local) {
                                     picker.launch(null)
                                 } else {
-                                    library.openNewSourceForm(sourcesProtocol)
+                                    library.openNewSourceForm(navState.sourcesProtocol)
                                 }
                             },
                             onOpenSource = { source ->
                                 library.openSource(source)
-                                screen = AppScreen.Library
+                                navigation.openLibrary()
                             },
                             onEditSource = library::openEditSourceForm,
                             onDeleteSource = library::removeSource,
@@ -306,7 +298,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     }
 
                     else -> {
-                        BackHandler { leaveLibrary() }
+                        BackHandler {
+                            when (navigation.backFromLibrary(libraryState.stack.size > 1)) {
+                                LibraryBackAction.NavigateUp -> library.navigateUp()
+                                LibraryBackAction.LeaveLibrary -> Unit
+                            }
+                        }
                         LibraryScreen(
                             state = libraryState,
                             mediaPreview = mediaPreview,
@@ -317,13 +314,28 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                     openEntry(entry, library.state.value.entries)
                                 }
                             },
-                            onBack = leaveLibrary,
+                            onOpenSettings = navigation::openSettings,
+                            onSelectView = { choice ->
+                                lifecycleScope.launch { settings.setView(choice.viewMode, choice.gridColumns) }
+                            },
+                            onSelectSort = { order -> lifecycleScope.launch { settings.setSortOrder(order) } },
+                            onScrollToTop = library::scrollToTop,
                             onRetry = library::retry,
                             onSavePosition = library::savePosition,
                         )
                     }
                 }
             }
+        }
+    }
+
+    /** 首页返回：第一次提示，2 秒内再按才退出。 */
+    private fun handleHomeBack() {
+        when (navigation.onHomeBack()) {
+            HomeBackResult.ShowExitHint ->
+                Toast.makeText(this, getString(R.string.app_exit_hint), Toast.LENGTH_SHORT).show()
+
+            HomeBackResult.Exit -> finish()
         }
     }
 
@@ -536,8 +548,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         stopPlaybackService()
         super.onDestroy()
     }
-
-    private enum class AppScreen { Home, Sources, Library, Settings }
 
     private companion object {
         const val NO_MEDIA = -1
