@@ -238,8 +238,7 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
 
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
-        runCurrent()
+        engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
@@ -255,14 +254,50 @@ class PlaybackControllerSwitchTest {
 
         // 只有重配、抓不到帧时不能撤冻结层。
         assertTrue(controller.switching.value)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
-        runCurrent()
-        assertTrue(controller.switching.value)
 
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
-        runCurrent()
+        engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a failed frame probe keeps waiting instead of failing the load`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+
+        // 抓帧探测没有独立短超时：远超旧探测预算后仍停在加载中。
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        runCurrent()
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertTrue(failures.isEmpty())
+
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        engine.reportVideoReconfigured()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a grab before 500ms keeps the indicator hidden`() = runTest {
+        val controller = playingController()
+        controller.pause()
+
+        controller.next()
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS - 100)
+        engine.reportFileLoaded()
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        engine.reportVideoReconfigured()
+
+        assertFalse(controller.buffering.value)
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
+        runCurrent()
+        assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
@@ -347,22 +382,25 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a first frame before 500ms cancels the indicator even if the probe finishes later`() = runTest {
+    fun `the indicator appears when the probe crosses the 500ms threshold`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
         advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS - 20)
         engine.reportFileLoaded()
+        // 重配已到但抓不到帧：不能取消计时，也不能算就绪。
         engine.reportVideoReconfigured()
-
-        // 就绪信号已到，计时被取消；抓帧探测可以晚于 500ms。
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
-        runCurrent()
         assertFalse(controller.buffering.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
 
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        advanceTimeBy(20)
         runCurrent()
+        assertTrue(controller.buffering.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        // 抓帧成功才撤掉提示并显示画面。
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        engine.reportVideoReconfigured()
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -379,33 +417,123 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
 
         engine.reportVideoReconfigured()
+        assertTrue(controller.switching.value)
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
-        runCurrent()
+        engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `a resume seek is applied before the ready frame is accepted`() = runTest {
+    fun `a ready signal from before the resume seek is ignored`() = runTest {
         progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
         val controller = playingController()
-        runCurrent()
 
         controller.next()
-        runCurrent()
         engine.reportFileLoaded()
 
         assertEquals(20_000L, engine.seekPositions.last())
+        val seekSerial = engine.currentSeekSerial
 
-        // 帧已可取，但续播 seek 刚发出：先等一个探测间隔再认首帧。
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
+        // seek 之前的信号序号更小：不能结束加载。
+        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
         assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
 
-        advanceTimeBy(PlaybackController.FRAME_PROBE_INTERVAL_MILLIS)
+        // seek 之后引擎会再次上报 PLAYBACK_RESTART，这一条才算就绪。
+        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `readiness waits for the resume lookup so the seek happens first`() = runTest {
+        progress.records["root/ep1.mkv"] = MediaProgress("root/ep1.mkv", 30_000, 600_000, 0)
+        progress.holdFinds()
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        // 续播位置还没查到，不能判定就绪，也不能先起播。
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertTrue(engine.seekPositions.isEmpty())
+
+        progress.releaseFinds()
+        runCurrent()
+
+        assertEquals(30_000L, engine.seekPositions.last())
+        val seekSerial = engine.currentSeekSerial
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a ready received during the resume lookup still counts when there is no record`() = runTest {
+        progress.holdFinds()
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        progress.releaseFinds()
+        runCurrent()
+
+        // 没有续播位置就不需要 seek，查询前收到的首帧直接生效。
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a cancelled switch drops the target's late resume lookup`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        progress.holdFinds()
+
+        controller.next()
+        controller.cancelSwitch()
+        progress.releaseFinds()
+        runCurrent()
+
+        // 被取消目标的迟到查询不能再对恢复后的原视频发出 seek。
+        assertTrue(engine.seekPositions.isEmpty())
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a switch without a render surface completes on file load`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(15_000, 600_000)
+        controller.setRenderSurfaceAvailable(false)
+
+        controller.next()
+        engine.reportFileLoaded()
+
+        // 后台抓不到帧不算失败：文件加载完成即就绪。
+        assertEquals(1, controller.currentIndex.value)
+        assertFalse(controller.switching.value)
+        assertFalse(controller.buffering.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertNull(controller.freezeFrame.value)
+
+        // 回前台重挂 Surface 不应重新进入加载。
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
         runCurrent()
         assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test

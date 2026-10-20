@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -28,9 +29,14 @@ class MpvPlaybackEngine(
     /** 加载代际与结束事件判定；方法内部同步，控制层与事件线程都会调用。 */
     private val fileEvents = MpvFileEvents()
 
-    /** 本次加载是否已经上报过首帧，避免 seek 后的重播事件重复上报。 */
+    /** 每次 seek 递增；ready 回调带上它，控制层只认续播 seek 之后的信号。 */
+    private val seekSerial = AtomicInteger(0)
+
+    /** 上一次上报 ready 时的 seek 序号；同一序号内不重复上报同类信号。 */
     @Volatile
-    private var readyReported = false
+    private var lastReconfigSerial = -1
+    @Volatile
+    private var lastRestartSerial = -1
 
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
     @Volatile
@@ -69,7 +75,8 @@ class MpvPlaybackEngine(
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
-        readyReported = false
+        lastReconfigSerial = -1
+        lastRestartSerial = -1
         targetUrl = url
         fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
@@ -97,14 +104,16 @@ class MpvPlaybackEngine(
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
         fileEvents.onStop()
         hasVideoTrack = false
-        readyReported = false
         targetUrl = null
         MPVLib.command(arrayOf("stop"))
     }
 
-    override fun seekTo(positionMillis: Long) {
+    /** seek 后 mpv 会再发 PLAYBACK_RESTART；序号递增让控制层能区分 seek 前后的信号。 */
+    override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
+        val serial = seekSerial.incrementAndGet()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+        return serial
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
@@ -235,10 +244,20 @@ class MpvPlaybackEngine(
         }
     }
 
+    /**
+     * 同一 seek 序号内，重配与重播各上报一次；seek 之后序号变化，两类信号都能再次上报。
+     * 播放中的首帧以 PLAYBACK_RESTART 为准，暂停态则以 VIDEO_RECONFIG 加抓帧确认。
+     */
     private fun reportReady(fromVideoReconfig: Boolean = false) {
-        if (readyReported) return
-        readyReported = true
-        listener?.onFirstFrameReady(fromVideoReconfig, targetUrl)
+        val serial = seekSerial.get()
+        if (fromVideoReconfig) {
+            if (lastReconfigSerial == serial) return
+            lastReconfigSerial = serial
+        } else {
+            if (lastRestartSerial == serial) return
+            lastRestartSerial = serial
+        }
+        listener?.onFirstFrameReady(fromVideoReconfig, targetUrl, serial)
     }
 
     override fun eventProperty(property: String) = Unit

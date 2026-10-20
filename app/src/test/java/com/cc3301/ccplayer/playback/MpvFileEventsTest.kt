@@ -135,6 +135,24 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a stop during an in-flight replacement swallows both pending ends`() {
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+
+        // 切集：旧文件被替换，目标仍在途。
+        events.onStart()
+        // 在途目标未结束时停止，然后立即重开原视频。
+        events.onStop()
+        events.onStart()
+
+        // 旧文件与在途目标各产生一次 END_FILE，都不能当成失败。
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertTrue(events.onFileLoaded(isTarget = true))
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+    }
+
+    @Test
     fun `a FILE_LOADED arriving after stop is ignored`() {
         events.onStart()
         events.onStop()

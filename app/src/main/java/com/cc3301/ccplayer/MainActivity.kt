@@ -171,6 +171,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
             surface?.let { binder.engine.attachSurface(it) }
+            binder.controller.setRenderSurfaceAvailable(surface != null)
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
@@ -488,17 +489,22 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStop()
         playback?.setAppInForeground(false)
         playback?.engine?.detachSurface()
+        playback?.controller?.setRenderSurfaceAvailable(false)
     }
 
     override fun onStart() {
         super.onStart()
         playback?.setAppInForeground(true)
-        surface?.let { playback?.engine?.attachSurface(it) }
+        surface?.let {
+            playback?.engine?.attachSurface(it)
+            playback?.controller?.setRenderSurfaceAvailable(true)
+        }
     }
 
     override fun onSurfaceReady(surface: Surface) {
         this.surface = surface
         playback?.engine?.attachSurface(surface)
+        playback?.controller?.setRenderSurfaceAvailable(true)
         startPendingPlayback()
     }
 
@@ -515,6 +521,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (surface == null) return
         surface = null
         playback?.engine?.detachSurface()
+        playback?.controller?.setRenderSurfaceAvailable(false)
     }
 
     private fun closePlayer() {

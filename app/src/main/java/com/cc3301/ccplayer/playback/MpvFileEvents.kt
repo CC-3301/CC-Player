@@ -40,10 +40,13 @@ internal class MpvFileEvents {
         eof = false
     }
 
-    /** 主动停止：清掉旧的待吞计数，只等停止本身产生的一次 END_FILE。 */
+    /**
+     * 主动停止：在途或已加载文件会因停止再产生一次 END_FILE。
+     * 已有的待吞计数必须保留，否则停止前被替换的在途加载会漏吞，后续结束事件被误判失败。
+     */
     @Synchronized
     fun onStop() {
-        pendingEnds = if (state != State.Idle) 1 else 0
+        if (state != State.Idle) pendingEnds++
         state = State.Idle
         eof = false
         stopping = true

@@ -31,8 +31,11 @@ interface PlaybackEngine {
 
     fun stop()
 
-    /** 跳到指定播放位置，单位毫秒。 */
-    fun seekTo(positionMillis: Long)
+    /**
+     * 跳到指定播放位置，单位毫秒。
+     * 返回本次 seek 的序号；之后的 ready 回调带上同一序号，控制层据此只认 seek 之后的信号。
+     */
+    fun seekTo(positionMillis: Long): Int
 
     /** 从当前位置起对音频输出做淡入，时长 [durationMillis]；画面不受影响。 */
     fun fadeInAudio(durationMillis: Long)
@@ -73,9 +76,10 @@ interface PlaybackEngine {
         /**
          * 首帧已可显示。[fromVideoReconfig] 为真表示只收到视频链重配，
          * 控制层要用抓帧确认画面确实存在后才算就绪。[targetUrl] 是本次加载的目标，
-         * 控制层据此丢弃取消/恢复之后迟到的 ready。
+         * 控制层据此丢弃取消/恢复之后迟到的 ready。[seekSerial] 是本次信号对应的 seek 序号，
+         * 控制层只接受续播 seek 之后的信号。seek 后引擎会再次上报 PLAYBACK_RESTART。
          */
-        fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?)
+        fun onFirstFrameReady(fromVideoReconfig: Boolean, targetUrl: String?, seekSerial: Int)
 
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()

@@ -31,6 +31,10 @@ class FakePlaybackEngine : PlaybackEngine {
     var stopCalls = 0
         private set
     val seekPositions = mutableListOf<Long>()
+
+    /** 最近一次 seek 的序号；ready 回调默认带上它。 */
+    var currentSeekSerial = 0
+        private set
     val fadeInDurations = mutableListOf<Long>()
     val decodeModes = mutableListOf<DecodeMode>()
 
@@ -76,8 +80,9 @@ class FakePlaybackEngine : PlaybackEngine {
         stopCalls++
     }
 
-    override fun seekTo(positionMillis: Long) {
+    override fun seekTo(positionMillis: Long): Int {
         seekPositions += positionMillis
+        return ++currentSeekSerial
     }
 
     override fun fadeInAudio(durationMillis: Long) {
@@ -118,7 +123,12 @@ class FakePlaybackEngine : PlaybackEngine {
     fun reportMediaLoaded() {
         listener?.onLoadActivity()
         listener?.onMediaLoaded()
-        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = currentTargetUrl)
+        // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
+        listener?.onFirstFrameReady(
+            fromVideoReconfig = false,
+            targetUrl = currentTargetUrl,
+            seekSerial = currentSeekSerial,
+        )
     }
 
     /** 只上报文件打开，首帧还没就绪。 */
@@ -128,15 +138,21 @@ class FakePlaybackEngine : PlaybackEngine {
     }
 
     /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
-    fun reportFirstFrameReady(targetUrl: String? = currentTargetUrl) {
+    fun reportFirstFrameReady(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = targetUrl)
+        listener?.onFirstFrameReady(fromVideoReconfig = false, targetUrl = targetUrl, seekSerial = seekSerial)
     }
 
     /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
-    fun reportVideoReconfigured(targetUrl: String? = currentTargetUrl) {
+    fun reportVideoReconfigured(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(fromVideoReconfig = true, targetUrl = targetUrl)
+        listener?.onFirstFrameReady(fromVideoReconfig = true, targetUrl = targetUrl, seekSerial = seekSerial)
     }
 
     /** 只上报加载活动，不给 ready/end。 */
