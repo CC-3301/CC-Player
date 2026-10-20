@@ -14,4 +14,5 @@
 - ABI：仅 arm64-v8a
 - 源码：官方 `MPVLib.kt`（MIT）原样复制到 `app/src/main/java/is/xyz/mpv/`；`MpvSurfaceView` 按官方 `BaseMPVView.kt` 的 Surface 挂载顺序改写
 - 渲染入口：`MPVLib.attachSurface(Surface)`，libmpv 的 render API 直接把画面画到视图的 Surface 上，承担官方 `MPVView` 的渲染职责，因此不需要单独移植 `MPVView`
+- Surface 生命周期：退后台时分离并关闭视频输出，回前台重新挂载同一 Surface 并恢复输出；挂载与分离幂等，重复调用不重建渲染上下文
 - 许可文本：`third_party/mpv-android/LICENSE`
