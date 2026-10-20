@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -23,6 +24,36 @@ class PlaybackControllerSleepTimerTest {
         val controller = controller()
 
         assertEquals(SleepTimerState.Off, controller.sleepTimerState.value)
+        assertNull(controller.sleepTimerOption.value)
+    }
+
+    @Test
+    fun `定时选项随设置与取消更新`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
+
+        controller.startSleepTimer(SleepTimerOption.AfterDuration(10))
+        assertEquals(SleepTimerOption.AfterDuration(10), controller.sleepTimerOption.value)
+
+        controller.startSleepTimer(SleepTimerOption.AfterDuration(30))
+        assertEquals(SleepTimerOption.AfterDuration(30), controller.sleepTimerOption.value)
+
+        controller.cancelSleepTimer()
+        assertNull(controller.sleepTimerOption.value)
+    }
+
+    @Test
+    fun `倒计时到点后定时选项清空`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
+        controller.startSleepTimer(SleepTimerOption.AfterDuration(10))
+
+        advance(10 * MINUTE)
+
+        assertEquals(SleepTimerState.Off, controller.sleepTimerState.value)
+        assertNull(controller.sleepTimerOption.value)
     }
 
     @Test
