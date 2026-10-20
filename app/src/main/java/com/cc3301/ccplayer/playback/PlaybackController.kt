@@ -8,8 +8,11 @@ import com.cc3301.ccplayer.settings.ResumeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -47,6 +50,18 @@ class PlaybackController(
     /** 拖动进度条时预览的目标位置；不在拖动时为 null。 */
     private val _seekPreviewMillis = MutableStateFlow<Long?>(null)
     val seekPreviewMillis: StateFlow<Long?> = _seekPreviewMillis.asStateFlow()
+
+    /** 正在切集：原视频暂停，画面冻结，等目标就绪后替换。 */
+    private val _switching = MutableStateFlow(false)
+    val switching: StateFlow<Boolean> = _switching.asStateFlow()
+
+    /** 缓冲指示是否显示：加载超过 [BUFFER_INDICATOR_DELAY_MILLIS] 仍未就绪时为真。 */
+    private val _buffering = MutableStateFlow(false)
+    val buffering: StateFlow<Boolean> = _buffering.asStateFlow()
+
+    /** 播放失败事件，供界面提示“播放失败”。 */
+    private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val playbackFailures: SharedFlow<Unit> = _playbackFailures.asSharedFlow()
 
     private val _decodeMode = MutableStateFlow(DecodeMode.Hardware)
     val decodeMode: StateFlow<DecodeMode> = _decodeMode.asStateFlow()
@@ -124,6 +139,23 @@ class PlaybackController(
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
+    /** 本次加载所处的阶段；[LoadPhase.None] 表示没有进行中的加载。 */
+    private var loadPhase = LoadPhase.None
+
+    /** 正在加载的目标下标；起播与切集共用。 */
+    private var loadTargetIndex = NO_MEDIA
+
+    /** 切集前原视频的下标与位置，失败或取消时回到这里。 */
+    private var switchOriginIndex = NO_MEDIA
+    private var switchOriginPositionMillis = 0L
+    private var switchOriginDurationMillis = 0L
+
+    /** 恢复原视频时等待文件打开后跳回的进度。 */
+    private var restorePositionMillis = 0L
+
+    /** 缓冲指示的延迟任务；加载结束时取消。 */
+    private var bufferingJob: Job? = null
+
     init {
         engine.setListener(this)
     }
@@ -142,27 +174,22 @@ class PlaybackController(
         playAt(index)
     }
 
-    /** 切换到播放列表第 [index] 项；超出范围时不动作。 */
+    /** 切换到播放列表第 [index] 项；超出范围或正在加载时不动作。 */
     fun playAt(index: Int) {
         val media = _playlist.value.getOrNull(index) ?: return
-        _currentIndex.value = index
-        _progress.value = PlaybackProgress()
-        _seekPreviewMillis.value = null
-        _subtitleTracks.value = emptyList()
-        _externalSubtitles.value = emptyList()
-        _subtitleSelection.value = SubtitleSelection.Off
-        active = true
-        playedPositionMillis = 0
-        playedDurationMillis = 0
-        savedPositionMillis = 0
-        resumePositionMillis = null
-        watchedToEnd = false
-        mediaLoaded = false
-        pausedAtEpisodeEnd = false
-        _state.value = PlaybackState.Loading
-        engine.start(media.playbackLocation)
-        engine.fadeInAudio(FADE_IN_MILLIS)
-        lookUpResumePosition(media)
+        // 切集缓冲期间重复切集不生效；首次加载还没开始播放时仍可直接改目标。
+        if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
+        if (active) {
+            startSwitch(index, media)
+        } else {
+            startSession(index, media)
+        }
+    }
+
+    /** 按媒体位置切换，不把列表视图的下标当作播放下标。 */
+    fun play(media: MediaFile) {
+        val index = _playlist.value.indexOfFirst { it.location == media.location }
+        if (index >= 0) playAt(index)
     }
 
     /** 名称自然排序下的一集；列表末尾时不动作。 */
@@ -173,6 +200,72 @@ class PlaybackController(
     /** 名称自然排序下的上一集；列表开头时不动作。 */
     fun previous() {
         playAt(_currentIndex.value - 1)
+    }
+
+    /**
+     * 取消进行中的切集并回到原视频：恢复原位置并保持暂停。
+     * 返回是否确实取消了切集；没有切集时返回 false。
+     */
+    fun cancelSwitch(): Boolean {
+        if (loadPhase != LoadPhase.Switching) return false
+        restoreOrigin()
+        return true
+    }
+
+    /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
+    private fun startSession(index: Int, media: MediaFile) {
+        _currentIndex.value = index
+        _progress.value = PlaybackProgress()
+        _seekPreviewMillis.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        active = true
+        paused = false
+        playedPositionMillis = 0
+        playedDurationMillis = 0
+        savedPositionMillis = 0
+        resumePositionMillis = null
+        watchedToEnd = false
+        mediaLoaded = false
+        pausedAtEpisodeEnd = false
+        loadTargetIndex = index
+        loadPhase = LoadPhase.Initial
+        _switching.value = false
+        _state.value = PlaybackState.Loading
+        beginBufferingIndicator()
+        engine.start(media.playbackLocation)
+        engine.fadeInAudio(FADE_IN_MILLIS)
+        lookUpResumePosition(index, media)
+    }
+
+    /**
+     * 切集：立即暂停原视频保留当前画面，再加载目标；首帧就绪后替换。
+     * 进度保持在原视频上，直到目标就绪。
+     */
+    private fun startSwitch(index: Int, media: MediaFile) {
+        switchOriginIndex = _currentIndex.value
+        switchOriginPositionMillis = playedPositionMillis
+        switchOriginDurationMillis = playedDurationMillis
+        _currentIndex.value = index
+        loadTargetIndex = index
+        loadPhase = LoadPhase.Switching
+        _switching.value = true
+        _seekPreviewMillis.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        resumePositionMillis = null
+        watchedToEnd = false
+        mediaLoaded = false
+        pausedAtEpisodeEnd = false
+        savedPositionMillis = 0
+        _state.value = PlaybackState.Loading
+        beginBufferingIndicator()
+        engine.pause()
+        engine.start(media.playbackLocation)
+        engine.fadeInAudio(FADE_IN_MILLIS)
+        lookUpResumePosition(index, media)
     }
 
     fun pause() {
@@ -187,6 +280,8 @@ class PlaybackController(
     fun resume() {
         if (!active) return
         paused = false
+        // 切集加载中的继续只记为意图，等目标文件就绪再出声。
+        if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
         if (stoppedAtEndOfEpisode()) playAt(_currentIndex.value)
         engine.resume()
     }
@@ -208,7 +303,8 @@ class PlaybackController(
     }
 
     fun stop() {
-        if (active) currentMedia()?.let { savePosition(media = it, force = true) }
+        val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
+        if (active) _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
         active = false
         paused = false
         engine.stop()
@@ -222,6 +318,7 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         directoryEntries = emptyList()
         pausedAtEpisodeEnd = false
+        resetLoadState()
         cancelSleepTimer()
     }
 
@@ -317,19 +414,71 @@ class PlaybackController(
     override fun onMediaLoaded() {
         if (!active) return
         mediaLoaded = true
-        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
-        applyResumePosition()
-        applyStartSubtitles()
+        when (loadPhase) {
+            LoadPhase.Initial -> {
+                applyResumePosition()
+                applyStartSubtitles(loadTargetIndex)
+                // 暂停中加载不会再有首帧事件，文件打开即可停在首帧。
+                if (paused) finishInitialLoad()
+            }
+            LoadPhase.Switching -> {
+                applyResumePosition()
+                applyStartSubtitles(loadTargetIndex)
+                if (paused) finishSwitch() else engine.resume()
+            }
+            LoadPhase.Restoring -> finishRestore()
+            LoadPhase.None -> Unit
+        }
+    }
+
+    override fun onFirstFrameReady() {
+        if (!active || !mediaLoaded) return
+        when (loadPhase) {
+            LoadPhase.Initial -> finishInitialLoad()
+            LoadPhase.Switching -> finishSwitch()
+            LoadPhase.Restoring, LoadPhase.None -> Unit
+        }
     }
 
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
+        // 首次加载被暂停后不会再等来首帧事件，文件已打开就直接进入暂停状态。
+        if (loadPhase == LoadPhase.Initial && paused) {
+            this.paused = true
+            finishInitialLoad()
+            return
+        }
+        // 加载期间引擎的暂停来自切集本身，不代表用户想停。
+        if (loadPhase != LoadPhase.None) return
         this.paused = paused
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
+    override fun onPlaybackFailed() {
+        if (!active) return
+        when (loadPhase) {
+            LoadPhase.Switching -> {
+                restoreOrigin()
+                _playbackFailures.tryEmit(Unit)
+            }
+            LoadPhase.Initial -> {
+                resetLoadState()
+                active = false
+                _state.value = PlaybackState.Ended
+                _playbackFailures.tryEmit(Unit)
+            }
+            LoadPhase.Restoring -> {
+                resetLoadState()
+                _state.value = PlaybackState.Paused
+            }
+            LoadPhase.None -> Unit
+        }
+    }
+
     override fun onPlaybackEnded() {
         if (!active) return
+        // 旧文件被替换时的结束事件不能触发自动连播。
+        if (loadPhase != LoadPhase.None) return
         if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
             _sleepTimerState.value = SleepTimerState.Off
             _sleepTimerOption.value = null
@@ -349,6 +498,8 @@ class PlaybackController(
 
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
         if (!active) return
+        // 加载中的位置属于新文件，切集时不能覆盖冻结画面上的原进度。
+        if (loadPhase != LoadPhase.None) return
         playedPositionMillis = positionMillis
         playedDurationMillis = durationMillis
         _progress.value = PlaybackProgress(positionMillis, durationMillis)
@@ -384,13 +535,104 @@ class PlaybackController(
     private fun reachedEnd(): Boolean =
         playedDurationMillis > 0 && playedPositionMillis >= playedDurationMillis - END_TOLERANCE_MILLIS
 
+    /** 首次打开就绪：撤掉缓冲指示，按暂停意图进入播放或暂停。 */
+    private fun finishInitialLoad() {
+        if (loadPhase != LoadPhase.Initial) return
+        endBufferingIndicator()
+        loadPhase = LoadPhase.None
+        loadTargetIndex = _currentIndex.value
+        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
+    }
+
+    /** 切集就绪：目标画面直接替换冻结画面，进度从新文件重新开始。 */
+    private fun finishSwitch() {
+        if (loadPhase != LoadPhase.Switching) return
+        endBufferingIndicator()
+        loadPhase = LoadPhase.None
+        loadTargetIndex = _currentIndex.value
+        _switching.value = false
+        switchOriginIndex = NO_MEDIA
+        playedPositionMillis = 0
+        playedDurationMillis = 0
+        _progress.value = PlaybackProgress()
+        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
+    }
+
+    /** 失败或取消切集：重新打开原视频，停在切集前的位置。 */
+    private fun restoreOrigin() {
+        val origin = _playlist.value.getOrNull(switchOriginIndex)
+        if (origin == null) {
+            resetLoadState()
+            return
+        }
+        endBufferingIndicator()
+        loadPhase = LoadPhase.Restoring
+        loadTargetIndex = switchOriginIndex
+        _currentIndex.value = switchOriginIndex
+        restorePositionMillis = switchOriginPositionMillis
+        playedPositionMillis = switchOriginPositionMillis
+        playedDurationMillis = switchOriginDurationMillis
+        _progress.value = PlaybackProgress(switchOriginPositionMillis, switchOriginDurationMillis)
+        savedPositionMillis = switchOriginPositionMillis
+        resumePositionMillis = null
+        mediaLoaded = false
+        watchedToEnd = false
+        pausedAtEpisodeEnd = false
+        paused = true
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        _state.value = PlaybackState.Paused
+        engine.pause()
+        engine.start(origin.playbackLocation)
+    }
+
+    /** 原视频重新打开完成：跳回切集前的位置并保持暂停，冻结画面随之撤掉。 */
+    private fun finishRestore() {
+        if (loadPhase != LoadPhase.Restoring) return
+        mediaLoaded = true
+        loadPhase = LoadPhase.None
+        loadTargetIndex = _currentIndex.value
+        _switching.value = false
+        switchOriginIndex = NO_MEDIA
+        if (restorePositionMillis > 0) engine.seekTo(restorePositionMillis)
+        restorePositionMillis = 0
+        applyStartSubtitles(_currentIndex.value)
+        _state.value = PlaybackState.Paused
+    }
+
+    /** 缓冲指示延迟出现；加载在延迟内结束就不会闪一下提示。 */
+    private fun beginBufferingIndicator() {
+        bufferingJob?.cancel()
+        _buffering.value = false
+        bufferingJob = scope.launch {
+            delay(BUFFER_INDICATOR_DELAY_MILLIS)
+            if (loadPhase != LoadPhase.None) _buffering.value = true
+        }
+    }
+
+    private fun endBufferingIndicator() {
+        bufferingJob?.cancel()
+        bufferingJob = null
+        _buffering.value = false
+    }
+
+    /** 清掉进行中的加载与切集状态，不改变会话本身。 */
+    private fun resetLoadState() {
+        endBufferingIndicator()
+        _switching.value = false
+        loadPhase = LoadPhase.None
+        loadTargetIndex = NO_MEDIA
+        switchOriginIndex = NO_MEDIA
+        restorePositionMillis = 0
+    }
+
     /** 按 [ResumeMode] 读记录：读到正的位置就在媒体加载后跳一次。 */
-    private fun lookUpResumePosition(media: MediaFile) {
+    private fun lookUpResumePosition(index: Int, media: MediaFile) {
         if (_resumeMode.value == ResumeMode.FromStart) return
-        val index = _currentIndex.value
         scope.launch {
             val record: MediaProgress? = progressStore.find(media.location)
-            if (!active || _currentIndex.value != index) return@launch
+            if (!active || loadTargetIndex != index) return@launch
             resumePositionMillis = record?.positionMillis?.takeIf { it > 0 }
             applyResumePosition()
         }
@@ -405,8 +647,8 @@ class PlaybackController(
     }
 
     /** 起播字幕：匹配到的外挂一律加载进轨道列表，显示哪一路由 [subtitleStartDecision] 定。 */
-    private fun applyStartSubtitles() {
-        val media = currentMedia() ?: return
+    private fun applyStartSubtitles(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
         val tracks = engine.embeddedSubtitleTracks()
         val start = subtitleStartDecision(media.name, tracks, directoryEntries)
         start.externalToLoad.forEach { engine.addExternalSubtitle(it.playbackLocation) }
@@ -448,9 +690,15 @@ class PlaybackController(
         _videoAspectRatio.value = width.toDouble() / height
     }
 
+    /** 一次加载所处的阶段；切集与首次打开共用缓冲指示，但返回行为不同。 */
+    private enum class LoadPhase { None, Initial, Switching, Restoring }
+
     companion object {
         /** 起播与跳转后的音频淡入时长，固定值。 */
         const val FADE_IN_MILLIS = 500L
+
+        /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
+        const val BUFFER_INDICATOR_DELAY_MILLIS = 500L
 
         private const val NO_MEDIA = -1
 

@@ -21,6 +21,21 @@ class MpvPlaybackEngine(
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
     private var videoOutputStopped = false
 
+    /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
+    private var attachedSurface: Surface? = null
+
+    /** 已打开文件；loadfile 替换时旧文件会先结束，要把它和加载失败区分开。 */
+    private var hasFile = false
+
+    /** 下一次结束事件来自被替换的旧文件，不是自然播完。 */
+    private var expectPreviousEnd = false
+
+    /** 本次加载是否已经上报过首帧，避免 seek 后的重播事件重复上报。 */
+    private var readyReported = false
+
+    /** mpv 报告已到文件末尾；结束事件据此区分自然播完与出错。 */
+    private var eofReached = false
+
     private var positionSeconds = 0.0
     private var durationSeconds = 0.0
     private var videoWidth = 0
@@ -36,6 +51,7 @@ class MpvPlaybackEngine(
         MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         MPVLib.observeProperty(WIDTH_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(HEIGHT_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
+        MPVLib.observeProperty(EOF_REACHED_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -45,6 +61,10 @@ class MpvPlaybackEngine(
     override fun start(url: String) {
         positionSeconds = 0.0
         durationSeconds = 0.0
+        expectPreviousEnd = hasFile
+        hasFile = false
+        readyReported = false
+        eofReached = false
         MPVLib.command(arrayOf("loadfile", url, "replace"))
     }
 
@@ -57,6 +77,9 @@ class MpvPlaybackEngine(
     }
 
     override fun stop() {
+        expectPreviousEnd = false
+        hasFile = false
+        readyReported = false
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -113,19 +136,23 @@ class MpvPlaybackEngine(
     }
 
     override fun attachSurface(surface: Surface) {
+        if (attachedSurface === surface && !videoOutputStopped) return
         if (videoOutputStopped) {
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
             videoOutputStopped = false
         }
         MPVLib.attachSurface(surface)
+        attachedSurface = surface
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         MPVLib.setOptionString("force-window", "yes")
     }
 
     override fun detachSurface() {
+        if (attachedSurface == null) return
         MPVLib.setPropertyString("vo", "null")
         MPVLib.setOptionString("force-window", "no")
         MPVLib.detachSurface()
+        attachedSurface = null
         videoOutputStopped = true
     }
 
@@ -140,9 +167,33 @@ class MpvPlaybackEngine(
 
     override fun event(eventId: Int) {
         when (eventId) {
-            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> listener?.onMediaLoaded()
-            MPVLib.MpvEvent.MPV_EVENT_END_FILE -> listener?.onPlaybackEnded()
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
+                // 替换命令发出后，旧文件迟到的“已打开”不能当成新文件就绪。
+                if (expectPreviousEnd) return
+                hasFile = true
+                eofReached = false
+                listener?.onMediaLoaded()
+            }
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
+                if (hasFile && !readyReported) {
+                    readyReported = true
+                    listener?.onFirstFrameReady()
+                }
+            }
+            MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
+    }
+
+    /** 替换旧文件也会产生 END_FILE；只有自然播完（eof）才算播放结束。 */
+    private fun onEndFile() {
+        if (expectPreviousEnd) {
+            expectPreviousEnd = false
+            return
+        }
+        val naturalEnd = eofReached ||
+            (durationSeconds > 0 && positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS)
+        hasFile = false
+        if (naturalEnd) listener?.onPlaybackEnded() else listener?.onPlaybackFailed()
     }
 
     override fun eventProperty(property: String) = Unit
@@ -168,7 +219,10 @@ class MpvPlaybackEngine(
     override fun eventProperty(property: String, value: String) = Unit
 
     override fun eventProperty(property: String, value: Boolean) {
-        if (property == PAUSE_PROPERTY) listener?.onPauseChanged(value)
+        when (property) {
+            PAUSE_PROPERTY -> listener?.onPauseChanged(value)
+            EOF_REACHED_PROPERTY -> eofReached = value
+        }
     }
 
     /** mpv 在时长未知时上报 NaN，按 0 处理。 */
@@ -205,6 +259,7 @@ class MpvPlaybackEngine(
         const val DURATION_PROPERTY = "duration"
         const val WIDTH_PROPERTY = "width"
         const val HEIGHT_PROPERTY = "height"
+        const val EOF_REACHED_PROPERTY = "eof-reached"
         const val SID_PROPERTY = "sid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"
@@ -219,5 +274,8 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+
+        /** 位置与时长差在这个范围内就算自然播完，兜底 eof-reached 未上报的情况。 */
+        const val EOF_TOLERANCE_SECONDS = 1.0
     }
 }

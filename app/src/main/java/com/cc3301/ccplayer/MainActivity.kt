@@ -6,10 +6,14 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.view.PixelCopy
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -107,6 +111,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
     private var surface: Surface? = null
+
+    /** 视频 Surface 当前尺寸，抓冻结画面时用。 */
+    private var surfaceWidth = 0
+    private var surfaceHeight = 0
     private var pendingPlaylist: List<MediaFile> = emptyList()
     private var pendingMedia: MediaFile? = null
 
@@ -126,6 +134,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
     private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
+    private var switching by mutableStateOf(false)
+    private var buffering by mutableStateOf(false)
+
+    /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标首帧就绪。 */
+    private var freezeFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -145,6 +158,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
+                launch { binder.controller.switching.collect { switching = it } }
+                launch { binder.controller.buffering.collect { buffering = it } }
+                launch {
+                    binder.controller.playbackFailures.collect {
+                        Toast.makeText(
+                            this@MainActivity,
+                            getString(R.string.player_playback_failed),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
                 launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
                 launch { binder.controller.externalSubtitles.collect { externalSubtitles = it } }
                 launch { binder.controller.subtitleSelection.collect { subtitleSelection = it } }
@@ -182,6 +206,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
+                LaunchedEffect(switching) {
+                    if (!switching) freezeFrame = null
+                }
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio) {
                     applyOrientation(
                         if (playerVisible) resolvedOrientation(orientationMode, videoAspectRatio)
@@ -198,7 +225,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
                 when {
                     playerVisible -> {
-                        BackHandler { closePlayer() }
+                        BackHandler {
+                            // 切集缓冲期间返回只取消这次切换，留在原视频并保持暂停。
+                            if (playback?.controller?.cancelSwitch() != true) closePlayer()
+                        }
                         PlayerScreen(
                             state = playbackState,
                             progress = progress,
@@ -212,16 +242,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
                             videoAspectRatio = videoAspectRatio,
+                            switching = switching,
+                            buffering = buffering,
+                            freezeFrame = freezeFrame,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
                             onTogglePlayPause = { playback?.controller?.togglePlayPause() },
-                            onPrevious = { playback?.controller?.previous() },
-                            onNext = { playback?.controller?.next() },
+                            onPrevious = { switchEpisode { playback?.controller?.previous() } },
+                            onNext = { switchEpisode { playback?.controller?.next() } },
                             onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
-                            onPlaylistSelect = { playback?.controller?.playAt(it) },
+                            onPlaylistSelect = { media -> switchEpisode { playback?.controller?.play(media) } },
                             onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
                             onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
                             onSelectOrientationMode = { mode ->
@@ -482,7 +515,33 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onSurfaceResized(width: Int, height: Int) {
+        surfaceWidth = width
+        surfaceHeight = height
         playback?.engine?.setSurfaceSize(width, height)
+    }
+
+    /** 切集前先抓一帧当前画面，切集期间盖在视频 Surface 上，避免出现黑屏。 */
+    private fun switchEpisode(action: () -> Unit) {
+        captureFreezeFrame()
+        action()
+    }
+
+    private fun captureFreezeFrame() {
+        val surface = surface ?: return
+        val width = surfaceWidth
+        val height = surfaceHeight
+        if (!surface.isValid || width <= 0 || height <= 0) return
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        PixelCopy.request(
+            surface,
+            bitmap,
+            { result ->
+                if (result == PixelCopy.SUCCESS && playback?.controller?.switching?.value == true) {
+                    freezeFrame = bitmap
+                }
+            },
+            Handler(Looper.getMainLooper()),
+        )
     }
 
     override fun onSurfaceReleased() {
@@ -508,6 +567,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         sleepTimerState = SleepTimerState.Off
         sleepTimerOption = null
         videoAspectRatio = null
+        switching = false
+        buffering = false
+        freezeFrame = null
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off

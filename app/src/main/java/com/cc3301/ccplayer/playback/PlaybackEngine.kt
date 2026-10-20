@@ -54,14 +54,20 @@ interface PlaybackEngine {
 
     /** 引擎向控制层上报的播放事件。 */
     interface Listener {
-        /** 媒体已打开，可以出画出声。 */
+        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。 */
         fun onMediaLoaded()
+
+        /** 首帧已可显示，缓冲可以结束。 */
+        fun onFirstFrameReady()
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)
 
-        /** 当前媒体播放结束。 */
+        /** 当前媒体自然播放结束；被替换或停止产生的结束事件不上报。 */
         fun onPlaybackEnded()
+
+        /** 媒体打开失败或播放中出错，按切集失败处理。 */
+        fun onPlaybackFailed()
 
         /** 播放位置或时长更新，单位毫秒。 */
         fun onPositionChanged(positionMillis: Long, durationMillis: Long)

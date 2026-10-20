@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.ui
 
+import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,6 +41,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -63,8 +66,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -158,6 +163,27 @@ private fun PlayerTextButton(
     }
 }
 
+/** 缓冲指示：转圈与“正在缓冲”，首次打开叠在黑屏上，切集叠在冻结画面上。 */
+@Composable
+private fun BufferingIndicator(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        CircularProgressIndicator(
+            color = AppColors.Foreground,
+            strokeWidth = 3.dp,
+            modifier = Modifier.size(36.dp),
+        )
+        Text(
+            text = stringResource(R.string.player_buffering),
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.Foreground,
+            modifier = Modifier.padding(top = AppSpacing.Sm),
+        )
+    }
+}
+
 @Composable
 fun PlayerScreen(
     state: PlaybackState,
@@ -174,6 +200,9 @@ fun PlayerScreen(
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     videoAspectRatio: Double?,
+    switching: Boolean,
+    buffering: Boolean,
+    freezeFrame: Bitmap?,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -183,7 +212,7 @@ fun PlayerScreen(
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onSeekBy: (Long) -> Unit,
-    onPlaylistSelect: (Int) -> Unit,
+    onPlaylistSelect: (MediaFile) -> Unit,
     onSelectDecodeMode: (DecodeMode) -> Unit,
     onSelectLoopMode: (LoopMode) -> Unit,
     onSelectOrientationMode: (OrientationMode) -> Unit,
@@ -223,6 +252,13 @@ fun PlayerScreen(
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
             .coerceAtLeast(72.dp)
+        if (buffering && !switching) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black),
+            )
+        }
         AndroidView(
             factory = { context ->
                 MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
@@ -234,6 +270,17 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
+        if (switching && freezeFrame != null) {
+            Image(
+                bitmap = freezeFrame.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (buffering) {
+            BufferingIndicator(modifier = Modifier.align(Alignment.Center))
+        }
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelOpen,
@@ -640,7 +687,7 @@ private fun Controls(
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
-    onPlaylistSelect: (Int) -> Unit,
+    onPlaylistSelect: (MediaFile) -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
@@ -1136,7 +1183,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
 private fun PlaylistPanel(
     playlist: List<MediaFile>,
     currentIndex: Int,
-    onSelect: (Int) -> Unit,
+    onSelect: (MediaFile) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1152,7 +1199,7 @@ private fun PlaylistPanel(
                     color = if (index == currentIndex) AppColors.Accent else AppColors.Foreground,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .noRippleClickable { onSelect(index) }
+                        .noRippleClickable { onSelect(media) }
                         .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }

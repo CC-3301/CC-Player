@@ -88,11 +88,22 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun release() = Unit
 
-    fun reportMediaLoaded() = listener?.onMediaLoaded()
+    /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
+    fun reportMediaLoaded() {
+        listener?.onMediaLoaded()
+        listener?.onFirstFrameReady()
+    }
+
+    /** 只上报文件打开，首帧还没就绪。 */
+    fun reportFileLoaded() = listener?.onMediaLoaded()
+
+    fun reportFirstFrameReady() = listener?.onFirstFrameReady()
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
     fun reportPlaybackEnded() = listener?.onPlaybackEnded()
+
+    fun reportPlaybackFailed() = listener?.onPlaybackFailed()
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
         listener?.onPositionChanged(positionMillis, durationMillis)
