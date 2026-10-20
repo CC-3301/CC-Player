@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import android.os.SystemClock
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -24,13 +25,16 @@ data class NavigationState(
 /** 首页返回的结果：第一次提示，窗口内再按一次退出。 */
 enum class HomeBackResult { ShowExitHint, Exit }
 
+/** 库页面系统返回的去向：回上级目录，或离开库页面回源列表。 */
+enum class LibraryBackAction { NavigateUp, LeaveLibrary }
+
 /**
  * 导航状态持有者：界面层级与设置页来处放在这里，由 ViewModel 持有，界面重建后不丢。
  * 首页二次返回的窗口按注入的时钟判定，便于测试。
  */
 class NavigationViewModel(
     private val savedState: SavedStateHandle = SavedStateHandle(),
-    private val now: () -> Long = { System.currentTimeMillis() },
+    private val now: () -> Long = { SystemClock.elapsedRealtime() },
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(restoredState())
@@ -59,6 +63,14 @@ class NavigationViewModel(
 
     fun backToSources() {
         update { it.copy(screen = AppScreen.Sources) }
+    }
+
+    /** 库页面系统返回：有上级目录时交给库状态回退，否则回到源列表。 */
+    fun backFromLibrary(hasParent: Boolean): LibraryBackAction = if (hasParent) {
+        LibraryBackAction.NavigateUp
+    } else {
+        backToSources()
+        LibraryBackAction.LeaveLibrary
     }
 
     fun backToHome() {

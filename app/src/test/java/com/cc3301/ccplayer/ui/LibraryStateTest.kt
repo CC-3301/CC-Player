@@ -136,6 +136,25 @@ class LibraryStateTest {
     }
 
     @Test
+    fun `仅切换视图仍按记录条目定位`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+        )
+
+        val switched = loaded.withDisplayPreferences(
+            viewMode = ViewMode.Grid,
+            gridColumns = 4,
+            sortOrder = loaded.sortOrder,
+            autoRestorePosition = true,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 24), switched.scrollTarget)
+    }
+
+    @Test
     fun `设置未变化时不重复触发滚动`() {
         val state = LibraryState().withLoadedEntries(listOf(entry("ep1.mkv", 1)), null, null)
 

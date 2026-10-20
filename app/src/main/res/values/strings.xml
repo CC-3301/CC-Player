@@ -2,7 +2,6 @@
 <resources>
     <string name="app_name">CC Player</string>
     <string name="app_exit_hint">再按一次退出</string>
-    <string name="library_back">返回</string>
     <string name="library_empty_title">空目录</string>
     <string name="library_empty">这个目录里没有可播放的媒体</string>
     <string name="library_load_failed">读不了这个目录。检查授权，或换一个目录。</string>

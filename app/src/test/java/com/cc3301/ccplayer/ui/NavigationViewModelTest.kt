@@ -34,6 +34,24 @@ class NavigationViewModelTest {
     }
 
     @Test
+    fun `库页面有上级目录时回退上级且不离开库页面`() {
+        navigation.openProtocol(SourceProtocol.Smb)
+        navigation.openLibrary()
+
+        assertEquals(LibraryBackAction.NavigateUp, navigation.backFromLibrary(hasParent = true))
+        assertEquals(AppScreen.Library, navigation.state.value.screen)
+    }
+
+    @Test
+    fun `库页面在根目录时返回源列表`() {
+        navigation.openProtocol(SourceProtocol.Smb)
+        navigation.openLibrary()
+
+        assertEquals(LibraryBackAction.LeaveLibrary, navigation.backFromLibrary(hasParent = false))
+        assertEquals(AppScreen.Sources, navigation.state.value.screen)
+    }
+
+    @Test
     fun `设置页从首页进入后返回首页`() {
         navigation.openSettings()
 

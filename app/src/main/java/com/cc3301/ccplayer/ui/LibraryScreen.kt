@@ -48,7 +48,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -77,7 +76,6 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 
 /**
  * 库页面：按「当前目录即列表」浏览单个连接源，点条目进入子目录或起播。
@@ -93,6 +91,7 @@ fun LibraryScreen(
     onOpenSettings: () -> Unit,
     onSelectView: (ViewChoice) -> Unit,
     onSelectSort: (SortOrder) -> Unit,
+    onScrollToTop: () -> Unit,
     onRetry: () -> Unit,
     onSavePosition: (sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) -> Unit,
     modifier: Modifier = Modifier,
@@ -103,16 +102,6 @@ fun LibraryScreen(
     val latestSavePosition by rememberUpdatedState(onSavePosition)
     val sourceLocation = state.sourceLocation
     val relativePath = relativeDirectoryPath(state.stack)
-    val scope = rememberCoroutineScope()
-    val scrollToTop: () -> Unit = {
-        scope.launch {
-            if (state.viewMode == ViewMode.List) {
-                listState.scrollToItem(0, 0)
-            } else {
-                gridState.scrollToItem(0, 0)
-            }
-        }
-    }
 
     // 目录读完、排序、视图或位置记忆开关变化后，按状态给出的目标定位一次。
     LaunchedEffect(state.scrollRevision) {
@@ -183,7 +172,7 @@ fun LibraryScreen(
                     state = state,
                     onSelectView = onSelectView,
                     onSelectSort = onSelectSort,
-                    onScrollToTop = scrollToTop,
+                    onScrollToTop = onScrollToTop,
                 )
             },
             titlePadding = 104.dp,

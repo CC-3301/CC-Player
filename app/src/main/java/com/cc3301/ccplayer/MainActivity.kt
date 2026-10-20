@@ -53,7 +53,6 @@ import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.settings.ViewMode
 import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -62,6 +61,7 @@ import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.ui.AppScreen
 import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
+import com.cc3301.ccplayer.ui.LibraryBackAction
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
@@ -181,7 +181,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         else ScreenOrientation.System,
                     )
                 }
-
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
                 }
@@ -296,10 +295,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
                     else -> {
                         BackHandler {
-                            if (libraryState.stack.size > 1) {
-                                library.navigateUp()
-                            } else {
-                                navigation.backToSources()
+                            when (navigation.backFromLibrary(libraryState.stack.size > 1)) {
+                                LibraryBackAction.NavigateUp -> library.navigateUp()
+                                LibraryBackAction.LeaveLibrary -> Unit
                             }
                         }
                         LibraryScreen(
@@ -314,12 +312,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             },
                             onOpenSettings = navigation::openSettings,
                             onSelectView = { choice ->
-                                lifecycleScope.launch {
-                                    if (choice.viewMode == ViewMode.Grid) settings.setGridColumns(choice.gridColumns)
-                                    settings.setViewMode(choice.viewMode)
-                                }
+                                lifecycleScope.launch { settings.setView(choice.viewMode, choice.gridColumns) }
                             },
                             onSelectSort = { order -> lifecycleScope.launch { settings.setSortOrder(order) } },
+                            onScrollToTop = library::scrollToTop,
                             onRetry = library::retry,
                             onSavePosition = library::savePosition,
                         )
