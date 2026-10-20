@@ -113,13 +113,17 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
     fun reportMediaLoaded() {
         listener?.onMediaLoaded()
-        listener?.onFirstFrameReady()
+        listener?.onFirstFrameReady(fromVideoReconfig = false)
     }
 
     /** 只上报文件打开，首帧还没就绪。 */
     fun reportFileLoaded() = listener?.onMediaLoaded()
 
-    fun reportFirstFrameReady() = listener?.onFirstFrameReady()
+    /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
+    fun reportFirstFrameReady() = listener?.onFirstFrameReady(fromVideoReconfig = false)
+
+    /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
+    fun reportVideoReconfigured() = listener?.onFirstFrameReady(fromVideoReconfig = true)
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 

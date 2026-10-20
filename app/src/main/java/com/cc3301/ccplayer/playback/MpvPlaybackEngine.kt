@@ -34,6 +34,9 @@ class MpvPlaybackEngine(
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
     private var hasVideoTrack = false
 
+    /** 本次 loadfile 的目标位置，用 mpv 的 path 属性识别迟到的旧 FILE_LOADED。 */
+    private var targetUrl: String? = null
+
     private var positionSeconds = 0.0
     private var durationSeconds = 0.0
     private var videoWidth = 0
@@ -61,6 +64,7 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         readyReported = false
+        targetUrl = url
         fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -83,9 +87,11 @@ class MpvPlaybackEngine(
     }
 
     override fun stop() {
-        fileEvents.reset()
+        // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
+        fileEvents.onStop()
         hasVideoTrack = false
         readyReported = false
+        targetUrl = null
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -174,21 +180,36 @@ class MpvPlaybackEngine(
     override fun event(eventId: Int) {
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
-            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> if (fileEvents.isLoaded && hasVideoTrack) reportReady()
-            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> if (fileEvents.isLoaded && !hasVideoTrack) reportReady()
+            // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
+            // 它可能早于首帧上屏，交给控制层做短暂延迟。
+            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
+                if (fileEvents.isLoaded && hasVideoTrack && isPaused()) reportReady(fromVideoReconfig = true)
+            }
+            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
+                if (fileEvents.isLoaded && !hasVideoTrack) reportReady()
+            }
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (fileEvents.isLoaded) reportReady()
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
     }
 
     private fun onFileLoaded() {
-        // 替换命令发出后，旧文件迟到的“已打开”不能当成新文件加载成功。
-        if (!fileEvents.onFileLoaded()) return
+        // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
+        if (!fileEvents.onFileLoaded(isTargetFile())) return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
         listener?.onMediaLoaded()
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
+
+    /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
+    private fun isTargetFile(): Boolean {
+        val target = targetUrl ?: return true
+        val path = MPVLib.getPropertyString(PATH_PROPERTY) ?: return true
+        return path == target
+    }
+
+    private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
     /** 替换、自然结束与失败由 [MpvFileEvents] 判定。 */
     private fun onEndFile() {
@@ -201,10 +222,10 @@ class MpvPlaybackEngine(
         }
     }
 
-    private fun reportReady() {
+    private fun reportReady(fromVideoReconfig: Boolean = false) {
         if (readyReported) return
         readyReported = true
-        listener?.onFirstFrameReady()
+        listener?.onFirstFrameReady(fromVideoReconfig)
     }
 
     override fun eventProperty(property: String) = Unit
@@ -271,6 +292,7 @@ class MpvPlaybackEngine(
         const val WIDTH_PROPERTY = "width"
         const val HEIGHT_PROPERTY = "height"
         const val EOF_REACHED_PROPERTY = "eof-reached"
+        const val PATH_PROPERTY = "path"
         const val SID_PROPERTY = "sid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"

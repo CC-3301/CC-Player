@@ -233,9 +233,35 @@ class PlaybackControllerSwitchTest {
         assertEquals(12_000L, engine.startedPositions.last())
 
         engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
         assertTrue(controller.switching.value)
 
-        engine.reportFirstFrameReady()
+        advanceTimeBy(PlaybackController.FRAME_SETTLE_MILLIS - 1)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a paused switch waits for the frame settle delay after video reconfig`() = runTest {
+        val controller = playingController()
+        controller.pause()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+
+        assertTrue(controller.switching.value)
+        advanceTimeBy(PlaybackController.FRAME_SETTLE_MILLIS - 1)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        advanceTimeBy(1)
+        runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
@@ -278,32 +304,50 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `an initial load that never becomes ready times out as a failure`() = runTest {
+    fun `an initial load failure stops the engine and reopening starts cleanly`() = runTest {
         val controller = controller()
         val failures = collectFailures(controller)
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.LOAD_TIMEOUT_MILLIS + 1)
-        runCurrent()
+        engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Ended, controller.state.value)
         assertEquals(1, failures.size)
+        assertEquals(1, engine.stopCalls)
+
+        open(controller, "ep1.mkv")
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        engine.reportMediaLoaded()
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(2, engine.startedUrls.size)
     }
 
     @Test
-    fun `a switch that never becomes ready restores the original and reports failure`() = runTest {
+    fun `a playback failure ends the session and the play key reopens the file`() = runTest {
         val controller = playingController()
-        engine.reportPositionChanged(25_000, 600_000)
         val failures = collectFailures(controller)
 
-        controller.next()
-        advanceTimeBy(PlaybackController.LOAD_TIMEOUT_MILLIS + 1)
-        runCurrent()
+        engine.reportPlaybackFailed()
+
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(1, failures.size)
+
+        controller.togglePlayPause()
 
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
-        assertEquals(PlaybackState.Paused, controller.state.value)
-        assertEquals(25_000L, controller.progress.value.positionMillis)
-        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `switching is accepted while the initial load is still in flight`() = runTest {
+        val controller = controller()
+
+        open(controller, "ep1.mkv", "ep2.mkv")
+        controller.next()
+
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(1, controller.currentIndex.value)
     }
 
     @Test

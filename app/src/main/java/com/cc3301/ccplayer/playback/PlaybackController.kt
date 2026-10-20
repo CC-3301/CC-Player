@@ -28,6 +28,9 @@ import kotlin.math.abs
  * 起播位置按 [ResumeMode] 取上次位置或从头；播放中按间隔落进度记录，位置到达时长（播到 100%）时清除记录。
  *
  * 定时暂停按 [SleepTimerOption] 到点暂停，或等当前文件自然播完时暂停（ADR-0015）；定时随会话结束清除。
+ *
+ * 所有字段只在控制层线程访问：生产环境由 PlaybackService 以 marshalCallbacks 注入回调投递，
+ * 引擎事件统一落到 Main，界面调用本来就在 Main，因此无需额外同步。
  */
 class PlaybackController(
     private val engine: PlaybackEngine,
@@ -160,8 +163,8 @@ class PlaybackController(
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
-    /** 加载超时；文件既不出首帧也不报错时兜底为失败。 */
-    private var loadTimeoutJob: Job? = null
+    /** 视频链重配后的稳定等待；避免在首帧真正上屏前撤掉冻结层。 */
+    private var frameSettleJob: Job? = null
 
     init {
         engine.setListener(if (marshalCallbacks) MarshallingListener(this, scope) else this)
@@ -242,7 +245,6 @@ class PlaybackController(
         replaceFreezeFrame(null)
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
-        beginLoadTimeout()
         engine.start(media.playbackLocation, paused = false)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -271,7 +273,6 @@ class PlaybackController(
         savedPositionMillis = 0
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
-        beginLoadTimeout()
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
         replaceFreezeFrame(engine.grabFrame())
@@ -310,6 +311,8 @@ class PlaybackController(
         when (_state.value) {
             PlaybackState.Playing -> pause()
             PlaybackState.Paused -> resume()
+            // 播完或失败后引擎已卸载，播放键重开当前文件。
+            PlaybackState.Ended -> if (_currentIndex.value != NO_MEDIA) playAt(_currentIndex.value)
             else -> Unit
         }
     }
@@ -440,10 +443,29 @@ class PlaybackController(
         }
     }
 
-    /** 首帧可显示后才算就绪；暂停中的加载同样要等到这一信号。 */
-    override fun onFirstFrameReady() {
+    /**
+     * 首帧可显示后才算就绪。视频链重配通常早于首帧上屏，
+     * 暂停态没有 PLAYBACK_RESTART，收到重配后再等 [FRAME_SETTLE_MILLIS] 才撤冻结层。
+     */
+    override fun onFirstFrameReady(fromVideoReconfig: Boolean) {
         if (!active || !mediaLoaded) return
-        when (loadPhase) {
+        val phase = loadPhase
+        if (phase == LoadPhase.None) return
+        if (!fromVideoReconfig) {
+            finishReady(phase)
+            return
+        }
+        frameSettleJob?.cancel()
+        frameSettleJob = scope.launch {
+            delay(FRAME_SETTLE_MILLIS)
+            if (loadPhase == phase && mediaLoaded) finishReady(phase)
+        }
+    }
+
+    private fun finishReady(phase: LoadPhase) {
+        frameSettleJob?.cancel()
+        frameSettleJob = null
+        when (phase) {
             LoadPhase.Initial -> finishInitialLoad()
             LoadPhase.Switching -> finishSwitch()
             LoadPhase.Restoring -> finishRestore()
@@ -535,7 +557,6 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
-        endLoadTimeout()
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
@@ -545,7 +566,6 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
-        endLoadTimeout()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
@@ -568,7 +588,6 @@ class PlaybackController(
             return
         }
         endBufferingIndicator()
-        beginLoadTimeout()
         loadPhase = LoadPhase.Restoring
         loadTargetIndex = switchOriginIndex
         _currentIndex.value = switchOriginIndex
@@ -599,7 +618,6 @@ class PlaybackController(
         if (loadPhase != LoadPhase.Restoring) return
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
-        endLoadTimeout()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
@@ -617,7 +635,10 @@ class PlaybackController(
             LoadPhase.Initial -> {
                 resetLoadState()
                 active = false
+                paused = true
                 _state.value = PlaybackState.Ended
+                // 清掉引擎里的失败残留，再次打开时不会撞上旧的 END_FILE。
+                engine.stop()
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Restoring -> {
@@ -628,11 +649,11 @@ class PlaybackController(
                 engine.stop()
                 _playbackFailures.tryEmit(Unit)
             }
-            // 播放中出错：停在当前位置，给出提示，不静默。
+            // 播放中出错：引擎已卸载，按失败结束；播放键可重开当前文件。
             LoadPhase.None -> {
+                active = false
                 paused = true
-                engine.pause()
-                _state.value = PlaybackState.Paused
+                _state.value = PlaybackState.Ended
                 _playbackFailures.tryEmit(Unit)
             }
         }
@@ -654,38 +675,17 @@ class PlaybackController(
         _buffering.value = false
     }
 
-    /** 加载既不出首帧也不报错时按失败收尾，避免永久停在缓冲。 */
-    private fun beginLoadTimeout() {
-        loadTimeoutJob?.cancel()
-        loadTimeoutJob = scope.launch {
-            delay(LOAD_TIMEOUT_MILLIS)
-            if (loadPhase != LoadPhase.None) handleLoadFailure()
-        }
-    }
-
-    private fun endLoadTimeout() {
-        loadTimeoutJob?.cancel()
-        loadTimeoutJob = null
-    }
-
-    /** 换掉冻结帧；旧位图晚一帧再回收，避免正在绘制时被释放。 */
+    /** 换掉冻结帧；位图交给 GC，不在 Compose 可能仍绘制时手动回收。 */
     private fun replaceFreezeFrame(frame: Bitmap?) {
-        val previous = _freezeFrame.value
-        if (previous === frame) return
         _freezeFrame.value = frame
-        if (previous != null) {
-            scope.launch {
-                delay(FREEZE_FRAME_RECYCLE_DELAY_MILLIS)
-                previous.recycle()
-            }
-        }
     }
 
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */
     private fun resetLoadState() {
         loadPhase = LoadPhase.None
         endBufferingIndicator()
-        endLoadTimeout()
+        frameSettleJob?.cancel()
+        frameSettleJob = null
         _switching.value = false
         loadTargetIndex = NO_MEDIA
         switchOriginIndex = NO_MEDIA
@@ -767,8 +767,8 @@ class PlaybackController(
             scope.launch { target.onMediaLoaded() }
         }
 
-        override fun onFirstFrameReady() {
-            scope.launch { target.onFirstFrameReady() }
+        override fun onFirstFrameReady(fromVideoReconfig: Boolean) {
+            scope.launch { target.onFirstFrameReady(fromVideoReconfig) }
         }
 
         override fun onPauseChanged(paused: Boolean) {
@@ -799,11 +799,8 @@ class PlaybackController(
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 500L
 
-        /** 加载超时：既不出首帧也不报错时按失败收尾。 */
-        const val LOAD_TIMEOUT_MILLIS = 30_000L
-
-        /** 旧冻结帧延后回收，避开仍在绘制它的那一帧。 */
-        private const val FREEZE_FRAME_RECYCLE_DELAY_MILLIS = 100L
+        /** 视频链重配后到首帧上屏的稳定等待。 */
+        const val FRAME_SETTLE_MILLIS = 80L
 
         private const val NO_MEDIA = -1
 

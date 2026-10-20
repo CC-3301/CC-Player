@@ -65,8 +65,11 @@ interface PlaybackEngine {
         /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。 */
         fun onMediaLoaded()
 
-        /** 首帧已可显示，缓冲可以结束。 */
-        fun onFirstFrameReady()
+        /**
+         * 首帧已可显示。[fromVideoReconfig] 为真表示只收到视频链重配，
+         * 画面可能还没上屏，控制层要再等一小段时间才撤冻结层。
+         */
+        fun onFirstFrameReady(fromVideoReconfig: Boolean)
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)

@@ -263,8 +263,8 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 首次加载的黑底画在视频视图之后，确保盖住尚未出帧的视频区域。
-        if (buffering && !switching) {
+        // 黑底画在视频视图之后：首次缓冲，或切集抓帧失败时，不露出未就绪的 Surface。
+        if ((buffering && !switching) || (switching && freezeFrame == null)) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
