@@ -20,6 +20,7 @@ class WebDavEncodingTest {
 
     @Test
     fun `编码请求地址时保留末尾斜杠`() {
+        assertEquals("http://host/", encodeWebDavUrl("http://host/"))
         assertEquals("http://host/dav/", encodeWebDavUrl("http://host/dav/"))
         assertEquals("http://host/dav", encodeWebDavUrl("http://host/dav"))
     }

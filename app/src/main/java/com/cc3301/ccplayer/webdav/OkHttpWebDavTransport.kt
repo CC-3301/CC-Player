@@ -25,14 +25,14 @@ import java.util.concurrent.TimeUnit
 class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) : WebDavTransport {
 
     override suspend fun list(url: String, username: String, password: String?): List<WebDavEntry> = withContext(Dispatchers.IO) {
-        // PROPFIND 的目录地址以 `/` 结尾，否则服务器会回 301 而客户端不跟随。
+        // PROPFIND 的目录地址统一以 `/` 结尾（ADR-0002），不依赖重定向处理。
         val directoryUrl = if (url.endsWith('/')) url else "$url/"
         val request = requestOf(directoryUrl, username, password)
             .method(METHOD_PROPFIND, PROPFIND_BODY.toRequestBody(XML_MEDIA_TYPE.toMediaType()))
             .header(DEPTH_HEADER, DEPTH_CHILDREN)
             .build()
         val body = execute(request).use { response ->
-            if (!response.isSuccessful) throw statusFailure(response.code, url)
+            if (!response.isSuccessful) throw statusFailure(response.code, directoryUrl)
             response.body?.string().orEmpty()
         }
         parsePropfind(body, directoryUrl)

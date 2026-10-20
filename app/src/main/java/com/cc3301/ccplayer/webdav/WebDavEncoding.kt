@@ -34,7 +34,7 @@ internal fun encodeWebDavUrl(rawUrl: String): String {
     return buildString {
         append(scheme).append(SCHEME_SEPARATOR).append(authority)
         segments.forEach { append('/').append(encodePathSegment(it)) }
-        if (path.endsWith('/') && segments.isNotEmpty()) append('/')
+        if (rest.endsWith('/')) append('/')
     }
 }
 
