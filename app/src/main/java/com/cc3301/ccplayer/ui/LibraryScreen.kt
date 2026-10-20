@@ -1,7 +1,9 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,22 +26,31 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +68,7 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreview
 import com.cc3301.ccplayer.library.MediaPreviewSource
+import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.library.relativeDirectoryPath
 import com.cc3301.ccplayer.settings.ViewMode
@@ -65,11 +77,12 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 
 /**
  * 库页面：按「当前目录即列表」浏览单个连接源，点条目进入子目录或起播。
  *
- * 顶栏只有返回与当前目录名；排序与视图只在设置页。
+ * 顶栏为汉堡按钮、当前目录名、视图按钮与排序按钮，不提供返回箭头。
  * 离开目录或滚动停下时记录第一个可见条目与偏移，下次进入据此恢复。
  */
 @Composable
@@ -77,7 +90,9 @@ fun LibraryScreen(
     state: LibraryState,
     mediaPreview: MediaPreviewSource,
     onOpenEntry: (MediaFile) -> Unit,
-    onBack: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onSelectView: (ViewChoice) -> Unit,
+    onSelectSort: (SortOrder) -> Unit,
     onRetry: () -> Unit,
     onSavePosition: (sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) -> Unit,
     modifier: Modifier = Modifier,
@@ -88,6 +103,16 @@ fun LibraryScreen(
     val latestSavePosition by rememberUpdatedState(onSavePosition)
     val sourceLocation = state.sourceLocation
     val relativePath = relativeDirectoryPath(state.stack)
+    val scope = rememberCoroutineScope()
+    val scrollToTop: () -> Unit = {
+        scope.launch {
+            if (state.viewMode == ViewMode.List) {
+                listState.scrollToItem(0, 0)
+            } else {
+                gridState.scrollToItem(0, 0)
+            }
+        }
+    }
 
     // 目录读完、排序、视图或位置记忆开关变化后，按状态给出的目标定位一次。
     LaunchedEffect(state.scrollRevision) {
@@ -148,11 +173,20 @@ fun LibraryScreen(
             title = state.currentDirectory?.name.orEmpty(),
             leading = {
                 HeaderIconButton(
-                    icon = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.library_back),
-                    onClick = onBack,
+                    icon = Icons.Filled.Menu,
+                    contentDescription = stringResource(R.string.settings_open),
+                    onClick = onOpenSettings,
                 )
             },
+            trailing = {
+                LibraryHeaderActions(
+                    state = state,
+                    onSelectView = onSelectView,
+                    onSelectSort = onSelectSort,
+                    onScrollToTop = scrollToTop,
+                )
+            },
+            titlePadding = 104.dp,
         )
         when {
             state.loading -> Centered { CircularProgressIndicator(color = AppColors.Accent) }
@@ -174,6 +208,112 @@ fun LibraryScreen(
                 gridState = gridState,
                 onOpenEntry = onOpenEntry,
             )
+        }
+    }
+}
+
+/** 库页面顶栏右侧：视图与排序按钮，当前项在菜单里带勾选。 */
+@Composable
+private fun LibraryHeaderActions(
+    state: LibraryState,
+    onSelectView: (ViewChoice) -> Unit,
+    onSelectSort: (SortOrder) -> Unit,
+    onScrollToTop: () -> Unit,
+) {
+    Row {
+        ViewMenuButton(
+            current = viewChoiceOf(state.viewMode, state.gridColumns),
+            onSelect = onSelectView,
+        )
+        SortMenuButton(
+            current = state.sortOrder,
+            onSelect = onSelectSort,
+            onScrollToTop = onScrollToTop,
+        )
+    }
+}
+
+@Composable
+private fun ViewMenuButton(current: ViewChoice, onSelect: (ViewChoice) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(
+                painter = painterResource(R.drawable.ic_view_mode),
+                contentDescription = stringResource(R.string.library_view),
+                tint = AppColors.Foreground,
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = AppColors.SurfaceHigh,
+            shape = RoundedCornerShape(AppRadius.Md),
+        ) {
+            viewChoices.forEach { choice ->
+                DropdownMenuItem(
+                    text = { Text(text = optionText(viewChoiceLabel(choice))) },
+                    onClick = {
+                        expanded = false
+                        onSelect(choice)
+                    },
+                    trailingIcon = {
+                        if (choice == current) {
+                            Icon(imageVector = Icons.Filled.Check, contentDescription = null, tint = AppColors.Accent)
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** 单击打开排序菜单；长按回到顶部，且不改变排序。 */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SortMenuButton(
+    current: SortOrder,
+    onSelect: (SortOrder) -> Unit,
+    onScrollToTop: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .combinedClickable(
+                    onClick = { expanded = true },
+                    onLongClick = onScrollToTop,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_sort),
+                contentDescription = stringResource(R.string.library_sort),
+                tint = AppColors.Foreground,
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = AppColors.SurfaceHigh,
+            shape = RoundedCornerShape(AppRadius.Md),
+        ) {
+            SortOrder.entries.forEach { order ->
+                DropdownMenuItem(
+                    text = { Text(text = stringResource(sortLabel(order))) },
+                    onClick = {
+                        expanded = false
+                        onSelect(order)
+                    },
+                    trailingIcon = {
+                        if (order == current) {
+                            Icon(imageVector = Icons.Filled.Check, contentDescription = null, tint = AppColors.Accent)
+                        }
+                    },
+                )
+            }
         }
     }
 }

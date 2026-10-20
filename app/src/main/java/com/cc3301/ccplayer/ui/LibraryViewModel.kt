@@ -144,13 +144,18 @@ data class LibraryState(
             gridColumns != this.gridColumns ||
             sortOrder != this.sortOrder ||
             autoRestorePosition != this.autoRestorePosition
+        val sortChanged = sortOrder != this.sortOrder
         val updated = copy(
             viewMode = viewMode,
             gridColumns = gridColumns,
             sortOrder = sortOrder,
             autoRestorePosition = autoRestorePosition,
         )
-        return if (changed) updated.retargeted() else updated
+        return when {
+            !changed -> updated
+            sortChanged -> updated.scrolledToTop()
+            else -> updated.retargeted()
+        }
     }
 
     /** 目录读完后套用结果，并按位置记录定出滚动目标。 */
@@ -168,6 +173,12 @@ data class LibraryState(
     /** 按当前可见次序重新计算滚动目标并递增序号。 */
     private fun retargeted(): LibraryState = copy(
         scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, autoRestorePosition),
+        scrollRevision = scrollRevision + 1,
+    )
+
+    /** 切换排序后回到顶部：不按位置记录定位，也不改记录本身。 */
+    private fun scrolledToTop(): LibraryState = copy(
+        scrollTarget = if (visibleEntries.isEmpty()) null else DirectoryScrollTarget(index = 0, offset = 0),
         scrollRevision = scrollRevision + 1,
     )
 }

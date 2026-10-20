@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">CC Player</string>
+    <string name="app_exit_hint">再按一次退出</string>
     <string name="library_back">返回</string>
     <string name="library_empty_title">空目录</string>
     <string name="library_empty">这个目录里没有可播放的媒体</string>
@@ -39,6 +40,8 @@
     <string name="network_source_confirm">保存</string>
     <string name="network_source_cancel">取消</string>
     <string name="library_retry">重试</string>
+    <string name="library_view">视图</string>
+    <string name="library_sort">排序</string>
     <string name="library_sort_name_ascending">名称升序</string>
     <string name="library_sort_name_descending">名称降序</string>
     <string name="library_sort_time_newest_first">修改时间 新→旧</string>

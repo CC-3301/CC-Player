@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,7 +36,7 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
- * 首页：左上角设置齿轮，中间标题，下方本地、SMB、WebDAV 三个协议入口。
+ * 首页：左上角汉堡按钮打开设置，中间标题，下方本地、SMB、WebDAV 三个协议入口。
  */
 @Composable
 fun HomeScreen(
@@ -54,7 +54,7 @@ fun HomeScreen(
             title = stringResource(R.string.app_name),
             leading = {
                 HeaderIconButton(
-                    icon = Icons.Filled.Settings,
+                    icon = Icons.Filled.Menu,
                     contentDescription = stringResource(R.string.settings_open),
                     onClick = onOpenSettings,
                 )

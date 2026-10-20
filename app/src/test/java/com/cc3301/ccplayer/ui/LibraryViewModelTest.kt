@@ -524,7 +524,7 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `切换排序不删除位置记录`() = runTest {
+    fun `切换排序回到顶部且不删除位置记录`() = runTest {
         tree.addDirectory(smbRoot, testVideo("a.mkv", "smb://nas/media/a.mkv"))
         openSmbForm(address = "nas", path = "media")
         advanceUntilIdle()
@@ -536,7 +536,7 @@ class LibraryViewModelTest {
         settings.setSortOrder(SortOrder.NameDescending)
         advanceUntilIdle()
 
-        assertEquals(DirectoryScrollTarget(index = 0, offset = 24), viewModel.state.value.scrollTarget)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), viewModel.state.value.scrollTarget)
         assertEquals(
             "smb://nas/media/a.mkv",
             positions.load("smb://nas/media", "")?.entryLocation,

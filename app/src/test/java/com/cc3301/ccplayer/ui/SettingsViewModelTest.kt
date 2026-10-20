@@ -1,12 +1,10 @@
 package com.cc3301.ccplayer.ui
 
-import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.FakePreferencesDataStore
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.ResumeMode
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.settings.ViewMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -49,7 +47,7 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `默认值为连播开、续播、位置记忆开、硬解、屏幕方向、单列、3 列、名称升序`() = runTest {
+    fun `默认值为连播开、续播、位置记忆开、硬解、屏幕方向`() = runTest {
         advanceUntilIdle()
 
         val state = viewModel.state.value
@@ -58,9 +56,6 @@ class SettingsViewModelTest {
         assertTrue(state.autoRestorePosition)
         assertEquals(DecodeMode.Hardware, state.decodeMode)
         assertEquals(OrientationMode.System, state.orientationMode)
-        assertEquals(ViewMode.List, state.viewMode)
-        assertEquals(3, state.gridColumns)
-        assertEquals(SortOrder.NameAscending, state.sortOrder)
     }
 
     @Test
@@ -109,36 +104,12 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `视图模式与列数改动写回设置并反映到状态`() = runTest {
-        viewModel.setViewMode(ViewMode.Grid)
-        viewModel.setGridColumns(4)
-        advanceUntilIdle()
-
-        assertEquals(ViewMode.Grid, settings.viewMode.first())
-        assertEquals(4, settings.gridColumns.first())
-        assertEquals(ViewMode.Grid, viewModel.state.value.viewMode)
-        assertEquals(4, viewModel.state.value.gridColumns)
-    }
-
-    @Test
-    fun `排序改动写回设置并反映到状态`() = runTest {
-        viewModel.setSortOrder(SortOrder.LastModifiedNewestFirst)
-        advanceUntilIdle()
-
-        assertEquals(SortOrder.LastModifiedNewestFirst, settings.sortOrder.first())
-        assertEquals(SortOrder.LastModifiedNewestFirst, viewModel.state.value.sortOrder)
-    }
-
-    @Test
     fun `已保存的设置项在状态里读出`() = runTest {
         settings.setAutoPlayNext(false)
         settings.setResumeMode(ResumeMode.FromStart)
         settings.setAutoRestorePosition(false)
         settings.setDecodeMode(DecodeMode.Software)
         settings.setOrientationMode(OrientationMode.Landscape)
-        settings.setViewMode(ViewMode.Grid)
-        settings.setGridColumns(2)
-        settings.setSortOrder(SortOrder.NameDescending)
         advanceUntilIdle()
 
         val state = viewModel.state.value
@@ -147,8 +118,5 @@ class SettingsViewModelTest {
         assertFalse(state.autoRestorePosition)
         assertEquals(DecodeMode.Software, state.decodeMode)
         assertEquals(OrientationMode.Landscape, state.orientationMode)
-        assertEquals(ViewMode.Grid, state.viewMode)
-        assertEquals(2, state.gridColumns)
-        assertEquals(SortOrder.NameDescending, state.sortOrder)
     }
 }

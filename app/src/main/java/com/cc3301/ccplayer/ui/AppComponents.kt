@@ -29,13 +29,14 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
-/** 顶栏：两侧各留一个图标按钮的位置，标题居中。 */
+/** 顶栏：两侧各留图标按钮的位置，标题居中。 */
 @Composable
 fun ScreenHeader(
     title: String,
     modifier: Modifier = Modifier,
     leading: @Composable () -> Unit = {},
     trailing: @Composable () -> Unit = {},
+    titlePadding: Dp = 52.dp,
 ) {
     Box(
         modifier = modifier
@@ -52,7 +53,7 @@ fun ScreenHeader(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .align(Alignment.Center)
-                .padding(horizontal = 52.dp),
+                .padding(horizontal = titlePadding),
         )
         Box(modifier = Modifier.align(Alignment.CenterEnd)) { trailing() }
     }
