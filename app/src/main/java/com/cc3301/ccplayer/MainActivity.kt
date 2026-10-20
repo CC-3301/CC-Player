@@ -37,10 +37,12 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.library.NetworkMediaReads
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.RoutingMediaReads
 import com.cc3301.ccplayer.network.RoutingNetworkStreams
 import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.network.withPlaybackLocation
@@ -57,6 +59,7 @@ import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
+import com.cc3301.ccplayer.smb.SmbMediaReads
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.ui.HomeScreen
 import com.cc3301.ccplayer.ui.LibraryScreen
@@ -77,6 +80,7 @@ import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
+import com.cc3301.ccplayer.webdav.WebDavMediaReads
 import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -88,10 +92,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 
-    /** 缩略图不复用播放代理：播放开始时会释放代理，预览需要独立的长期访问。 */
-    private val previewStreams: NetworkStreams by lazy { createNetworkStreams() }
-
-    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, previewStreams) }
+    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, createPreviewReads()) }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
@@ -392,6 +393,22 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources)),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
+            ),
+        )
+    }
+
+    /** 预览读取直接走各协议，不建回环代理，也不参与播放代理的释放。 */
+    private fun createPreviewReads(): NetworkMediaReads {
+        val sources = NetworkSourceRepository(
+            store = DataStoreBookmarkStore.create(applicationContext),
+            credentials = EncryptedCredentialStore.create(applicationContext),
+        )
+        val webDavReads = WebDavMediaReads(OkHttpWebDavTransport(), WebDavLocator(sources))
+        return RoutingMediaReads(
+            mapOf(
+                SmbLocation.SCHEME to SmbMediaReads(SmbJConnector(), SmbLocator(sources)),
+                WebDavAddress.SCHEME_HTTP to webDavReads,
+                WebDavAddress.SCHEME_HTTPS to webDavReads,
             ),
         )
     }

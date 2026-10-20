@@ -28,18 +28,15 @@ class WebDavStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
-    /** 预览抽取用的随机读句柄：直接读源站，不经过回环代理。 */
-    override suspend fun openRead(location: String): ByteSource {
-        val target = targetOf(location)
-        return transport.openRead(target.url, target.username, target.password)
-    }
-
     override fun close() {
         server.close()
     }
 
     /** 代理在自己的线程上取流，这里阻塞等打开完成。 */
-    private fun openBlocking(location: String): ByteSource = runBlocking { openRead(location) }
+    private fun openBlocking(location: String): ByteSource = runBlocking {
+        val target = targetOf(location)
+        transport.openRead(target.url, target.username, target.password)
+    }
 
     private suspend fun targetOf(location: String): WebDavTarget =
         locator.locate(location)

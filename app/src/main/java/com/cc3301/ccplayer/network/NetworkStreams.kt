@@ -2,26 +2,21 @@ package com.cc3301.ccplayer.network
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
-import com.cc3301.ccplayer.library.NetworkMediaReads
 import com.cc3301.ccplayer.library.schemeOf
-import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.Closeable
 
 /**
  * 网络媒体播放接缝：把网络位置映到本机回环地址，播放核心只拿到本机地址。
  *
- * 各协议各自实现，与各自的文件树一一对应；预览抽取复用同一套协议访问，按字节范围读取。
+ * 各协议各自实现，与各自的文件树一一对应。
  */
-interface NetworkStreams : Closeable, NetworkMediaReads {
+interface NetworkStreams : Closeable {
 
     /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
     suspend fun probe(location: String)
 
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
-
-    /** 打开 [location] 的随机读句柄，供预览抽取读取文件开头；调用方负责关闭。 */
-    override suspend fun openRead(location: String): ByteSource
 }
 
 /**
@@ -34,8 +29,6 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     }
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
-
-    override suspend fun openRead(location: String): ByteSource = streamsFor(location).openRead(location)
 
     /** 同一个代理登记在多个方案下时只关一次。 */
     override fun close() {

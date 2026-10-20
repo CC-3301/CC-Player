@@ -35,7 +35,8 @@ interface MediaPreviewExtractor {
  * 媒体预览：先在 [cache] 里找图，没有就让 [extractor] 抽一次图并落盘。
  *
  * 网络条目的缓存键含修改时间，修改时间变化视为新文件；并发提取数有上限，
- * 失败或超时保持占位图且不写缓存。
+ * 失败或超时保持占位图且不写缓存。修改时间缺失时无法判断缓存是否过期，
+ * 网络条目直接保持占位图，不读也不写缓存。
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
@@ -64,11 +65,12 @@ class CachedMediaPreviewSource(
     }
 
     private suspend fun networkImage(file: MediaFile): File? {
-        val key = networkCacheKey(file)
+        val key = networkCacheKey(file) ?: return null
         cache.file(key)?.let { return it }
         val bytes = try {
-            withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                networkPermits.withPermit { extractor.imageBytes(file) }
+            networkPermits.withPermit {
+                // 可取消的超时；阻塞中的网络读由各自的传输层超时兜底。
+                withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { extractor.imageBytes(file) }
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -85,7 +87,7 @@ class CachedMediaPreviewSource(
         /** 同时进行的网络提取数；超出的由 [networkPermits] 排队。 */
         private const val NETWORK_CONCURRENCY = 3
 
-        /** 单次网络提取的等待上限；超时按没有图处理。 */
+        /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
 
         fun create(context: Context, networkReads: NetworkMediaReads): CachedMediaPreviewSource {
@@ -96,7 +98,8 @@ class CachedMediaPreviewSource(
             )
         }
 
-        /** 网络缓存键：媒体位置 + 修改时间；位置相同但修改时间变了就是新文件。 */
-        private fun networkCacheKey(file: MediaFile): String = "${file.location}@${file.lastModified}"
+        /** 网络缓存键：媒体位置 + 修改时间；修改时间缺失时返回 null，不读写缓存。 */
+        private fun networkCacheKey(file: MediaFile): String? =
+            if (file.lastModified <= 0) null else "${file.location}@${file.lastModified}"
     }
 }

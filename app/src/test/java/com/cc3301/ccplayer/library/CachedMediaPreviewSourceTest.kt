@@ -2,9 +2,12 @@ package com.cc3301.ccplayer.library
 
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -128,6 +131,31 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `不同位置相同修改时间各自独立缓存`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        source.preview(networkAt("a.mkv", lastModified = 1_000))
+        source.preview(networkAt("b.mkv", lastModified = 1_000))
+
+        assertEquals(2, directory.listFiles()!!.size)
+
+        source.preview(networkAt("a.mkv", lastModified = 1_000))
+        source.preview(networkAt("b.mkv", lastModified = 1_000))
+
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `修改时间缺失的网络条目不读也不写缓存`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+
+        val preview = source.preview(network("电影.mkv", lastModified = 0))
+
+        assertNull(preview.image)
+        assertTrue(extractor.imageRequests.isEmpty())
+        assertTrue(directory.listFiles().isNullOrEmpty())
+    }
+
+    @Test
     fun `网络提取失败保持占位图且不写缓存`() = runTest {
         extractor.imageFailure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
@@ -145,6 +173,23 @@ class CachedMediaPreviewSourceTest {
 
         assertNull(preview.image)
         assertTrue(directory.listFiles().isNullOrEmpty())
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `慢提取超时后释放并发名额`() = runTest {
+        val tracker = SlowFileExtractor(slowDelayMillis = 60_000)
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+        val slow = (1..3).map { index -> async { bounded.preview(network("慢$index.mkv")) } }
+        runCurrent()
+        assertEquals(3, tracker.requests.size)
+
+        val fast = async { bounded.preview(network("快.mkv")) }
+        val fastPreview = fast.await()
+
+        assertNotNull(fastPreview.image)
+        assertTrue(tracker.requests.contains("smb://nas/media/快.mkv"))
+        assertTrue(slow.awaitAll().all { it.image == null })
     }
 
     @Test
@@ -170,12 +215,28 @@ class CachedMediaPreviewSourceTest {
 
     private fun local(name: String) = MediaFile(name = name, location = "root/$name")
 
-    private fun network(name: String, lastModified: Long = 1_700_000_000_000) = MediaFile(
+    private fun network(name: String, lastModified: Long = 1_700_000_000_000) = networkAt(name, lastModified)
+
+    private fun networkAt(name: String, lastModified: Long) = MediaFile(
         name = name,
         location = "smb://nas/media/$name",
         lastModified = lastModified,
         source = MediaSource.Network,
     )
+}
+
+/** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的并发名额释放。 */
+private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPreviewExtractor {
+
+    val requests = mutableListOf<String>()
+
+    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+        requests += file.location
+        if (file.name.startsWith("慢")) delay(slowDelayMillis)
+        return byteArrayOf(1)
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
 }
 
 /** 记录同时进行的抽图数，用来验证并发上限。 */
