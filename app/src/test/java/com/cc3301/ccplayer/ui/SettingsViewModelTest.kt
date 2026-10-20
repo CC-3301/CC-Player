@@ -52,6 +52,7 @@ class SettingsViewModelTest {
 
         val state = viewModel.state.value
         assertTrue(state.autoPlayNext)
+        assertTrue(state.backgroundPlayback)
         assertEquals(ResumeMode.LastPosition, state.resumeMode)
         assertTrue(state.autoRestorePosition)
         assertEquals(DecodeMode.Hardware, state.decodeMode)
@@ -65,6 +66,15 @@ class SettingsViewModelTest {
 
         assertFalse(settings.autoPlayNext.first())
         assertFalse(viewModel.state.value.autoPlayNext)
+    }
+
+    @Test
+    fun `后台播放开关改动写回设置并反映到状态`() = runTest {
+        viewModel.setBackgroundPlayback(false)
+        advanceUntilIdle()
+
+        assertFalse(settings.backgroundPlayback.first())
+        assertFalse(viewModel.state.value.backgroundPlayback)
     }
 
     @Test

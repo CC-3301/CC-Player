@@ -30,6 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
@@ -152,6 +153,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
             surface?.let { binder.engine.attachSurface(it) }
+            binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
 
@@ -249,6 +251,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         SettingsScreen(
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
+                            onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
                             onSetResumeMode = settingsViewModel::setResumeMode,
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
@@ -447,6 +450,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (surface == null) return
         pendingMedia = null
         binder.controller.openPlaylist(pendingPlaylist, current, pendingDirectoryEntries)
+        // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
+        binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
 
     /** 通知栏要能显示就得有这个权限（Android 13 起）。 */
@@ -457,14 +462,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    /** 退到后台停止画面渲染，音频继续；回前台接回同一块 Surface，媒体不重新打开。 */
+    /** 退到后台停止画面渲染；是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
+        playback?.setAppInForeground(false)
         playback?.engine?.detachSurface()
     }
 
     override fun onStart() {
         super.onStart()
+        playback?.setAppInForeground(true)
         surface?.let { playback?.engine?.attachSurface(it) }
     }
 

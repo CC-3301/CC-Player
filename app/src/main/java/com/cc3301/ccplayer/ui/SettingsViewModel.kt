@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 /** 设置页展示的全部持久设置项。 */
 data class SettingsState(
     val autoPlayNext: Boolean = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
+    val backgroundPlayback: Boolean = SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK,
     val resumeMode: ResumeMode = SettingsRepository.DEFAULT_RESUME_MODE,
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
     val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
@@ -44,20 +45,25 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             ) { autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode ->
                 PlaybackSettings(autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode)
             }
-            playback.collect { playbackSettings ->
-                _state.value = SettingsState(
+            combine(playback, settings.backgroundPlayback) { playbackSettings, backgroundPlayback ->
+                SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
+                    backgroundPlayback = backgroundPlayback,
                     resumeMode = playbackSettings.resumeMode,
                     autoRestorePosition = playbackSettings.autoRestorePosition,
                     decodeMode = playbackSettings.decodeMode,
                     orientationMode = playbackSettings.orientationMode,
                 )
-            }
+            }.collect { state -> _state.value = state }
         }
     }
 
     fun setAutoPlayNext(enabled: Boolean) {
         viewModelScope.launch { settings.setAutoPlayNext(enabled) }
+    }
+
+    fun setBackgroundPlayback(enabled: Boolean) {
+        viewModelScope.launch { settings.setBackgroundPlayback(enabled) }
     }
 
     fun setResumeMode(mode: ResumeMode) {
