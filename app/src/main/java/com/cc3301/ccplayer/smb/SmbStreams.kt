@@ -27,20 +27,23 @@ class SmbStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
-    override fun close() {
-        server.close()
-    }
-
-    /** 代理在自己的线程上取流，这里阻塞等连接与打开完成。 */
-    private fun openBlocking(location: String): ByteSource = runBlocking {
+    /** 预览抽取用的随机读句柄：直接读共享，不经过回环代理。 */
+    override suspend fun openRead(location: String): ByteSource {
         val (target, connection) = connectTo(location)
-        try {
+        return try {
             SmbStreamSource(connection, connection.openRead(target.path))
         } catch (failure: Exception) {
             runCatching { connection.close() }
             throw failure
         }
     }
+
+    override fun close() {
+        server.close()
+    }
+
+    /** 代理在自己的线程上取流，这里阻塞等连接与打开完成。 */
+    private fun openBlocking(location: String): ByteSource = runBlocking { openRead(location) }
 
     private suspend fun connectTo(location: String): Pair<SmbTarget, SmbConnection> {
         val target = locator.locate(location)

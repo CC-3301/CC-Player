@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.network
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.streaming.ByteSource
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -10,6 +11,7 @@ import org.junit.Test
 private class FakeNetworkStreams : NetworkStreams {
 
     val probed = mutableListOf<String>()
+    val opened = mutableListOf<String>()
 
     var closes = 0
 
@@ -18,6 +20,15 @@ private class FakeNetworkStreams : NetworkStreams {
     }
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
+
+    override suspend fun openRead(location: String): ByteSource {
+        opened += location
+        return object : ByteSource {
+            override val size: Long = 0
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+            override fun close() = Unit
+        }
+    }
 
     override fun close() {
         closes++
@@ -43,6 +54,15 @@ class RoutingNetworkStreamsTest {
     fun `本机地址按方案分派`() {
         assertEquals("http://127.0.0.1:1/电影.mkv", streams.urlFor("smb://nas/media/电影.mkv"))
         assertEquals("http://127.0.0.1:1/电影.mkv", streams.urlFor("http://dav.example.com/dav/电影.mkv"))
+    }
+
+    @Test
+    fun `预览读取按方案分派`() = runTest {
+        streams.openRead("smb://nas/media/电影.mkv").close()
+        streams.openRead("https://dav.example.com/dav/歌.mp3").close()
+
+        assertEquals(listOf("smb://nas/media/电影.mkv"), smb.opened)
+        assertEquals(listOf("https://dav.example.com/dav/歌.mp3"), webDav.opened)
     }
 
     @Test

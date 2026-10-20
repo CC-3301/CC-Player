@@ -13,7 +13,7 @@ class ThumbnailCache(
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
-    /** 取出该位置的缓存文件；没有缓存时返回 null。 */
+    /** 取出该缓存键对应的缓存文件；没有缓存时返回 null。 */
     fun file(location: String): File? {
         val cached = File(directory, cacheFileName(location))
         if (!cached.isFile) return null
@@ -21,7 +21,7 @@ class ThumbnailCache(
         return cached
     }
 
-    /** 写入该位置的缓存文件，并清掉超限的旧条目。 */
+    /** 写入该缓存键对应的缓存文件，并清掉超限的旧条目。 */
     fun save(location: String, bytes: ByteArray): File {
         directory.mkdirs()
         val target = File(directory, cacheFileName(location))
@@ -43,7 +43,7 @@ class ThumbnailCache(
     }
 }
 
-/** 位置到文件名的映射：用 SHA-256 避免不同位置撞到同一个缓存文件。 */
+/** 缓存键到文件名的映射：用 SHA-256 避免不同缓存键撞到同一个缓存文件。 */
 private fun cacheFileName(location: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(location.toByteArray())
     return digest.joinToString(separator = "") { byte -> "%02x".format(byte) } + ".img"

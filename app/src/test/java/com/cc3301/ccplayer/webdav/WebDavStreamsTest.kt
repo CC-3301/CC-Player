@@ -64,6 +64,19 @@ class WebDavStreamsTest {
     }
 
     @Test
+    fun `预览按字节范围读文件开头，用完关闭句柄`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+
+        val head = ByteArray(16)
+        val read = streams.openRead(movie).use { source -> source.readAt(0, head, 0, head.size) }
+
+        assertEquals(16, read)
+        assertArrayEquals(payload.copyOfRange(0, 16), head)
+        assertEquals(true, transport.handles.getValue(movie).closed)
+    }
+
+    @Test
     fun `起播前试连能发现连不上的服务器`() = runTest {
         addSource(root)
         transport.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")

@@ -88,7 +88,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 
-    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext) }
+    /** 缩略图不复用播放代理：播放开始时会释放代理，预览需要独立的长期访问。 */
+    private val previewStreams: NetworkStreams by lazy { createNetworkStreams() }
+
+    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, previewStreams) }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 

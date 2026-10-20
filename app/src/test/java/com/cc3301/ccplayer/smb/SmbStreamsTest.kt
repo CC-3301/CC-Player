@@ -64,6 +64,19 @@ class SmbStreamsTest {
     }
 
     @Test
+    fun `预览按字节范围读文件开头，用完关闭句柄`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+
+        val head = ByteArray(16)
+        val read = streams.openRead(movie).use { source -> source.readAt(0, head, 0, head.size) }
+
+        assertEquals(16, read)
+        assertArrayEquals(payload.copyOfRange(0, 16), head)
+        assertEquals(true, connector.handles.getValue("media/电影.mkv").closed)
+    }
+
+    @Test
     fun `起播前试连能发现连不上的共享`() = runTest {
         addSource(root)
         connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")

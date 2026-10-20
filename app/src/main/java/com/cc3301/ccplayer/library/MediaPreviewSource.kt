@@ -2,13 +2,17 @@ package com.cc3301.ccplayer.library
 
 import android.content.Context
 import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * 卡片预览接缝：列表界面只依赖本接口，本地抽帧实现由此注入。
+ * 卡片预览接缝：列表界面只依赖本接口，本地与网络实现由此注入。
  */
 interface MediaPreviewSource {
 
-    /** 取卡片预览；目录与网络源没有预览。 */
+    /** 取卡片预览；目录没有预览。 */
     suspend fun preview(file: MediaFile): MediaPreview
 }
 
@@ -28,38 +32,71 @@ interface MediaPreviewExtractor {
 }
 
 /**
- * 本地媒体预览：先在 [cache] 里找图，没有就让 [extractor] 抽一次图并落盘。
- * 网络文件不抽帧（ADR-0021）。
+ * 媒体预览：先在 [cache] 里找图，没有就让 [extractor] 抽一次图并落盘。
+ *
+ * 网络条目的缓存键含修改时间，修改时间变化视为新文件；并发提取数有上限，
+ * 失败或超时保持占位图且不写缓存。
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
     private val cache: ThumbnailCache,
 ) : MediaPreviewSource {
 
+    /** 网络提取的同时请求数上限：一次进入目录时不发起过多网络请求。 */
+    private val networkPermits = Semaphore(NETWORK_CONCURRENCY)
+
     override suspend fun preview(file: MediaFile): MediaPreview {
-        if (file.isDirectory || file.source != MediaSource.Local) return MediaPreview(image = null, durationMillis = null)
-        return MediaPreview(
-            image = cachedImage(file),
-            durationMillis = extractor.durationMillis(file),
-        )
+        if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
+        return when (file.source) {
+            MediaSource.Local -> MediaPreview(
+                image = cachedImage(file, file.location),
+                durationMillis = extractor.durationMillis(file),
+            )
+
+            MediaSource.Network -> MediaPreview(image = networkImage(file), durationMillis = null)
+        }
     }
 
-    private suspend fun cachedImage(file: MediaFile): File? {
-        cache.file(file.location)?.let { return it }
+    private suspend fun cachedImage(file: MediaFile, key: String): File? {
+        cache.file(key)?.let { return it }
         val bytes = extractor.imageBytes(file) ?: return null
-        return cache.save(file.location, bytes)
+        return cache.save(key, bytes)
+    }
+
+    private suspend fun networkImage(file: MediaFile): File? {
+        val key = networkCacheKey(file)
+        cache.file(key)?.let { return it }
+        val bytes = try {
+            withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                networkPermits.withPermit { extractor.imageBytes(file) }
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            null
+        } ?: return null
+        return cache.save(key, bytes)
     }
 
     companion object {
         /** 缩略图缓存目录的上限。 */
         private const val CACHE_BYTES = 64L * 1024 * 1024
 
-        fun create(context: Context): CachedMediaPreviewSource {
+        /** 同时进行的网络提取数；超出的由 [networkPermits] 排队。 */
+        private const val NETWORK_CONCURRENCY = 3
+
+        /** 单次网络提取的等待上限；超时按没有图处理。 */
+        private const val NETWORK_TIMEOUT_MILLIS = 15_000L
+
+        fun create(context: Context, networkReads: NetworkMediaReads): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             return CachedMediaPreviewSource(
-                extractor = AndroidMediaPreviewExtractor(appContext),
+                extractor = AndroidMediaPreviewExtractor(appContext, networkReads),
                 cache = ThumbnailCache(appContext.filesDir.resolve("thumbnails"), CACHE_BYTES),
             )
         }
+
+        /** 网络缓存键：媒体位置 + 修改时间；位置相同但修改时间变了就是新文件。 */
+        private fun networkCacheKey(file: MediaFile): String = "${file.location}@${file.lastModified}"
     }
 }
