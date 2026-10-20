@@ -9,113 +9,116 @@ class PlayerLockTest {
     private val lock = PlayerLock(elapsedMillis = { now })
 
     @Test
-    fun `默认未锁定`() {
+    fun `默认未锁定且解锁按钮隐藏`() {
         assertEquals(false, lock.locked)
-        assertEquals(false, lock.unlockPending)
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
-    fun `第一次点锁按钮进入锁定`() {
+    fun `未锁定时点锁定键立即上锁并显示解锁按钮`() {
         lock.tapLockButton()
 
         assertEquals(true, lock.locked)
-        assertEquals(false, lock.unlockPending)
+        assertEquals(true, lock.unlockVisible)
     }
 
     @Test
-    fun `锁定后点一次只是进入确认态`() {
+    fun `锁定后点一次解锁按钮立即解锁`() {
         lock.tapLockButton()
         now = 1_000L
-
-        lock.tapLockButton()
-
-        assertEquals(true, lock.locked)
-        assertEquals(true, lock.unlockPending)
-    }
-
-    @Test
-    fun `确认期内再点一次才解锁`() {
-        lock.tapLockButton()
-        now = 1_000L
-        lock.tapLockButton()
-        now = 3_999L
 
         lock.tapLockButton()
 
         assertEquals(false, lock.locked)
-        assertEquals(false, lock.unlockPending)
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
-    fun `过了确认期再点不解锁而是重新进入确认态`() {
+    fun `解锁按钮显示三秒后自动隐藏`() {
         lock.tapLockButton()
-        now = 1_000L
-        lock.tapLockButton()
-        now = 4_001L
+        now = 2_999L
+        lock.hideUnlockIfExpired()
+        assertEquals(true, lock.unlockVisible)
 
-        lock.tapLockButton()
+        now = 3_000L
+        lock.hideUnlockIfExpired()
 
         assertEquals(true, lock.locked)
-        assertEquals(true, lock.unlockPending)
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
-    fun `恰好到确认期边界视为超时`() {
+    fun `锁定态点画面重新显示解锁按钮`() {
         lock.tapLockButton()
-        now = 1_000L
-        lock.tapLockButton()
-        now = 4_000L
+        now = 3_000L
+        lock.hideUnlockIfExpired()
+        now = 5_000L
 
-        lock.tapLockButton()
+        lock.tapScreen()
 
-        assertEquals(true, lock.locked)
-        assertEquals(true, lock.unlockPending)
+        assertEquals(true, lock.unlockVisible)
     }
 
     @Test
-    fun `确认期从最后一次点击重新计时`() {
+    fun `点画面重新显示后自动隐藏重新计时`() {
         lock.tapLockButton()
-        now = 1_000L
-        lock.tapLockButton()
-        now = 4_001L
-        lock.tapLockButton()
-        now = 7_000L
+        now = 3_000L
+        lock.hideUnlockIfExpired()
+        now = 5_000L
+        lock.tapScreen()
 
-        lock.tapLockButton()
+        now = 7_999L
+        lock.hideUnlockIfExpired()
+        assertEquals(true, lock.unlockVisible)
+
+        now = 8_000L
+        lock.hideUnlockIfExpired()
+        assertEquals(false, lock.unlockVisible)
+    }
+
+    @Test
+    fun `未锁定时点画面不显示解锁按钮`() {
+        lock.tapScreen()
 
         assertEquals(false, lock.locked)
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
-    fun `确认态超时后回到纯锁定态`() {
+    fun `自动隐藏后仍保持锁定`() {
         lock.tapLockButton()
-        now = 1_000L
-        lock.tapLockButton()
+        now = 3_000L
 
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
 
         assertEquals(true, lock.locked)
-        assertEquals(false, lock.unlockPending)
     }
 
     @Test
-    fun `解锁后再点锁按钮重新锁定`() {
+    fun `解锁后重新上锁再次显示解锁按钮`() {
         lock.tapLockButton()
         now = 1_000L
         lock.tapLockButton()
         now = 2_000L
         lock.tapLockButton()
 
-        lock.tapLockButton()
-
         assertEquals(true, lock.locked)
-        assertEquals(false, lock.unlockPending)
+        assertEquals(true, lock.unlockVisible)
+
+        now = 4_000L
+        lock.hideUnlockIfExpired()
+        assertEquals(true, lock.unlockVisible)
+
+        now = 5_000L
+        lock.hideUnlockIfExpired()
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
     fun `锁定时手势与控制条都不放行只留解锁按钮`() {
         lock.tapLockButton()
 
+        assertEquals(false, inputAllowed(PlayerInput.Tap, lock.locked))
         assertEquals(false, inputAllowed(PlayerInput.DoubleTap, lock.locked))
         assertEquals(false, inputAllowed(PlayerInput.VolumeDrag, lock.locked))
         assertEquals(false, inputAllowed(PlayerInput.SeekDrag, lock.locked))
