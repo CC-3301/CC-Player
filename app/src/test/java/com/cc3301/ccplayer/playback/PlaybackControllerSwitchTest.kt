@@ -11,11 +11,13 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 切集与缓冲指示的状态机：500ms 阈值、失败与取消回退、替换事件不触发连播。
+ * 切集与缓冲指示的状态机：500ms 阈值、首帧判定、失败与取消回退、
+ * 替换事件不触发连播，以及加载超时。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerSwitchTest {
@@ -46,7 +48,8 @@ class PlaybackControllerSwitchTest {
         open(controller, "ep1.mkv")
         advanceTimeBy(BUFFER_DELAY - 100)
         runCurrent()
-        engine.reportMediaLoaded()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
 
         assertFalse(controller.buffering.value)
         advanceTimeBy(BUFFER_DELAY)
@@ -55,7 +58,35 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `switching pauses the old video before loading the target`() = runTest {
+    fun `a first frame exactly at the deadline keeps the indicator hidden`() = runTest {
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        advanceTimeBy(BUFFER_DELAY)
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        runCurrent()
+
+        assertFalse(controller.buffering.value)
+        advanceTimeBy(BUFFER_DELAY)
+        runCurrent()
+        assertFalse(controller.buffering.value)
+    }
+
+    @Test
+    fun `a new session explicitly starts the engine unpaused`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv")
+        controller.pause()
+        controller.stop()
+
+        open(controller, "ep1.mkv")
+
+        assertEquals(false, engine.startedPaused.last())
+    }
+
+    @Test
+    fun `switching pauses the old video and grabs a frame before loading the target`() = runTest {
         val controller = playingController()
 
         controller.next()
@@ -63,19 +94,29 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
-        assertTrue(engine.pauseCalls >= 1)
+        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(1, engine.grabFrameCalls)
+        assertEquals(0, engine.resumeCalls)
         assertTrue(controller.switching.value)
     }
 
     @Test
-    fun `the old audio stays paused until the target file is loaded`() = runTest {
+    fun `the target stays paused until its first frame is ready`() = runTest {
         val controller = playingController()
 
         controller.next()
-
-        assertEquals(0, engine.resumeCalls)
         engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+
+        engine.reportFirstFrameReady()
+
         assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertFalse(controller.switching.value)
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test
@@ -92,6 +133,23 @@ class PlaybackControllerSwitchTest {
         advanceTimeBy(1)
         runCurrent()
         assertTrue(controller.buffering.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.buffering.value)
+    }
+
+    @Test
+    fun `a paused switch stays paused after the first frame`() = runTest {
+        val controller = playingController()
+        controller.pause()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
     }
 
     @Test
@@ -116,9 +174,11 @@ class PlaybackControllerSwitchTest {
         controller.next()
         controller.previous()
         controller.playAt(0)
+        controller.play(MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"))
 
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
         assertEquals(1, controller.currentIndex.value)
+        assertEquals(1, engine.grabFrameCalls)
     }
 
     @Test
@@ -134,20 +194,22 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.buffering.value)
         assertEquals(40_000L, controller.progress.value.positionMillis)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(40_000L, engine.startedPositions.last())
 
         engine.reportFileLoaded()
-        assertEquals(40_000L, engine.seekPositions.last())
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.switching.value)
+        assertNull(controller.freezeFrame.value)
+
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
     fun `a failed switch reports playback failure`() = runTest {
         val controller = playingController()
-        val failures = mutableListOf<Unit>()
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-            controller.playbackFailures.collect { failures += it }
-        }
+        val failures = collectFailures(controller)
 
         controller.next()
         engine.reportPlaybackFailed()
@@ -168,10 +230,13 @@ class PlaybackControllerSwitchTest {
         assertEquals(12_000L, controller.progress.value.positionMillis)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertFalse(controller.cancelSwitch())
+        assertEquals(12_000L, engine.startedPositions.last())
 
         engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
-        assertEquals(12_000L, engine.seekPositions.last())
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
@@ -186,6 +251,21 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `pausing before the first frame keeps the initial load pending then paused`() = runTest {
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.reportFileLoaded()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.reportFirstFrameReady()
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
     fun `an end event while switching does not auto play the next episode`() = runTest {
         val controller = playingController()
 
@@ -195,6 +275,66 @@ class PlaybackControllerSwitchTest {
 
         assertEquals(started, engine.startedUrls)
         assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `an initial load that never becomes ready times out as a failure`() = runTest {
+        val controller = controller()
+        val failures = collectFailures(controller)
+
+        open(controller, "ep1.mkv")
+        advanceTimeBy(PlaybackController.LOAD_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a switch that never becomes ready restores the original and reports failure`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(25_000, 600_000)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(PlaybackController.LOAD_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(25_000L, controller.progress.value.positionMillis)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a failing restore ends the session and reports failure`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertEquals(1, failures.size)
+
+        engine.reportPlaybackFailed()
+
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(2, failures.size)
+        assertFalse(controller.switching.value)
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `stopping during a switch saves the original position`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(33_000, 600_000)
+        runCurrent()
+        progress.records.clear()
+
+        controller.next()
+        controller.stop()
+        runCurrent()
+
+        assertEquals(33_000L, progress.records["root/ep1.mkv"]?.positionMillis)
     }
 
     @Test
@@ -226,10 +366,16 @@ class PlaybackControllerSwitchTest {
     private fun TestScope.playingController(): PlaybackController {
         val controller = controller()
         open(controller, "ep1.mkv", "ep2.mkv")
-        advanceTimeBy(BUFFER_DELAY)
-        runCurrent()
         engine.reportMediaLoaded()
         return controller
+    }
+
+    private fun TestScope.collectFailures(controller: PlaybackController): List<Unit> {
+        val failures = mutableListOf<Unit>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            controller.playbackFailures.collect { failures += it }
+        }
+        return failures
     }
 
     private fun open(
@@ -242,6 +388,6 @@ class PlaybackControllerSwitchTest {
     }
 
     private companion object {
-        const val BUFFER_DELAY = 500L
+        const val BUFFER_DELAY = PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS
     }
 }

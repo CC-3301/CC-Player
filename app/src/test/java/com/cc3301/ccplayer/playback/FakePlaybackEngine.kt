@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import android.graphics.Bitmap
 import android.view.Surface
 
 /**
@@ -10,6 +11,16 @@ class FakePlaybackEngine : PlaybackEngine {
     private var listener: PlaybackEngine.Listener? = null
 
     val startedUrls = mutableListOf<String>()
+    val startedPaused = mutableListOf<Boolean>()
+    val startedPositions = mutableListOf<Long>()
+
+    /** 指令顺序，用于验证先暂停、再抓帧、再换文件。 */
+    val actions = mutableListOf<String>()
+
+    /** 抓帧返回的画面；测试里保持 null，避免依赖 android.graphics 实现。 */
+    var frameToGrab: Bitmap? = null
+    var grabFrameCalls = 0
+        private set
     var pauseCalls = 0
         private set
     var resumeCalls = 0
@@ -34,15 +45,26 @@ class FakePlaybackEngine : PlaybackEngine {
         this.listener = listener
     }
 
-    override fun start(url: String) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
+        actions += "start"
         startedUrls += url
+        startedPaused += paused
+        startedPositions += startPositionMillis
+    }
+
+    override fun grabFrame(): Bitmap? {
+        actions += "grab"
+        grabFrameCalls++
+        return frameToGrab
     }
 
     override fun pause() {
+        actions += "pause"
         pauseCalls++
     }
 
     override fun resume() {
+        actions += "resume"
         resumeCalls++
     }
 

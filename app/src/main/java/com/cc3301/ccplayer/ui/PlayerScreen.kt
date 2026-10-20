@@ -252,13 +252,6 @@ fun PlayerScreen(
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
             .coerceAtLeast(72.dp)
-        if (buffering && !switching) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black),
-            )
-        }
         AndroidView(
             factory = { context ->
                 MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
@@ -270,6 +263,14 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
+        // 首次加载的黑底画在视频视图之后，确保盖住尚未出帧的视频区域。
+        if (buffering && !switching) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black),
+            )
+        }
         if (switching && freezeFrame != null) {
             Image(
                 bitmap = freezeFrame.asImageBitmap(),

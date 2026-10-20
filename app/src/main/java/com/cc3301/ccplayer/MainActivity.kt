@@ -10,10 +10,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.view.PixelCopy
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -111,10 +108,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
     private var surface: Surface? = null
-
-    /** 视频 Surface 当前尺寸，抓冻结画面时用。 */
-    private var surfaceWidth = 0
-    private var surfaceHeight = 0
     private var pendingPlaylist: List<MediaFile> = emptyList()
     private var pendingMedia: MediaFile? = null
 
@@ -160,6 +153,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
+                launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
                         Toast.makeText(
@@ -206,9 +200,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
-                LaunchedEffect(switching) {
-                    if (!switching) freezeFrame = null
-                }
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio) {
                     applyOrientation(
                         if (playerVisible) resolvedOrientation(orientationMode, videoAspectRatio)
@@ -225,10 +216,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
                 when {
                     playerVisible -> {
-                        BackHandler {
-                            // 切集缓冲期间返回只取消这次切换，留在原视频并保持暂停。
-                            if (playback?.controller?.cancelSwitch() != true) closePlayer()
-                        }
+                        BackHandler { handlePlayerBack() }
                         PlayerScreen(
                             state = playbackState,
                             progress = progress,
@@ -249,12 +237,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
                             onTogglePlayPause = { playback?.controller?.togglePlayPause() },
-                            onPrevious = { switchEpisode { playback?.controller?.previous() } },
-                            onNext = { switchEpisode { playback?.controller?.next() } },
+                            onPrevious = { playback?.controller?.previous() },
+                            onNext = { playback?.controller?.next() },
                             onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
-                            onPlaylistSelect = { media -> switchEpisode { playback?.controller?.play(media) } },
+                            onPlaylistSelect = { media -> playback?.controller?.play(media) },
                             onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
                             onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
                             onSelectOrientationMode = { mode ->
@@ -275,7 +263,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                     is SubtitleMenuItem.Off -> controller?.disableSubtitles()
                                 }
                             },
-                            onClose = { closePlayer() },
+                            onClose = { handlePlayerBack() },
                         )
                     }
 
@@ -515,33 +503,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onSurfaceResized(width: Int, height: Int) {
-        surfaceWidth = width
-        surfaceHeight = height
         playback?.engine?.setSurfaceSize(width, height)
     }
 
-    /** 切集前先抓一帧当前画面，切集期间盖在视频 Surface 上，避免出现黑屏。 */
-    private fun switchEpisode(action: () -> Unit) {
-        captureFreezeFrame()
-        action()
-    }
-
-    private fun captureFreezeFrame() {
-        val surface = surface ?: return
-        val width = surfaceWidth
-        val height = surfaceHeight
-        if (!surface.isValid || width <= 0 || height <= 0) return
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        PixelCopy.request(
-            surface,
-            bitmap,
-            { result ->
-                if (result == PixelCopy.SUCCESS && playback?.controller?.switching?.value == true) {
-                    freezeFrame = bitmap
-                }
-            },
-            Handler(Looper.getMainLooper()),
-        )
+    /** 返回先尝试取消切集；没有切集才退出播放页。 */
+    private fun handlePlayerBack() {
+        if (playback?.controller?.cancelSwitch() != true) closePlayer()
     }
 
     override fun onSurfaceReleased() {

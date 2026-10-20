@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import android.graphics.Bitmap
 import android.view.Surface
 
 /**
@@ -9,8 +10,15 @@ interface PlaybackEngine {
 
     fun setListener(listener: Listener)
 
-    /** 打开媒体并起播。 */
-    fun start(url: String)
+    /**
+     * 打开媒体；[paused] 为真时新文件加载后保持暂停，等控制层放行才出声。
+     * [startPositionMillis] 为正时从该位置打开，首帧就是目标位置的画面。
+     * 每次开始都显式设置暂停状态，避免上一次会话的暂停残留。
+     */
+    fun start(url: String, paused: Boolean = false, startPositionMillis: Long = 0)
+
+    /** 取当前画面的一帧，用于切集时冻结在原画面上；没有可取的画面时为 null。 */
+    fun grabFrame(): Bitmap?
 
     fun pause()
 

@@ -38,7 +38,7 @@ class PlaybackControllerProgressTest {
         val controller = controller(this)
 
         controller.openPlaylist(listOf(ep1, ep2), ep1)
-        advanceUntilIdle()
+        runCurrent()
         engine.reportMediaLoaded()
 
         assertEquals(listOf(30_000L), engine.seekPositions)
