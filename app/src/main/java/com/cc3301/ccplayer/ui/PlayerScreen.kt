@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -38,7 +39,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -106,7 +106,7 @@ import kotlin.math.roundToInt
 private val PlayerPanelColor = AppColors.SurfaceHigh.copy(alpha = 0.96f)
 private val PlayerPanelShape = RoundedCornerShape(AppRadius.Lg)
 
-/** 顶栏内容高度；锁定键与“更多”面板据此贴在标题栏下方。 */
+/** 顶栏内容高度；“更多”面板据此贴在标题栏下方。 */
 private val PlayerTopBarHeight = 56.dp
 
 /** “更多”面板为底部控制条预留的高度。 */
@@ -233,9 +233,9 @@ fun PlayerScreen(
     val locked = lock.locked
     val panelOpen = playlistVisible || subtitleMenuVisible || moreVisible
 
-    LaunchedEffect(lock.unlockPending) {
-        if (lock.unlockPending) {
-            delay(UNLOCK_CONFIRM_WINDOW_MILLIS)
+    LaunchedEffect(lock.locked, lock.unlockVisible, lock.unlockShownAtMillis) {
+        if (lock.locked && lock.unlockVisible) {
+            delay(UNLOCK_AUTO_HIDE_MILLIS)
             lock.expireUnlock()
         }
     }
@@ -303,6 +303,14 @@ fun PlayerScreen(
         seekHint?.let { hint ->
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
+        // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
+        if (locked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) { detectTapGestures { lock.tapScreen() } },
+            )
+        }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
             if (controlsVisible) {
                 PlayerTopBar(
@@ -318,13 +326,6 @@ fun PlayerScreen(
                         }
                     },
                     modifier = Modifier.align(Alignment.TopStart),
-                )
-                LockButton(
-                    onLock = { lock.tapLockButton() },
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .safeDrawingPadding()
-                        .padding(start = AppSpacing.Sm, top = PlayerTopBarHeight),
                 )
                 if (moreVisible) {
                     MorePanel(
@@ -387,19 +388,24 @@ fun PlayerScreen(
                             moreVisible = false
                         }
                     },
+                    onLock = { lock.tapLockButton() },
                     onSelectSubtitle = onSelectSubtitle,
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
         } else {
-            UnlockButton(
-                unlockPending = lock.unlockPending,
-                onTap = {
-                    lock.tapLockButton()
-                    if (!lock.locked) controlsVisible = true
-                },
-                modifier = Modifier.align(Alignment.TopStart),
-            )
+            if (lock.unlockVisible) {
+                UnlockButton(
+                    onTap = {
+                        lock.tapLockButton()
+                        if (!lock.locked) controlsVisible = true
+                    },
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .safeDrawingPadding()
+                        .padding(AppSpacing.Lg),
+                )
+            }
         }
     }
 }
@@ -636,37 +642,14 @@ private fun playerOverlayTextStyle(): TextStyle = MaterialTheme.typography.title
     ),
 )
 
-/** 锁定按钮：位于顶部返回按钮下方。 */
+/** 锁定态下唯一可见的控件：点一次立即解锁，无背景与强调色。 */
 @Composable
-private fun LockButton(onLock: () -> Unit, modifier: Modifier = Modifier) {
-    IconButton(
-        onClick = onLock,
-        modifier = modifier.playerPanel(),
-    ) {
+private fun UnlockButton(onTap: () -> Unit, modifier: Modifier = Modifier) {
+    IconButton(onClick = onTap, modifier = modifier) {
         Icon(
-            imageVector = Icons.Filled.Lock,
-            contentDescription = stringResource(R.string.player_lock),
+            painter = painterResource(R.drawable.ic_player_lock_open),
+            contentDescription = stringResource(R.string.player_unlock),
             tint = AppColors.Foreground,
-        )
-    }
-}
-
-/** 锁定态下唯一可见的控件：点两次解锁，第一次点后图标转为强调色。 */
-@Composable
-private fun UnlockButton(unlockPending: Boolean, onTap: () -> Unit, modifier: Modifier = Modifier) {
-    IconButton(
-        onClick = onTap,
-        modifier = modifier
-            .safeDrawingPadding()
-            .padding(AppSpacing.Md)
-            .playerPanel(),
-    ) {
-        Icon(
-            imageVector = Icons.Filled.Lock,
-            contentDescription = stringResource(
-                if (unlockPending) R.string.player_unlock_confirm else R.string.player_unlock,
-            ),
-            tint = if (unlockPending) AppColors.Accent else AppColors.Foreground,
         )
     }
 }
@@ -691,6 +674,7 @@ private fun Controls(
     onPlaylistSelect: (MediaFile) -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
+    onLock: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -739,11 +723,12 @@ private fun Controls(
             onNext = onNext,
             onToggleSubtitles = onToggleSubtitleMenu,
             onTogglePlaylist = onTogglePlaylist,
+            onLock = onLock,
         )
     }
 }
 
-/** 底部图标条：左/中/右三槽位，中间 56dp 固定，播放/暂停严格居中。 */
+/** 底部图标条：锁定键在左下角，播放键严格居中，字幕与播放列表在右下角。 */
 @Composable
 private fun PlayerIconBar(
     playing: Boolean,
@@ -756,19 +741,30 @@ private fun PlayerIconBar(
     onNext: () -> Unit,
     onToggleSubtitles: () -> Unit,
     onTogglePlaylist: () -> Unit,
+    onLock: () -> Unit,
 ) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .height(48.dp),
     ) {
-        // 右侧槽位放三个图标，均分后不超过左右槽位，避免侵入中间的固定 56dp。
         val iconSize = ((maxWidth - 56.dp) / 6).coerceIn(1.dp, 44.dp)
-        Row(
-            modifier = Modifier.fillMaxSize(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // 左下角锁定键与上一集/播放/下一集同一条水平线。
+            PlayerIconButton(
+                icon = R.drawable.ic_player_lock_closed,
+                contentDescription = stringResource(R.string.player_lock),
+                onClick = onLock,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .size(iconSize),
+            )
+            // 上一集在播放键左侧、下一集在右侧，播放键始终居中。
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.Xs),
+            ) {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
@@ -776,8 +772,6 @@ private fun PlayerIconBar(
                     enabled = canGoPrevious,
                     modifier = Modifier.size(iconSize),
                 )
-            }
-            Box(modifier = Modifier.width(56.dp), contentAlignment = Alignment.Center) {
                 PlayerIconButton(
                     icon = if (playing) R.drawable.ic_player_pause else R.drawable.ic_player_play,
                     contentDescription = stringResource(
@@ -786,12 +780,6 @@ private fun PlayerIconBar(
                     onClick = onTogglePlayPause,
                     modifier = Modifier.size(iconSize),
                 )
-            }
-            Row(
-                modifier = Modifier.weight(1f),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
@@ -799,6 +787,12 @@ private fun PlayerIconBar(
                     enabled = canGoNext,
                     modifier = Modifier.size(iconSize),
                 )
+            }
+            // 字幕紧挨播放列表放在右下区域。
+            Row(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
