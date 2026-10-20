@@ -198,7 +198,7 @@ private fun SourceRow(
     onDelete: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(AppRadius.Lg)
+    val shape = RoundedCornerShape(AppRadius.Xl)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -207,15 +207,13 @@ private fun SourceRow(
             .background(AppColors.Surface)
             .border(1.dp, AppColors.Line, shape)
             .clickable(onClick = onOpen)
-            .padding(start = 13.dp, end = 10.dp, top = 13.dp, bottom = 13.dp),
+            .padding(horizontal = AppSpacing.Lg, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconTile(
             painter = painterResource(sourceProtocolIcon(protocol)),
             tint = protocolTint(protocol),
             background = protocolBackground(protocol),
-            size = 40.dp,
-            iconSize = 22.dp,
         )
         Text(
             text = source.name,

@@ -370,12 +370,6 @@ private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenE
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = stringResource(entryKindLabel(entry)),
-                style = MaterialTheme.typography.bodySmall,
-                color = AppColors.Muted,
-                modifier = Modifier.padding(top = 3.dp),
-            )
         }
         if (entry.isDirectory) {
             Icon(
@@ -388,7 +382,7 @@ private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenE
     }
 }
 
-/** 网格卡片：缩略图（或占位图）+ 文件名 + 种类。 */
+/** 网格卡片：缩略图（或占位图）+ 文件名。 */
 @Composable
 private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
     val preview by produceState<MediaPreview?>(initialValue = null, entry.location) {
@@ -410,12 +404,6 @@ private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpen
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
-        )
-        Text(
-            text = stringResource(entryKindLabel(entry)),
-            style = MaterialTheme.typography.labelSmall,
-            color = AppColors.Muted,
-            modifier = Modifier.padding(top = 1.dp, start = 2.dp, end = 2.dp),
         )
     }
 }
@@ -515,10 +503,4 @@ private fun Message(text: String, onRetry: (() -> Unit)? = null) {
 @Composable
 private fun Centered(content: @Composable () -> Unit) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { content() }
-}
-
-private fun entryKindLabel(entry: MediaFile): Int = when {
-    entry.isDirectory -> R.string.library_entry_directory
-    mediaKindOf(entry.name) == MediaKind.Audio -> R.string.library_entry_audio
-    else -> R.string.library_entry_video
 }
