@@ -153,7 +153,10 @@ private class OkHttpWebDavReadHandle(
     /** 已打开的流读到的位置：流从 [RangedResponse.start] 起，读完 [已读数] 后落在这里。 */
     private var position = first.start
 
-    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+    /** 解码器与关闭可能来自不同线程，读与关闭串行进行。 */
+    private val lock = Any()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = synchronized(lock) {
         if (position < 0 || position >= size) return 0
         val response = responseAt(position)
         val read = response.stream.read(buffer, offset, length)
@@ -162,7 +165,7 @@ private class OkHttpWebDavReadHandle(
         return read
     }
 
-    override fun close() {
+    override fun close() = synchronized(lock) {
         current?.close()
         current = null
         position = 0
