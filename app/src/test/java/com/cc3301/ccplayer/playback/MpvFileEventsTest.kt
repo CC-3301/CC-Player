@@ -185,6 +185,49 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a ready processed before the seek event keeps the old serial`() {
+        val signals = MpvReadySignals()
+        signals.onStart()
+        assertEquals(0, signals.acceptReady(fromVideoReconfig = true))
+
+        // seek 命令已下发，但旧的 PLAYBACK_RESTART 先于 MPV_EVENT_SEEK 被处理。
+        val seekSerial = signals.onSeekIssued()
+        assertEquals(1, seekSerial)
+        assertEquals(0, signals.acceptReady(fromVideoReconfig = false))
+
+        // SEEK 事件到达后，后续 ready 才使用新序号。
+        signals.onSeekEvent()
+        assertEquals(1, signals.acceptReady(fromVideoReconfig = false))
+        assertEquals(1, signals.acceptReady(fromVideoReconfig = true))
+    }
+
+    @Test
+    fun `each seek event advances the accepted serial in order`() {
+        val signals = MpvReadySignals()
+        signals.onStart()
+
+        assertEquals(1, signals.onSeekIssued())
+        assertEquals(2, signals.onSeekIssued())
+
+        signals.onSeekEvent()
+        assertEquals(1, signals.acceptReady(fromVideoReconfig = false))
+
+        signals.onSeekEvent()
+        assertEquals(2, signals.acceptReady(fromVideoReconfig = true))
+    }
+
+    @Test
+    fun `a repeated ready in the same seek serial is reported once`() {
+        val signals = MpvReadySignals()
+        signals.onStart()
+
+        assertEquals(0, signals.acceptReady(fromVideoReconfig = true))
+        assertEquals(null, signals.acceptReady(fromVideoReconfig = true))
+        assertEquals(0, signals.acceptReady(fromVideoReconfig = false))
+        assertEquals(null, signals.acceptReady(fromVideoReconfig = false))
+    }
+
+    @Test
     fun `path comparison only rejects a present but different path`() {
         assertTrue(isTargetPath(target = "root/ep1.mkv", path = "root/ep1.mkv"))
         assertTrue(isTargetPath(target = null, path = "root/ep1.mkv"))

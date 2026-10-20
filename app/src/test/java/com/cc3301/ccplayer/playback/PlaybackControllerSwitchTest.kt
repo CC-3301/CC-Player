@@ -284,6 +284,106 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a paused probe retries until a frame appears`() = runTest {
+        val controller = playingController()
+        controller.pause()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        val attempts = engine.grabFrameCalls
+
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(attempts + 1, engine.grabFrameCalls)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(attempts + 2, engine.grabFrameCalls)
+        assertTrue(controller.switching.value)
+
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a paused switch with resume keeps the target position in progress`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        controller.pause()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(20_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `an initial load with resume and pause keeps the position in progress`() = runTest {
+        progress.records["root/ep1.mkv"] = MediaProgress("root/ep1.mkv", 30_000, 600_000, 0)
+        val controller = controller()
+
+        open(controller, "ep1.mkv")
+        controller.pause()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(30_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `an initial load without a render surface completes on file load`() = runTest {
+        val controller = controller()
+        controller.setRenderSurfaceAvailable(false)
+
+        open(controller, "ep1.mkv")
+        engine.reportFileLoaded()
+
+        assertFalse(controller.buffering.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a cancelled switch without a render surface finishes the restore on file load`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        controller.setRenderSurfaceAvailable(false)
+
+        controller.next()
+        controller.cancelSwitch()
+        engine.reportFileLoaded()
+
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `a switch that regains a render surface waits for a frame again`() = runTest {
+        val controller = playingController()
+        controller.setRenderSurfaceAvailable(false)
+
+        controller.next()
+        controller.setRenderSurfaceAvailable(true)
+        engine.reportFileLoaded()
+
+        // Surface 回来后不再按“文件加载完成”就绪，等真正的首帧。
+        assertTrue(controller.switching.value)
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
     fun `a grab before 500ms keeps the indicator hidden`() = runTest {
         val controller = playingController()
         controller.pause()

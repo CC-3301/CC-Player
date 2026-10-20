@@ -99,3 +99,62 @@ internal class MpvFileEvents {
 
     enum class End { Replaced, Ended, Failed }
 }
+
+/**
+ * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
+ *
+ * seek 命令下发时先登记序号，但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”。
+ * 这样即使旧文件的 restart/reconfig 在 seek 命令之后才被处理，它仍带旧序号，不会被误认。
+ * 同一序号内重配与重播各只上报一次。控制层线程与 mpv 事件线程都会调用，方法同步。
+ */
+internal class MpvReadySignals {
+
+    private var issued = 0
+    private val pendingSeeks = ArrayDeque<Int>()
+    private var accepted = 0
+    private var lastReconfigSerial = -1
+    private var lastRestartSerial = -1
+
+    /** 新文件开始加载：ready 判定从当前已接受的序号重新开始。 */
+    @Synchronized
+    fun onStart() {
+        lastReconfigSerial = -1
+        lastRestartSerial = -1
+    }
+
+    /** 下发 seek，返回该 seek 的序号；对应 MPV_EVENT_SEEK 到达前，ready 仍用旧序号。 */
+    @Synchronized
+    fun onSeekIssued(): Int {
+        issued++
+        pendingSeeks.addLast(issued)
+        return issued
+    }
+
+    /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
+    @Synchronized
+    fun onSeekEvent() {
+        pendingSeeks.removeFirstOrNull()?.let { accepted = it }
+    }
+
+    /** 本次 ready 的序号；同一序号内同类信号重复时返回 null。 */
+    @Synchronized
+    fun acceptReady(fromVideoReconfig: Boolean): Int? {
+        if (fromVideoReconfig) {
+            if (lastReconfigSerial == accepted) return null
+            lastReconfigSerial = accepted
+        } else {
+            if (lastRestartSerial == accepted) return null
+            lastRestartSerial = accepted
+        }
+        return accepted
+    }
+
+    @Synchronized
+    fun reset() {
+        issued = 0
+        pendingSeeks.clear()
+        accepted = 0
+        lastReconfigSerial = -1
+        lastRestartSerial = -1
+    }
+}

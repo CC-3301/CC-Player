@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -29,14 +28,8 @@ class MpvPlaybackEngine(
     /** 加载代际与结束事件判定；方法内部同步，控制层与事件线程都会调用。 */
     private val fileEvents = MpvFileEvents()
 
-    /** 每次 seek 递增；ready 回调带上它，控制层只认续播 seek 之后的信号。 */
-    private val seekSerial = AtomicInteger(0)
-
-    /** 上一次上报 ready 时的 seek 序号；同一序号内不重复上报同类信号。 */
-    @Volatile
-    private var lastReconfigSerial = -1
-    @Volatile
-    private var lastRestartSerial = -1
+    /** seek 序号与 ready 上报判定；旧事件不会被当成 seek 之后的信号。 */
+    private val readySignals = MpvReadySignals()
 
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
     @Volatile
@@ -75,8 +68,7 @@ class MpvPlaybackEngine(
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
-        lastReconfigSerial = -1
-        lastRestartSerial = -1
+        readySignals.onStart()
         targetUrl = url
         fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
@@ -108,10 +100,13 @@ class MpvPlaybackEngine(
         MPVLib.command(arrayOf("stop"))
     }
 
-    /** seek 后 mpv 会再发 PLAYBACK_RESTART；序号递增让控制层能区分 seek 前后的信号。 */
+    /**
+     * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
+     * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
+     */
     override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
-        val serial = seekSerial.incrementAndGet()
+        val serial = readySignals.onSeekIssued()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
         return serial
     }
@@ -191,6 +186,7 @@ class MpvPlaybackEngine(
     override fun release() {
         MPVLib.removeObserver(this)
         fileEvents.reset()
+        readySignals.reset()
         MPVLib.destroy()
     }
 
@@ -200,11 +196,14 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG,
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG,
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART,
+            MPVLib.MpvEvent.MPV_EVENT_SEEK,
             MPVLib.MpvEvent.MPV_EVENT_END_FILE,
             -> listener?.onLoadActivity()
         }
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
+            // 从这里开始，后面的 ready 才算 seek 之后的信号。
+            MPVLib.MpvEvent.MPV_EVENT_SEEK -> readySignals.onSeekEvent()
             // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
             // 它可能早于首帧上屏，交给控制层做短暂延迟。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
@@ -249,14 +248,7 @@ class MpvPlaybackEngine(
      * 播放中的首帧以 PLAYBACK_RESTART 为准，暂停态则以 VIDEO_RECONFIG 加抓帧确认。
      */
     private fun reportReady(fromVideoReconfig: Boolean = false) {
-        val serial = seekSerial.get()
-        if (fromVideoReconfig) {
-            if (lastReconfigSerial == serial) return
-            lastReconfigSerial = serial
-        } else {
-            if (lastRestartSerial == serial) return
-            lastRestartSerial = serial
-        }
+        val serial = readySignals.acceptReady(fromVideoReconfig) ?: return
         listener?.onFirstFrameReady(fromVideoReconfig, targetUrl, serial)
     }
 

@@ -174,6 +174,12 @@ class PlaybackController(
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
+    /** 暂停态重配后的抓帧确认；抓不到就按间隔重试，直到就绪或被看门狗判失败。 */
+    private var frameProbeJob: Job? = null
+
+    /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
+    private var loadStartPositionMillis = 0L
+
     /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
     private var seekPendingForReady = false
 
@@ -251,10 +257,14 @@ class PlaybackController(
         return true
     }
 
-    /** 界面在 Surface 挂上或分离时上报；没有画面时切集不再等抓帧。 */
+    /**
+     * 界面在 Surface 挂上或分离时上报；没有画面时加载不再等抓帧。
+     * Surface 重新可用时补一次就绪检查，确保后台完成的加载不会被重新拉回等待。
+     */
     fun setRenderSurfaceAvailable(available: Boolean) {
         _renderSurfaceAvailable.value = available
-        if (!available) finishSwitchWithoutSurface()
+        finishLoadWithoutSurface()
+        evaluateDeferredReady()
     }
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
@@ -479,13 +489,17 @@ class PlaybackController(
             LoadPhase.Initial -> {
                 applyResumePosition()
                 applyStartSubtitles(loadTargetIndex)
+                finishLoadWithoutSurface()
             }
             LoadPhase.Switching -> {
                 applyResumePosition()
                 applyStartSubtitles(loadTargetIndex)
-                finishSwitchWithoutSurface()
+                finishLoadWithoutSurface()
             }
-            LoadPhase.Restoring -> applyStartSubtitles(_currentIndex.value)
+            LoadPhase.Restoring -> {
+                applyStartSubtitles(_currentIndex.value)
+                finishLoadWithoutSurface()
+            }
             LoadPhase.None -> Unit
         }
     }
@@ -523,7 +537,7 @@ class PlaybackController(
             finishReady(phase)
             return
         }
-        if (phase == LoadPhase.Switching && !_renderSurfaceAvailable.value) {
+        if (!_renderSurfaceAvailable.value) {
             // 后台没有可渲染画面：文件已加载即视为就绪，回前台由 Surface 重挂恢复画面。
             finishReady(phase)
             return
@@ -533,22 +547,49 @@ class PlaybackController(
 
     /**
      * 暂停态重配后尝试抓帧确认。抓不到只表示还不能撤冻结层，
-     * 继续等下一个首帧/加载事件；60 秒没有任何事件才由看门狗判失败。
+     * 之后按间隔重试；不设独立失败超时，加载是否失败只看 60 秒无事件看门狗。
      */
     private fun probeFrameThenFinish(phase: LoadPhase) {
         if (loadPhase != phase) return
-        if (engine.grabFrame() != null) finishReady(phase)
+        if (engine.grabFrame() != null) {
+            finishReady(phase)
+            return
+        }
+        frameProbeJob?.cancel()
+        frameProbeJob = scope.launch {
+            while (true) {
+                delay(FRAME_PROBE_RETRY_MILLIS)
+                if (loadPhase != phase || !_renderSurfaceAvailable.value) return@launch
+                if (engine.grabFrame() != null) {
+                    finishReady(phase)
+                    return@launch
+                }
+            }
+        }
     }
 
-    /** 后台没有可渲染画面时，切集以文件加载完成作为就绪。 */
-    private fun finishSwitchWithoutSurface() {
-        if (loadPhase != LoadPhase.Switching) return
+    /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
+    private fun finishLoadWithoutSurface() {
+        val phase = loadPhase
+        if (phase == LoadPhase.None) return
         if (_renderSurfaceAvailable.value) return
         if (!mediaLoaded || !resumeLookupDone) return
-        finishReady(LoadPhase.Switching)
+        finishReady(phase)
+    }
+
+    /** 条件满足时补处理续播查询期间暂存的首帧信号。 */
+    private fun evaluateDeferredReady() {
+        val deferred = deferredReadyFromVideoReconfig ?: return
+        val phase = loadPhase
+        if (phase == LoadPhase.None) return
+        if (!mediaLoaded || !resumeLookupDone || seekPendingForReady) return
+        deferredReadyFromVideoReconfig = null
+        handleReadySignal(phase, deferred)
     }
 
     private fun finishReady(phase: LoadPhase) {
+        frameProbeJob?.cancel()
+        frameProbeJob = null
         seekPendingForReady = false
         deferredReadyFromVideoReconfig = null
         when (phase) {
@@ -649,10 +690,14 @@ class PlaybackController(
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
         endLoadWatchdog()
+        // 暂停态续播没有后续位置事件，用加载目标位置初始化，避免界面停在 0:00。
+        playedPositionMillis = loadStartPositionMillis
+        playedDurationMillis = 0
+        _progress.value = PlaybackProgress(loadStartPositionMillis, 0)
         _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
     }
 
-    /** 切集就绪：目标画面直接替换冻结画面，进度从新文件重新开始。 */
+    /** 切集就绪：目标画面直接替换冻结画面，进度从新文件开始。 */
     private fun finishSwitch() {
         if (loadPhase != LoadPhase.Switching) return
         loadPhase = LoadPhase.None
@@ -662,9 +707,9 @@ class PlaybackController(
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         replaceFreezeFrame(null)
-        playedPositionMillis = 0
+        playedPositionMillis = loadStartPositionMillis
         playedDurationMillis = 0
-        _progress.value = PlaybackProgress()
+        _progress.value = PlaybackProgress(loadStartPositionMillis, 0)
         if (paused) {
             _state.value = PlaybackState.Paused
         } else {
@@ -687,10 +732,13 @@ class PlaybackController(
         loadTargetIndex = switchOriginIndex
         loadTargetUrl = origin.playbackLocation
         // 清掉被取消目标的续播 seek 与抓帧确认残留。
+        frameProbeJob?.cancel()
+        frameProbeJob = null
         seekPendingForReady = false
         deferredReadyFromVideoReconfig = null
         requiredSeekSerial = 0
         resumeLookupDone = true
+        loadStartPositionMillis = switchOriginPositionMillis
         _currentIndex.value = switchOriginIndex
         playedPositionMillis = switchOriginPositionMillis
         playedDurationMillis = switchOriginDurationMillis
@@ -808,6 +856,8 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         endBufferingIndicator()
         endLoadWatchdog()
+        frameProbeJob?.cancel()
+        frameProbeJob = null
         _switching.value = false
         loadTargetIndex = NO_MEDIA
         loadTargetUrl = null
@@ -822,6 +872,9 @@ class PlaybackController(
     /** 开始一轮加载：续播位置未查明前不允许判定就绪，seek 序号从零比较。 */
     private fun beginLoadTracking() {
         loadGeneration++
+        frameProbeJob?.cancel()
+        frameProbeJob = null
+        loadStartPositionMillis = 0
         seekPendingForReady = false
         deferredReadyFromVideoReconfig = null
         requiredSeekSerial = 0
@@ -846,7 +899,7 @@ class PlaybackController(
             deferredReadyFromVideoReconfig = null
             // 没有续播 seek 时，查询完成前收到的首帧仍然有效；有 seek 时等 seek 后的新信号。
             if (!seekPendingForReady && deferred != null) handleReadySignal(loadPhase, deferred)
-            finishSwitchWithoutSurface()
+            finishLoadWithoutSurface()
         }
     }
 
@@ -857,6 +910,7 @@ class PlaybackController(
         if (!mediaLoaded) return
         resumePositionMillis = null
         savedPositionMillis = position
+        loadStartPositionMillis = position
         if (loadPhase != LoadPhase.None) {
             seekPendingForReady = true
             requiredSeekSerial = engine.seekTo(position)
@@ -956,6 +1010,9 @@ class PlaybackController(
 
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 500L
+
+        /** 暂停态抓帧失败后的重试间隔；没有失败次数上限，失败由无事件看门狗判定。 */
+        const val FRAME_PROBE_RETRY_MILLIS = 100L
 
         /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
         const val LOAD_WATCHDOG_MILLIS = 60_000L
