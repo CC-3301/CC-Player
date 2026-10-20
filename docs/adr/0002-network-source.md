@@ -10,7 +10,7 @@
 - WebDAV：基于 OkHttp 自实现（PROPFIND/GET/Range）或 sardine-android
 - WebDAV 连接字段：服务器地址（`http(s)://host[:port]`，端口默认 80/443）、起始目录（可空）
 - WebDAV 允许 `http://` 明文地址（局域网 NAS 常只提供明文 HTTP）；应用开启明文流量，scheme 仍限定 http/https
-- PROPFIND 的目录地址统一以 `/` 结尾；客户端不跟随非 GET 重定向，缺末尾斜杠会被 301 拒绝
+- PROPFIND 的目录地址统一以 `/` 结尾，避免依赖服务器目录重定向
 - WebDAV 起始目录为空时从服务器地址根目录开始浏览
 - 向下抽象统一 `MediaFile` 接口（本地/远程同一套列表、排序、播放、字幕查找逻辑）
 - 播放远程媒体：按需拉流（HTTP Range / SMB 顺序读），必要时走本地缓存

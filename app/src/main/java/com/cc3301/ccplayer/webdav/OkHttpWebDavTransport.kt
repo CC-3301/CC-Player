@@ -25,15 +25,17 @@ import java.util.concurrent.TimeUnit
 class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) : WebDavTransport {
 
     override suspend fun list(url: String, username: String, password: String?): List<WebDavEntry> = withContext(Dispatchers.IO) {
-        val request = requestOf(url, username, password)
+        // PROPFIND 的目录地址统一以 `/` 结尾（ADR-0002），不依赖重定向处理。
+        val directoryUrl = if (url.endsWith('/')) url else "$url/"
+        val request = requestOf(directoryUrl, username, password)
             .method(METHOD_PROPFIND, PROPFIND_BODY.toRequestBody(XML_MEDIA_TYPE.toMediaType()))
             .header(DEPTH_HEADER, DEPTH_CHILDREN)
             .build()
         val body = execute(request).use { response ->
-            if (!response.isSuccessful) throw statusFailure(response.code, url)
+            if (!response.isSuccessful) throw statusFailure(response.code, directoryUrl)
             response.body?.string().orEmpty()
         }
-        parsePropfind(body, url)
+        parsePropfind(body, directoryUrl)
     }
 
     override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle = withContext(Dispatchers.IO) {
@@ -151,7 +153,10 @@ private class OkHttpWebDavReadHandle(
     /** 已打开的流读到的位置：流从 [RangedResponse.start] 起，读完 [已读数] 后落在这里。 */
     private var position = first.start
 
-    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+    /** 解码器与关闭可能来自不同线程，读与关闭串行进行。 */
+    private val lock = Any()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = synchronized(lock) {
         if (position < 0 || position >= size) return 0
         val response = responseAt(position)
         val read = response.stream.read(buffer, offset, length)
@@ -160,7 +165,7 @@ private class OkHttpWebDavReadHandle(
         return read
     }
 
-    override fun close() {
+    override fun close() = synchronized(lock) {
         current?.close()
         current = null
         position = 0

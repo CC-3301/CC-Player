@@ -26,10 +26,10 @@
     <string name="sources_delete_remote_message">只删除本地记录与凭据，不删除远程文件。</string>
     <string name="sources_delete_confirm">删除</string>
     <string name="sources_cancel">取消</string>
-    <string name="network_source_name">名称（可空）</string>
+    <string name="network_source_name">名称</string>
     <string name="network_source_server_address">服务器地址</string>
-    <string name="network_source_share_path">路径（共享名加子目录，可空）</string>
-    <string name="network_source_start_directory">起始目录（可空）</string>
+    <string name="network_source_share_path">路径</string>
+    <string name="network_source_start_directory">起始目录</string>
     <string name="network_source_add_title">添加 %1$s 连接</string>
     <string name="network_source_edit_title">编辑 %1$s 连接</string>
     <string name="network_source_address_invalid">地址不合法。</string>
