@@ -30,6 +30,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
@@ -128,7 +129,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
-    private var backgroundPlayback by mutableStateOf(SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -152,6 +152,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
             surface?.let { binder.engine.attachSurface(it) }
+            binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
 
@@ -162,9 +163,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        lifecycleScope.launch {
-            settings.backgroundPlayback.collect { backgroundPlayback = it }
-        }
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -453,6 +451,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (surface == null) return
         pendingMedia = null
         binder.controller.openPlaylist(pendingPlaylist, current, pendingDirectoryEntries)
+        // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
+        binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
     }
 
     /** 通知栏要能显示就得有这个权限（Android 13 起）。 */
@@ -463,11 +463,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    /** 退到后台停止画面渲染；关闭后台播放时同时暂停，音频不再继续。 */
+    /** 退到后台停止画面渲染；是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
         playback?.setAppInForeground(false)
-        if (!backgroundPlayback) playback?.controller?.pause()
         playback?.engine?.detachSurface()
     }
 

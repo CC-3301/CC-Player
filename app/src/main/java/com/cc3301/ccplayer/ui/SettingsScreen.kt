@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -238,8 +239,13 @@ private fun <T> ChoiceSetting(
                 modifier = Modifier.padding(start = AppSpacing.Xs),
             )
         }
-        // 菜单以行尾为锚点向左展开，靠近右侧触发位置。
-        Box(modifier = Modifier.align(Alignment.TopEnd).fillMaxHeight()) {
+        // 菜单以行尾真实尺寸为锚点，从行下方靠右展开，不遮挡触发行。
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .fillMaxHeight()
+                .width(48.dp),
+        ) {
             DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false },

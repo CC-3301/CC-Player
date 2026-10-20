@@ -6,9 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -57,29 +55,6 @@ class MediaSessionActionTest {
         MediaSessionAction.Previous.applyTo(controller)
 
         assertEquals(listOf("root/ep2.mkv", "root/ep1.mkv"), engine.startedUrls)
-    }
-
-    @Test
-    fun `前台时通知栏动作不受后台播放开关影响`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertTrue(action.appliesWhen(backgroundPlaybackEnabled = true, appInForeground = true))
-            assertTrue(action.appliesWhen(backgroundPlaybackEnabled = false, appInForeground = true))
-        }
-    }
-
-    @Test
-    fun `开启后台播放时后台通知栏动作全部生效`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertTrue(action.appliesWhen(backgroundPlaybackEnabled = true, appInForeground = false))
-        }
-    }
-
-    @Test
-    fun `关闭后台播放时后台播放键不生效而暂停与切集仍生效`() {
-        assertFalse(MediaSessionAction.Play.appliesWhen(backgroundPlaybackEnabled = false, appInForeground = false))
-        listOf(MediaSessionAction.Pause, MediaSessionAction.Previous, MediaSessionAction.Next).forEach { action ->
-            assertTrue(action.appliesWhen(backgroundPlaybackEnabled = false, appInForeground = false))
-        }
     }
 
     @Test

@@ -32,7 +32,3 @@ enum class MediaSessionAction(
 /** 通知栏播放/暂停按钮的动作：播放中显示暂停，其余状态显示播放。 */
 fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
     if (state == PlaybackState.Playing) MediaSessionAction.Pause else MediaSessionAction.Play
-
-/** 关闭后台播放时，后台的通知栏播放键不恢复播放；暂停与切集不受影响。 */
-fun MediaSessionAction.appliesWhen(backgroundPlaybackEnabled: Boolean, appInForeground: Boolean): Boolean =
-    backgroundPlaybackEnabled || appInForeground || this != MediaSessionAction.Play

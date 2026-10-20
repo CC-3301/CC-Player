@@ -2,23 +2,30 @@ package com.cc3301.ccplayer.ui.theme
 
 import androidx.compose.foundation.IndicationNodeFactory
 import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.node.DelegatableNode
+import androidx.compose.ui.node.DrawModifierNode
+import androidx.compose.ui.node.invalidateDraw
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.R
+import kotlinx.coroutines.launch
 
 /** 深色影院主题的取色：表面、边框、文字与强调色。 */
 object AppColors {
@@ -96,14 +103,54 @@ private val AppTypography = Typography(
     labelSmall = TextStyle(fontSize = 10.sp),
 )
 
-/** 全局不显示按压涟漪：自绘 clickable 与 Material 组件都取这一份空指示。 */
-private object NoIndication : IndicationNodeFactory {
-    override fun create(interactionSource: InteractionSource): DelegatableNode = object : Modifier.Node() {}
+/** 吞掉按下与悬停反馈，只在键盘/手柄焦点落上时画一层强调色。 */
+private object NoPressIndication : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode =
+        NoPressIndicationNode(interactionSource)
 
     override fun equals(other: Any?): Boolean = other === this
 
     override fun hashCode(): Int = System.identityHashCode(this)
 }
+
+private class NoPressIndicationNode(
+    private val interactionSource: InteractionSource,
+) : Modifier.Node(), DrawModifierNode {
+
+    private var focused = false
+
+    override fun onAttach() {
+        coroutineScope.launch {
+            interactionSource.interactions.collect { interaction ->
+                when (interaction) {
+                    is FocusInteraction.Focus -> focused = true
+                    is FocusInteraction.Unfocus -> focused = false
+                }
+                invalidateDraw()
+            }
+        }
+    }
+
+    override fun ContentDrawScope.draw() {
+        drawContent()
+        if (focused) drawRect(color = AppColors.Accent, alpha = FOCUS_ALPHA)
+    }
+
+    private companion object {
+        const val FOCUS_ALPHA = 0.12f
+    }
+}
+
+/** Material 组件的按压、拖动与悬停透明，焦点反馈保留。 */
+@OptIn(ExperimentalMaterial3Api::class)
+private val AppRippleConfiguration = RippleConfiguration(
+    rippleAlpha = RippleAlpha(
+        draggedAlpha = 0f,
+        focusedAlpha = 0.12f,
+        hoveredAlpha = 0f,
+        pressedAlpha = 0f,
+    ),
+)
 
 /** 应用主题：替换 Material 默认配色与字号，并关闭点击涟漪；背景以 colors.xml 为唯一来源。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,8 +162,8 @@ fun CcPlayerTheme(content: @Composable () -> Unit) {
         typography = AppTypography,
     ) {
         CompositionLocalProvider(
-            LocalIndication provides NoIndication,
-            LocalRippleConfiguration provides null,
+            LocalIndication provides NoPressIndication,
+            LocalRippleConfiguration provides AppRippleConfiguration,
             content = content,
         )
     }
