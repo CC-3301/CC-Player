@@ -45,7 +45,7 @@ class PlayerLock(
     }
 
     /** 解锁按钮显示满 [UNLOCK_AUTO_HIDE_MILLIS] 后隐藏；未满时保持。 */
-    fun expireUnlock() {
+    fun hideUnlockIfExpired() {
         if (!locked || !unlockVisible) return
         if (elapsedMillis() - unlockShownAtMillis >= UNLOCK_AUTO_HIDE_MILLIS) {
             unlockVisible = false

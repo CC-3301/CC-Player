@@ -8,7 +8,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -236,7 +235,7 @@ fun PlayerScreen(
     LaunchedEffect(lock.locked, lock.unlockVisible, lock.unlockShownAtMillis) {
         if (lock.locked && lock.unlockVisible) {
             delay(UNLOCK_AUTO_HIDE_MILLIS)
-            lock.expireUnlock()
+            lock.hideUnlockIfExpired()
         }
     }
 
@@ -308,7 +307,7 @@ fun PlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) { detectTapGestures { lock.tapScreen() } },
+                    .noRippleClickable { lock.tapScreen() },
             )
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
@@ -398,7 +397,7 @@ fun PlayerScreen(
                 UnlockButton(
                     onTap = {
                         lock.tapLockButton()
-                        if (!lock.locked) controlsVisible = true
+                        controlsVisible = true
                     },
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -748,7 +747,8 @@ private fun PlayerIconBar(
             .fillMaxWidth()
             .height(48.dp),
     ) {
-        val iconSize = ((maxWidth - 56.dp) / 6).coerceIn(1.dp, 44.dp)
+        // 三组图标互不重叠需满足 7×图标宽 + 中间两处间距 ≤ 行宽。
+        val iconSize = ((maxWidth - AppSpacing.Xs * 2) / 7).coerceIn(1.dp, 44.dp)
         Box(modifier = Modifier.fillMaxSize()) {
             // 左下角锁定键与上一集/播放/下一集同一条水平线。
             PlayerIconButton(

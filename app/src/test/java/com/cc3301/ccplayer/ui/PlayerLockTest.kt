@@ -37,11 +37,11 @@ class PlayerLockTest {
     fun `解锁按钮显示三秒后自动隐藏`() {
         lock.tapLockButton()
         now = 2_999L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
         assertEquals(true, lock.unlockVisible)
 
         now = 3_000L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
 
         assertEquals(true, lock.locked)
         assertEquals(false, lock.unlockVisible)
@@ -51,7 +51,7 @@ class PlayerLockTest {
     fun `锁定态点画面重新显示解锁按钮`() {
         lock.tapLockButton()
         now = 3_000L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
         now = 5_000L
 
         lock.tapScreen()
@@ -63,16 +63,16 @@ class PlayerLockTest {
     fun `点画面重新显示后自动隐藏重新计时`() {
         lock.tapLockButton()
         now = 3_000L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
         now = 5_000L
         lock.tapScreen()
 
         now = 7_999L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
         assertEquals(true, lock.unlockVisible)
 
         now = 8_000L
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
         assertEquals(false, lock.unlockVisible)
     }
 
@@ -89,7 +89,7 @@ class PlayerLockTest {
         lock.tapLockButton()
         now = 3_000L
 
-        lock.expireUnlock()
+        lock.hideUnlockIfExpired()
 
         assertEquals(true, lock.locked)
     }
@@ -104,7 +104,14 @@ class PlayerLockTest {
 
         assertEquals(true, lock.locked)
         assertEquals(true, lock.unlockVisible)
-        assertEquals(2_000L, lock.unlockShownAtMillis)
+
+        now = 4_000L
+        lock.hideUnlockIfExpired()
+        assertEquals(true, lock.unlockVisible)
+
+        now = 5_000L
+        lock.hideUnlockIfExpired()
+        assertEquals(false, lock.unlockVisible)
     }
 
     @Test
