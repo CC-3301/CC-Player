@@ -73,6 +73,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
@@ -304,10 +305,12 @@ fun PlayerScreen(
         }
         // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
         if (locked) {
+            val lockedHint = stringResource(R.string.player_screen_locked_hint)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable { lock.tapScreen() },
+                    .noRippleClickable { lock.tapScreen() }
+                    .semantics { contentDescription = lockedHint },
             )
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
@@ -747,7 +750,7 @@ private fun PlayerIconBar(
             .fillMaxWidth()
             .height(48.dp),
     ) {
-        // 三组图标互不重叠需满足 7×图标宽 + 中间两处间距 ≤ 行宽。
+        // 三组图标互不重叠需满足 7 倍图标宽（由播放键居中约束推出）+ 中间两处间距 ≤ 行宽。
         val iconSize = ((maxWidth - AppSpacing.Xs * 2) / 7).coerceIn(1.dp, 44.dp)
         Box(modifier = Modifier.fillMaxSize()) {
             // 左下角锁定键与上一集/播放/下一集同一条水平线。
