@@ -40,6 +40,18 @@ class MediaSessionActionTest {
     }
 
     @Test
+    fun `the play action after playback ended reopens the current file`() {
+        open("ep1.mkv", "ep2.mkv", current = "ep2.mkv")
+        engine.reportMediaLoaded()
+        engine.reportPlaybackEnded()
+
+        MediaSessionAction.Play.applyTo(controller)
+
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertEquals(listOf("root/ep2.mkv", "root/ep2.mkv"), engine.startedUrls)
+    }
+
+    @Test
     fun `the next action plays the next episode`() {
         open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
 

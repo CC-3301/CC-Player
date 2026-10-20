@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.playback
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.view.Surface
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
@@ -21,7 +22,27 @@ class MpvPlaybackEngine(
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
     private var videoOutputStopped = false
 
+    /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
+    private var attachedSurface: Surface? = null
+
+    /** 加载代际与结束事件判定；方法内部同步，控制层与事件线程都会调用。 */
+    private val fileEvents = MpvFileEvents()
+
+    /** seek 序号与 ready 上报判定；旧事件不会被当成 seek 之后的信号。 */
+    private val readySignals = MpvReadySignals()
+
+    /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
+    @Volatile
+    private var hasVideoTrack = false
+
+    /** 本次 loadfile 的目标位置，用 mpv 的 path 属性识别迟到的旧 FILE_LOADED。 */
+    @Volatile
+    private var targetUrl: String? = null
+
+    @Volatile
     private var positionSeconds = 0.0
+
+    @Volatile
     private var durationSeconds = 0.0
     private var videoWidth = 0
     private var videoHeight = 0
@@ -36,17 +57,32 @@ class MpvPlaybackEngine(
         MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         MPVLib.observeProperty(WIDTH_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(HEIGHT_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
+        MPVLib.observeProperty(EOF_REACHED_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
         this.listener = listener
     }
 
-    override fun start(url: String) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
         positionSeconds = 0.0
         durationSeconds = 0.0
-        MPVLib.command(arrayOf("loadfile", url, "replace"))
+        hasVideoTrack = false
+        readySignals.onStart()
+        targetUrl = url
+        fileEvents.onStart()
+        MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
+        val command = mutableListOf("loadfile", url, "replace")
+        if (startPositionMillis > 0) {
+            command += "-1"
+            command += "start=${formatSeconds(startPositionMillis)}"
+        }
+        MPVLib.command(command.toTypedArray())
     }
+
+    /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
+    override fun grabFrame(): PlaybackEngine.Frame? =
+        runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull()?.let(PlaybackEngine::Frame)
 
     override fun pause() {
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, true)
@@ -57,12 +93,22 @@ class MpvPlaybackEngine(
     }
 
     override fun stop() {
+        // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
+        fileEvents.onStop()
+        hasVideoTrack = false
+        targetUrl = null
         MPVLib.command(arrayOf("stop"))
     }
 
-    override fun seekTo(positionMillis: Long) {
+    /**
+     * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
+     * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
+     */
+    override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
+        val serial = readySignals.onSeekIssued()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+        return serial
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
@@ -113,19 +159,23 @@ class MpvPlaybackEngine(
     }
 
     override fun attachSurface(surface: Surface) {
+        if (attachedSurface === surface && !videoOutputStopped) return
         if (videoOutputStopped) {
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
             videoOutputStopped = false
         }
         MPVLib.attachSurface(surface)
+        attachedSurface = surface
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         MPVLib.setOptionString("force-window", "yes")
     }
 
     override fun detachSurface() {
+        if (attachedSurface == null) return
         MPVLib.setPropertyString("vo", "null")
         MPVLib.setOptionString("force-window", "no")
         MPVLib.detachSurface()
+        attachedSurface = null
         videoOutputStopped = true
     }
 
@@ -135,14 +185,74 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
+        fileEvents.reset()
+        readySignals.reset()
         MPVLib.destroy()
     }
 
     override fun event(eventId: Int) {
         when (eventId) {
-            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> listener?.onMediaLoaded()
-            MPVLib.MpvEvent.MPV_EVENT_END_FILE -> listener?.onPlaybackEnded()
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED,
+            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG,
+            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG,
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART,
+            MPVLib.MpvEvent.MPV_EVENT_SEEK,
+            MPVLib.MpvEvent.MPV_EVENT_END_FILE,
+            -> listener?.onLoadActivity()
         }
+        when (eventId) {
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
+            // 从这里开始，后面的 ready 才算 seek 之后的信号。
+            MPVLib.MpvEvent.MPV_EVENT_SEEK -> readySignals.onSeekEvent()
+            // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
+            // 它可能早于首帧上屏，需要控制层抓帧确认。
+            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
+                if (fileEvents.isLoaded && hasVideoTrack && isPaused()) reportReady(needsFrameConfirmation = true)
+            }
+            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
+                if (fileEvents.isLoaded && !hasVideoTrack) reportReady()
+            }
+            // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (fileEvents.isLoaded) {
+                reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+            }
+            MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
+        }
+    }
+
+    private fun onFileLoaded() {
+        // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
+        if (!fileEvents.onFileLoaded(isTargetFile())) return
+        hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
+        listener?.onMediaLoaded()
+        // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
+        if (!hasVideoTrack) reportReady()
+    }
+
+    /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
+    private fun isTargetFile(): Boolean =
+        isTargetPath(targetUrl, MPVLib.getPropertyString(PATH_PROPERTY))
+
+    private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
+
+    /** 替换、自然结束与失败由 [MpvFileEvents] 判定。 */
+    private fun onEndFile() {
+        val atEndByPosition = durationSeconds > 0 &&
+            positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS
+        when (fileEvents.onEndFile(atEndByPosition)) {
+            MpvFileEvents.End.Replaced -> Unit
+            MpvFileEvents.End.Ended -> listener?.onPlaybackEnded()
+            MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
+        }
+    }
+
+    /**
+     * 同一 seek 序号内，需抓帧确认与无需确认两类 ready 各只上报一次；
+     * seek 之后序号变化，两类信号都能再次上报。
+     */
+    private fun reportReady(needsFrameConfirmation: Boolean = false) {
+        val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
+        listener?.onFirstFrameReady(needsFrameConfirmation, targetUrl, serial)
     }
 
     override fun eventProperty(property: String) = Unit
@@ -168,7 +278,10 @@ class MpvPlaybackEngine(
     override fun eventProperty(property: String, value: String) = Unit
 
     override fun eventProperty(property: String, value: Boolean) {
-        if (property == PAUSE_PROPERTY) listener?.onPauseChanged(value)
+        when (property) {
+            PAUSE_PROPERTY -> listener?.onPauseChanged(value)
+            EOF_REACHED_PROPERTY -> fileEvents.onEofChanged(value)
+        }
     }
 
     /** mpv 在时长未知时上报 NaN，按 0 处理。 */
@@ -205,6 +318,8 @@ class MpvPlaybackEngine(
         const val DURATION_PROPERTY = "duration"
         const val WIDTH_PROPERTY = "width"
         const val HEIGHT_PROPERTY = "height"
+        const val EOF_REACHED_PROPERTY = "eof-reached"
+        const val PATH_PROPERTY = "path"
         const val SID_PROPERTY = "sid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"
@@ -215,9 +330,20 @@ class MpvPlaybackEngine(
         const val DEFAULT_ENTRY = "default"
         const val EXTERNAL_FILENAME_ENTRY = "external-filename"
         const val SUBTITLE_TRACK_TYPE = "sub"
+        const val VIDEO_TRACK_TYPE = "video"
         const val SUB_ADD_SELECT = "select"
+
+        /** 抓冻结画面的目标像素边长。 */
+        const val GRAB_DIMENSION = 1920
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+
+        /** 位置与时长差在这个范围内就算自然播完，兜底 eof-reached 未上报的情况。 */
+        const val EOF_TOLERANCE_SECONDS = 1.0
     }
 }
+
+/** 只有目标与 mpv 当前 path 都存在且一致，才承认这次加载；其余都按旧代际事件丢弃。 */
+internal fun isTargetPath(target: String?, path: String?): Boolean =
+    target != null && path == target

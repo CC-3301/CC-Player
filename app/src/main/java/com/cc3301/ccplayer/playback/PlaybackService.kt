@@ -43,7 +43,12 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath)
-        playbackController = PlaybackController(playbackEngine, RoomPlaybackProgressRepository.create(this), scope)
+        playbackController = PlaybackController(
+            playbackEngine,
+            RoomPlaybackProgressRepository.create(this),
+            scope,
+            marshalCallbacks = true,
+        )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pause,
             onPolicyChanged = ::refreshPlaybackControls,

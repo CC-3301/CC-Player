@@ -25,7 +25,7 @@ import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -68,9 +68,9 @@ class NetworkPlaybackProgressTest {
         smbConnector.addFile("media", "电影.mkv", payload)
         val entry = playable(smbMovie)
 
-        open(this, entry)
+        open(backgroundScope, entry)
         engine.reportPositionChanged(30_000, 60_000)
-        advanceUntilIdle()
+        runCurrent()
 
         assertTrue(entry.playbackLocation.startsWith(LOOPBACK_PREFIX))
         assertEquals(smbMovie.location, entry.location)
@@ -84,9 +84,9 @@ class NetworkPlaybackProgressTest {
         webDavTransport.addFile(webDavMovie.location, payload)
         val entry = playable(webDavMovie)
 
-        open(this, entry)
+        open(backgroundScope, entry)
         engine.reportPositionChanged(30_000, 60_000)
-        advanceUntilIdle()
+        runCurrent()
 
         assertTrue(entry.playbackLocation.startsWith(LOOPBACK_PREFIX))
         assertEquals(webDavMovie.location, entry.location)
@@ -100,13 +100,13 @@ class NetworkPlaybackProgressTest {
         smbConnector.addFile("media", "电影.mkv", payload)
         val first = playable(smbMovie)
 
-        open(this, first)
+        open(backgroundScope, first)
         engine.reportPositionChanged(30_000, 60_000)
-        advanceUntilIdle()
+        runCurrent()
 
         val second = playable(smbMovie)
-        open(this, second)
-        advanceUntilIdle()
+        open(backgroundScope, second)
+        runCurrent()
 
         assertNotEquals(first.playbackLocation, second.playbackLocation)
         assertEquals(second.playbackLocation, engine.startedUrls.last())
@@ -119,12 +119,12 @@ class NetworkPlaybackProgressTest {
         addSource(smbRoot)
         smbConnector.addFile("media", "电影.mkv", payload)
         val entry = playable(smbMovie)
-        val controller = open(this, entry)
+        val controller = open(backgroundScope, entry)
 
         engine.reportPositionChanged(30_000, 60_000)
-        advanceUntilIdle()
+        runCurrent()
         controller.stop()
-        advanceUntilIdle()
+        runCurrent()
 
         assertTrue(progress.calledLocations.isNotEmpty())
         assertTrue(progress.calledLocations.none { it.startsWith(LOOPBACK_PREFIX) })

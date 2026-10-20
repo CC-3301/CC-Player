@@ -54,6 +54,8 @@
     <string name="player_next">下一集</string>
     <string name="player_playlist">播放列表</string>
     <string name="player_subtitles">字幕</string>
+    <string name="player_buffering">正在缓冲</string>
+    <string name="player_playback_failed">播放失败</string>
     <string name="player_more">更多</string>
     <string name="player_more_expanded">已展开</string>
     <string name="player_more_collapsed">已折叠</string>

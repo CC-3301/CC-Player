@@ -10,6 +10,20 @@ class FakePlaybackEngine : PlaybackEngine {
     private var listener: PlaybackEngine.Listener? = null
 
     val startedUrls = mutableListOf<String>()
+    val startedPaused = mutableListOf<Boolean>()
+    val startedPositions = mutableListOf<Long>()
+
+    /** 指令顺序，用于验证先暂停、再抓帧、再换文件。 */
+    val actions = mutableListOf<String>()
+
+    /** 抓帧返回的画面；测试用不含位图的 Frame 模拟“有帧”。 */
+    var frameToGrab: PlaybackEngine.Frame? = null
+    var grabFrameCalls = 0
+        private set
+
+    /** 最近一次 start 的目标，ready 回调带上它供控制层过滤迟到事件。 */
+    var currentTargetUrl: String? = null
+        private set
     var pauseCalls = 0
         private set
     var resumeCalls = 0
@@ -17,6 +31,10 @@ class FakePlaybackEngine : PlaybackEngine {
     var stopCalls = 0
         private set
     val seekPositions = mutableListOf<Long>()
+
+    /** 最近一次 seek 的序号；ready 回调默认带上它。 */
+    var currentSeekSerial = 0
+        private set
     val fadeInDurations = mutableListOf<Long>()
     val decodeModes = mutableListOf<DecodeMode>()
 
@@ -34,15 +52,27 @@ class FakePlaybackEngine : PlaybackEngine {
         this.listener = listener
     }
 
-    override fun start(url: String) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
+        actions += "start"
         startedUrls += url
+        startedPaused += paused
+        startedPositions += startPositionMillis
+        currentTargetUrl = url
+    }
+
+    override fun grabFrame(): PlaybackEngine.Frame? {
+        actions += "grab"
+        grabFrameCalls++
+        return frameToGrab
     }
 
     override fun pause() {
+        actions += "pause"
         pauseCalls++
     }
 
     override fun resume() {
+        actions += "resume"
         resumeCalls++
     }
 
@@ -50,8 +80,9 @@ class FakePlaybackEngine : PlaybackEngine {
         stopCalls++
     }
 
-    override fun seekTo(positionMillis: Long) {
+    override fun seekTo(positionMillis: Long): Int {
         seekPositions += positionMillis
+        return ++currentSeekSerial
     }
 
     override fun fadeInAudio(durationMillis: Long) {
@@ -88,11 +119,65 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun release() = Unit
 
-    fun reportMediaLoaded() = listener?.onMediaLoaded()
+    /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
+    fun reportMediaLoaded() {
+        listener?.onLoadActivity()
+        listener?.onMediaLoaded()
+        // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation = false,
+            targetUrl = currentTargetUrl,
+            seekSerial = currentSeekSerial,
+        )
+    }
+
+    /** 只上报文件打开，首帧还没就绪。 */
+    fun reportFileLoaded() {
+        listener?.onLoadActivity()
+        listener?.onMediaLoaded()
+    }
+
+    /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
+    fun reportFirstFrameReady(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(needsFrameConfirmation = false, targetUrl = targetUrl, seekSerial = seekSerial)
+    }
+
+    /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
+    fun reportVideoReconfigured(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
+    }
+
+    /** 暂停态下的 PLAYBACK_RESTART：同样需要控制层抓帧确认。 */
+    fun reportPausedRestart(
+        targetUrl: String? = currentTargetUrl,
+        seekSerial: Int = currentSeekSerial,
+    ) {
+        listener?.onLoadActivity()
+        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
+    }
+
+    /** 只上报加载活动，不给 ready/end。 */
+    fun reportLoadActivity() = listener?.onLoadActivity()
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
-    fun reportPlaybackEnded() = listener?.onPlaybackEnded()
+    fun reportPlaybackEnded() {
+        listener?.onLoadActivity()
+        listener?.onPlaybackEnded()
+    }
+
+    fun reportPlaybackFailed() {
+        listener?.onLoadActivity()
+        listener?.onPlaybackFailed()
+    }
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
         listener?.onPositionChanged(positionMillis, durationMillis)
