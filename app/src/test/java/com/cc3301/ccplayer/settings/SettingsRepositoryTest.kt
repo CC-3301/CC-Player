@@ -38,6 +38,18 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `默认开启后台播放`() = runTest {
+        assertTrue(settings.backgroundPlayback.first())
+    }
+
+    @Test
+    fun `后台播放开关写入后读回`() = runTest {
+        settings.setBackgroundPlayback(false)
+
+        assertFalse(settings.backgroundPlayback.first())
+    }
+
+    @Test
     fun `自动连播开关写入后读回`() = runTest {
         settings.setAutoPlayNext(false)
 

@@ -1,10 +1,18 @@
 package com.cc3301.ccplayer.ui.theme
 
+import androidx.compose.foundation.IndicationNodeFactory
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.node.DelegatableNode
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -88,13 +96,28 @@ private val AppTypography = Typography(
     labelSmall = TextStyle(fontSize = 10.sp),
 )
 
-/** 应用主题：替换 Material 默认配色与字号；背景以 colors.xml 为唯一来源。 */
+/** 全局不显示按压涟漪：自绘 clickable 与 Material 组件都取这一份空指示。 */
+private object NoIndication : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode = object : Modifier.Node() {}
+
+    override fun equals(other: Any?): Boolean = other === this
+
+    override fun hashCode(): Int = System.identityHashCode(this)
+}
+
+/** 应用主题：替换 Material 默认配色与字号，并关闭点击涟漪；背景以 colors.xml 为唯一来源。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CcPlayerTheme(content: @Composable () -> Unit) {
     val colorScheme = AppColorScheme.copy(background = colorResource(R.color.app_background))
     MaterialTheme(
         colorScheme = colorScheme,
         typography = AppTypography,
-        content = content,
-    )
+    ) {
+        CompositionLocalProvider(
+            LocalIndication provides NoIndication,
+            LocalRippleConfiguration provides null,
+            content = content,
+        )
+    }
 }

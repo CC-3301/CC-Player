@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
+import com.cc3301.ccplayer.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,6 +32,9 @@ class PlaybackService : Service() {
     private lateinit var playbackController: PlaybackController
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioOutputMonitor: AudioOutputMonitor
+
+    private var backgroundPlaybackEnabled = SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK
+    private var appInForeground = true
 
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -54,12 +58,17 @@ class PlaybackService : Service() {
                 startForeground(NOTIFICATION_ID, buildNotification(state))
             }
         }
+        scope.launch {
+            SettingsRepository.create(applicationContext).backgroundPlayback.collect { enabled ->
+                backgroundPlaybackEnabled = enabled
+            }
+        }
     }
 
     override fun onBind(intent: Intent): IBinder = LocalBinder()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        MediaSessionAction.fromIntentAction(intent?.action)?.applyTo(playbackController)
+        MediaSessionAction.fromIntentAction(intent?.action)?.let(::dispatch)
         return super.onStartCommand(intent, flags, startId)
     }
 
@@ -78,6 +87,11 @@ class PlaybackService : Service() {
         val engine: PlaybackEngine get() = this@PlaybackService.engine
 
         val controller: PlaybackController get() = this@PlaybackService.controller
+
+        /** 界面前后台变化，用于关闭后台播放时拦截通知栏播放键。 */
+        fun setAppInForeground(foreground: Boolean) {
+            this@PlaybackService.appInForeground = foreground
+        }
     }
 
     /** 通知栏与系统媒体控制都经 MediaSession 回调到同一个播放控制层。 */
@@ -85,17 +99,24 @@ class PlaybackService : Service() {
         mediaSession = MediaSessionCompat(this, MEDIA_SESSION_TAG).apply {
             setCallback(
                 object : MediaSessionCompat.Callback() {
-                    override fun onPlay() = MediaSessionAction.Play.applyTo(playbackController)
+                    override fun onPlay() = dispatch(MediaSessionAction.Play)
 
-                    override fun onPause() = MediaSessionAction.Pause.applyTo(playbackController)
+                    override fun onPause() = dispatch(MediaSessionAction.Pause)
 
-                    override fun onSkipToNext() = MediaSessionAction.Next.applyTo(playbackController)
+                    override fun onSkipToNext() = dispatch(MediaSessionAction.Next)
 
-                    override fun onSkipToPrevious() = MediaSessionAction.Previous.applyTo(playbackController)
+                    override fun onSkipToPrevious() = dispatch(MediaSessionAction.Previous)
                 },
             )
             isActive = true
             setPlaybackState(playbackState(playbackController.state.value))
+        }
+    }
+
+    /** 按前后台与后台播放开关决定通知栏动作是否执行。 */
+    private fun dispatch(action: MediaSessionAction) {
+        if (action.appliesWhen(backgroundPlaybackEnabled, appInForeground)) {
+            action.applyTo(playbackController)
         }
     }
 

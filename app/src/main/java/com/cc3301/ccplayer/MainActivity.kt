@@ -128,6 +128,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
+    private var backgroundPlayback by mutableStateOf(SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -161,6 +162,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lifecycleScope.launch {
+            settings.backgroundPlayback.collect { backgroundPlayback = it }
+        }
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -250,6 +254,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         SettingsScreen(
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
+                            onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
                             onSetResumeMode = settingsViewModel::setResumeMode,
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
@@ -458,14 +463,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    /** 退到后台停止画面渲染，音频继续；回前台接回同一块 Surface，媒体不重新打开。 */
+    /** 退到后台停止画面渲染；关闭后台播放时同时暂停，音频不再继续。 */
     override fun onStop() {
         super.onStop()
+        playback?.setAppInForeground(false)
+        if (!backgroundPlayback) playback?.controller?.pause()
         playback?.engine?.detachSurface()
     }
 
     override fun onStart() {
         super.onStart()
+        playback?.setAppInForeground(true)
         surface?.let { playback?.engine?.attachSurface(it) }
     }
 

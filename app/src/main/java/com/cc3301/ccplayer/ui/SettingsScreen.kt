@@ -1,16 +1,23 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -22,8 +29,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -32,8 +37,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
@@ -45,13 +52,14 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
- * 设置页：按播放与列表分组，归总连播、起播位置、解码、屏幕方向与目录位置记忆。
+ * 设置页：按播放与列表分组，归总连播、后台播放、起播位置、解码、屏幕方向与目录位置记忆。
  * 顶栏进入，改动即写入持久设置。视图与排序由库页面顶栏提供，不在设置页。
  */
 @Composable
 fun SettingsScreen(
     state: SettingsState,
     onSetAutoPlayNext: (Boolean) -> Unit,
+    onSetBackgroundPlayback: (Boolean) -> Unit,
     onSetResumeMode: (ResumeMode) -> Unit,
     onSetAutoRestorePosition: (Boolean) -> Unit,
     onSetDecodeMode: (DecodeMode) -> Unit,
@@ -87,6 +95,12 @@ fun SettingsScreen(
                     label = stringResource(R.string.settings_auto_play_next),
                     checked = state.autoPlayNext,
                     onCheckedChange = onSetAutoPlayNext,
+                )
+                RowDivider()
+                ToggleSetting(
+                    label = stringResource(R.string.settings_background_playback),
+                    checked = state.backgroundPlayback,
+                    onCheckedChange = onSetBackgroundPlayback,
                 )
                 RowDivider()
                 ChoiceSetting(
@@ -140,8 +154,13 @@ private fun ToggleSetting(label: String, checked: Boolean, onCheckedChange: (Boo
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
-            .padding(horizontal = 15.dp, vertical = 14.dp),
+            .heightIn(min = 52.dp)
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
     ) {
@@ -151,16 +170,30 @@ private fun ToggleSetting(label: String, checked: Boolean, onCheckedChange: (Boo
             color = AppColors.Foreground,
             modifier = Modifier.weight(1f),
         )
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = AppColors.AccentDeep,
-                uncheckedThumbColor = AppColors.SwitchThumb,
-                uncheckedTrackColor = AppColors.SurfaceHighest,
-                uncheckedBorderColor = Color.Transparent,
-            ),
+        SettingSwitch(checked = checked)
+    }
+}
+
+/** 设置开关：固定 44×26，右侧与选项行的箭头共用同一条基准线。 */
+@Composable
+private fun SettingSwitch(checked: Boolean) {
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 21.dp else 3.dp,
+        label = "settings-switch-thumb",
+    )
+    Box(
+        modifier = Modifier
+            .size(width = 44.dp, height = 26.dp)
+            .clip(CircleShape)
+            .background(if (checked) AppColors.AccentDeep else AppColors.SurfaceHighest),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            modifier = Modifier
+                .offset(x = thumbOffset)
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(if (checked) Color.White else AppColors.SwitchThumb),
         )
     }
 }
@@ -179,8 +212,9 @@ private fun <T> ChoiceSetting(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(min = 52.dp)
                 .clickable { expanded = true }
-                .padding(horizontal = 15.dp, vertical = 14.dp),
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
         ) {
@@ -204,25 +238,28 @@ private fun <T> ChoiceSetting(
                 modifier = Modifier.padding(start = AppSpacing.Xs),
             )
         }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            containerColor = AppColors.SurfaceHigh,
-            shape = RoundedCornerShape(AppRadius.Md),
-        ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(text = optionText(optionLabel(option))) },
-                    onClick = {
-                        expanded = false
-                        onSelect(option)
-                    },
-                    trailingIcon = {
-                        if (option == selected) {
-                            Icon(imageVector = Icons.Filled.Check, contentDescription = null, tint = AppColors.Accent)
-                        }
-                    },
-                )
+        // 菜单以行尾为锚点向左展开，靠近右侧触发位置。
+        Box(modifier = Modifier.align(Alignment.TopEnd).fillMaxHeight()) {
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                containerColor = AppColors.SurfaceHigh,
+                shape = RoundedCornerShape(AppRadius.Md),
+            ) {
+                options.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(text = optionText(optionLabel(option))) },
+                        onClick = {
+                            expanded = false
+                            onSelect(option)
+                        },
+                        trailingIcon = {
+                            if (option == selected) {
+                                Icon(imageVector = Icons.Filled.Check, contentDescription = null, tint = AppColors.Accent)
+                            }
+                        },
+                    )
+                }
             }
         }
     }
