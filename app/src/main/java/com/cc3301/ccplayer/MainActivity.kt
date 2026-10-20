@@ -55,7 +55,6 @@ import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.settings.next
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
@@ -77,7 +76,6 @@ import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
-import com.cc3301.ccplayer.ui.WindowBrightnessControl
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.resolvedOrientation
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
@@ -190,10 +188,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 }
 
                 val levelControls = remember {
-                    PlayerLevelControls(
-                        brightness = WindowBrightnessControl(this@MainActivity),
-                        volume = MediaVolumeControl(this@MainActivity),
-                    )
+                    PlayerLevelControls(volume = MediaVolumeControl(this@MainActivity))
                 }
 
                 when {
@@ -222,10 +217,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
                             onPlaylistSelect = { playback?.controller?.playAt(it) },
-                            onToggleDecodeMode = { playback?.controller?.toggleDecodeMode() },
-                            onToggleLoopMode = { playback?.controller?.cycleLoopMode() },
-                            onCycleOrientationMode = {
-                                lifecycleScope.launch { settings.setOrientationMode(orientationMode.next()) }
+                            onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
+                            onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
+                            onSelectOrientationMode = { mode ->
+                                lifecycleScope.launch { settings.setOrientationMode(mode) }
                             },
                             onToggleAutoPlayNext = {
                                 lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }

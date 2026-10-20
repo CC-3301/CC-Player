@@ -5,49 +5,8 @@ import org.junit.Test
 
 class PlayerLevelControlsTest {
 
-    private val brightness = FakeBrightnessControl()
     private val volume = FakeVolumeControl(max = 15, current = 0)
-    private val levels = PlayerLevelControls(brightness, volume)
-
-    @Test
-    fun `上滑增大亮度`() {
-        brightness.current = 0.4f
-
-        val shown = levels.dragBrightness(dragAmount = -100f, viewHeight = 1_000)
-
-        assertEquals(0.5f, shown, 0.0001f)
-        assertEquals(listOf(0.5f), brightness.written)
-    }
-
-    @Test
-    fun `下滑减小亮度`() {
-        brightness.current = 0.4f
-
-        val shown = levels.dragBrightness(dragAmount = 100f, viewHeight = 1_000)
-
-        assertEquals(0.3f, shown, 0.0001f)
-        assertEquals(listOf(0.3f), brightness.written)
-    }
-
-    @Test
-    fun `滑过整屏高度等于满量程`() {
-        brightness.current = 0f
-
-        val shown = levels.dragBrightness(dragAmount = -1_000f, viewHeight = 1_000)
-
-        assertEquals(1f, shown, 0.0001f)
-    }
-
-    @Test
-    fun `亮度夹取在 0 到 1`() {
-        brightness.current = 0.9f
-        levels.dragBrightness(dragAmount = -1_000f, viewHeight = 1_000)
-
-        brightness.current = 0.1f
-        levels.dragBrightness(dragAmount = 1_000f, viewHeight = 1_000)
-
-        assertEquals(listOf(1f, 0f), brightness.written)
-    }
+    private val levels = PlayerLevelControls(volume)
 
     @Test
     fun `上滑增大音量并写到档位`() {
@@ -57,6 +16,25 @@ class PlayerLevelControlsTest {
 
         assertEquals(0.4f, shown, 0.0001f)
         assertEquals(listOf(6), volume.written)
+    }
+
+    @Test
+    fun `下滑减小音量`() {
+        volume.current = 6
+
+        val shown = levels.dragVolume(dragAmount = 200f, viewHeight = 1_000)
+
+        assertEquals(0.2f, shown, 0.0001f)
+        assertEquals(listOf(3), volume.written)
+    }
+
+    @Test
+    fun `滑过整屏高度等于满量程`() {
+        volume.current = 0
+
+        val shown = levels.dragVolume(dragAmount = -1_000f, viewHeight = 1_000)
+
+        assertEquals(1f, shown, 0.0001f)
     }
 
     @Test
@@ -81,23 +59,23 @@ class PlayerLevelControlsTest {
 
     @Test
     fun `屏高为零时不改变取值`() {
-        brightness.current = 0.4f
+        volume.current = 3
 
-        val shown = levels.dragBrightness(dragAmount = -100f, viewHeight = 0)
+        val shown = levels.dragVolume(dragAmount = -100f, viewHeight = 0)
 
-        assertEquals(0.4f, shown, 0.0001f)
-        assertEquals(listOf(0.4f), brightness.written)
+        assertEquals(0.2f, shown, 0.0001f)
+        assertEquals(listOf(3), volume.written)
     }
 
-    private class FakeBrightnessControl(var current: Float = 0.5f) : BrightnessControl {
-        val written = mutableListOf<Float>()
+    @Test
+    fun `满档为零时不写入`() {
+        val muted = FakeVolumeControl(max = 0, current = 0)
+        val controls = PlayerLevelControls(muted)
 
-        override fun read(): Float = current
+        val shown = controls.dragVolume(dragAmount = -100f, viewHeight = 1_000)
 
-        override fun write(fraction: Float) {
-            written += fraction
-            current = fraction
-        }
+        assertEquals(0f, shown, 0.0001f)
+        assertEquals(emptyList<Int>(), muted.written)
     }
 
     private class FakeVolumeControl(private val max: Int, var current: Int) : VolumeControl {

@@ -117,7 +117,8 @@ class PlayerLockTest {
         lock.tapLockButton()
 
         assertEquals(false, inputAllowed(PlayerInput.DoubleTap, lock.locked))
-        assertEquals(false, inputAllowed(PlayerInput.LevelDrag, lock.locked))
+        assertEquals(false, inputAllowed(PlayerInput.VolumeDrag, lock.locked))
+        assertEquals(false, inputAllowed(PlayerInput.SeekDrag, lock.locked))
         assertEquals(false, inputAllowed(PlayerInput.ControlBar, lock.locked))
         assertEquals(true, inputAllowed(PlayerInput.UnlockButton, lock.locked))
     }

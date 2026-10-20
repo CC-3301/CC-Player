@@ -2,13 +2,6 @@ package com.cc3301.ccplayer.ui
 
 import kotlin.math.roundToInt
 
-/** 屏幕亮度的读写，取值 0~1；写窗口属性。 */
-interface BrightnessControl {
-    fun read(): Float
-
-    fun write(fraction: Float)
-}
-
 /** 设备媒体音量的读写，取值 0~[maxVolume] 档。 */
 interface VolumeControl {
     val maxVolume: Int
@@ -19,25 +12,14 @@ interface VolumeControl {
 }
 
 /**
- * 上下拖动调亮度/音量的换算与写入：手指上滑为增大，滑过整屏高度等于满量程，
- * 结果夹取到 0~1（音量再取整到 0~[VolumeControl.maxVolume]）。
+ * 上下拖动调音量的换算与写入：手指上滑为增大，滑过整屏高度等于满量程，
+ * 结果夹取到 0~[VolumeControl.maxVolume]。
  *
  * 拖动过程按累计比例推进：音量档位取整后回读会停在原档，逐次累积才能把小幅拖动走满。
  */
-class PlayerLevelControls(
-    private val brightness: BrightnessControl,
-    private val volume: VolumeControl,
-) {
-    private var brightnessFraction: Float? = null
-    private var volumeFraction: Float? = null
+class PlayerLevelControls(private val volume: VolumeControl) {
 
-    /** 拖动亮度，返回新亮度 0~1，供界面提示。 */
-    fun dragBrightness(dragAmount: Float, viewHeight: Int): Float {
-        val next = advance(brightnessFraction ?: brightness.read(), dragAmount, viewHeight)
-        brightnessFraction = next
-        brightness.write(next)
-        return next
-    }
+    private var volumeFraction: Float? = null
 
     /** 拖动音量，返回新音量占满档的比例 0~1，供界面提示。 */
     fun dragVolume(dragAmount: Float, viewHeight: Int): Float {
