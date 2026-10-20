@@ -25,7 +25,9 @@ import java.util.concurrent.TimeUnit
 class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) : WebDavTransport {
 
     override suspend fun list(url: String, username: String, password: String?): List<WebDavEntry> = withContext(Dispatchers.IO) {
-        val request = requestOf(url, username, password)
+        // PROPFIND 的目录地址以 `/` 结尾，否则服务器会回 301 而客户端不跟随。
+        val directoryUrl = if (url.endsWith('/')) url else "$url/"
+        val request = requestOf(directoryUrl, username, password)
             .method(METHOD_PROPFIND, PROPFIND_BODY.toRequestBody(XML_MEDIA_TYPE.toMediaType()))
             .header(DEPTH_HEADER, DEPTH_CHILDREN)
             .build()
@@ -33,7 +35,7 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
             if (!response.isSuccessful) throw statusFailure(response.code, url)
             response.body?.string().orEmpty()
         }
-        parsePropfind(body, url)
+        parsePropfind(body, directoryUrl)
     }
 
     override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle = withContext(Dispatchers.IO) {

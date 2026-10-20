@@ -29,10 +29,12 @@ internal fun encodeWebDavUrl(rawUrl: String): String {
     val scheme = rawUrl.substring(0, separator)
     val rest = rawUrl.substring(separator + SCHEME_SEPARATOR.length)
     val authority = rest.substringBefore('/')
-    val segments = rest.substringAfter('/', "").split('/').filter { it.isNotEmpty() }
+    val path = rest.substringAfter('/', "")
+    val segments = path.split('/').filter { it.isNotEmpty() }
     return buildString {
         append(scheme).append(SCHEME_SEPARATOR).append(authority)
         segments.forEach { append('/').append(encodePathSegment(it)) }
+        if (path.endsWith('/') && segments.isNotEmpty()) append('/')
     }
 }
 

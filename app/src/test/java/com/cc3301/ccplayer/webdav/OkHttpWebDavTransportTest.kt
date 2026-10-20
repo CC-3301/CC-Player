@@ -54,7 +54,7 @@ class OkHttpWebDavTransportTest {
             )
             val request = server.received().single()
             assertEquals("PROPFIND", request.method)
-            assertEquals("/dav", request.path)
+            assertEquals("/dav/", request.path)
             assertEquals("1", request.header("Depth"))
             assertEquals(Credentials.basic("cc", "secret"), request.header("Authorization"))
         }
@@ -65,7 +65,16 @@ class OkHttpWebDavTransportTest {
         FakeWebDavServer(listing = listing).use { server ->
             transport.list("${server.root}/剧集 第二季", "cc", "secret")
 
-            assertEquals("/dav/%E5%89%A7%E9%9B%86%20%E7%AC%AC%E4%BA%8C%E5%AD%A3", server.received().single().path)
+            assertEquals("/dav/%E5%89%A7%E9%9B%86%20%E7%AC%AC%E4%BA%8C%E5%AD%A3/", server.received().single().path)
+        }
+    }
+
+    @Test
+    fun `目录地址已带末尾斜杠时不重复补斜杠`() = runTest {
+        FakeWebDavServer(listing = listing).use { server ->
+            transport.list("${server.root}/", "cc", "secret")
+
+            assertEquals("/dav/", server.received().single().path)
         }
     }
 

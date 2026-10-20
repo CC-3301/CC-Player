@@ -19,6 +19,12 @@ class WebDavEncodingTest {
     }
 
     @Test
+    fun `编码请求地址时保留末尾斜杠`() {
+        assertEquals("http://host/dav/", encodeWebDavUrl("http://host/dav/"))
+        assertEquals("http://host/dav", encodeWebDavUrl("http://host/dav"))
+    }
+
+    @Test
     fun `百分号解码不把加号当空格`() {
         assertEquals("A B", percentDecode("A%20B"))
         assertEquals("A+B", percentDecode("A+B"))
