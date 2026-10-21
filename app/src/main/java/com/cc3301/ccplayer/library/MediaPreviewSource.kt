@@ -386,10 +386,14 @@ class CachedMediaPreviewSource(
             val policy = ThumbnailPolicy()
             return CachedMediaPreviewSource(
                 extractor = AndroidMediaPreviewExtractor(appContext, networkReads),
-                cache = ThumbnailCache(appContext.filesDir.resolve("thumbnails"), CACHE_BYTES),
+                cache = thumbnailCache(appContext),
                 policy = policy,
             )
         }
+
+        /** 缩略图缓存目录的唯一入口；播放服务只读同一份缓存。 */
+        internal fun thumbnailCache(context: Context): ThumbnailCache =
+            ThumbnailCache(context.applicationContext.filesDir.resolve("thumbnails"), CACHE_BYTES)
     }
 }
 

@@ -74,12 +74,24 @@ fun dispatchMediaAction(
     }
 }
 
+/** 拖动定位只在正常播放且未被后台策略限制时可用。 */
+fun mediaSeekAllowed(
+    hasMedia: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+    blocksBackgroundPlayback: Boolean,
+): Boolean = hasMedia && !switching && !initialLoading && !restoring && !blocksBackgroundPlayback
+
 /** 媒体动作集合对应的 [PlaybackStateCompat] 动作位。 */
-fun playbackStateActions(actions: List<MediaSessionAction>): Long = actions.fold(0L) { flags, action ->
-    flags or when (action) {
-        MediaSessionAction.Play -> PlaybackStateCompat.ACTION_PLAY
-        MediaSessionAction.Pause -> PlaybackStateCompat.ACTION_PAUSE
-        MediaSessionAction.Previous -> PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-        MediaSessionAction.Next -> PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+fun playbackStateActions(actions: List<MediaSessionAction>, seekable: Boolean = false): Long {
+    val flags = actions.fold(0L) { flags, action ->
+        flags or when (action) {
+            MediaSessionAction.Play -> PlaybackStateCompat.ACTION_PLAY
+            MediaSessionAction.Pause -> PlaybackStateCompat.ACTION_PAUSE
+            MediaSessionAction.Previous -> PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+            MediaSessionAction.Next -> PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+        }
     }
+    return if (seekable) flags or PlaybackStateCompat.ACTION_SEEK_TO else flags
 }
