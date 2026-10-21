@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -93,6 +94,34 @@ class PlaybackController(
      */
     private val _renderSurfaceAvailable = MutableStateFlow(true)
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
+
+    /**
+     * 暂停态退到后台前缓存的画面。回前台先盖在视频视图上，
+     * 等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
+     */
+    private val _backgroundRestoreFrame = MutableStateFlow<Bitmap?>(null)
+    val backgroundRestoreFrame: StateFlow<Bitmap?> = _backgroundRestoreFrame.asStateFlow()
+
+    /** 抓帧进行中；抓帧线程写，界面线程读。 */
+    @Volatile
+    private var backgroundCaptureInFlight = false
+
+    /** 每次抓帧的令牌；界面线程递增，抓帧线程据此丢弃超时或跨周期的结果。 */
+    @Volatile
+    private var backgroundCaptureToken = 0
+
+    /** 本后台周期是否已尝试抓帧；只在界面线程读写。 */
+    private var backgroundCaptureAttempted = false
+
+    /** 本后台周期的抓帧任务；同一周期重复触发时复用。 */
+    private var backgroundCaptureJob: Job? = null
+
+    /** 缓存帧对应的 Surface 代数；只接受更晚代数的出帧通知。 */
+    @Volatile
+    private var capturedSurfaceGeneration = -1
+
+    /** 暂停态回前台后的抓帧确认；确认到新帧或撤帧时取消。 */
+    private var backgroundFrameProbeJob: Job? = null
 
     /** 播放失败事件，供界面提示“播放失败”。 */
     private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -313,8 +342,57 @@ class PlaybackController(
      */
     fun setRenderSurfaceAvailable(available: Boolean) {
         _renderSurfaceAvailable.value = available
+        if (available) {
+            // 新的前后台周期开始：作废尚未完成的抓帧，并允许下一次退后台重新抓。
+            backgroundCaptureToken++
+            backgroundCaptureAttempted = false
+            backgroundCaptureJob = null
+        }
         finishLoadWithoutSurface()
         evaluateDeferredReady()
+    }
+
+    /**
+     * 界面在退到后台、分离 Surface 之前调用：暂停态先抓一帧备用。
+     * 抓帧在后台调度执行，立即返回任务；调用方只做有界等待，超时后丢弃结果。
+     * 播放态不截帧，回前台由播放核心继续输出。
+     */
+    fun beginBackgroundCapture(): Job? {
+        // 同一后台周期只尝试一次；重复调用复用同一任务。
+        if (backgroundCaptureAttempted) return backgroundCaptureJob
+        backgroundCaptureAttempted = true
+        backgroundCaptureJob = null
+        if (backgroundCaptureInFlight) return null
+        // 新周期不复用旧帧，避免上一次后台留下的画面跨周期出现。
+        replaceBackgroundRestoreFrame(null)
+        if (!active || !paused || loadPhase != LoadPhase.None || _holdBlack.value) return null
+        val generation = engine.surfaceGeneration
+        val token = ++backgroundCaptureToken
+        backgroundCaptureInFlight = true
+        val job = scope.launch(frameProbeDispatcher) {
+            val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
+            backgroundCaptureInFlight = false
+            if (frame == null || token != backgroundCaptureToken) return@launch
+            capturedSurfaceGeneration = generation
+            _backgroundRestoreFrame.value = frame
+        }
+        backgroundCaptureJob = job
+        return job
+    }
+
+    /** 放弃本周期抓帧：之后到达的结果一律丢弃。 */
+    fun abandonBackgroundCapture() {
+        backgroundCaptureToken++
+    }
+
+    /**
+     * 后台策略触发的暂停：保留片尾黑底，退后台抓帧据此跳过末帧。
+     * 用户主动暂停仍走 [pause]。
+     */
+    fun pauseForBackground() {
+        if (!active) return
+        paused = true
+        engine.pause()
     }
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
@@ -346,6 +424,7 @@ class PlaybackController(
         _restoring.value = false
         restartFromStartAfterRestore = false
         replaceFreezeFrame(null)
+        resetBackgroundCapture()
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
         beginLoadWatchdog()
@@ -365,6 +444,7 @@ class PlaybackController(
         switchOriginEnded = originAtEnd
         switchFailureReported = false
         _holdBlack.value = false
+        resetBackgroundCapture()
         applySwitchTarget(index, media)
         beginBufferingIndicator()
         beginLoadWatchdog()
@@ -715,6 +795,42 @@ class PlaybackController(
         if (loadPhase != LoadPhase.None) beginLoadWatchdog()
     }
 
+    /** 播放态重新输出画面，后台恢复帧不再需要遮挡。 */
+    override fun onFramePresented(surfaceGeneration: Int) {
+        clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
+    }
+
+    /** 暂停态视频输出重配：抓帧确认后再撤帧，避免重配早于首帧上屏时露黑底。 */
+    override fun onSurfaceReconfigured(surfaceGeneration: Int) {
+        if (!_renderSurfaceAvailable.value) return
+        if (_backgroundRestoreFrame.value == null) return
+        if (surfaceGeneration <= capturedSurfaceGeneration) return
+        backgroundFrameProbeJob?.cancel()
+        backgroundFrameProbeJob = scope.launch {
+            var attempts = 0
+            while (isActive && attempts < BACKGROUND_FRAME_PROBE_MAX_ATTEMPTS) {
+                attempts++
+                if (!_renderSurfaceAvailable.value) return@launch
+                if (surfaceGeneration != engine.surfaceGeneration) return@launch
+                val frame = withContext(frameProbeDispatcher) { engine.grabFrame() }
+                if (frame != null) {
+                    clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
+                    return@launch
+                }
+                delay(FRAME_PROBE_RETRY_MILLIS)
+            }
+        }
+    }
+
+    /** Surface 可用且通知来自缓存帧之后的代数时才撤帧，迟到的通知不能清掉下一周期刚抓的帧。 */
+    private fun clearBackgroundRestoreFrameIfCurrent(surfaceGeneration: Int) {
+        if (!_renderSurfaceAvailable.value) return
+        if (_backgroundRestoreFrame.value == null) return
+        if (surfaceGeneration <= capturedSurfaceGeneration) return
+        if (surfaceGeneration != engine.surfaceGeneration) return
+        replaceBackgroundRestoreFrame(null)
+    }
+
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
         when (loadPhase) {
@@ -1021,6 +1137,23 @@ class PlaybackController(
         _freezeFrame.value = frame
     }
 
+    /** 新一次加载或会话开始：作废尚未完成的后台抓帧，允许下一周期重新抓。 */
+    private fun resetBackgroundCapture() {
+        backgroundCaptureToken++
+        backgroundCaptureAttempted = false
+        backgroundCaptureJob = null
+        replaceBackgroundRestoreFrame(null)
+    }
+
+    /** 换掉后台恢复帧；同样交给 GC，不手动回收。撤帧时一并停掉抓帧确认。 */
+    private fun replaceBackgroundRestoreFrame(frame: Bitmap?) {
+        _backgroundRestoreFrame.value = frame
+        if (frame == null) {
+            backgroundFrameProbeJob?.cancel()
+            backgroundFrameProbeJob = null
+        }
+    }
+
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */
     private fun resetLoadState() {
         loadGeneration++
@@ -1045,6 +1178,7 @@ class PlaybackController(
         switchFailureReported = false
         _holdBlack.value = false
         replaceFreezeFrame(null)
+        resetBackgroundCapture()
     }
 
     /** 开始一轮加载：续播位置未查明前不允许判定就绪，seek 序号从零比较。 */
@@ -1169,6 +1303,14 @@ class PlaybackController(
             scope.launch { target.onLoadActivity() }
         }
 
+        override fun onFramePresented(surfaceGeneration: Int) {
+            scope.launch { target.onFramePresented(surfaceGeneration) }
+        }
+
+        override fun onSurfaceReconfigured(surfaceGeneration: Int) {
+            scope.launch { target.onSurfaceReconfigured(surfaceGeneration) }
+        }
+
         override fun onPauseChanged(paused: Boolean) {
             scope.launch { target.onPauseChanged(paused) }
         }
@@ -1199,6 +1341,9 @@ class PlaybackController(
 
         /** 暂停态抓帧失败后的重试间隔；没有失败次数上限，失败由无事件看门狗判定。 */
         const val FRAME_PROBE_RETRY_MILLIS = 100L
+
+        /** 暂停态回前台后的抓帧确认上限；超过后停止抓帧并保留缓存帧。 */
+        const val BACKGROUND_FRAME_PROBE_MAX_ATTEMPTS = 20
 
         /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
         const val LOAD_WATCHDOG_MILLIS = 60_000L
