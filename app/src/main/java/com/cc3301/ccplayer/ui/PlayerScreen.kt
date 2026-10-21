@@ -94,6 +94,7 @@ import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.playback.customSleepMinutes
+import com.cc3301.ccplayer.playback.isInitialLoading
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
@@ -140,9 +141,19 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
 
 /** 无涟漪点击。 */
 @Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
+private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier =
+    noRippleClickable(onClick, enabled = true)
+
+/** 无涟漪点击；[enabled] 为假时不响应。 */
+@Composable
+private fun Modifier.noRippleClickable(onClick: () -> Unit, enabled: Boolean): Modifier {
     val interaction = remember { MutableInteractionSource() }
-    return clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    return clickable(
+        interactionSource = interaction,
+        indication = null,
+        enabled = enabled,
+        onClick = onClick,
+    )
 }
 
 /** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
@@ -216,8 +227,10 @@ fun PlayerScreen(
     surfaceCallback: MpvSurfaceView.Callback,
     videoAspectRatio: Double?,
     switching: Boolean,
+    restoring: Boolean,
     buffering: Boolean,
     freezeFrame: Bitmap?,
+    holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -249,16 +262,30 @@ fun PlayerScreen(
     val locked = lock.locked
     val controlsVisible = controls.visible
     val panelOpen = playlistVisible || subtitleMenuVisible || moreVisible
+    val initialLoading = isInitialLoading(state, switching)
+
+    // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
+    LaunchedEffect(switching, initialLoading) {
+        // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
+        controls.onInteraction()
+        if (switching || initialLoading) {
+            playlistVisible = false
+            subtitleMenuVisible = false
+            moreVisible = false
+        }
+    }
 
     LaunchedEffect(panelOpen) {
         controls.updatePanelOpen(panelOpen)
     }
-    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis) {
+    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
+        // 加载全程不自动隐藏，避免切集超过 3 秒时控制条消失。
+        val holdVisible = switching || initialLoading
         while (controls.visible && !controls.panelOpen) {
-            val remaining = controls.millisUntilAutoHide()
+            val remaining = controls.millisUntilAutoHide(holdVisible)
             if (remaining < 0L) break
             if (remaining == 0L) {
-                controls.hideIfExpired()
+                controls.hideIfExpired(holdVisible)
                 break
             }
             delay(remaining)
@@ -295,8 +322,8 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲，或切集抓帧失败时，不露出未就绪的 Surface。
-        if ((buffering && !switching) || (switching && freezeFrame == null)) {
+        // 黑底画在视频视图之后：首次缓冲、切集无冻结帧，或片尾恢复就绪后保持黑底。
+        if (holdBlack || (buffering && !switching) || (switching && freezeFrame == null)) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -317,6 +344,9 @@ fun PlayerScreen(
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelOpen,
+            switching = switching,
+            initialLoading = initialLoading,
+            restoring = restoring,
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             levelControls = levelControls,
@@ -349,12 +379,13 @@ fun PlayerScreen(
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
         // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
+        // 加载期间动作按钮仍由 actionAllowed 禁用；点按只用于解锁，始终放行。
         if (locked) {
             val lockedHint = stringResource(R.string.player_screen_locked_hint)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable { lock.tapScreen() }
+                    .noRippleClickable({ lock.tapScreen() })
                     .semantics { contentDescription = lockedHint },
             )
         }
@@ -363,6 +394,7 @@ fun PlayerScreen(
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
+                    moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
                     onBack = onClose,
                     onRotate = {
                         controls.onInteraction()
@@ -418,6 +450,9 @@ fun PlayerScreen(
                     subtitleSelection = subtitleSelection,
                     playlistVisible = playlistVisible,
                     subtitleMenuVisible = subtitleMenuVisible,
+                    switching = switching,
+                    initialLoading = initialLoading,
+                    restoring = restoring,
                     onTogglePlayPause = {
                         controls.onInteraction()
                         onTogglePlayPause()
@@ -484,6 +519,9 @@ fun PlayerScreen(
 private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
     positionMillis: Long,
     durationMillis: Long,
     levelControls: PlayerLevelControls,
@@ -498,6 +536,11 @@ private fun PlayerGestureLayer(
     modifier: Modifier = Modifier,
 ) {
     val enabled = gesturesAllowed(locked, panelOpen)
+    val gesturesEnabled = enabled
+    // 各手势按实际动作单独判定，避免音量/进度被禁时连双击播放/暂停一起关掉。
+    val playPauseAllowed = actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring)
+    val seekAllowed = actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring)
+    val volumeAllowed = actionAllowed(PlayerAction.Volume, switching, initialLoading, restoring)
     // 回调与播放位置取最新一份，避免手势层在位置变化时重启。
     val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
     val latestOnSeekBy = rememberUpdatedState(onSeekBy)
@@ -516,8 +559,13 @@ private fun PlayerGestureLayer(
             is TapGestureAction.DoubleTap -> {
                 latestOnUserInteraction.value()
                 when (val doubleTap = action.action) {
-                    is DoubleTapAction.Seek -> latestOnSeekBy.value(doubleTap.deltaMillis)
-                    DoubleTapAction.TogglePlayPause -> latestOnTogglePlayPause.value()
+                    is DoubleTapAction.Seek -> if (seekAllowed) {
+                        latestOnSeekBy.value(doubleTap.deltaMillis)
+                    }
+
+                    DoubleTapAction.TogglePlayPause -> if (playPauseAllowed) {
+                        latestOnTogglePlayPause.value()
+                    }
                 }
             }
         }
@@ -525,15 +573,13 @@ private fun PlayerGestureLayer(
 
     Box(
         modifier = modifier
-            .pointerInput(enabled) {
-                if (!enabled) {
-                    tapGesture.cancel()
-                    return@pointerInput
-                }
+            .pointerInput(gesturesEnabled, playPauseAllowed, seekAllowed) {
+                tapGesture.cancel()
+                if (!gesturesEnabled) return@pointerInput
                 detectPlayerTaps(tapGesture, dispatchTap)
             }
-            .pointerInput(enabled) {
-                if (!enabled) return@pointerInput
+            .pointerInput(gesturesEnabled, seekAllowed, volumeAllowed) {
+                if (!gesturesEnabled) return@pointerInput
                 val threshold = VOLUME_DRAG_THRESHOLD_DP.dp.toPx()
                 val touchSlop = viewConfiguration.touchSlop
                 awaitEachGesture {
@@ -560,13 +606,13 @@ private fun PlayerGestureLayer(
                                 latestOnUserInteraction.value()
                             }
                             when (update.gesture) {
-                                DragGesture.Volume -> if (update.volumeDragY != 0f) {
+                                DragGesture.Volume -> if (volumeAllowed && update.volumeDragY != 0f) {
                                     latestOnVolumeHint.value(
                                         levelControls.dragVolume(update.volumeDragY, size.height),
                                     )
                                 }
 
-                                DragGesture.Seek -> {
+                                DragGesture.Seek -> if (seekAllowed) {
                                     val seek = seekDrag ?: PlayerSeekDrag(
                                         baseMillis = latestPosition.value,
                                         durationMillis = latestDuration.value,
@@ -581,7 +627,7 @@ private fun PlayerGestureLayer(
                                 null -> Unit
                             }
                         }
-                        if (drag.gesture == DragGesture.Seek && seekDrag?.finish() != null) {
+                        if (seekAllowed && drag.gesture == DragGesture.Seek && seekDrag?.finish() != null) {
                             latestOnSeekCommit.value()
                         }
                     } finally {
@@ -667,6 +713,7 @@ private fun signedDuration(millis: Long): String =
 private fun PlayerTopBar(
     title: String,
     moreVisible: Boolean,
+    moreEnabled: Boolean,
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
@@ -709,11 +756,14 @@ private fun PlayerTopBar(
                     tint = AppColors.Foreground,
                 )
             }
-            IconButton(onClick = onToggleMore) {
+            IconButton(
+                onClick = onToggleMore,
+                enabled = moreEnabled,
+            ) {
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
                     contentDescription = stringResource(R.string.player_more),
-                    tint = playerToolColor(moreVisible),
+                    tint = if (moreEnabled) playerToolColor(moreVisible) else DisabledToolColor,
                 )
             }
         }
@@ -755,6 +805,9 @@ private fun Controls(
     subtitleSelection: SubtitleSelection,
     playlistVisible: Boolean,
     subtitleMenuVisible: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -796,6 +849,7 @@ private fun Controls(
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
+            enabled = actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
             modifier = Modifier.padding(horizontal = AppSpacing.Lg),
@@ -804,6 +858,9 @@ private fun Controls(
             playing = state == PlaybackState.Playing,
             canGoPrevious = currentIndex > 0,
             canGoNext = currentIndex in 0 until playlist.lastIndex,
+            switching = switching,
+            initialLoading = initialLoading,
+            restoring = restoring,
             subtitleMenuVisible = subtitleMenuVisible,
             playlistVisible = playlistVisible,
             onTogglePlayPause = onTogglePlayPause,
@@ -822,6 +879,9 @@ private fun PlayerIconBar(
     playing: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
     subtitleMenuVisible: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
@@ -846,6 +906,7 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
+                enabled = actionAllowed(PlayerAction.Lock, switching, initialLoading, restoring),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .size(metrics.sideButtonSize),
@@ -860,7 +921,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
-                    enabled = canGoPrevious,
+                    enabled = canGoPrevious && actionAllowed(PlayerAction.Previous, switching, initialLoading, restoring),
                     modifier = Modifier.size(metrics.previousNextSize),
                     iconSize = PlayerTransportIconSize,
                 )
@@ -870,6 +931,7 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onTogglePlayPause,
+                    enabled = actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
                     modifier = Modifier.size(metrics.playPauseSize),
                     iconSize = PlayerPlayPauseIconSize,
                 )
@@ -877,7 +939,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
-                    enabled = canGoNext,
+                    enabled = canGoNext && actionAllowed(PlayerAction.Next, switching, initialLoading, restoring),
                     modifier = Modifier.size(metrics.previousNextSize),
                     iconSize = PlayerTransportIconSize,
                 )
@@ -888,6 +950,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
+                    enabled = actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
@@ -897,6 +960,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
+                    enabled = actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
                     active = playlistVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
@@ -922,6 +986,9 @@ private fun PlayerIconBar(
     }
 }
 
+/** 禁用控件的画布色。 */
+private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
+
 /** 播放器图标按钮：只有图标，禁用或展开时改变颜色。 */
 @Composable
 private fun PlayerIconButton(
@@ -938,7 +1005,7 @@ private fun PlayerIconButton(
             painter = painterResource(icon),
             contentDescription = contentDescription,
             tint = when {
-                !enabled -> AppColors.Faint.copy(alpha = 0.45f)
+                !enabled -> DisabledToolColor
                 active -> AppColors.Accent
                 else -> AppColors.Foreground
             },
@@ -953,6 +1020,7 @@ private fun SeekBar(
     positionMillis: Long,
     durationMillis: Long,
     previewMillis: Long?,
+    enabled: Boolean = true,
     onPreview: (Long) -> Unit,
     onCommit: () -> Unit,
     modifier: Modifier = Modifier,
@@ -982,6 +1050,7 @@ private fun SeekBar(
             value = shown.toFloat(),
             onValueChange = { onPreview(it.toLong()) },
             onValueChangeFinished = onCommit,
+            enabled = enabled,
             valueRange = 0f..maximum.toFloat(),
             modifier = Modifier.fillMaxWidth(),
             colors = SliderDefaults.colors(

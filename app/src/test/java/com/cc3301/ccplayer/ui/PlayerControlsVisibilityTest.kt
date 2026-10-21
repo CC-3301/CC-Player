@@ -112,4 +112,14 @@ class PlayerControlsVisibilityTest {
         controls.hideIfExpired()
         assertEquals(false, controls.visible)
     }
+
+    @Test
+    fun `加载期间不自动隐藏`() {
+        now = 10_000L
+
+        assertEquals(-1L, controls.millisUntilAutoHide(holdVisible = true))
+        controls.hideIfExpired(holdVisible = true)
+
+        assertEquals(true, controls.visible)
+    }
 }

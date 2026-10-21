@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.isInitialLoading
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -122,5 +124,55 @@ class PlayerGesturesTest {
         assertEquals(false, inputAllowed(PlayerInput.SeekDrag, locked = true))
         assertEquals(false, inputAllowed(PlayerInput.ControlBar, locked = true))
         assertEquals(true, inputAllowed(PlayerInput.UnlockButton, locked = true))
+    }
+
+    @Test
+    fun `切集期间只放行返回、上一集与下一集`() {
+        val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
+        assertEquals(setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next), allowed)
+    }
+
+    @Test
+    fun `未切集时所有操作放行`() {
+        PlayerAction.entries.forEach { action ->
+            assertEquals(action.name, true, actionAllowed(action, switching = false, initialLoading = false, restoring = false))
+        }
+    }
+
+    @Test
+    fun `首次加载期间只放行返回`() {
+        val allowed = PlayerAction.entries
+            .filter { actionAllowed(it, switching = false, initialLoading = true, restoring = false) }
+            .toSet()
+        assertEquals(setOf(PlayerAction.Back), allowed)
+    }
+
+    @Test
+    fun `恢复原片期间额外放行播放暂停`() {
+        val allowed = PlayerAction.entries
+            .filter { actionAllowed(it, switching = true, initialLoading = false, restoring = true) }
+            .toSet()
+        assertEquals(
+            setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next, PlayerAction.PlayPause),
+            allowed,
+        )
+    }
+
+    @Test
+    fun `首次加载完成后所有操作恢复`() {
+        PlayerAction.entries.forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionAllowed(action, switching = false, initialLoading = false, restoring = false),
+            )
+        }
+    }
+
+    @Test
+    fun `加载中且未切集才算首次加载`() {
+        assertTrue(isInitialLoading(PlaybackState.Loading, switching = false))
+        assertFalse(isInitialLoading(PlaybackState.Loading, switching = true))
+        assertFalse(isInitialLoading(PlaybackState.Playing, switching = false))
     }
 }

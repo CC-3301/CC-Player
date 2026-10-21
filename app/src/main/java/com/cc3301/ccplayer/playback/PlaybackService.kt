@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -60,7 +61,11 @@ class PlaybackService : Service() {
         setUpMediaSession()
         startForeground(NOTIFICATION_ID, buildNotification(playbackController.state.value))
         stateScope.launch {
-            playbackController.state.collect(::refreshPlaybackControls)
+            combine(
+                playbackController.state,
+                playbackController.switching,
+                playbackController.restoring,
+            ) { _, _, _ -> Unit }.collect { refreshPlaybackControls() }
         }
         scope.launch {
             SettingsRepository.create(applicationContext).backgroundPlayback.collect { enabled ->
@@ -117,13 +122,22 @@ class PlaybackService : Service() {
         }
     }
 
-    /** 按策略决定通知栏动作是否执行；后台关闭时只放过暂停。 */
+    /** 按策略决定通知栏动作是否执行；首次加载、目标加载与恢复期间按可用性拦截。 */
     private fun dispatch(action: MediaSessionAction) {
-        backgroundPolicy.dispatch(action) { allowed -> allowed.applyTo(playbackController) }
+        val controller = playbackController
+        dispatchMediaAction(
+            action,
+            controller.state.value,
+            controller.switching.value,
+            controller.restoring.value,
+        ) { allowedAction ->
+            backgroundPolicy.dispatch(allowedAction) { passed -> passed.applyTo(controller) }
+        }
     }
 
-    /** 状态或前后台变化时同步 MediaSession 与通知栏，前后台切换后按钮集合随之变化。 */
-    private fun refreshPlaybackControls(state: PlaybackState = playbackController.state.value) {
+    /** 状态、加载阶段或前后台变化时同步 MediaSession 与通知栏，按钮集合随之变化。 */
+    private fun refreshPlaybackControls() {
+        val state = playbackController.state.value
         mediaSession.setPlaybackState(playbackState(state))
         startForeground(NOTIFICATION_ID, buildNotification(state))
     }
@@ -136,7 +150,7 @@ class PlaybackService : Service() {
     }
 
     private fun buildNotification(state: PlaybackState): Notification {
-        val actions = backgroundPolicy.notificationActions(state)
+        val actions = currentActions(state)
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(getString(R.string.notification_playing))
@@ -179,15 +193,20 @@ class PlaybackService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
+    /** 当前加载阶段与后台策略下可用的媒体动作。 */
+    private fun currentActions(state: PlaybackState): List<MediaSessionAction> {
+        val switching = playbackController.switching.value
+        return backgroundPolicy.notificationActions(
+            state = state,
+            switching = switching,
+            initialLoading = isInitialLoading(state, switching),
+            restoring = playbackController.restoring.value,
+        )
+    }
+
     private fun playbackState(state: PlaybackState): PlaybackStateCompat {
-        val actions = if (backgroundPolicy.blocksBackgroundPlayback) {
-            PlaybackStateCompat.ACTION_PAUSE
-        } else {
-            PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PAUSE or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-        }
         return PlaybackStateCompat.Builder()
-            .setActions(actions)
+            .setActions(playbackStateActions(currentActions(state)))
             .setState(
                 when (state) {
                     PlaybackState.Idle -> PlaybackStateCompat.STATE_NONE

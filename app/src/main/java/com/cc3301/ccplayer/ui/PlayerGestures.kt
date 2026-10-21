@@ -117,3 +117,40 @@ fun gesturesAllowed(locked: Boolean, panelOpen: Boolean): Boolean = !locked && !
 /** 锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。 */
 fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
     !locked || input == PlayerInput.UnlockButton
+
+/** 播放页上受切集缓冲限制的操作。 */
+enum class PlayerAction {
+    Back,
+    Previous,
+    Next,
+    PlayPause,
+    Seek,
+    Volume,
+    Lock,
+    More,
+    Playlist,
+    Subtitles,
+}
+
+/**
+ * 当前可用的播放页操作：首次加载只放行返回；目标加载只放行返回与上一集/下一集；
+ * 恢复原片期间额外放行播放/暂停。
+ */
+fun actionAllowed(
+    action: PlayerAction,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): Boolean = when {
+    initialLoading -> action == PlayerAction.Back
+    restoring ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next ||
+            action == PlayerAction.PlayPause
+    switching ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next
+    else -> true
+}
