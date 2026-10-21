@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.isInitialLoading
 
 /**
  * 浏览页进入播放页的瞬时状态：准备期与首次加载期间只允许返回。
@@ -44,7 +45,7 @@ class PlaybackEntryState {
 
     /** 准备期与首次加载（非切集）只允许返回。 */
     fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
-        openingPlayback || (playbackState == PlaybackState.Loading && !switching)
+        openingPlayback || isInitialLoading(playbackState, switching)
 
     /** 离开播放页时清除准备态。 */
     fun reset() {

@@ -132,7 +132,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var switching by mutableStateOf(false)
+    private var restoring by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
+    private var holdBlack by mutableStateOf(false)
 
     /** 浏览页进入播放页的准备态与首次加载门禁。 */
     private val playbackEntry = PlaybackEntryState()
@@ -172,7 +174,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
+                launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
+                launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -262,9 +266,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             surfaceCallback = this@MainActivity,
                             videoAspectRatio = videoAspectRatio,
                             switching = switching,
+                            restoring = restoring,
                             buffering = buffering || playbackEntry.openingPlayback,
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             freezeFrame = freezeFrame,
+                            holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -554,7 +560,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         sleepTimerOption = null
         videoAspectRatio = null
         switching = false
+        restoring = false
         buffering = false
+        holdBlack = false
         freezeFrame = null
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()

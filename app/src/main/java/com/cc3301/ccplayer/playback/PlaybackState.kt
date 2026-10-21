@@ -15,3 +15,7 @@ sealed interface PlaybackState {
     /** 当前媒体播放到末尾。 */
     data object Ended : PlaybackState
 }
+
+/** 首次加载缓冲：加载中且不在切集；此时只允许返回。 */
+fun isInitialLoading(state: PlaybackState, switching: Boolean): Boolean =
+    state == PlaybackState.Loading && !switching

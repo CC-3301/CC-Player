@@ -25,19 +25,12 @@ class MpvPlaybackEngine(
     /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
     private var attachedSurface: Surface? = null
 
-    /** 加载代际与结束事件判定；方法内部同步，控制层与事件线程都会调用。 */
-    private val fileEvents = MpvFileEvents()
-
-    /** seek 序号与 ready 上报判定；旧事件不会被当成 seek 之后的信号。 */
-    private val readySignals = MpvReadySignals()
+    /** 加载代际、结束判定与 ready 序号；同一临界区，控制层与事件线程都会调用。 */
+    private val loadCoordinator = MpvLoadCoordinator()
 
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
     @Volatile
     private var hasVideoTrack = false
-
-    /** 本次 loadfile 的目标位置，用 mpv 的 path 属性识别迟到的旧 FILE_LOADED。 */
-    @Volatile
-    private var targetUrl: String? = null
 
     @Volatile
     private var positionSeconds = 0.0
@@ -64,13 +57,11 @@ class MpvPlaybackEngine(
         this.listener = listener
     }
 
-    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
+        val spec = loadCoordinator.start(url)
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
-        readySignals.onStart()
-        targetUrl = url
-        fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
         if (startPositionMillis > 0) {
@@ -78,6 +69,7 @@ class MpvPlaybackEngine(
             command += "start=${formatSeconds(startPositionMillis)}"
         }
         MPVLib.command(command.toTypedArray())
+        return spec.token
     }
 
     /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
@@ -94,10 +86,14 @@ class MpvPlaybackEngine(
 
     override fun stop() {
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
-        fileEvents.onStop()
+        loadCoordinator.stop()
         hasVideoTrack = false
-        targetUrl = null
         MPVLib.command(arrayOf("stop"))
+    }
+
+    /** 看门狗恢复前丢掉不会再有事件的死代际，避免恢复的 FILE_LOADED 配到旧加载。 */
+    override fun discardInFlightLoads() {
+        loadCoordinator.discardInFlight()
     }
 
     /**
@@ -106,7 +102,7 @@ class MpvPlaybackEngine(
      */
     override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
-        val serial = readySignals.onSeekIssued()
+        val serial = loadCoordinator.onSeekIssued()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
         return serial
     }
@@ -185,8 +181,7 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
-        fileEvents.reset()
-        readySignals.reset()
+        loadCoordinator.reset()
         MPVLib.destroy()
     }
 
@@ -203,17 +198,19 @@ class MpvPlaybackEngine(
         when (eventId) {
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
-            MPVLib.MpvEvent.MPV_EVENT_SEEK -> readySignals.onSeekEvent()
+            MPVLib.MpvEvent.MPV_EVENT_SEEK -> loadCoordinator.onSeekEvent()
             // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
             // 它可能早于首帧上屏，需要控制层抓帧确认。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
-                if (fileEvents.isLoaded && hasVideoTrack && isPaused()) reportReady(needsFrameConfirmation = true)
+                if (loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
+                    reportReady(needsFrameConfirmation = true)
+                }
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
-                if (fileEvents.isLoaded && !hasVideoTrack) reportReady()
+                if (loadCoordinator.isFileLoaded && !hasVideoTrack) reportReady()
             }
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
-            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (fileEvents.isLoaded) {
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (loadCoordinator.isFileLoaded) {
                 reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
@@ -221,17 +218,13 @@ class MpvPlaybackEngine(
     }
 
     private fun onFileLoaded() {
-        // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
-        if (!fileEvents.onFileLoaded(isTargetFile())) return
+        // 先消化旧代际的结束事件并按 mpv 当前路径校验队首，迟到事件不能占掉新加载的代际。
+        val spec = loadCoordinator.onFileLoaded(MPVLib.getPropertyString(PATH_PROPERTY)) ?: return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(spec.url, spec.token)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
-
-    /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
-    private fun isTargetFile(): Boolean =
-        isTargetPath(targetUrl, MPVLib.getPropertyString(PATH_PROPERTY))
 
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
@@ -239,7 +232,7 @@ class MpvPlaybackEngine(
     private fun onEndFile() {
         val atEndByPosition = durationSeconds > 0 &&
             positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS
-        when (fileEvents.onEndFile(atEndByPosition)) {
+        when (loadCoordinator.onEndFile(atEndByPosition)) {
             MpvFileEvents.End.Replaced -> Unit
             MpvFileEvents.End.Ended -> listener?.onPlaybackEnded()
             MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
@@ -251,8 +244,14 @@ class MpvPlaybackEngine(
      * seek 之后序号变化，两类信号都能再次上报。
      */
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
-        val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
-        listener?.onFirstFrameReady(needsFrameConfirmation, targetUrl, serial)
+        // 先确认 ready 属于当前代际再占去重槽：旧代际不吞当前加载的信号。
+        val ready = loadCoordinator.acceptReady(needsFrameConfirmation) ?: return
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation,
+            ready.spec.url,
+            ready.serial,
+            ready.spec.token,
+        )
     }
 
     override fun eventProperty(property: String) = Unit
@@ -280,7 +279,7 @@ class MpvPlaybackEngine(
     override fun eventProperty(property: String, value: Boolean) {
         when (property) {
             PAUSE_PROPERTY -> listener?.onPauseChanged(value)
-            EOF_REACHED_PROPERTY -> fileEvents.onEofChanged(value)
+            EOF_REACHED_PROPERTY -> loadCoordinator.onEofChanged(value)
         }
     }
 

@@ -37,9 +37,6 @@ enum class PlayerInput {
 
     /** 解锁按钮。 */
     UnlockButton,
-
-    /** 播放页返回按钮。 */
-    Back,
 }
 
 /** 手势分区：左右各 [VOLUME_ZONE_FRACTION] 竖条为音量区，中间为跳转与双击区。 */
@@ -114,16 +111,46 @@ fun dragGesture(
     }
 }
 
-/** 锁定、任一面板打开或首次加载期间，手势层不响应。 */
-fun gesturesAllowed(locked: Boolean, panelOpen: Boolean, initialLoading: Boolean = false): Boolean =
-    !locked && !panelOpen && !initialLoading
+/** 锁定或任一面板打开时，手势层不响应。 */
+fun gesturesAllowed(locked: Boolean, panelOpen: Boolean): Boolean = !locked && !panelOpen
+
+/** 锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。 */
+fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
+    !locked || input == PlayerInput.UnlockButton
+
+/** 播放页上受切集缓冲限制的操作。 */
+enum class PlayerAction {
+    Back,
+    Previous,
+    Next,
+    PlayPause,
+    Seek,
+    Volume,
+    Lock,
+    More,
+    Playlist,
+    Subtitles,
+}
 
 /**
- * 锁定时只放行 [PlayerInput.UnlockButton]，优先于首次加载限制；
- * 未锁定但首次加载期间只放行返回；其余元素既不响应手势也不显示。
+ * 当前可用的播放页操作：首次加载只放行返回；目标加载只放行返回与上一集/下一集；
+ * 恢复原片期间额外放行播放/暂停。
  */
-fun inputAllowed(input: PlayerInput, locked: Boolean, initialLoading: Boolean = false): Boolean = when {
-    locked -> input == PlayerInput.UnlockButton
-    initialLoading -> input == PlayerInput.Back
+fun actionAllowed(
+    action: PlayerAction,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): Boolean = when {
+    initialLoading -> action == PlayerAction.Back
+    restoring ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next ||
+            action == PlayerAction.PlayPause
+    switching ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next
     else -> true
 }

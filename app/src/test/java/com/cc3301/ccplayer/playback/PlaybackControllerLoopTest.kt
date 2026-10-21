@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -37,14 +38,22 @@ class PlaybackControllerLoopTest {
     }
 
     @Test
-    fun `auto advance starts the next episode with a fresh progress`() {
+    fun `auto advance keeps the origin progress until the next episode is ready`() {
         open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
         engine.reportMediaLoaded()
         engine.reportPositionChanged(30_000, 60_000)
 
         endCurrentEpisode()
 
-        assertEquals(PlaybackProgress(), controller.progress.value)
+        // 自动连播与手动切集一样，目标就绪前进度仍停在原视频上。
+        assertEquals(PlaybackProgress(30_000, 60_000), controller.progress.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(0L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, controller.currentIndex.value)
     }
 
     @Test
@@ -65,9 +74,20 @@ class PlaybackControllerLoopTest {
 
         endCurrentEpisode()
 
+        // 单集重播也走统一的切换路径：目标先暂停加载，首帧就绪后再播放。
         assertEquals(listOf("root/ep1.mkv", "root/ep1.mkv"), engine.startedUrls)
         assertEquals(0, controller.currentIndex.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
+        assertTrue(controller.switching.value)
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(1, engine.grabFrameCalls)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(0L, controller.progress.value.positionMillis)
     }
 
     @Test
@@ -143,6 +163,7 @@ class PlaybackControllerLoopTest {
     @Test
     fun `auto play next off does not block the manual next episode`() {
         open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
         controller.setAutoPlayNext(false)
 
         controller.next()

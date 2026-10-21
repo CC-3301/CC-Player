@@ -49,16 +49,16 @@ class PlayerControlsVisibility(
         }
     }
 
-    /** 距自动隐藏的剩余毫秒；不参与计时时返回 -1。 */
-    fun millisUntilAutoHide(): Long {
-        if (!visible || panelOpen) return -1L
+    /** 距自动隐藏的剩余毫秒；不参与计时或 [holdVisible] 为真时返回 -1。 */
+    fun millisUntilAutoHide(holdVisible: Boolean = false): Long {
+        if (holdVisible || !visible || panelOpen) return -1L
         val elapsed = elapsedMillis() - lastInteractionAtMillis
         return (CONTROLS_AUTO_HIDE_MILLIS - elapsed).coerceAtLeast(0L)
     }
 
-    /** 显示状态下无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 后隐藏；面板打开时保持。 */
-    fun hideIfExpired() {
-        if (!visible || panelOpen) return
+    /** 显示状态下无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 后隐藏；面板打开或 [holdVisible] 时保持。 */
+    fun hideIfExpired(holdVisible: Boolean = false) {
+        if (holdVisible || !visible || panelOpen) return
         if (elapsedMillis() - lastInteractionAtMillis >= CONTROLS_AUTO_HIDE_MILLIS) {
             visible = false
         }

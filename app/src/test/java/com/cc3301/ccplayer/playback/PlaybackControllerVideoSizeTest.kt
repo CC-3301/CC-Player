@@ -74,6 +74,7 @@ class PlaybackControllerVideoSizeTest {
     fun `switching media keeps the last aspect ratio until the new size arrives`() {
         open("ep1.mkv", "ep2.mkv")
         engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportMediaLoaded()
 
         controller.next()
 
@@ -84,6 +85,7 @@ class PlaybackControllerVideoSizeTest {
     fun `the new media reports its own aspect ratio`() {
         open("ep1.mkv", "ep2.mkv")
         engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportMediaLoaded()
 
         controller.next()
         engine.reportVideoSizeChanged(1080, 1920)

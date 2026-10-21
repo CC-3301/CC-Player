@@ -21,14 +21,18 @@ class FakePlaybackEngine : PlaybackEngine {
     var grabFrameCalls = 0
         private set
 
-    /** 最近一次 start 的目标，ready 回调带上它供控制层过滤迟到事件。 */
+    /** 最近一次 start 的目标与代际，回调带上它们供控制层过滤迟到事件。 */
     var currentTargetUrl: String? = null
+        private set
+    var currentLoadToken = 0
         private set
     var pauseCalls = 0
         private set
     var resumeCalls = 0
         private set
     var stopCalls = 0
+        private set
+    var discardInFlightCalls = 0
         private set
     val seekPositions = mutableListOf<Long>()
 
@@ -52,12 +56,13 @@ class FakePlaybackEngine : PlaybackEngine {
         this.listener = listener
     }
 
-    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
         actions += "start"
         startedUrls += url
         startedPaused += paused
         startedPositions += startPositionMillis
         currentTargetUrl = url
+        return ++currentLoadToken
     }
 
     override fun grabFrame(): PlaybackEngine.Frame? {
@@ -78,6 +83,10 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun stop() {
         stopCalls++
+    }
+
+    override fun discardInFlightLoads() {
+        discardInFlightCalls++
     }
 
     override fun seekTo(positionMillis: Long): Int {
@@ -120,48 +129,67 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun release() = Unit
 
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
-    fun reportMediaLoaded() {
+    fun reportMediaLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(targetUrl, loadToken)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
-            targetUrl = currentTargetUrl,
+            targetUrl = targetUrl,
             seekSerial = currentSeekSerial,
+            loadToken = loadToken,
         )
     }
 
     /** 只上报文件打开，首帧还没就绪。 */
-    fun reportFileLoaded() {
+    fun reportFileLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(targetUrl, loadToken)
     }
 
     /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
     fun reportFirstFrameReady(
         targetUrl: String? = currentTargetUrl,
         seekSerial: Int = currentSeekSerial,
+        loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(needsFrameConfirmation = false, targetUrl = targetUrl, seekSerial = seekSerial)
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation = false,
+            targetUrl = targetUrl,
+            seekSerial = seekSerial,
+            loadToken = loadToken,
+        )
     }
 
     /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
     fun reportVideoReconfigured(
         targetUrl: String? = currentTargetUrl,
         seekSerial: Int = currentSeekSerial,
+        loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation = true,
+            targetUrl = targetUrl,
+            seekSerial = seekSerial,
+            loadToken = loadToken,
+        )
     }
 
     /** 暂停态下的 PLAYBACK_RESTART：同样需要控制层抓帧确认。 */
     fun reportPausedRestart(
         targetUrl: String? = currentTargetUrl,
         seekSerial: Int = currentSeekSerial,
+        loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity()
-        listener?.onFirstFrameReady(needsFrameConfirmation = true, targetUrl = targetUrl, seekSerial = seekSerial)
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation = true,
+            targetUrl = targetUrl,
+            seekSerial = seekSerial,
+            loadToken = loadToken,
+        )
     }
 
     /** 只上报加载活动，不给 ready/end。 */
