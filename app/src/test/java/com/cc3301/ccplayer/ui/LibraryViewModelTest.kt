@@ -689,23 +689,50 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `进程重建后恢复连接源与目录栈`() = runTest {
+    fun `进程回收后恢复目录栈、浏览位置并逐级返回`() = runTest {
         val series = testDirectory("剧集", "smb://nas/media/剧集")
+        val season = testDirectory("第二季", "smb://nas/media/剧集/第二季")
         tree.addDirectory(smbRoot, series)
-        tree.addDirectory(series, testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"))
+        tree.addDirectory(series, season)
+        tree.addDirectory(
+            season,
+            testVideo("第01集.mkv", "smb://nas/media/剧集/第二季/第01集.mkv"),
+            testVideo("第02集.mkv", "smb://nas/media/剧集/第二季/第02集.mkv"),
+        )
         openSmbForm(address = "nas", path = "media")
         advanceUntilIdle()
         viewModel.openSource(viewModel.sourcesState.value.smb.single())
         advanceUntilIdle()
         viewModel.enter(series)
         advanceUntilIdle()
-
-        val recreated = createViewModel()
+        viewModel.enter(season)
+        advanceUntilIdle()
+        viewModel.savePosition(
+            "smb://nas/media",
+            "剧集/第二季",
+            "smb://nas/media/剧集/第二季/第02集.mkv",
+            36,
+        )
         advanceUntilIdle()
 
-        assertEquals("smb://nas/media", recreated.state.value.sourceLocation)
-        assertEquals(listOf("nas", "剧集"), recreated.state.value.stack.map { it.name })
-        assertEquals(listOf("第01集.mkv"), recreated.state.value.entries.map { it.name })
+        val restored = createViewModel(state = restoredHandle())
+        advanceUntilIdle()
+
+        assertEquals("smb://nas/media", restored.state.value.sourceLocation)
+        assertEquals(listOf("nas", "剧集", "第二季"), restored.state.value.stack.map { it.name })
+        assertEquals("第二季", restored.state.value.currentDirectory?.name)
+        assertEquals(listOf("第01集.mkv", "第02集.mkv"), restored.state.value.entries.map { it.name })
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+
+        restored.navigateUp()
+        advanceUntilIdle()
+        assertEquals(listOf("nas", "剧集"), restored.state.value.stack.map { it.name })
+        assertEquals("剧集", restored.state.value.currentDirectory?.name)
+
+        restored.navigateUp()
+        advanceUntilIdle()
+        assertEquals(1, restored.state.value.stack.size)
+        assertEquals("smb://nas/media", restored.state.value.currentDirectory?.location)
     }
 
     @Test
@@ -786,6 +813,20 @@ class LibraryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), recreated.state.value.scrollTarget)
+    }
+
+    /**
+     * 模拟进程回收：新建句柄并深拷贝列表值。
+     * 直接构造 SavedStateHandle 不经过 Bundle 序列化，只覆盖键值进入恢复路径。
+     */
+    private fun restoredHandle(): SavedStateHandle {
+        val restored = savedState.keys().associateWith { key ->
+            when (val value = savedState.get<Any?>(key)) {
+                is ArrayList<*> -> ArrayList(value)
+                else -> value
+            }
+        }
+        return SavedStateHandle(restored)
     }
 
     private fun openSmbForm(
