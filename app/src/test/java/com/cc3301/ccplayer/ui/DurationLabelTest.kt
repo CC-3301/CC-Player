@@ -28,4 +28,16 @@ class DurationLabelTest {
     fun `负数按零处理`() {
         assertEquals("0:00", formatDuration(-1))
     }
+
+    @Test
+    fun `进度条时间优先显示拖动预览`() {
+        assertEquals(10_000L, seekBarProgressMillis(10_000L, 100_000L, null))
+        assertEquals(45_000L, seekBarProgressMillis(10_000L, 100_000L, 45_000L))
+    }
+
+    @Test
+    fun `进度条时间限制在总时长内`() {
+        assertEquals(0L, seekBarProgressMillis(10_000L, 100_000L, -1L))
+        assertEquals(100_000L, seekBarProgressMillis(10_000L, 100_000L, 150_000L))
+    }
 }

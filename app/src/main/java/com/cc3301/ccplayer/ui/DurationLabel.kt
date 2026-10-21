@@ -12,3 +12,7 @@ fun formatDuration(millis: Long): String {
         "%d:%02d".format(minutes, seconds)
     }
 }
+
+/** 进度条显示的进度：拖动预览优先，并限制在总时长内。 */
+fun seekBarProgressMillis(positionMillis: Long, durationMillis: Long, previewMillis: Long?): Long =
+    (previewMillis ?: positionMillis).coerceIn(0L, durationMillis.coerceAtLeast(0L))

@@ -39,6 +39,15 @@ val PlayerSideTouchTarget = 48.dp
 /** 播放页次级按钮的视觉图标尺寸。 */
 val PlayerSideIconSize = 26.dp
 
+/** 进度条触控高度。 */
+val PlayerSeekTouchHeight = 44.dp
+
+/** 进度条圆形滑块直径。 */
+val PlayerSeekThumbSize = 16.dp
+
+/** 进度条视觉轨道线宽。 */
+val PlayerSeekTrackHeight = 3.dp
+
 /** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
 val PlayerTransportButtonSize = 48.dp
 val PlayerTransportIconSize = 28.dp

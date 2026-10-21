@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -31,6 +32,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -41,6 +43,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -66,6 +69,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -1014,7 +1018,8 @@ private fun PlayerIconButton(
     }
 }
 
-/** 进度条：拖动中只在气泡里显示预览时间，松手才把位置交给控制层。 */
+/** 进度条：左侧当前时间、右侧总时长；拖动时左侧时间跟随预览，松手才提交。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SeekBar(
     positionMillis: Long,
@@ -1026,40 +1031,76 @@ private fun SeekBar(
     modifier: Modifier = Modifier,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
-    val shown = (previewMillis ?: positionMillis).coerceIn(0L, maximum)
-    Column(modifier = modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(24.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (previewMillis != null) {
-                Text(
-                    text = formatDuration(previewMillis),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = AppColors.Foreground,
-                    modifier = Modifier
-                        .background(PlayerPanelColor, RoundedCornerShape(AppRadius.Sm))
-                        .border(1.dp, AppColors.Line, RoundedCornerShape(AppRadius.Sm))
-                        .padding(horizontal = AppSpacing.Md, vertical = 2.dp),
-                )
-            }
-        }
+    val progress = seekBarProgressMillis(positionMillis, durationMillis, previewMillis)
+    val colors = SliderDefaults.colors(
+        thumbColor = MaterialTheme.colorScheme.onPrimary,
+        activeTrackColor = AppColors.Accent,
+        inactiveTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f),
+        activeTickColor = Color.Transparent,
+        inactiveTickColor = Color.Transparent,
+    )
+    val thumbColor = if (enabled) colors.thumbColor else colors.disabledThumbColor
+    val activeTrackColor = if (enabled) colors.activeTrackColor else colors.disabledActiveTrackColor
+    val inactiveTrackColor = if (enabled) colors.inactiveTrackColor else colors.disabledInactiveTrackColor
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(PlayerSeekTouchHeight),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
+    ) {
+        Text(
+            text = formatDuration(progress),
+            style = MaterialTheme.typography.labelLarge,
+            color = AppColors.Foreground,
+            maxLines = 1,
+        )
         Slider(
-            value = shown.toFloat(),
+            value = progress.toFloat(),
             onValueChange = { onPreview(it.toLong()) },
             onValueChangeFinished = onCommit,
             enabled = enabled,
             valueRange = 0f..maximum.toFloat(),
-            modifier = Modifier.fillMaxWidth(),
-            colors = SliderDefaults.colors(
-                thumbColor = MaterialTheme.colorScheme.onPrimary,
-                activeTrackColor = AppColors.Accent,
-                inactiveTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f),
-                activeTickColor = Color.Transparent,
-                inactiveTickColor = Color.Transparent,
-            ),
+            modifier = Modifier
+                .weight(1f)
+                .height(PlayerSeekTouchHeight),
+            colors = colors,
+            thumb = {
+                Box(
+                    modifier = Modifier
+                        .size(PlayerSeekThumbSize)
+                        .background(thumbColor, CircleShape),
+                )
+            },
+            track = {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(PlayerSeekTrackHeight),
+                ) {
+                    val centerY = size.height / 2f
+                    drawLine(
+                        color = inactiveTrackColor,
+                        start = Offset(0f, centerY),
+                        end = Offset(size.width, centerY),
+                        strokeWidth = size.height,
+                        cap = StrokeCap.Round,
+                    )
+                    drawLine(
+                        color = activeTrackColor,
+                        start = Offset(0f, centerY),
+                        end = Offset(size.width * progress.toFloat() / maximum.toFloat(), centerY),
+                        strokeWidth = size.height,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            },
+        )
+        Text(
+            text = formatDuration(durationMillis),
+            style = MaterialTheme.typography.labelLarge,
+            color = AppColors.Foreground,
+            maxLines = 1,
         )
     }
 }
