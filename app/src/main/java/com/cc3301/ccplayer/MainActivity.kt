@@ -267,7 +267,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             videoAspectRatio = videoAspectRatio,
                             switching = switching,
                             restoring = restoring,
-                            buffering = buffering || playbackEntry.openingPlayback,
+                            buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             freezeFrame = freezeFrame,
                             holdBlack = holdBlack,

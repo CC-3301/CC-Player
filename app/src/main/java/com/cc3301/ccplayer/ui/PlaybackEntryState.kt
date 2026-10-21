@@ -20,7 +20,10 @@ class PlaybackEntryState {
     var awaitingInitialPlayback by mutableStateOf(false)
         private set
 
-    /** 进入播放页；[preparing] 为真时保持缓冲指示并限制输入。 */
+    /**
+     * 进入播放页；[preparing] 为真时保持缓冲指示并限制输入。
+     * 视频即时进入才等待首次加载失败退回；音频保持原行为，首播失败留在播放页。
+     */
     fun enter(preparing: Boolean) {
         openingPlayback = preparing
         awaitingInitialPlayback = preparing
@@ -35,6 +38,9 @@ class PlaybackEntryState {
             awaitingInitialPlayback = false
         }
     }
+
+    /** 准备期或播放控制层在缓冲时显示缓冲指示。 */
+    fun showingBuffering(controllerBuffering: Boolean): Boolean = controllerBuffering || openingPlayback
 
     /** 首次播放加载失败：返回是否应退回列表，并清除等待态。 */
     fun consumeInitialFailure(): Boolean {

@@ -175,4 +175,11 @@ class PlayerGesturesTest {
         assertFalse(isInitialLoading(PlaybackState.Loading, switching = true))
         assertFalse(isInitialLoading(PlaybackState.Playing, switching = false))
     }
+
+    @Test
+    fun `首次加载时返回入口不受控制层显隐影响`() {
+        assertTrue(backEntryVisible(controlsVisible = true, initialLoading = false))
+        assertTrue(backEntryVisible(controlsVisible = false, initialLoading = true))
+        assertFalse(backEntryVisible(controlsVisible = false, initialLoading = false))
+    }
 }

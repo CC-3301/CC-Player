@@ -76,6 +76,29 @@ class PlaybackEntryStateTest {
     }
 
     @Test
+    fun `音频首播失败留在播放页`() {
+        state.enter(preparing = false)
+        state.onPlaybackUpdate(PlaybackState.Loading, buffering = false, switching = false)
+
+        assertTrue(state.initialLoading(PlaybackState.Loading, switching = false))
+        assertFalse(state.consumeInitialFailure())
+    }
+
+    @Test
+    fun `准备期或控制层缓冲时显示缓冲指示`() {
+        state.enter(preparing = true)
+
+        assertTrue(state.showingBuffering(controllerBuffering = false))
+        assertTrue(state.showingBuffering(controllerBuffering = true))
+
+        state.onPlaybackUpdate(PlaybackState.Loading, buffering = true, switching = false)
+        assertTrue(state.showingBuffering(controllerBuffering = true))
+
+        state.onPlaybackUpdate(PlaybackState.Playing, buffering = false, switching = false)
+        assertFalse(state.showingBuffering(controllerBuffering = false))
+    }
+
+    @Test
     fun `离开播放页清除准备态`() {
         state.enter(preparing = true)
         state.reset()

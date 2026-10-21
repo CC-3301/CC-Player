@@ -31,18 +31,28 @@ class PlaybackEntryOpener(
 
     private var job: Job? = null
 
+    /** 本次点开是否已经进入播放页；音频准备失败时仍停在浏览页。 */
+    private var playerEntered = false
+
     /**
      * 点开 [entry]。[enterBeforePreparing] 为真时立即进入播放页再准备；
      * 为假时准备完成后才进入，保持原行为。
      */
     fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean) {
         job?.cancel()
-        if (enterBeforePreparing) onEnterPlayer(true)
+        playerEntered = false
+        if (enterBeforePreparing) {
+            onEnterPlayer(true)
+            playerEntered = true
+        }
         val started = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val plainEntries = directoryEntries()
                 val prepared = prepare(entry, entries, plainEntries)
-                if (!enterBeforePreparing) onEnterPlayer(false)
+                if (!enterBeforePreparing) {
+                    onEnterPlayer(false)
+                    playerEntered = true
+                }
                 onStartPlayback(prepared.current, prepared.playlist, prepared.directoryEntries)
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -74,11 +84,11 @@ class PlaybackEntryOpener(
         )
     }
 
-    /** 准备失败：先提示原因，再退回列表；先清任务再回调，避免回调里取消自身。 */
+    /** 准备失败：先提示原因；已进入播放页才退回列表。先清任务再回调，避免回调里取消自身。 */
     private fun finishWithFailure(failure: MediaFailure) {
         job = null
         onShowFailure(failure)
-        onLeavePlayer()
+        if (playerEntered) onLeavePlayer()
     }
 
     /** 离开播放页时取消尚未完成的准备。 */

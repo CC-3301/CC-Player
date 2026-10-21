@@ -157,7 +157,7 @@ class PlaybackEntryOpenerTest {
     }
 
     @Test
-    fun `音频准备失败不进入播放页`() = runTest {
+    fun `音频准备失败不进入播放页也不退出列表`() = runTest {
         val audio = testVideo("片头曲.mp3", "content://root/片头曲.mp3")
         val recorder = EntryRecorder()
         val opener = opener(
@@ -173,7 +173,8 @@ class PlaybackEntryOpenerTest {
         assertTrue(recorder.enterStates.isEmpty())
         assertNull(recorder.opened)
         assertEquals(MediaFailure.Unknown, recorder.shownFailure)
-        assertEquals(listOf("failure:Unknown", "leave"), recorder.events)
+        assertEquals(0, recorder.leaveCount)
+        assertEquals(listOf("failure:Unknown"), recorder.events)
     }
 
     @Test

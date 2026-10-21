@@ -397,7 +397,7 @@ fun PlayerScreen(
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
             // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
-            if (controlsVisible || initialLoading) {
+            if (backEntryVisible(controlsVisible, initialLoading)) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
