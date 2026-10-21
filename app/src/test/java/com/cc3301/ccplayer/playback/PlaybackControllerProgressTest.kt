@@ -115,9 +115,15 @@ class PlaybackControllerProgressTest {
         engine.reportMediaLoaded()
 
         controller.next()
+        runCurrent()
+        // 就绪前进度仍停在原视频，目标尚未接管。
+        assertEquals(0L, controller.progress.value.positionMillis)
         engine.reportPositionChanged(30_000, 60_000)
         engine.reportFileLoaded()
+        runCurrent()
+        assertEquals(0L, controller.progress.value.positionMillis)
         engine.reportFirstFrameReady()
+        runCurrent()
 
         assertEquals(0L, controller.progress.value.positionMillis)
         assertNull(progress.records[ep1.location])

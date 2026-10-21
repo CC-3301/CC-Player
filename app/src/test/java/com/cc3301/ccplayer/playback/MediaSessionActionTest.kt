@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import android.support.v4.media.session.PlaybackStateCompat
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import kotlinx.coroutines.CoroutineScope
@@ -102,7 +103,7 @@ class MediaSessionActionTest {
     @Test
     fun `initial loading disables every media action`() {
         MediaSessionAction.entries.forEach { action ->
-            assertFalse(mediaActionAllowed(action, switching = false, initialLoading = true))
+            assertFalse(mediaActionAllowed(action, switching = false, initialLoading = true, restoring = false))
         }
     }
 
@@ -112,7 +113,7 @@ class MediaSessionActionTest {
             assertEquals(
                 action.name,
                 action == MediaSessionAction.Previous || action == MediaSessionAction.Next,
-                mediaActionAllowed(action, switching = true, initialLoading = false),
+                mediaActionAllowed(action, switching = true, initialLoading = false, restoring = false),
             )
         }
     }
@@ -120,8 +121,90 @@ class MediaSessionActionTest {
     @Test
     fun `outside loading every media action is allowed`() {
         MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false))
+            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = false))
         }
+    }
+
+    @Test
+    fun `restoring allows play pause and both episode actions`() {
+        MediaSessionAction.entries.forEach { action ->
+            assertTrue(mediaActionAllowed(action, switching = true, initialLoading = false, restoring = true))
+        }
+    }
+
+    @Test
+    fun `dispatch blocks play while the target is loading`() {
+        val applied = mutableListOf<MediaSessionAction>()
+
+        dispatchMediaAction(
+            MediaSessionAction.Play,
+            state = PlaybackState.Loading,
+            switching = true,
+            restoring = false,
+        ) { applied += it }
+        dispatchMediaAction(
+            MediaSessionAction.Next,
+            state = PlaybackState.Loading,
+            switching = true,
+            restoring = false,
+        ) { applied += it }
+
+        assertEquals(listOf(MediaSessionAction.Next), applied)
+    }
+
+    @Test
+    fun `dispatch lets play through while the original is being restored`() {
+        val applied = mutableListOf<MediaSessionAction>()
+
+        dispatchMediaAction(
+            MediaSessionAction.Play,
+            state = PlaybackState.Paused,
+            switching = true,
+            restoring = true,
+        ) { applied += it }
+
+        assertEquals(listOf(MediaSessionAction.Play), applied)
+    }
+
+    @Test
+    fun `dispatch blocks every action during the initial load`() {
+        val applied = mutableListOf<MediaSessionAction>()
+
+        MediaSessionAction.entries.forEach { action ->
+            dispatchMediaAction(
+                action,
+                state = PlaybackState.Loading,
+                switching = false,
+                restoring = false,
+            ) { applied += it }
+        }
+
+        assertTrue(applied.isEmpty())
+    }
+
+    @Test
+    fun `playback state actions follow the allowed set`() {
+        assertEquals(
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE,
+            playbackStateActions(
+                availableMediaActions(switching = true, initialLoading = false, restoring = true),
+            ),
+        )
+        assertEquals(
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_SKIP_TO_NEXT,
+            playbackStateActions(
+                availableMediaActions(switching = true, initialLoading = false, restoring = false),
+            ),
+        )
+        assertEquals(
+            0L,
+            playbackStateActions(
+                availableMediaActions(switching = false, initialLoading = true, restoring = false),
+            ),
+        )
     }
 
     private fun open(vararg names: String, current: String) {

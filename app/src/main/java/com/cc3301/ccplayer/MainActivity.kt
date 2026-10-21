@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
     private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var switching by mutableStateOf(false)
+    private var restoring by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
     private var holdBlack by mutableStateOf(false)
 
@@ -157,6 +158,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
+                launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
@@ -241,6 +243,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             surfaceCallback = this@MainActivity,
                             videoAspectRatio = videoAspectRatio,
                             switching = switching,
+                            restoring = restoring,
                             buffering = buffering,
                             freezeFrame = freezeFrame,
                             holdBlack = holdBlack,
@@ -559,6 +562,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         sleepTimerOption = null
         videoAspectRatio = null
         switching = false
+        restoring = false
         buffering = false
         holdBlack = false
         freezeFrame = null

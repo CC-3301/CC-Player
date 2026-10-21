@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.playback
 
+import android.support.v4.media.session.PlaybackStateCompat
+
 /**
  * 通知栏媒体动作：通知栏按钮与系统媒体控制都下发这四种。
  */
@@ -33,15 +35,51 @@ enum class MediaSessionAction(
 fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
     if (state == PlaybackState.Playing) MediaSessionAction.Pause else MediaSessionAction.Play
 
-/** 媒体会话动作的可用性：首次加载全部禁用，切集期间只允许上一集/下一集。 */
+/** 媒体会话动作的可用性：首次加载全部禁用；目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。 */
 fun mediaActionAllowed(
     action: MediaSessionAction,
     switching: Boolean,
     initialLoading: Boolean,
+    restoring: Boolean,
 ): Boolean = when {
     initialLoading -> false
+    restoring -> true
     switching ->
         action == MediaSessionAction.Previous ||
             action == MediaSessionAction.Next
     else -> true
+}
+
+/** 当前加载阶段下可用的媒体动作，通知栏与 MediaSession 的动作集合据此收窄。 */
+fun availableMediaActions(
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): List<MediaSessionAction> =
+    MediaSessionAction.entries.filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
+
+/**
+ * 通知栏与系统媒体控制的统一下发入口：动作在当前加载阶段不可用时不下发。
+ * [state] 来自播放控制层；[switching] 与 [restoring] 区分目标加载与恢复原片。
+ */
+fun dispatchMediaAction(
+    action: MediaSessionAction,
+    state: PlaybackState,
+    switching: Boolean,
+    restoring: Boolean,
+    apply: (MediaSessionAction) -> Unit,
+) {
+    if (mediaActionAllowed(action, switching, isInitialLoading(state, switching), restoring)) {
+        apply(action)
+    }
+}
+
+/** 媒体动作集合对应的 [PlaybackStateCompat] 动作位。 */
+fun playbackStateActions(actions: List<MediaSessionAction>): Long = actions.fold(0L) { flags, action ->
+    flags or when (action) {
+        MediaSessionAction.Play -> PlaybackStateCompat.ACTION_PLAY
+        MediaSessionAction.Pause -> PlaybackStateCompat.ACTION_PAUSE
+        MediaSessionAction.Previous -> PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        MediaSessionAction.Next -> PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+    }
 }

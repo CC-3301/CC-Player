@@ -100,6 +100,78 @@ internal class MpvFileEvents {
     enum class End { Replaced, Ended, Failed }
 }
 
+/** 一次 loadfile 的目标与代际；URL 与序号总是成对使用。 */
+internal data class LoadSpec(val url: String, val token: Int)
+
+/**
+ * loadfile 与 FILE_LOADED 的代际关联：每次 start 入队在途加载，FILE_LOADED 取最早的一条，
+ * 因此同 URL 重载时迟到的旧 FILE_LOADED 仍带旧代际。
+ *
+ * 被新加载取代或停止的在途文件不会再有 FILE_LOADED，只会先来一次 END_FILE；
+ * 结束队列按命令顺序记录每个将要结束的文件，用它把对应在途加载移出。
+ * 控制层线程调用 start/stop，mpv 事件线程调用其余方法，所有方法同步。
+ */
+internal class MpvLoadQueue {
+
+    private val pendingLoads = ArrayDeque<LoadSpec>()
+    private val endingLoads = ArrayDeque<LoadSpec>()
+    private var current: LoadSpec? = null
+    private var nextToken = 0
+
+    /** 已确认 FILE_LOADED 的加载；后续 ready 事件沿用这份快照。 */
+    @Volatile
+    var loaded: LoadSpec? = null
+        private set
+
+    /** 下发新的 loadfile；上一个在途或已加载文件之后会来一次 END_FILE。 */
+    @Synchronized
+    fun onStart(url: String): LoadSpec {
+        current?.let { endingLoads.addLast(it) }
+        val spec = LoadSpec(url, ++nextToken)
+        current = spec
+        loaded = null
+        pendingLoads.addLast(spec)
+        return spec
+    }
+
+    /** 收到 FILE_LOADED：取最早的在途加载，事件按命令顺序对应。 */
+    @Synchronized
+    fun onFileLoaded(): LoadSpec? {
+        val spec = pendingLoads.removeFirstOrNull() ?: return null
+        loaded = spec
+        return spec
+    }
+
+    /** 收到 END_FILE：取出产生这次结束的加载，并清掉它在途记录。 */
+    @Synchronized
+    fun onEndFile(): LoadSpec? {
+        val ended = endingLoads.removeFirstOrNull()
+            ?: current?.also { current = null }
+            ?: return null
+        pendingLoads.remove(ended)
+        if (current === ended) current = null
+        if (loaded === ended) loaded = null
+        return ended
+    }
+
+    /** 主动停止：在途加载不会再有 FILE_LOADED，正在播放的文件会来一次 END_FILE。 */
+    @Synchronized
+    fun onStop() {
+        current?.let { endingLoads.addLast(it) }
+        current = null
+        loaded = null
+        pendingLoads.clear()
+    }
+
+    @Synchronized
+    fun reset() {
+        current = null
+        loaded = null
+        pendingLoads.clear()
+        endingLoads.clear()
+    }
+}
+
 /**
  * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
  *

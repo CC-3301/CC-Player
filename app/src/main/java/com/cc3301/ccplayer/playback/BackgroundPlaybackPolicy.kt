@@ -44,13 +44,23 @@ class BackgroundPlaybackPolicy(
         if (allows(action)) apply(action)
     }
 
-    /** 通知栏动作集合：后台关闭时只剩暂停，避免显示点了没反应的按钮。 */
-    fun notificationActions(state: PlaybackState): List<MediaSessionAction> =
-        if (blocksBackgroundPlayback) {
+    /**
+     * 通知栏动作集合：后台关闭时只剩暂停，同时按当前加载阶段收窄，
+     * 避免显示点了没反应的按钮。
+     */
+    fun notificationActions(
+        state: PlaybackState,
+        switching: Boolean = false,
+        initialLoading: Boolean = false,
+        restoring: Boolean = false,
+    ): List<MediaSessionAction> {
+        val actions = if (blocksBackgroundPlayback) {
             listOf(MediaSessionAction.Pause)
         } else {
             listOf(MediaSessionAction.Previous, mediaSessionActionFor(state), MediaSessionAction.Next)
         }
+        return actions.filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
+    }
 
     private fun pauseIfBlocked() {
         if (blocksBackgroundPlayback) pausePlayback()

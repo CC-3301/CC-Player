@@ -260,4 +260,78 @@ class MpvFileEventsTest {
         assertFalse(events.isLoaded)
         assertEquals(MpvFileEvents.End.Failed, events.onEndFile(atEndByPosition = true))
     }
+
+    @Test
+    fun `FILE_LOADED is associated with the start that produced it`() {
+        val queue = MpvLoadQueue()
+        val first = queue.onStart("root/ep1.mkv")
+        assertEquals(first, queue.onFileLoaded())
+
+        val second = queue.onStart("root/ep1.mkv")
+        val lateFirst = queue.onStart("root/ep1.mkv")
+
+        // 同 URL 重载：事件按命令顺序对应，先到的仍是旧代际。
+        assertEquals(second, queue.onFileLoaded())
+        assertEquals(lateFirst, queue.onFileLoaded())
+    }
+
+    @Test
+    fun `a superseded in-flight load is skipped on its end event`() {
+        val queue = MpvLoadQueue()
+        val first = queue.onStart("root/ep1.mkv")
+        val second = queue.onStart("root/ep2.mkv")
+
+        assertEquals(first, queue.onEndFile())
+        assertEquals(second, queue.onFileLoaded())
+    }
+
+    @Test
+    fun `a same URL reload keeps the old event on the old generation`() {
+        val queue = MpvLoadQueue()
+        val old = queue.onStart("root/ep1.mkv")
+        assertEquals(old, queue.onFileLoaded())
+
+        val replacement = queue.onStart("root/ep1.mkv")
+        assertEquals(old, queue.onEndFile())
+        assertEquals(replacement, queue.onFileLoaded())
+    }
+
+    @Test
+    fun `the end queue matches repeated replacements in command order`() {
+        val queue = MpvLoadQueue()
+        val first = queue.onStart("root/ep1.mkv")
+        assertEquals(first, queue.onFileLoaded())
+
+        val second = queue.onStart("root/ep2.mkv")
+        val third = queue.onStart("root/ep3.mkv")
+
+        assertEquals(first, queue.onEndFile())
+        assertEquals(second, queue.onEndFile())
+        assertEquals(third, queue.onFileLoaded())
+    }
+
+    @Test
+    fun `a late FILE_LOADED from a natural end does not attach to the next load`() {
+        val queue = MpvLoadQueue()
+        val first = queue.onStart("root/ep1.mkv")
+        assertEquals(first, queue.onFileLoaded())
+        assertEquals(first, queue.onEndFile())
+
+        val second = queue.onStart("root/ep1.mkv")
+        assertEquals(second, queue.onFileLoaded())
+    }
+
+    @Test
+    fun `stop drops in-flight loads and the stopped file's end`() {
+        val queue = MpvLoadQueue()
+        val first = queue.onStart("root/ep1.mkv")
+        assertEquals(first, queue.onFileLoaded())
+        val inFlight = queue.onStart("root/ep2.mkv")
+        queue.onStop()
+
+        // 被替换的旧文件与被停止的在途加载各来一次 END_FILE。
+        assertEquals(first, queue.onEndFile())
+        assertEquals(inFlight, queue.onEndFile())
+        assertEquals(null, queue.onFileLoaded())
+    }
 }

@@ -64,9 +64,13 @@ class PlaybackController(
     private val _seekPreviewMillis = MutableStateFlow<Long?>(null)
     val seekPreviewMillis: StateFlow<Long?> = _seekPreviewMillis.asStateFlow()
 
-    /** 正在切集：原视频暂停，画面冻结，等目标就绪后替换。 */
+    /** 正在切集：原视频暂停，画面冻结，等目标就绪后替换；恢复原片期间仍为真。 */
     private val _switching = MutableStateFlow(false)
     val switching: StateFlow<Boolean> = _switching.asStateFlow()
+
+    /** 正在恢复原片：只剩播放/暂停在切集门禁之外额外放行。 */
+    private val _restoring = MutableStateFlow(false)
+    val restoring: StateFlow<Boolean> = _restoring.asStateFlow()
 
     /** 缓冲指示是否显示：加载超过 [BUFFER_INDICATOR_DELAY_MILLIS] 仍未就绪时为真。 */
     private val _buffering = MutableStateFlow(false)
@@ -195,6 +199,9 @@ class PlaybackController(
 
     /** 本次切集已经报过“播放失败”；恢复再失败时不重复提示。 */
     private var switchFailureReported = false
+
+    /** 用户在片尾恢复期间按了播放：恢复完成后从头重开，不在片尾 resume。 */
+    private var restartFromStartAfterRestore = false
 
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
@@ -335,6 +342,8 @@ class PlaybackController(
         loadPhase = LoadPhase.Initial
         beginLoadTracking()
         _switching.value = false
+        _restoring.value = false
+        restartFromStartAfterRestore = false
         replaceFreezeFrame(null)
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
@@ -374,6 +383,8 @@ class PlaybackController(
         loadPhase = LoadPhase.Switching
         beginLoadTracking()
         _switching.value = true
+        _restoring.value = false
+        restartFromStartAfterRestore = false
         _seekPreviewMillis.value = null
         _subtitleTracks.value = emptyList()
         _externalSubtitles.value = emptyList()
@@ -420,8 +431,17 @@ class PlaybackController(
         clearRestoreHoldOnUserAction()
         paused = false
         // 切集加载中的继续只记为意图，等目标文件就绪再出声。
-        if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
-        if (stoppedAtEndOfEpisode()) playAt(_currentIndex.value)
+        if (loadPhase == LoadPhase.Switching) return
+        if (loadPhase == LoadPhase.Restoring) {
+            // 片尾恢复没有可续播位置：文件重新打开后从头开始，不在片尾立即再次 EOF。
+            if (restoreAtEndOfEpisode) restartFromStartAfterRestore = true
+            return
+        }
+        if (stoppedAtEndOfEpisode()) {
+            // 从头重开当前文件，避免在片尾 resume 后立刻再次结束。
+            playAt(_currentIndex.value)
+            return
+        }
         engine.resume()
     }
 
@@ -832,6 +852,8 @@ class PlaybackController(
         beginLoadWatchdog()
         loadGeneration++
         loadPhase = LoadPhase.Restoring
+        _restoring.value = true
+        restartFromStartAfterRestore = false
         loadTargetIndex = switchOriginIndex
         loadTargetUrl = origin.playbackLocation
         // 自然播完以显式标记为准；位置兜底只在抓不到末帧时补充。
@@ -875,12 +897,16 @@ class PlaybackController(
     /** 原视频重新出帧：撤掉冻结画面；恢复期间按过播放就继续，否则保持暂停。 */
     private fun finishRestore() {
         if (loadPhase != LoadPhase.Restoring) return
+        // 片尾恢复没有可续播位置：用户按过播放就从 0 重开，不能在片尾 resume。
+        val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
+        restartFromStartAfterRestore = false
         // 片尾恢复且没有用户要求播放时保持黑底；用户已按播放则直接继续。
         val holdBlack = restoreAtEndOfEpisode && paused
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
         _switching.value = false
+        _restoring.value = false
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
@@ -889,6 +915,11 @@ class PlaybackController(
         // 普通恢复成功后允许后续真实失败重新提示；黑底期间保持去重到用户操作。
         if (!holdBlack) switchFailureReported = false
         replaceFreezeFrame(null)
+        if (restartFromStart) {
+            // 以新的加载从 0 开始，暂停意图已在用户操作时记为播放。
+            playIndex(_currentIndex.value)
+            return
+        }
         if (paused) {
             _state.value = PlaybackState.Paused
         } else {
@@ -991,6 +1022,8 @@ class PlaybackController(
         frameProbeJob?.cancel()
         frameProbeJob = null
         _switching.value = false
+        _restoring.value = false
+        restartFromStartAfterRestore = false
         loadTargetIndex = NO_MEDIA
         loadTargetUrl = null
         seekPendingForReady = false

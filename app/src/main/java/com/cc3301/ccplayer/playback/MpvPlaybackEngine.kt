@@ -35,18 +35,8 @@ class MpvPlaybackEngine(
     @Volatile
     private var hasVideoTrack = false
 
-    /** 当前 loadfile 的目标与代际；URL 与序号总是成对读取。 */
-    @Volatile
-    private var currentLoad: LoadSpec? = null
-
-    /** 每次 start 递增的加载代际；事件按产生它的那次加载上报。 */
-    private var nextLoadToken = 0
-
-    /** 已通过校验的 FILE_LOADED 对应的目标与代际；ready 事件沿用同一份快照。 */
-    @Volatile
-    private var loadedTargetUrl: String? = null
-    @Volatile
-    private var loadedLoadToken = 0
+    /** loadfile 代际与 FILE_LOADED 的关联；同 URL 重载也不会把旧事件记到新代际。 */
+    private val loadQueue = MpvLoadQueue()
 
     @Volatile
     private var positionSeconds = 0.0
@@ -74,14 +64,11 @@ class MpvPlaybackEngine(
     }
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
-        val loadToken = ++nextLoadToken
+        val spec = loadQueue.onStart(url)
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
         readySignals.onStart()
-        currentLoad = LoadSpec(url, loadToken)
-        loadedTargetUrl = null
-        loadedLoadToken = 0
         fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -90,7 +77,7 @@ class MpvPlaybackEngine(
             command += "start=${formatSeconds(startPositionMillis)}"
         }
         MPVLib.command(command.toTypedArray())
-        return loadToken
+        return spec.token
     }
 
     /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
@@ -107,11 +94,9 @@ class MpvPlaybackEngine(
 
     override fun stop() {
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
+        loadQueue.onStop()
         fileEvents.onStop()
         hasVideoTrack = false
-        currentLoad = null
-        loadedTargetUrl = null
-        loadedLoadToken = 0
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -200,6 +185,7 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
+        loadQueue.reset()
         fileEvents.reset()
         readySignals.reset()
         MPVLib.destroy()
@@ -236,14 +222,12 @@ class MpvPlaybackEngine(
     }
 
     private fun onFileLoaded() {
-        // 目标与代际来自同一份快照，避免校验期间被新的 start 改掉。
-        val load = currentLoad ?: return
+        // FILE_LOADED 按命令顺序对应最早的在途加载，URL 与代际来自同一条记录。
+        val spec = loadQueue.onFileLoaded() ?: return
         // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
-        if (!fileEvents.onFileLoaded(isTargetFile(load.url))) return
-        loadedTargetUrl = load.url
-        loadedLoadToken = load.token
+        if (!fileEvents.onFileLoaded(isTargetFile(spec.url))) return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded(load.url, load.token)
+        listener?.onMediaLoaded(spec.url, spec.token)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
@@ -252,12 +236,11 @@ class MpvPlaybackEngine(
     private fun isTargetFile(target: String?): Boolean =
         isTargetPath(target, MPVLib.getPropertyString(PATH_PROPERTY))
 
-    private data class LoadSpec(val url: String, val token: Int)
-
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
     /** 替换、自然结束与失败由 [MpvFileEvents] 判定。 */
     private fun onEndFile() {
+        loadQueue.onEndFile()
         val atEndByPosition = durationSeconds > 0 &&
             positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS
         when (fileEvents.onEndFile(atEndByPosition)) {
@@ -273,11 +256,13 @@ class MpvPlaybackEngine(
      */
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
         val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
+        // ready 沿用产生它的那次 FILE_LOADED 快照，迟到的旧代际不会被记到新加载上。
+        val spec = loadQueue.loaded ?: return
         listener?.onFirstFrameReady(
             needsFrameConfirmation,
-            loadedTargetUrl,
+            spec.url,
             serial,
-            loadedLoadToken,
+            spec.token,
         )
     }
 

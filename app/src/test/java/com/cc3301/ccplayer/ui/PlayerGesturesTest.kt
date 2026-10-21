@@ -128,29 +128,34 @@ class PlayerGesturesTest {
 
     @Test
     fun `切集期间只放行返回、上一集与下一集`() {
-        val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true) }.toSet()
+        val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
         assertEquals(setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next), allowed)
-        assertEquals(7, PlayerAction.entries.count { !actionAllowed(it, switching = true) })
+        assertEquals(7, PlayerAction.entries.count { !actionAllowed(it, switching = true, initialLoading = false, restoring = false) })
     }
 
     @Test
     fun `未切集时所有操作放行`() {
         PlayerAction.entries.forEach { action ->
-            assertEquals(action.name, true, actionAllowed(action, switching = false))
+            assertEquals(action.name, true, actionAllowed(action, switching = false, initialLoading = false, restoring = false))
         }
     }
 
     @Test
     fun `首次加载期间只放行返回`() {
         val allowed = PlayerAction.entries
-            .filter { actionAllowed(it, switching = false, initialLoading = true) }
+            .filter { actionAllowed(it, switching = false, initialLoading = true, restoring = false) }
             .toSet()
         assertEquals(setOf(PlayerAction.Back), allowed)
+    }
+
+    @Test
+    fun `恢复原片期间额外放行播放暂停`() {
+        val allowed = PlayerAction.entries
+            .filter { actionAllowed(it, switching = true, initialLoading = false, restoring = true) }
+            .toSet()
         assertEquals(
-            9,
-            PlayerAction.entries.count {
-                !actionAllowed(it, switching = false, initialLoading = true)
-            },
+            setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next, PlayerAction.PlayPause),
+            allowed,
         )
     }
 
@@ -160,7 +165,7 @@ class PlayerGesturesTest {
             assertEquals(
                 action.name,
                 true,
-                actionAllowed(action, switching = false, initialLoading = false),
+                actionAllowed(action, switching = false, initialLoading = false, restoring = false),
             )
         }
     }

@@ -147,4 +147,49 @@ class BackgroundPlaybackPolicyTest {
             policy.notificationActions(PlaybackState.Playing),
         )
     }
+
+    @Test
+    fun `目标加载期间通知栏只保留上下集`() {
+        policy.setAppInForeground(true)
+
+        assertEquals(
+            listOf(MediaSessionAction.Previous, MediaSessionAction.Next),
+            policy.notificationActions(
+                PlaybackState.Loading,
+                switching = true,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `恢复原片期间通知栏保留上下集与播放暂停`() {
+        policy.setAppInForeground(true)
+
+        assertEquals(
+            listOf(MediaSessionAction.Previous, MediaSessionAction.Play, MediaSessionAction.Next),
+            policy.notificationActions(
+                PlaybackState.Paused,
+                switching = true,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `首次加载期间通知栏不显示动作`() {
+        policy.setAppInForeground(true)
+
+        assertEquals(
+            emptyList<MediaSessionAction>(),
+            policy.notificationActions(
+                PlaybackState.Loading,
+                switching = false,
+                initialLoading = true,
+                restoring = false,
+            ),
+        )
+    }
 }

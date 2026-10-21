@@ -132,13 +132,25 @@ enum class PlayerAction {
     Subtitles,
 }
 
-/** 当前可用的播放页操作：首次加载只放行返回，切集只放行返回与上一集/下一集。 */
-fun actionAllowed(action: PlayerAction, switching: Boolean, initialLoading: Boolean = false): Boolean =
-    when {
-        initialLoading -> action == PlayerAction.Back
-        switching ->
-            action == PlayerAction.Back ||
-                action == PlayerAction.Previous ||
-                action == PlayerAction.Next
-        else -> true
-    }
+/**
+ * 当前可用的播放页操作：首次加载只放行返回；目标加载只放行返回与上一集/下一集；
+ * 恢复原片期间额外放行播放/暂停。
+ */
+fun actionAllowed(
+    action: PlayerAction,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): Boolean = when {
+    initialLoading -> action == PlayerAction.Back
+    restoring ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next ||
+            action == PlayerAction.PlayPause
+    switching ->
+        action == PlayerAction.Back ||
+            action == PlayerAction.Previous ||
+            action == PlayerAction.Next
+    else -> true
+}
