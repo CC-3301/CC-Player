@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -74,6 +75,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -118,12 +120,6 @@ private val PlayerTopBarHeight = 56.dp
 
 /** “更多”面板为底部控制条预留的高度。 */
 private val PlayerControlBarReserve = 224.dp
-
-/** 松手后预览保留到播放位置追平的时间容差，毫秒。 */
-private const val SEEK_PREVIEW_SETTLE_MILLIS = 1_000L
-
-/** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
-private const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
@@ -857,6 +853,7 @@ private fun Controls(
             )
         }
         SeekBar(
+            mediaKey = playlist.getOrNull(currentIndex)?.location.orEmpty(),
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
@@ -1029,6 +1026,7 @@ private fun PlayerIconButton(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SeekBar(
+    mediaKey: String,
     positionMillis: Long,
     durationMillis: Long,
     previewMillis: Long?,
@@ -1037,61 +1035,66 @@ private fun SeekBar(
     onCommit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val durationKnown = durationMillis > 0L
-    val maximum = if (durationKnown) durationMillis else 1L
-    val sliderEnabled = enabled && durationKnown
-    var dragMillis by remember { mutableStateOf<Long?>(null) }
-    var heldMillis by remember { mutableStateOf<Long?>(null) }
-    var pendingSliderMillis by remember { mutableStateOf<Long?>(null) }
-    val progress = seekBarProgressMillis(
-        positionMillis = positionMillis,
-        durationMillis = durationMillis,
-        previewMillis = dragMillis ?: previewMillis ?: heldMillis,
-    )
+    val maximum = durationMillis.coerceAtLeast(1L)
+    // 预览状态绑定到当前媒体与时长：切集后不沿用上一集的 seek 目标。
+    var dragMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
+    var heldMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
+    var heldBaseMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
+    var pendingSliderMillis by remember(mediaKey) { mutableStateOf<Long?>(null) }
+    var leftTimeWidthPx by remember { mutableStateOf(0f) }
+    var rightTimeWidthPx by remember { mutableStateOf(0f) }
+    val previewForDisplay = dragMillis ?: previewMillis ?: heldMillis
+    val progress = seekBarProgressMillis(positionMillis, durationMillis, previewForDisplay)
+    val unknownText = stringResource(R.string.player_time_unknown)
+    val labels = seekBarLabels(positionMillis, durationMillis, previewForDisplay, unknownText)
+    val sliderEnabled = enabled && labels.seekEnabled
     // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
-    LaunchedEffect(positionMillis, heldMillis) {
+    LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
         val held = heldMillis ?: return@LaunchedEffect
-        if (abs(positionMillis - held) <= SEEK_PREVIEW_SETTLE_MILLIS) {
+        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, false)) {
             heldMillis = null
         }
     }
     LaunchedEffect(heldMillis) {
         val held = heldMillis ?: return@LaunchedEffect
         delay(SEEK_PREVIEW_HOLD_MILLIS)
-        if (heldMillis == held) heldMillis = null
+        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, true)) {
+            heldMillis = null
+        }
     }
     val previewAt: (Long) -> Unit = {
         heldMillis = null
+        heldBaseMillis = null
         onPreview(it)
     }
-    val commitAt: (Long) -> Unit = {
-        heldMillis = it
+    val commitAt: (Long, Long) -> Unit = { target, base ->
+        heldMillis = target
+        heldBaseMillis = base
         onCommit()
     }
     val latestPreviewAt = rememberUpdatedState(previewAt)
     val latestCommitAt = rememberUpdatedState(commitAt)
+    val latestPositionMillis = rememberUpdatedState(positionMillis)
     val colors = SliderDefaults.colors(
         thumbColor = MaterialTheme.colorScheme.onPrimary,
         activeTrackColor = AppColors.Accent,
         inactiveTrackColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.35f),
         activeTickColor = Color.Transparent,
         inactiveTickColor = Color.Transparent,
+        disabledThumbColor = DisabledToolColor,
+        disabledActiveTrackColor = DisabledToolColor,
+        disabledInactiveTrackColor = DisabledToolColor,
     )
     val thumbColor = if (sliderEnabled) colors.thumbColor else colors.disabledThumbColor
     val activeTrackColor = if (sliderEnabled) colors.activeTrackColor else colors.disabledActiveTrackColor
     val inactiveTrackColor = if (sliderEnabled) colors.inactiveTrackColor else colors.disabledInactiveTrackColor
-    val currentMillis = if (durationKnown) progress else positionMillis.coerceAtLeast(0L)
-    val currentText = formatDuration(currentMillis)
-    val totalText = if (durationKnown) {
-        formatDuration(durationMillis)
-    } else {
-        stringResource(R.string.player_time_unknown)
-    }
-    val stateText = stringResource(R.string.player_progress_state, currentText, totalText)
+    val stateText = stringResource(R.string.player_progress_state, labels.current, labels.total)
     val timeStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
-    val timeColor = if (sliderEnabled) AppColors.Foreground else DisabledToolColor
+    // 时长未知只禁用 seek，播放本身仍可用，因此当前时间不随 Slider 一起置灰。
+    val timeColor = if (enabled) AppColors.Foreground else DisabledToolColor
     val density = LocalDensity.current
-    val trackInsetPx = with(density) { (PlayerSeekTimeWidth + AppSpacing.Sm).toPx() }
+    val spacingPx = with(density) { AppSpacing.Sm.toPx() }
+    val thumbRadiusPx = with(density) { PlayerSeekThumbSize.toPx() / 2f }
 
     Box(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -1102,12 +1105,14 @@ private fun SeekBar(
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
         ) {
             Text(
-                text = currentText,
+                text = labels.current,
                 style = timeStyle,
                 color = timeColor,
                 maxLines = 1,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.width(PlayerSeekTimeWidth),
+                modifier = Modifier
+                    .widthIn(min = PlayerSeekTimeWidth)
+                    .onSizeChanged { leftTimeWidthPx = it.width.toFloat() },
             )
             Slider(
                 value = progress.toFloat(),
@@ -1119,7 +1124,11 @@ private fun SeekBar(
                 onValueChangeFinished = {
                     val target = pendingSliderMillis
                     pendingSliderMillis = null
-                    if (target != null) commitAt(target) else onCommit()
+                    if (target != null) {
+                        commitAt(target, latestPositionMillis.value)
+                    } else {
+                        onCommit()
+                    }
                 },
                 enabled = sliderEnabled,
                 valueRange = 0f..maximum.toFloat(),
@@ -1165,12 +1174,14 @@ private fun SeekBar(
                 },
             )
             Text(
-                text = totalText,
+                text = labels.total,
                 style = timeStyle,
                 color = timeColor,
                 maxLines = 1,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.width(PlayerSeekTimeWidth),
+                modifier = Modifier
+                    .widthIn(min = PlayerSeekTimeWidth)
+                    .onSizeChanged { rightTimeWidthPx = it.width.toFloat() },
             )
         }
         if (sliderEnabled) {
@@ -1178,32 +1189,55 @@ private fun SeekBar(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .pointerInput(sliderEnabled, maximum, trackInsetPx) {
+                    .pointerInput(
+                        sliderEnabled,
+                        maximum,
+                        leftTimeWidthPx,
+                        rightTimeWidthPx,
+                        spacingPx,
+                        thumbRadiusPx,
+                    ) {
                         awaitEachGesture {
                             val down = awaitFirstDown()
-                            down.consume()
-                            val trackStart = trackInsetPx.coerceIn(0f, size.width / 2f)
-                            val trackEnd = size.width - trackStart
+                            val bounds = seekBarTrackBounds(
+                                widthPx = size.width.toFloat(),
+                                leftTimeWidthPx = leftTimeWidthPx,
+                                rightTimeWidthPx = rightTimeWidthPx,
+                                spacingPx = spacingPx,
+                                thumbRadiusPx = thumbRadiusPx,
+                            )
                             var target = seekBarMillisAt(
                                 x = down.position.x,
-                                trackStart = trackStart,
-                                trackEnd = trackEnd,
+                                trackStart = bounds.start,
+                                trackEnd = bounds.end,
                                 durationMillis = maximum,
                             ) ?: return@awaitEachGesture
+                            val seekBase = latestPositionMillis.value
+                            down.consume()
                             dragMillis = target
                             latestPreviewAt.value(target)
+                            var completed = false
+                            var cancelled = false
                             try {
                                 while (true) {
                                     val event = awaitPointerEvent()
+                                    event.changes.forEach { it.consume() }
+                                    val pressedIds = event.changes
+                                        .filter { it.pressed }
+                                        .map { it.id.value }
+                                    if (isMultiPointerDrag(down.id.value, pressedIds)) {
+                                        cancelled = true
+                                        break
+                                    }
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                     if (!change.pressed) {
-                                        change.consume()
+                                        completed = true
                                         break
                                     }
                                     seekBarMillisAt(
                                         x = change.position.x,
-                                        trackStart = trackStart,
-                                        trackEnd = trackEnd,
+                                        trackStart = bounds.start,
+                                        trackEnd = bounds.end,
                                         durationMillis = maximum,
                                     )?.let { updated ->
                                         if (updated != target) {
@@ -1212,12 +1246,15 @@ private fun SeekBar(
                                             latestPreviewAt.value(target)
                                         }
                                     }
-                                    change.consume()
                                 }
                             } finally {
                                 dragMillis = null
                             }
-                            latestCommitAt.value(target)
+                            if (completed) {
+                                latestCommitAt.value(target, seekBase)
+                            } else if (cancelled) {
+                                latestPreviewAt.value(latestPositionMillis.value)
+                            }
                         }
                     },
             )
