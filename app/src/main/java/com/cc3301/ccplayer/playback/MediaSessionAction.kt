@@ -35,13 +35,18 @@ enum class MediaSessionAction(
 fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
     if (state == PlaybackState.Playing) MediaSessionAction.Pause else MediaSessionAction.Play
 
-/** 媒体会话动作的可用性：首次加载全部禁用；目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。 */
+/**
+ * 媒体会话动作的可用性：后台关闭时只放行暂停；首次加载全部禁用；
+ * 目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。
+ */
 fun mediaActionAllowed(
     action: MediaSessionAction,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
+    blocksBackgroundPlayback: Boolean = false,
 ): Boolean = when {
+    blocksBackgroundPlayback -> action == MediaSessionAction.Pause
     initialLoading -> false
     restoring -> true
     switching ->
@@ -67,19 +72,50 @@ fun dispatchMediaAction(
     state: PlaybackState,
     switching: Boolean,
     restoring: Boolean,
+    blocksBackgroundPlayback: Boolean = false,
     apply: (MediaSessionAction) -> Unit,
 ) {
-    if (mediaActionAllowed(action, switching, isInitialLoading(state, switching), restoring)) {
+    val initialLoading = isInitialLoading(state, switching)
+    if (mediaActionAllowed(action, switching, initialLoading, restoring, blocksBackgroundPlayback)) {
         apply(action)
     }
 }
 
-/** 媒体动作集合对应的 [PlaybackStateCompat] 动作位。 */
-fun playbackStateActions(actions: List<MediaSessionAction>): Long = actions.fold(0L) { flags, action ->
-    flags or when (action) {
-        MediaSessionAction.Play -> PlaybackStateCompat.ACTION_PLAY
-        MediaSessionAction.Pause -> PlaybackStateCompat.ACTION_PAUSE
-        MediaSessionAction.Previous -> PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
-        MediaSessionAction.Next -> PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+/** 通知栏动作集合：后台关闭时只保留暂停，其余情况按加载阶段收窄。 */
+fun mediaNotificationActions(
+    state: PlaybackState,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+    blocksBackgroundPlayback: Boolean,
+): List<MediaSessionAction> =
+    if (blocksBackgroundPlayback) {
+        listOf(MediaSessionAction.Pause)
+    } else {
+        listOf(MediaSessionAction.Previous, mediaSessionActionFor(state), MediaSessionAction.Next)
+            .filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
     }
+
+/** 拖动定位只在正常播放或暂停且未被加载阶段、后台策略限制时可用。 */
+fun mediaSeekAllowed(
+    state: PlaybackState,
+    hasMedia: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+    blocksBackgroundPlayback: Boolean,
+): Boolean = (state == PlaybackState.Playing || state == PlaybackState.Paused) &&
+    hasMedia && !switching && !initialLoading && !restoring && !blocksBackgroundPlayback
+
+/** 媒体动作集合对应的 [PlaybackStateCompat] 动作位。 */
+fun playbackStateActions(actions: List<MediaSessionAction>, seekable: Boolean = false): Long {
+    val flags = actions.fold(0L) { flags, action ->
+        flags or when (action) {
+            MediaSessionAction.Play -> PlaybackStateCompat.ACTION_PLAY
+            MediaSessionAction.Pause -> PlaybackStateCompat.ACTION_PAUSE
+            MediaSessionAction.Previous -> PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+            MediaSessionAction.Next -> PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+        }
+    }
+    return if (seekable) flags or PlaybackStateCompat.ACTION_SEEK_TO else flags
 }

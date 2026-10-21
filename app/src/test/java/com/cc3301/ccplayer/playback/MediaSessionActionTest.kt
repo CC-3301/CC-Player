@@ -128,7 +128,7 @@ class MediaSessionActionTest {
     @Test
     fun `restoring allows play pause and both episode actions`() {
         MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = true, initialLoading = false, restoring = true))
+            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = true))
         }
     }
 
@@ -138,13 +138,13 @@ class MediaSessionActionTest {
 
         dispatchMediaAction(
             MediaSessionAction.Play,
-            state = PlaybackState.Loading,
+            state = PlaybackState.Paused,
             switching = true,
             restoring = false,
         ) { applied += it }
         dispatchMediaAction(
             MediaSessionAction.Next,
-            state = PlaybackState.Loading,
+            state = PlaybackState.Paused,
             switching = true,
             restoring = false,
         ) { applied += it }
@@ -159,7 +159,7 @@ class MediaSessionActionTest {
         dispatchMediaAction(
             MediaSessionAction.Play,
             state = PlaybackState.Paused,
-            switching = true,
+            switching = false,
             restoring = true,
         ) { applied += it }
 
@@ -183,6 +183,100 @@ class MediaSessionActionTest {
     }
 
     @Test
+    fun `dispatch keeps pause while background playback is blocked during loading gates`() {
+        val applied = mutableListOf<MediaSessionAction>()
+
+        MediaSessionAction.entries.forEach { action ->
+            dispatchMediaAction(
+                action,
+                state = PlaybackState.Loading,
+                switching = false,
+                restoring = false,
+                blocksBackgroundPlayback = true,
+            ) { applied += it }
+        }
+
+        assertEquals(listOf(MediaSessionAction.Pause), applied)
+    }
+
+    @Test
+    fun `seek is blocked while loading switching or restoring`() {
+        assertFalse(
+            mediaSeekAllowed(
+                state = PlaybackState.Loading,
+                hasMedia = true,
+                switching = false,
+                initialLoading = true,
+                restoring = false,
+                blocksBackgroundPlayback = false,
+            ),
+        )
+        assertFalse(
+            mediaSeekAllowed(
+                state = PlaybackState.Paused,
+                hasMedia = true,
+                switching = true,
+                initialLoading = false,
+                restoring = false,
+                blocksBackgroundPlayback = false,
+            ),
+        )
+        assertFalse(
+            mediaSeekAllowed(
+                state = PlaybackState.Paused,
+                hasMedia = true,
+                switching = false,
+                initialLoading = false,
+                restoring = true,
+                blocksBackgroundPlayback = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `seek is blocked without media and when background playback is off in background`() {
+        assertFalse(
+            mediaSeekAllowed(
+                state = PlaybackState.Playing,
+                hasMedia = false,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+                blocksBackgroundPlayback = false,
+            ),
+        )
+        assertFalse(
+            mediaSeekAllowed(
+                state = PlaybackState.Playing,
+                hasMedia = true,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+                blocksBackgroundPlayback = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `seek action is declared only when seeking is allowed`() {
+        val actions = listOf(MediaSessionAction.Previous, MediaSessionAction.Pause, MediaSessionAction.Next)
+
+        assertEquals(
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT,
+            playbackStateActions(actions),
+        )
+        assertEquals(
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SEEK_TO,
+            playbackStateActions(actions, seekable = true),
+        )
+    }
+
+    @Test
     fun `playback state actions follow the allowed set`() {
         assertEquals(
             PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
@@ -190,7 +284,7 @@ class MediaSessionActionTest {
                 PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE,
             playbackStateActions(
-                availableMediaActions(switching = true, initialLoading = false, restoring = true),
+                availableMediaActions(switching = false, initialLoading = false, restoring = true),
             ),
         )
         assertEquals(
