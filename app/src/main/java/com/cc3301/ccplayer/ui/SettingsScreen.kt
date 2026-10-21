@@ -65,6 +65,8 @@ fun SettingsScreen(
     onSetAutoRestorePosition: (Boolean) -> Unit,
     onSetDecodeMode: (DecodeMode) -> Unit,
     onSetOrientationMode: (OrientationMode) -> Unit,
+    onSetDiagnosticsEnabled: (Boolean) -> Unit,
+    onExportDiagnostics: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -135,6 +137,18 @@ fun SettingsScreen(
                     onCheckedChange = onSetAutoRestorePosition,
                 )
             }
+            SettingsGroup(title = stringResource(R.string.settings_diagnostics_section)) {
+                ToggleSetting(
+                    label = stringResource(R.string.settings_diagnostics_log),
+                    checked = state.diagnosticsEnabled,
+                    onCheckedChange = onSetDiagnosticsEnabled,
+                )
+                RowDivider()
+                ActionSetting(
+                    label = stringResource(R.string.settings_export_diagnostics),
+                    onClick = onExportDiagnostics,
+                )
+            }
         }
     }
 }
@@ -195,6 +209,32 @@ private fun SettingSwitch(checked: Boolean) {
                 .size(20.dp)
                 .clip(CircleShape)
                 .background(if (checked) Color.White else AppColors.SwitchThumb),
+        )
+    }
+}
+
+/** 点击执行的设置项：整行可点，行尾显示进入箭头。 */
+@Composable
+private fun ActionSetting(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = AppColors.Foreground,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = AppColors.Faint,
         )
     }
 }

@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaSource
@@ -27,6 +29,7 @@ class PlaybackEntryOpener(
     private val onStartPlayback: (current: MediaFile, playlist: List<MediaFile>, directoryEntries: List<MediaFile>) -> Unit,
     private val onShowFailure: (MediaFailure) -> Unit,
     private val onLeavePlayer: () -> Unit,
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
 
     private var job: Job? = null
@@ -57,8 +60,10 @@ class PlaybackEntryOpener(
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (failure: MediaSourceException) {
+                diagnostics.log { "准备失败: ${entry.name} (${failure.failure})" }
                 finishWithFailure(failure.failure)
             } catch (failure: Exception) {
+                diagnostics.log { "准备失败: ${entry.name} (Unknown)" }
                 finishWithFailure(MediaFailure.Unknown)
             }
         }

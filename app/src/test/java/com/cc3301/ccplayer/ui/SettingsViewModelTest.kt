@@ -57,6 +57,16 @@ class SettingsViewModelTest {
         assertTrue(state.autoRestorePosition)
         assertEquals(DecodeMode.Hardware, state.decodeMode)
         assertEquals(OrientationMode.System, state.orientationMode)
+        assertFalse(state.diagnosticsEnabled)
+    }
+
+    @Test
+    fun `诊断日志开关改动写回设置并反映到状态`() = runTest {
+        viewModel.setDiagnosticsEnabled(true)
+        advanceUntilIdle()
+
+        assertTrue(settings.diagnosticsEnabled.first())
+        assertTrue(viewModel.state.value.diagnosticsEnabled)
     }
 
     @Test
