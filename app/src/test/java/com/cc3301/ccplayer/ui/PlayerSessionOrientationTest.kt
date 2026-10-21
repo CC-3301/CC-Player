@@ -10,8 +10,8 @@ class PlayerSessionOrientationTest {
     private val session = PlayerSessionOrientation()
 
     @Test
-    fun `转屏按钮覆盖本次播放而不改变设置判定`() {
-        session.toggle(isLandscape = false)
+    fun `转屏按钮产生的覆盖优先于方向设置`() {
+        session.toggle(ScreenOrientation.Portrait)
 
         assertEquals(ScreenOrientation.Landscape, session.override)
         assertEquals(
@@ -21,17 +21,29 @@ class PlayerSessionOrientationTest {
     }
 
     @Test
-    fun `同一会话切集保留转屏覆盖`() {
-        session.toggle(isLandscape = true)
+    fun `连点转屏按已施加方向连续切换`() {
+        // 系统旋转尚未生效时连续点击，仍按本次播放已施加的方向继续切换。
+        session.toggle(ScreenOrientation.Portrait)
+        assertEquals(ScreenOrientation.Landscape, session.override)
 
-        // 模拟同一会话内切到不同比例的下一集，覆盖不受宽高比影响。
+        session.toggle(ScreenOrientation.Portrait)
+        assertEquals(ScreenOrientation.Portrait, session.override)
+
+        session.toggle(ScreenOrientation.Portrait)
+        assertEquals(ScreenOrientation.Landscape, session.override)
+    }
+
+    @Test
+    fun `转屏覆盖不受视频宽高比影响`() {
+        session.toggle(ScreenOrientation.Landscape)
+
         assertEquals(ScreenOrientation.Portrait, session.resolve(OrientationMode.FollowVideo, 1.78))
         assertEquals(ScreenOrientation.Portrait, session.resolve(OrientationMode.FollowVideo, 0.56))
     }
 
     @Test
     fun `进入新播放清零转屏覆盖`() {
-        session.toggle(isLandscape = false)
+        session.toggle(ScreenOrientation.Portrait)
 
         session.beginPlayback()
 
@@ -44,7 +56,7 @@ class PlayerSessionOrientationTest {
 
     @Test
     fun `退出播放页清零转屏覆盖`() {
-        session.toggle(isLandscape = true)
+        session.toggle(ScreenOrientation.Landscape)
 
         session.endPlayback()
 
@@ -57,7 +69,7 @@ class PlayerSessionOrientationTest {
 
     @Test
     fun `清除覆盖后跟随视频继续按宽高比判定`() {
-        session.toggle(isLandscape = true)
+        session.toggle(ScreenOrientation.Landscape)
         session.clearOverride()
 
         assertEquals(

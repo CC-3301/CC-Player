@@ -30,9 +30,10 @@ class PlayerSessionOrientation {
         override = null
     }
 
-    /** 转屏按钮：按当前是否横屏切到另一个方向。 */
-    fun toggle(isLandscape: Boolean) {
-        override = toggledOrientation(isLandscape)
+    /** 转屏按钮：按已施加的方向或当前屏幕方向切到另一个方向，连点可连续切换。 */
+    fun toggle(current: ScreenOrientation) {
+        val active = override ?: current
+        override = toggledOrientation(active == ScreenOrientation.Landscape)
     }
 
     /** 本次播放应施加的朝向；没有覆盖时按设置与视频比例判定。 */

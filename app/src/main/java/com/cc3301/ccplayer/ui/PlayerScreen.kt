@@ -126,22 +126,6 @@ private val PlayerBottomBarGradient = Brush.verticalGradient(
     1f to Color.Black.copy(alpha = 0.78f),
 )
 
-/** 播放页两侧次级按钮的最大尺寸。 */
-private val PlayerSideButtonSize = 36.dp
-
-/** 上一集/下一集按钮尺寸（ADR-0025）。 */
-private val PlayerTransportButtonSize = 46.dp
-
-/** 播放/暂停按钮尺寸（ADR-0025）。 */
-private val PlayerPlayPauseButtonSize = 58.dp
-
-/** 播放/暂停与上一集/下一集之间的间距。 */
-private val PlayerTransportGap = 16.dp
-
-/** 传输三键整组的固定宽度。 */
-private val PlayerTransportWidth =
-    PlayerTransportButtonSize * 2 + PlayerPlayPauseButtonSize + PlayerTransportGap * 2
-
 /** 吞掉区域内触摸，避免落到下层手势层；不建立可点击语义。 */
 private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
     awaitPointerEventScope {
@@ -788,12 +772,7 @@ private fun Controls(
             .background(PlayerBottomBarGradient)
             .blockPlayerGestures()
             .safeDrawingPadding()
-            .padding(
-                start = AppSpacing.Lg,
-                end = AppSpacing.Lg,
-                top = 24.dp,
-                bottom = AppSpacing.Md,
-            ),
+            .padding(top = 24.dp, bottom = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
     ) {
         if (playlistVisible) {
@@ -801,12 +780,14 @@ private fun Controls(
                 playlist = playlist,
                 currentIndex = currentIndex,
                 onSelect = onPlaylistSelect,
+                modifier = Modifier.padding(horizontal = AppSpacing.Lg),
             )
         }
         if (subtitleMenuVisible) {
             SubtitlePanel(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
                 onSelect = onSelectSubtitle,
+                modifier = Modifier.padding(horizontal = AppSpacing.Lg),
             )
         }
         SeekBar(
@@ -815,6 +796,7 @@ private fun Controls(
             previewMillis = seekPreviewMillis,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
+            modifier = Modifier.padding(horizontal = AppSpacing.Lg),
         )
         PlayerIconBar(
             playing = state == PlaybackState.Playing,
@@ -847,15 +829,18 @@ private fun PlayerIconBar(
     onTogglePlaylist: () -> Unit,
     onLock: () -> Unit,
 ) {
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(PlayerPlayPauseButtonSize),
-    ) {
-        // 传输三键宽度固定；两侧次级按钮让位收缩，保证窄屏也不与中间重叠。
-        val sideButtonSize = ((maxWidth - PlayerTransportWidth) / 4f)
-            .coerceIn(24.dp, PlayerSideButtonSize)
-        Box(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val metrics = playerIconBarMetrics(maxWidth)
+        val barHeight = if (metrics.rightStacked) {
+            PlayerSideTouchTarget * 2
+        } else {
+            PlayerPlayPauseButtonSize
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(barHeight),
+        ) {
             // 左下角锁定键与上一集/播放/下一集同一条水平线。
             PlayerIconButton(
                 icon = R.drawable.ic_player_lock_closed,
@@ -863,21 +848,21 @@ private fun PlayerIconBar(
                 onClick = onLock,
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .size(sideButtonSize),
+                    .size(metrics.sideButtonSize),
             )
             // 上一集在播放键左侧、下一集在右侧，播放键始终居中。
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(PlayerTransportGap),
+                horizontalArrangement = Arrangement.spacedBy(metrics.gap),
             ) {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
                     enabled = canGoPrevious,
-                    modifier = Modifier.size(PlayerTransportButtonSize),
-                    iconSize = 28.dp,
+                    modifier = Modifier.size(metrics.previousNextSize),
+                    iconSize = PlayerTransportIconSize,
                 )
                 PlayerIconButton(
                     icon = if (playing) R.drawable.ic_player_pause else R.drawable.ic_player_play,
@@ -885,37 +870,55 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onTogglePlayPause,
-                    modifier = Modifier.size(PlayerPlayPauseButtonSize),
-                    iconSize = 34.dp,
+                    modifier = Modifier.size(metrics.playPauseSize),
+                    iconSize = PlayerPlayPauseIconSize,
                 )
                 PlayerIconButton(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
                     enabled = canGoNext,
-                    modifier = Modifier.size(PlayerTransportButtonSize),
-                    iconSize = 28.dp,
+                    modifier = Modifier.size(metrics.previousNextSize),
+                    iconSize = PlayerTransportIconSize,
                 )
             }
-            // 字幕紧挨播放列表放在右下区域。
-            Row(
-                modifier = Modifier.align(Alignment.CenterEnd),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            // 字幕紧挨播放列表放在右下区域；极窄屏改为上下排列，避免与三键重叠。
+            val subtitleButton: @Composable () -> Unit = {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
                     active = subtitleMenuVisible,
-                    modifier = Modifier.size(sideButtonSize),
+                    modifier = Modifier.size(metrics.sideButtonSize),
+                    iconSize = PlayerSideIconSize,
                 )
+            }
+            val playlistButton: @Composable () -> Unit = {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
                     active = playlistVisible,
-                    modifier = Modifier.size(sideButtonSize),
+                    modifier = Modifier.size(metrics.sideButtonSize),
+                    iconSize = PlayerSideIconSize,
                 )
+            }
+            if (metrics.rightStacked) {
+                Column(
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    subtitleButton()
+                    playlistButton()
+                }
+            } else {
+                Row(
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    subtitleButton()
+                    playlistButton()
+                }
             }
         }
     }
@@ -930,7 +933,7 @@ private fun PlayerIconButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     active: Boolean = false,
-    iconSize: Dp = 24.dp,
+    iconSize: Dp = PlayerSideIconSize,
 ) {
     IconButton(onClick = onClick, enabled = enabled, modifier = modifier) {
         Icon(
@@ -954,10 +957,11 @@ private fun SeekBar(
     previewMillis: Long?,
     onPreview: (Long) -> Unit,
     onCommit: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
     val shown = (previewMillis ?: positionMillis).coerceIn(0L, maximum)
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1289,9 +1293,10 @@ private fun PlaylistPanel(
     playlist: List<MediaFile>,
     currentIndex: Int,
     onSelect: (MediaFile) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
             .playerPanel(),
@@ -1314,9 +1319,13 @@ private fun PlaylistPanel(
 
 /** 字幕菜单：内嵌轨道、可匹配外挂、关闭，当前生效项用强调色。 */
 @Composable
-private fun SubtitlePanel(menu: List<SubtitleMenuItem>, onSelect: (SubtitleMenuItem) -> Unit) {
+private fun SubtitlePanel(
+    menu: List<SubtitleMenuItem>,
+    onSelect: (SubtitleMenuItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(max = 240.dp)
             .playerPanel(),

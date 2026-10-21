@@ -273,9 +273,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 }
                             },
                             onToggleRotation = {
-                                sessionOrientation.toggle(
-                                    currentScreenOrientation() == ScreenOrientation.Landscape,
-                                )
+                                sessionOrientation.toggle(currentScreenOrientation())
                             },
                             onClose = { handlePlayerBack() },
                         )
@@ -583,7 +581,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 退出播放页：立即恢复系统栏并交回方向设置，再切回浏览页。 */
+    /**
+     * 退出播放页：先同步恢复系统栏与方向，保证系统栏在页面切换前出现；
+     * 状态变化后 [LaunchedEffect] 会按非播放状态再兜底应用一次，重复调用无副作用。
+     */
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
         sessionOrientation.endPlayback()
