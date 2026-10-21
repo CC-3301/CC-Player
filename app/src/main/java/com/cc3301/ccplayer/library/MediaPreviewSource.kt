@@ -192,9 +192,12 @@ class CachedMediaPreviewSource(
         }
         if (result == PreviewDuration.Failed) {
             val attempts = (previous?.attempts ?: 0) + 1
-            durationFailures[key] = RetryState(
-                attempts = attempts,
-                retryAtMillis = monotonicClock() + durationRetryDelay(attempts),
+            val failedAt = monotonicClock()
+            recordRetry(
+                failures = durationFailures,
+                key = key,
+                state = RetryState(attempts, failedAt + durationRetryDelay(attempts)),
+                now = failedAt,
             )
         } else {
             durationFailures.remove(key)
@@ -310,14 +313,33 @@ class CachedMediaPreviewSource(
             throw cancellation
         } catch (failure: Exception) {
             val attempts = (previous?.attempts ?: 0) + 1
-            extractionFailures[key] = RetryState(
-                attempts = attempts,
-                retryAtMillis = monotonicClock() + extractionRetryDelay(attempts),
+            val failedAt = monotonicClock()
+            recordRetry(
+                failures = extractionFailures,
+                key = key,
+                state = RetryState(attempts, failedAt + extractionRetryDelay(attempts)),
+                now = failedAt,
             )
             return LoadedPreview(image = null, durationMillis = null)
         }
         extractionFailures.remove(key)
         return loaded
+    }
+
+    /** 记录失败退避；记录数达到上限时先清掉已过期的，再移除最旧的一条。 */
+    private fun <K> recordRetry(
+        failures: ConcurrentHashMap<K, RetryState>,
+        key: K,
+        state: RetryState,
+        now: Long,
+    ) {
+        if (failures.size >= MAX_RETRY_ENTRIES) {
+            failures.entries.removeAll { it.value.retryAtMillis <= now }
+            if (failures.size >= MAX_RETRY_ENTRIES) {
+                failures.keys.firstOrNull()?.let { failures.remove(it) }
+            }
+        }
+        failures[key] = state
     }
 
     /** 连续失败按倍数退避，上限为十分钟。 */
@@ -355,6 +377,9 @@ class CachedMediaPreviewSource(
         /** 时长读取失败后的最大重试间隔。 */
         private const val DURATION_RETRY_MAX_MILLIS = 10 * 60 * 1000L
 
+        /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
+        private const val MAX_RETRY_ENTRIES = 512
+
         fun create(context: Context, networkReads: NetworkMediaReads): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
@@ -369,16 +394,11 @@ class CachedMediaPreviewSource(
 
 /**
  * 缩略图缓存键：位置、大小、修改时间、抽帧策略版本与目标宽度。
- * 音频使用内嵌封面、不按目标宽度缩放，因此宽度不参与音频缓存键。
+ * 音频封面与视频帧都按有效目标宽度缩放，因此宽度同样参与音频缓存键。
  * 修改时间缺失时用有效期代替修改时间；有效期变化必须视为另一份缓存。
  */
 internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String {
-    val width = if (mediaKindOf(file.name) == MediaKind.Audio) {
-        ""
-    } else {
-        "|w${effectiveTargetWidth(policy.targetWidth)}"
-    }
-    val base = "${file.location}|${file.size}|v${policy.version}$width"
+    val base = "${file.location}|${file.size}|v${policy.version}|w${effectiveTargetWidth(policy.targetWidth)}"
     return if (file.lastModified > 0) {
         "$base|m${file.lastModified}"
     } else {

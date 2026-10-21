@@ -409,6 +409,97 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `无图条目修改时间缺失且有效期到期后重新抽取`() = runTest {
+        var now = 1_000L
+        val cache = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+        val bounded = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = cache,
+            monotonicClock = { now },
+        )
+        extractor.imageBytes = null
+        extractor.durationMillis = 5_000
+        val file = local("歌.mp3", lastModified = 0)
+
+        assertNull(bounded.preview(file).image)
+        assertEquals(1, extractor.imageRequests.size)
+
+        now += MISSING_MODIFIED_VALIDITY_MILLIS - 1
+        assertNull(bounded.preview(file).image)
+        assertEquals(1, extractor.imageRequests.size)
+
+        now += 2
+        extractor.imageBytes = byteArrayOf(1, 2)
+        val fresh = bounded.preview(file)
+
+        assertArrayEquals(byteArrayOf(1, 2), fresh.image!!.readBytes())
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `无图条目时长未知时后续命中补读时长`() = runTest {
+        extractor.imageBytes = null
+        extractor.durationMillis = 187_000
+        extractor.durationFailure = IllegalStateException("读时长失败")
+        val file = local("歌.mp3", lastModified = 1_000)
+        val key = thumbnailCacheKey(file, ThumbnailPolicy())
+
+        val first = source.preview(file)
+        assertNull(first.image)
+        assertNull(first.durationMillis)
+        val entry = cache().entry(key)
+        assertNotNull(entry)
+        assertNull(entry!!.file)
+        assertTrue(!entry.durationKnown)
+
+        extractor.durationFailure = null
+        val hit = source.preview(file)
+
+        assertNull(hit.image)
+        assertEquals(187_000L, hit.durationMillis)
+        val updated = cache().entry(key)
+        assertNotNull(updated)
+        assertEquals(187_000L, updated!!.durationMillis)
+        assertTrue(updated.durationKnown)
+    }
+
+    @Test
+    fun `候选帧全部解码失败不写无图条目，退避后可重试`() = runTest {
+        var now = 1_000L
+        val tracker = RetryAfterFailureExtractor()
+        val cache = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            ioDispatcher = Dispatchers.Unconfined,
+        )
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = cache,
+            monotonicClock = { now },
+        )
+        val file = local("电影.mkv", lastModified = 1_000)
+
+        assertNull(bounded.preview(file).image)
+        assertEquals(1, tracker.requests)
+        assertEquals(0, directory.listFiles().orEmpty().count { it.name.endsWith(".meta") })
+
+        now += 30_000
+        assertNull(bounded.preview(file).image)
+        assertEquals(2, tracker.requests)
+
+        now += 60_000
+        tracker.failure = null
+        assertNotNull(bounded.preview(file).image)
+        assertEquals(3, tracker.requests)
+        assertEquals(1, imageFileCount())
+    }
+
+    @Test
     fun `整次抽取失败后按退避重试且成功后清理键`() = runTest {
         var now = 1_000L
         val tracker = RetryAfterFailureExtractor()
@@ -584,7 +675,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `音频缓存键不包含目标宽度`() = runTest {
+    fun `音频缓存键包含目标宽度`() = runTest {
         val first = CachedMediaPreviewSource(
             extractor = extractor,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
@@ -600,8 +691,8 @@ class CachedMediaPreviewSourceTest {
         first.preview(local("歌.mp3", lastModified = 1_000))
         second.preview(local("歌.mp3", lastModified = 1_000))
 
-        assertEquals(1, extractor.imageRequests.size)
-        assertEquals(1, imageFileCount())
+        assertEquals(2, extractor.imageRequests.size)
+        assertEquals(2, imageFileCount())
     }
 
     @Test

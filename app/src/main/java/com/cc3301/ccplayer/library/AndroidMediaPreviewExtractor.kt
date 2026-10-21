@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.library
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -9,6 +10,7 @@ import androidx.core.graphics.get
 import androidx.core.graphics.scale
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -36,7 +38,7 @@ class AndroidMediaPreviewExtractor(
         withRetriever(file) { retriever ->
             when (mediaKindOf(file.name)) {
                 MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
-                MediaKind.Audio -> retriever.embeddedPicture
+                MediaKind.Audio -> coverBytes(retriever, targetWidth)
                 null -> null
             }
         }
@@ -68,7 +70,7 @@ class AndroidMediaPreviewExtractor(
                     )
 
                     MediaKind.Audio -> MediaPreviewExtraction(
-                        imageBytes = retriever.embeddedPicture,
+                        imageBytes = coverBytes(retriever, targetWidth),
                         duration = retriever.readDuration(),
                     )
 
@@ -98,7 +100,7 @@ private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
             retriever.setDataSource(dataSource)
             when (kind) {
                 MediaKind.Video -> videoFrameBytes(retriever, NETWORK_FRAME_COUNT, targetWidth)
-                MediaKind.Audio -> retriever.embeddedPicture
+                MediaKind.Audio -> coverBytes(retriever, targetWidth)
             }
         } finally {
             retriever.release()
@@ -134,12 +136,32 @@ private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, 
         retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             ?.let { frame -> scaleFrame(frame, targetWidth) }
     }
+    // 候选帧位置存在却一帧都没解出，属于本次抽取失败，不能当成“确定没有图”。
+    if (decoded.isEmpty()) throw IOException("没有解出可用的视频帧")
     val chosen = chooseFrame(decoded, ::isSolidFrame)
     decoded.forEach { (_, frame) ->
         if (frame !== chosen) frame.recycle()
     }
-    return chosen?.let { frame ->
+    val compressed = chosen?.let { frame ->
         compressFrame(frame).also { frame.recycle() }
+    }
+    return compressed ?: throw IOException("视频帧压缩失败")
+}
+
+/** 音频内嵌封面按与视频帧相同的宽度和 JPEG 质量处理；没有封面返回 null。 */
+private fun coverBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? {
+    val picture = retriever.embeddedPicture ?: return null
+    val bitmap = BitmapFactory.decodeByteArray(picture, 0, picture.size)
+        ?: throw IOException("封面解码失败")
+    return try {
+        val scaled = scaleFrame(bitmap, targetWidth)
+        try {
+            compressFrame(scaled) ?: throw IOException("封面压缩失败")
+        } finally {
+            if (scaled !== bitmap) scaled.recycle()
+        }
+    } finally {
+        bitmap.recycle()
     }
 }
 

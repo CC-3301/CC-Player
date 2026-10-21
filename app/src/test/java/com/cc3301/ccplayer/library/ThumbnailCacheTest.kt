@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.library
 import java.io.File
 import java.nio.file.Files
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -334,7 +335,12 @@ class ThumbnailCacheTest {
     fun `并发保存与淘汰保持图片与时长配对`() = runBlocking {
         val sharedDirectory = Files.createTempDirectory("thumbnail-evict-race").toFile()
         try {
-            val concurrent = ThumbnailCache(directory = sharedDirectory, maxBytes = 32)
+            val tick = AtomicLong(1_000L)
+            val concurrent = ThumbnailCache(
+                directory = sharedDirectory,
+                maxBytes = 32,
+                clock = { tick.getAndIncrement() },
+            )
             val keys = (1..30).map { index -> "content://root/并发淘汰$index.mkv" }
             val failures = Collections.synchronizedList(mutableListOf<Throwable>())
             val threads = keys.mapIndexed { index, key ->
@@ -355,6 +361,8 @@ class ThumbnailCacheTest {
 
             assertTrue(failures.isEmpty())
             assertEquals(0, sharedDirectory.tempCount())
+            // 上限只够一条，并发写入后必须确实发生过淘汰。
+            assertTrue(sharedDirectory.imageCount() in 1 until keys.size)
             keys.forEach { key ->
                 concurrent.entry(key)?.let { entry ->
                     val image = entry.file ?: return@let
@@ -365,6 +373,68 @@ class ThumbnailCacheTest {
         } finally {
             sharedDirectory.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `首次并发访问只执行一次启动清理`() = runBlocking {
+        repeat(20) { index -> File(directory, "stale$index.tmp").writeText("x") }
+        val concurrent = ThumbnailCache(directory = directory, maxBytes = 1 shl 20)
+        val failures = Collections.synchronizedList(mutableListOf<Throwable>())
+        val threads = (1..32).map { index ->
+            Thread {
+                runBlocking {
+                    try {
+                        concurrent.entry("content://root/并发首次$index.mkv")
+                    } catch (failure: Throwable) {
+                        failures += failure
+                    }
+                }
+            }
+        }
+
+        threads.forEach(Thread::start)
+        threads.forEach(Thread::join)
+
+        assertTrue(failures.isEmpty())
+        assertEquals(1, concurrent.cleanupRuns)
+        assertEquals(0, directory.tempCount())
+    }
+
+    @Test
+    fun `无图条目超过数量上限时淘汰最旧`() = runBlocking {
+        var now = 1_000L
+        val capped = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            maxNoImageEntries = 3,
+        )
+        (1..5).forEach { index ->
+            now += 10
+            capped.saveWithoutImage("content://root/无图$index.mp3", durationMillis = index.toLong())
+        }
+
+        assertEquals(3, directory.metadataCount())
+        assertNull(capped.entry("content://root/无图1.mp3"))
+        assertNull(capped.entry("content://root/无图2.mp3"))
+        assertNotNull(capped.entry("content://root/无图3.mp3"))
+        assertNotNull(capped.entry("content://root/无图4.mp3"))
+        assertNotNull(capped.entry("content://root/无图5.mp3"))
+    }
+
+    @Test
+    fun `无图条目不占用图片字节上限`() = runBlocking {
+        val capped = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1,
+            maxNoImageEntries = 100,
+        )
+        (1..10).forEach { index ->
+            capped.saveWithoutImage("content://root/仅元数据$index.mp3", durationMillis = index.toLong())
+        }
+
+        assertEquals(10, directory.metadataCount())
+        assertEquals(0, directory.imageCount())
     }
 
     @Test

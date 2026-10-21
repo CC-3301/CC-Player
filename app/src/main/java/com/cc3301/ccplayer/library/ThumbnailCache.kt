@@ -21,6 +21,7 @@ data class CachedThumbnail(
  *
  * 每个条目带一份元数据，第一行是写入时间，第二行是时长：
  * `unknown` 或缺失表示时长未知，`null` 表示确定没有时长，数字表示已知时长；第三行标记无图条目。
+ * 无图条目只占元数据、不计入字节上限，按条数单独淘汰。
  * 写入时间用于有效期判断。磁盘读写与启动清理都在 IO 调度执行。
  */
 class ThumbnailCache(
@@ -28,6 +29,7 @@ class ThumbnailCache(
     private val maxBytes: Long,
     private val clock: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val maxNoImageEntries: Int = MAX_NO_IMAGE_ENTRIES,
 ) {
 
     /** 同一目录的实例共用锁，避免多实例同时替换同名文件。 */
@@ -36,6 +38,11 @@ class ThumbnailCache(
     /** 启动清理只做一次；首次访问时在 IO 调度执行，不在构造时扫目录。 */
     @Volatile
     private var cleaned = false
+
+    /** 实际执行的启动清理次数；用于验证并发首次访问只清理一次。 */
+    @Volatile
+    internal var cleanupRuns = 0
+        private set
 
     /** 取出该缓存键对应的条目；没有缓存或已超过有效期时返回 null。 */
     suspend fun entry(location: String, maxAgeMillis: Long? = null): CachedThumbnail? =
@@ -90,14 +97,15 @@ class ThumbnailCache(
 
     private fun readEntry(location: String, maxAgeMillis: Long?): CachedThumbnail? {
         val cached = File(directory, cacheFileName(location))
-        val metadata = metadataFile(location).takeIf { it.isFile }?.readMetadata()
+        val metadataFile = metadataFile(location).takeIf { it.isFile }
+        val metadata = metadataFile?.readMetadata()
         val hasImage = cached.isFile
         if (!hasImage && metadata?.noImage != true) return null
         if (maxAgeMillis != null) {
             val writtenAt = metadata?.writtenAt ?: return null
             if (clock() - writtenAt > maxAgeMillis) return null
         }
-        if (hasImage) cached.setLastModified(clock())
+        if (hasImage) cached.setLastModified(clock()) else metadataFile?.setLastModified(clock())
         return CachedThumbnail(
             file = if (hasImage) cached else null,
             durationMillis = metadata?.durationMillis,
@@ -166,6 +174,7 @@ class ThumbnailCache(
         try {
             temp.writeText(encodeMetadata(writtenAt, durationMillis, durationKnown, noImage))
             replaceFile(temp, metadata)
+            metadata.setLastModified(writtenAt)
         } finally {
             temp.delete()
         }
@@ -179,6 +188,7 @@ class ThumbnailCache(
                 deleteTemporaryFiles()
                 deleteOrphanMetadata()
             }
+            cleanupRuns++
             cleaned = true
         }
     }
@@ -195,12 +205,12 @@ class ThumbnailCache(
             for (entry in entries) {
                 if (totalBytes <= maxBytes) break
                 if (entry == keep) continue
-                // 与本次扫描同时写入的条目留到下次淘汰，避免删掉正在落盘的预览。
-                if (entry.lastModified() >= scanStartedAt) continue
                 val length = entry.length()
                 val deleted = synchronized(locks.entry) {
-                    // 删除时持条目锁，避免删掉另一写入者刚换好图片、尚未换元数据的条目。
-                    if (!entry.isFile || !entry.delete()) {
+                    // 删除前重读修改时间：期间被命中或重写的条目留到下次淘汰。
+                    if (entry.lastModified() >= scanStartedAt) {
+                        false
+                    } else if (!entry.isFile || !entry.delete()) {
                         false
                     } else {
                         File(directory, entry.name + METADATA_SUFFIX).delete()
@@ -208,6 +218,30 @@ class ThumbnailCache(
                     }
                 }
                 if (deleted) totalBytes -= length
+            }
+            evictNoImageEntries()
+        }
+    }
+
+    /** 无图条目只占元数据，不计入字节上限，按条数单独淘汰。 */
+    private fun evictNoImageEntries() {
+        synchronized(locks.entry) {
+            val metadataFiles = directory.listFiles().orEmpty()
+                .filter { it.isFile && it.name.endsWith(METADATA_SUFFIX) }
+            if (metadataFiles.size <= maxNoImageEntries) return@synchronized
+            val entries = metadataFiles
+                .filter { metadata ->
+                    val image = File(
+                        directory,
+                        metadata.name.removeSuffix(METADATA_SUFFIX) + IMAGE_SUFFIX,
+                    )
+                    !image.isFile && metadata.readMetadata()?.noImage == true
+                }
+                .sortedBy { it.lastModified() }
+            var count = entries.size
+            for (entry in entries) {
+                if (count <= maxNoImageEntries) break
+                if (entry.delete()) count--
             }
         }
     }
@@ -314,3 +348,6 @@ private const val TEMP_SUFFIX = ".tmp"
 private const val DURATION_NONE = "null"
 private const val DURATION_UNKNOWN = "unknown"
 private const val NO_IMAGE_MARKER = "no-image"
+
+/** 无图条目的数量上限；它们只占元数据，需要单独控制增长。 */
+private const val MAX_NO_IMAGE_ENTRIES = 2_048
