@@ -364,7 +364,8 @@ fun PlayerScreen(
         val backAllowed = inputAllowed(PlayerInput.Back, locked, initialLoading)
         val controlsAllowed = inputAllowed(PlayerInput.ControlBar, locked, initialLoading)
         if (backAllowed) {
-            if (controlsVisible) {
+            // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
+            if (controlsVisible || initialLoading) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,

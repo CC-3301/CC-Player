@@ -132,4 +132,13 @@ class PlayerGesturesTest {
             assertFalse(input.name, inputAllowed(input, locked = false, initialLoading = true))
         }
     }
+
+    @Test
+    fun `锁定优先于首次加载限制`() {
+        assertTrue(inputAllowed(PlayerInput.UnlockButton, locked = true, initialLoading = true))
+        assertFalse(inputAllowed(PlayerInput.Back, locked = true, initialLoading = true))
+        PlayerInput.entries.filter { it != PlayerInput.UnlockButton }.forEach { input ->
+            assertFalse(input.name, inputAllowed(input, locked = true, initialLoading = true))
+        }
+    }
 }

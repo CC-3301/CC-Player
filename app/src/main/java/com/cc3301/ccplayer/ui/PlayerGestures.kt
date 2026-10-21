@@ -119,10 +119,11 @@ fun gesturesAllowed(locked: Boolean, panelOpen: Boolean, initialLoading: Boolean
     !locked && !panelOpen && !initialLoading
 
 /**
- * 首次加载期间只放行返回；锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。
+ * 锁定时只放行 [PlayerInput.UnlockButton]，优先于首次加载限制；
+ * 未锁定但首次加载期间只放行返回；其余元素既不响应手势也不显示。
  */
 fun inputAllowed(input: PlayerInput, locked: Boolean, initialLoading: Boolean = false): Boolean = when {
-    initialLoading -> input == PlayerInput.Back
     locked -> input == PlayerInput.UnlockButton
+    initialLoading -> input == PlayerInput.Back
     else -> true
 }

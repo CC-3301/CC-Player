@@ -38,6 +38,18 @@ class PendingPlaybackTest {
     }
 
     @Test
+    fun `从未就绪到就绪只起播一次`() {
+        pending.set(current, playlist, directoryEntries)
+        var starts = 0
+
+        pending.start(canStart = false) { _, _, _ -> starts += 1 }
+        pending.start(canStart = true) { _, _, _ -> starts += 1 }
+        pending.start(canStart = true) { _, _, _ -> starts += 1 }
+
+        assertEquals(1, starts)
+    }
+
+    @Test
     fun `清空后不再起播`() {
         pending.set(current, playlist, directoryEntries)
         pending.clear()

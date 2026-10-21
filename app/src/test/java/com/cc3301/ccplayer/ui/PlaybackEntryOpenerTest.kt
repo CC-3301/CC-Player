@@ -131,21 +131,49 @@ class PlaybackEntryOpenerTest {
     @Test
     fun `音频准备完成后才进入播放页`() = runTest {
         val audio = testVideo("片头曲.mp3", "content://root/片头曲.mp3")
+        val directoryGate = CompletableDeferred<Unit>()
         val recorder = EntryRecorder()
         val opener = opener(
             scope = this,
             recorder = recorder,
-            directoryEntries = { listOf(audio) },
+            directoryEntries = {
+                directoryGate.await()
+                listOf(audio)
+            },
             streams = { throw AssertionError("本地音频不应建立网络连接") },
         )
 
         opener.open(audio, listOf(audio), enterBeforePreparing = false)
+        runCurrent()
 
         assertTrue("音频不预先进入播放页", recorder.enterStates.isEmpty())
+        assertTrue(recorder.events.isEmpty())
+
+        directoryGate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(listOf(false), recorder.enterStates)
+        assertEquals(listOf("enter:false", "start"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
+    }
+
+    @Test
+    fun `音频准备失败不进入播放页`() = runTest {
+        val audio = testVideo("片头曲.mp3", "content://root/片头曲.mp3")
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { throw IllegalStateException("目录读不了") },
+            streams = { throw AssertionError("本地音频不应建立网络连接") },
+        )
+
+        opener.open(audio, listOf(audio), enterBeforePreparing = false)
+        advanceUntilIdle()
+
+        assertTrue(recorder.enterStates.isEmpty())
+        assertNull(recorder.opened)
+        assertEquals(MediaFailure.Unknown, recorder.shownFailure)
+        assertEquals(listOf("failure:Unknown", "leave"), recorder.events)
     }
 
     @Test
