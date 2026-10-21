@@ -7,14 +7,13 @@ import com.cc3301.ccplayer.library.thumbnailCacheKey
 import com.cc3301.ccplayer.library.thumbnailCacheMaxAge
 import java.io.File
 
-/** 通知展示内容：标题、时长、封面文件、动作集合与进度刷新节奏。 */
+/** 通知展示内容：标题、时长、封面文件与动作集合。 */
 data class MediaNotificationContent(
     val title: String,
     val durationMillis: Long,
     val positionMillis: Long,
     val coverFile: File?,
     val actions: List<MediaSessionAction>,
-    val refreshIntervalMillis: Long?,
 )
 
 /**
@@ -36,14 +35,13 @@ fun mediaNotificationContent(
     durationMillis = notificationDurationMillis(progress),
     positionMillis = progress.positionMillis,
     coverFile = coverFile,
-    actions = notificationActions(
+    actions = mediaNotificationActions(
         state = state,
         switching = switching,
         initialLoading = initialLoading,
         restoring = restoring,
         blocksBackgroundPlayback = blocksBackgroundPlayback,
     ),
-    refreshIntervalMillis = notificationRefreshIntervalMillis(state),
 )
 
 /** 通知标题：文件名去掉最后一个扩展名；隐藏文件与无扩展名文件名原样保留。 */
@@ -69,30 +67,35 @@ fun shouldRefreshNotification(
     current: PlaybackProgress,
 ): Boolean = state != PlaybackState.Playing || previous.durationMillis != current.durationMillis
 
+/** 服务内的位置回调触发器：保留上一次进度，决定本次回调是否要刷新通知。 */
+internal class NotificationProgressTrigger {
+    private var previous = PlaybackProgress()
+
+    fun shouldRefresh(state: PlaybackState, current: PlaybackProgress): Boolean {
+        val refresh = shouldRefreshNotification(state, previous, current)
+        previous = current
+        return refresh
+    }
+}
+
 /**
- * 缩略图封面读取：命中后按缓存键复用；未命中不记负缓存，缩略图稍后落盘时下一次可补上。
+ * 缩略图封面读取：每次都按缓存键和有效期向缓存查询，命中不跨刷新复用，
+ * 文件被淘汰或超过有效期时能及时退回应用图标。
  */
 internal class NotificationCoverCache(
     private val cache: ThumbnailCache,
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
 ) {
-    private var cachedKey: String? = null
-    private var cachedFile: File? = null
-
     suspend fun file(media: MediaFile?): File? {
         if (media == null) return null
-        val key = thumbnailCacheKey(media, policy)
-        if (cachedFile != null && cachedKey == key) return cachedFile
-        val file = cache.file(key, thumbnailCacheMaxAge(media, policy))
-        if (file != null) {
-            cachedKey = key
-            cachedFile = file
-        } else {
-            cachedKey = null
-            cachedFile = null
-        }
-        return file
+        return cache.file(
+            thumbnailCacheKey(media, policy),
+            thumbnailCacheMaxAge(media, policy),
+        )
     }
 }
 
 const val NOTIFICATION_REFRESH_INTERVAL_MILLIS = 1_000L
+
+/** 暂停或结束后为补上稍后落盘的缩略图，最多每 2 秒刷新一次。 */
+const val COVER_RETRY_INTERVAL_MILLIS = 2_000L

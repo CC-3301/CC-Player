@@ -53,7 +53,7 @@ class BackgroundPlaybackPolicy(
         switching: Boolean = false,
         initialLoading: Boolean = false,
         restoring: Boolean = false,
-    ): List<MediaSessionAction> = notificationActions(
+    ): List<MediaSessionAction> = mediaNotificationActions(
         state = state,
         switching = switching,
         initialLoading = initialLoading,

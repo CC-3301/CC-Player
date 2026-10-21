@@ -138,13 +138,13 @@ class MediaSessionActionTest {
 
         dispatchMediaAction(
             MediaSessionAction.Play,
-            state = PlaybackState.Loading,
+            state = PlaybackState.Paused,
             switching = true,
             restoring = false,
         ) { applied += it }
         dispatchMediaAction(
             MediaSessionAction.Next,
-            state = PlaybackState.Loading,
+            state = PlaybackState.Paused,
             switching = true,
             restoring = false,
         ) { applied += it }
@@ -183,6 +183,23 @@ class MediaSessionActionTest {
     }
 
     @Test
+    fun `dispatch keeps pause while background playback is blocked during loading gates`() {
+        val applied = mutableListOf<MediaSessionAction>()
+
+        MediaSessionAction.entries.forEach { action ->
+            dispatchMediaAction(
+                action,
+                state = PlaybackState.Loading,
+                switching = false,
+                restoring = false,
+                blocksBackgroundPlayback = true,
+            ) { applied += it }
+        }
+
+        assertEquals(listOf(MediaSessionAction.Pause), applied)
+    }
+
+    @Test
     fun `seek is blocked while loading switching or restoring`() {
         assertFalse(
             mediaSeekAllowed(
@@ -196,7 +213,7 @@ class MediaSessionActionTest {
         )
         assertFalse(
             mediaSeekAllowed(
-                state = PlaybackState.Loading,
+                state = PlaybackState.Paused,
                 hasMedia = true,
                 switching = true,
                 initialLoading = false,

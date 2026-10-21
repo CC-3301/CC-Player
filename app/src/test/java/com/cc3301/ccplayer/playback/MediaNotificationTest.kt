@@ -97,6 +97,21 @@ class MediaNotificationTest {
     }
 
     @Test
+    fun `an expired thumbnail is not reused`() = runBlocking {
+        var now = 1_000L
+        val policy = ThumbnailPolicy(missingModifiedValidityMillis = 1_000)
+        val expiringCache = ThumbnailCache(directory = directory, maxBytes = 64, clock = { now })
+        val media = MediaFile(name = "a.mkv", location = "root/a.mkv")
+        expiringCache.save(thumbnailCacheKey(media, policy), byteArrayOf(7, 8, 9))
+        val covers = NotificationCoverCache(expiringCache, policy)
+
+        assertEquals(expiringCache.file(thumbnailCacheKey(media, policy)), covers.file(media))
+
+        now += 2_000L
+        assertNull(covers.file(media))
+    }
+
+    @Test
     fun `progress refreshes every second while playing`() {
         assertEquals(1_000L, notificationRefreshIntervalMillis(PlaybackState.Playing))
     }
@@ -143,6 +158,31 @@ class MediaNotificationTest {
                 PlaybackState.Playing,
                 PlaybackProgress(positionMillis = 1_000, durationMillis = 0),
                 PlaybackProgress(positionMillis = 1_000, durationMillis = 90_000),
+            ),
+        )
+    }
+
+    @Test
+    fun `service progress trigger refreshes on a paused seek callback`() {
+        val trigger = NotificationProgressTrigger()
+        trigger.shouldRefresh(PlaybackState.Playing, PlaybackProgress(durationMillis = 90_000))
+
+        assertFalse(
+            trigger.shouldRefresh(
+                PlaybackState.Playing,
+                PlaybackProgress(positionMillis = 500, durationMillis = 90_000),
+            ),
+        )
+        assertFalse(
+            trigger.shouldRefresh(
+                PlaybackState.Playing,
+                PlaybackProgress(positionMillis = 1_000, durationMillis = 90_000),
+            ),
+        )
+        assertTrue(
+            trigger.shouldRefresh(
+                PlaybackState.Paused,
+                PlaybackProgress(positionMillis = 2_000, durationMillis = 90_000),
             ),
         )
     }

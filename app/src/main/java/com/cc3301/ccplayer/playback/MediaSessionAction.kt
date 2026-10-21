@@ -35,13 +35,18 @@ enum class MediaSessionAction(
 fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
     if (state == PlaybackState.Playing) MediaSessionAction.Pause else MediaSessionAction.Play
 
-/** 媒体会话动作的可用性：首次加载全部禁用；目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。 */
+/**
+ * 媒体会话动作的可用性：后台关闭时只放行暂停；首次加载全部禁用；
+ * 目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。
+ */
 fun mediaActionAllowed(
     action: MediaSessionAction,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
+    blocksBackgroundPlayback: Boolean = false,
 ): Boolean = when {
+    blocksBackgroundPlayback -> action == MediaSessionAction.Pause
     initialLoading -> false
     restoring -> true
     switching ->
@@ -67,15 +72,17 @@ fun dispatchMediaAction(
     state: PlaybackState,
     switching: Boolean,
     restoring: Boolean,
+    blocksBackgroundPlayback: Boolean = false,
     apply: (MediaSessionAction) -> Unit,
 ) {
-    if (mediaActionAllowed(action, switching, isInitialLoading(state, switching), restoring)) {
+    val initialLoading = isInitialLoading(state, switching)
+    if (mediaActionAllowed(action, switching, initialLoading, restoring, blocksBackgroundPlayback)) {
         apply(action)
     }
 }
 
 /** 通知栏动作集合：后台关闭时只保留暂停，其余情况按加载阶段收窄。 */
-fun notificationActions(
+fun mediaNotificationActions(
     state: PlaybackState,
     switching: Boolean,
     initialLoading: Boolean,

@@ -53,7 +53,11 @@ class PlaybackService : Service() {
 
     /** 通知刷新串行化：状态与每秒进度都可能触发，只保留最新一次。 */
     private var refreshJob: Job? = null
+    private val progressTrigger = NotificationProgressTrigger()
     private var appIconBitmap: Bitmap? = null
+    private var coverBitmapPath: String? = null
+    private var coverBitmap: Bitmap? = null
+    private var grantedCoverUri: Uri? = null
 
     private val fileProviderAuthority: String get() = "$packageName.fileprovider"
 
@@ -94,19 +98,25 @@ class PlaybackService : Service() {
             ) { _, _, _, _, _ -> Unit }.collect { requestRefresh() }
         }
         stateScope.launch {
-            var previous = PlaybackProgress()
             playbackController.progress.collect { current ->
-                if (shouldRefreshNotification(playbackController.state.value, previous, current)) {
+                if (progressTrigger.shouldRefresh(playbackController.state.value, current)) {
                     requestRefresh()
                 }
-                previous = current
             }
         }
         stateScope.launch {
+            var coverRetryElapsed = 0L
             while (isActive) {
                 delay(NOTIFICATION_REFRESH_INTERVAL_MILLIS)
                 if (notificationRefreshIntervalMillis(playbackController.state.value) != null) {
+                    coverRetryElapsed = 0L
                     requestRefresh()
+                } else if (currentMedia() != null) {
+                    coverRetryElapsed += NOTIFICATION_REFRESH_INTERVAL_MILLIS
+                    if (coverRetryElapsed >= COVER_RETRY_INTERVAL_MILLIS) {
+                        coverRetryElapsed = 0L
+                        requestRefresh()
+                    }
                 }
             }
         }
@@ -128,6 +138,9 @@ class PlaybackService : Service() {
         stateScope.cancel()
         scope.cancel()
         audioOutputMonitor.stop()
+        grantedCoverUri?.let {
+            runCatching { revokeUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
         mediaSession.isActive = false
         mediaSession.release()
         playbackEngine.release()
@@ -180,6 +193,7 @@ class PlaybackService : Service() {
             controller.state.value,
             controller.switching.value,
             controller.restoring.value,
+            blocksBackgroundPlayback = backgroundPolicy.blocksBackgroundPlayback,
         ) { allowedAction ->
             backgroundPolicy.dispatch(allowedAction) { passed -> passed.applyTo(controller) }
         }
@@ -242,11 +256,24 @@ class PlaybackService : Service() {
         )
     }
 
-    /** 封面解码放到 IO；按 256px 上限降采样后再交给通知。 */
+    /** 封面解码放到 IO；按 256px 上限降采样并按文件路径复用，换媒体时丢弃旧位图。 */
     private suspend fun coverBitmap(file: File?): Bitmap {
-        if (file == null) return appIconBitmap()
+        if (file == null) {
+            coverBitmapPath = null
+            coverBitmap = null
+            return appIconBitmap()
+        }
+        val path = file.absolutePath
+        if (coverBitmapPath == path) coverBitmap?.let { return it }
         val decoded = withContext(Dispatchers.IO) { decodeCover(file) }
-        return decoded ?: appIconBitmap()
+        if (decoded == null) {
+            coverBitmapPath = null
+            coverBitmap = null
+            return appIconBitmap()
+        }
+        coverBitmapPath = path
+        coverBitmap = decoded
+        return decoded
     }
 
     private fun decodeCover(file: File): Bitmap? {
@@ -264,9 +291,17 @@ class PlaybackService : Service() {
     private fun coverUri(file: File?): Uri? {
         val uri = file?.let {
             runCatching { FileProvider.getUriForFile(this, fileProviderAuthority, it) }.getOrNull()
-        } ?: return null
-        runCatching {
-            grantUriPermission(SYSTEM_UI_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val previous = grantedCoverUri
+        if (previous != null && previous != uri) {
+            runCatching { revokeUriPermission(previous, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            grantedCoverUri = null
+        }
+        if (uri == null) return null
+        if (grantedCoverUri != uri) {
+            runCatching {
+                grantUriPermission(SYSTEM_UI_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }.onSuccess { grantedCoverUri = uri }
         }
         return uri
     }
