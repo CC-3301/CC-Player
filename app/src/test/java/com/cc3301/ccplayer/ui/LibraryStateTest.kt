@@ -85,6 +85,69 @@ class LibraryStateTest {
     }
 
     @Test
+    fun `关闭位置记忆时切换视图仍按记录定位`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState(autoRestorePosition = false).withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+        )
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
+
+        val switched = loaded.withDisplayPreferences(
+            viewMode = ViewMode.Grid,
+            gridColumns = 3,
+            sortOrder = loaded.sortOrder,
+            autoRestorePosition = false,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 24), switched.scrollTarget)
+    }
+
+    @Test
+    fun `首次套用关闭开关时按新开关重算一次`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+        )
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 24), loaded.scrollTarget)
+
+        val applied = loaded.withDisplayPreferences(
+            viewMode = loaded.viewMode,
+            gridColumns = loaded.gridColumns,
+            sortOrder = loaded.sortOrder,
+            autoRestorePosition = false,
+            recomputePositionOnFirstApply = true,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), applied.scrollTarget)
+    }
+
+    @Test
+    fun `首次套用排序偏好时按新次序重新定位`() {
+        val entries = listOf(entry("ep10.mkv", 2), entry("ep2.mkv", 1))
+        val loaded = LibraryState().withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 8),
+        )
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 8), loaded.scrollTarget)
+
+        val applied = loaded.withDisplayPreferences(
+            viewMode = loaded.viewMode,
+            gridColumns = loaded.gridColumns,
+            sortOrder = SortOrder.NameDescending,
+            autoRestorePosition = true,
+            sortChangeScrollsToTop = false,
+            recomputePositionOnFirstApply = true,
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 8), applied.scrollTarget)
+    }
+
+    @Test
     fun `没有记录时从顶部开始`() {
         val loaded = LibraryState().withLoadedEntries(
             entries = listOf(entry("ep1.mkv", 1)),

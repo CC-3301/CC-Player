@@ -140,8 +140,9 @@ data class LibraryState(
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
     /**
-     * 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。
-     * 位置记忆开关只影响正常进入目录时是否定位，不改变当前目录已定的滚动目标。
+     * 套用展示偏好：排序变化回到顶部；切换视图始终按位置记录定位；
+     * 首次套用偏好时若有取值变化，按实际开关重算一次。
+     * 之后就地切换开关不改变当前目录已定的滚动目标。
      */
     fun withDisplayPreferences(
         viewMode: ViewMode,
@@ -149,11 +150,13 @@ data class LibraryState(
         sortOrder: SortOrder,
         autoRestorePosition: Boolean,
         sortChangeScrollsToTop: Boolean = true,
+        recomputePositionOnFirstApply: Boolean = false,
     ): LibraryState {
-        val changed = viewMode != this.viewMode ||
-            gridColumns != this.gridColumns ||
-            sortOrder != this.sortOrder
+        val viewChanged = viewMode != this.viewMode || gridColumns != this.gridColumns
         val sortChanged = sortChangeScrollsToTop && sortOrder != this.sortOrder
+        val preferencesChanged = viewChanged ||
+            sortOrder != this.sortOrder ||
+            autoRestorePosition != this.autoRestorePosition
         val updated = copy(
             viewMode = viewMode,
             gridColumns = gridColumns,
@@ -161,9 +164,10 @@ data class LibraryState(
             autoRestorePosition = autoRestorePosition,
         )
         return when {
-            !changed -> updated
             sortChanged -> updated.scrolledToTop(pendingWhileLoading = updated.loading)
-            else -> updated.retargeted()
+            recomputePositionOnFirstApply && preferencesChanged -> updated.retargeted()
+            viewChanged -> updated.retargeted(restorePosition = true)
+            else -> updated
         }
     }
 
@@ -191,12 +195,10 @@ data class LibraryState(
     }
 
     /** 按当前可见次序重新计算滚动目标并递增序号。 */
-    private fun retargeted(): LibraryState = copy(
-        scrollTarget = directoryScrollTarget(
-            visibleEntries,
-            savedPosition,
-            autoRestorePosition || restorePositionForced,
-        ),
+    private fun retargeted(
+        restorePosition: Boolean = autoRestorePosition || restorePositionForced,
+    ): LibraryState = copy(
+        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, restorePosition),
         scrollRevision = scrollRevision + 1,
     )
 
@@ -274,6 +276,7 @@ class LibraryViewModel(
                             sortOrder = preferences.sortOrder,
                             autoRestorePosition = preferences.autoRestorePosition,
                             sortChangeScrollsToTop = !firstApply,
+                            recomputePositionOnFirstApply = firstApply,
                         ),
                     )
                 }
@@ -474,11 +477,11 @@ class LibraryViewModel(
         }
     }
 
-    /** 记录某个目录的第一个可见条目与滚动偏移；位置记录与位置记忆开关无关，加载中不写。 */
+    /** 记录某个目录的第一个可见条目与滚动偏移；位置记录与位置记忆开关无关，加载中或条目不在当前列表时不写。 */
     fun savePosition(sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) {
         if (sourceLocation.isBlank()) return
         val current = _state.value
-        if (current.loading) return
+        if (current.loading || current.visibleEntries.none { it.location == entryLocation }) return
         val position = DirectoryPosition(entryLocation, scrollOffset)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
