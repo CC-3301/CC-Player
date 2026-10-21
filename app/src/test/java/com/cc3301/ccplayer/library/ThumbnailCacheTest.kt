@@ -71,6 +71,18 @@ class ThumbnailCacheTest {
     }
 
     @Test
+    fun `带有效期的条目从写入起算`() {
+        now = 1_000L
+        cache.save("content://root/a.mkv", ByteArray(4), maxAgeMillis = 500)
+
+        now = 1_499L
+        assertNotNull(cache.file("content://root/a.mkv", maxAgeMillis = 500))
+
+        now = 1_501L
+        assertNull(cache.file("content://root/a.mkv", maxAgeMillis = 500))
+    }
+
+    @Test
     fun `再次写入同一位置覆盖旧内容`() {
         cache.save("content://root/a.mkv", ByteArray(4))
 

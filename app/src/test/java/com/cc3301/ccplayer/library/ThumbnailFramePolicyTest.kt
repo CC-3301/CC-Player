@@ -32,12 +32,15 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `时长未知时在约一秒处兜底`() {
-        val positions = framePositions(0, LOCAL_FRAME_COUNT)
+    fun `时长未知时取多个固定候选且最后一个兜底`() {
+        val local = framePositions(0, LOCAL_FRAME_COUNT)
 
-        assertEquals(1, positions.size)
-        assertEquals(1_000_000L, positions[0].micros)
-        assertTrue(positions[0].fallback)
+        assertEquals(listOf(1_000_000L, 3_000_000L, 5_000_000L), local.map { it.micros })
+        assertEquals(listOf(false, false, true), local.map { it.fallback })
+
+        val network = framePositions(0, NETWORK_FRAME_COUNT)
+        assertEquals(listOf(1_000_000L, 3_000_000L), network.map { it.micros })
+        assertTrue(network.last().fallback)
     }
 
     @Test
@@ -80,9 +83,12 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `超过目标宽度的帧缩到目标宽度，小图不放大`() {
+    fun `抽帧输出宽度钳在 320 到 512`() {
         assertEquals(512, targetFrameWidth(1920))
         assertEquals(512, targetFrameWidth(513))
-        assertEquals(300, targetFrameWidth(300))
+        assertEquals(400, targetFrameWidth(400))
+        assertEquals(320, targetFrameWidth(300))
+        assertEquals(320, targetFrameWidth(100))
+        assertEquals(320, targetFrameWidth(1920, targetWidth = 320))
     }
 }

@@ -83,7 +83,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `网络视频抽帧并显示`() = runTest {
+    fun `网络视频抽帧并显示，对外不返回时长`() = runTest {
         val frame = byteArrayOf(4, 5, 6)
         extractor.imageBytes = frame
 
@@ -91,6 +91,19 @@ class CachedMediaPreviewSourceTest {
 
         assertArrayEquals(frame, preview.image!!.readBytes())
         assertEquals(listOf("smb://nas/media/共享电影.mkv"), extractor.imageRequests)
+        assertEquals(1, extractor.internalDurationReads)
+        assertTrue(extractor.durationRequests.isEmpty())
+        assertNull(preview.durationMillis)
+    }
+
+    @Test
+    fun `网络音频对外不返回时长`() = runTest {
+        extractor.imageBytes = byteArrayOf(7, 8, 9)
+
+        val preview = source.preview(network("歌.mp3"))
+
+        assertNull(preview.durationMillis)
+        assertEquals(0, extractor.internalDurationReads)
         assertTrue(extractor.durationRequests.isEmpty())
     }
 
@@ -127,7 +140,7 @@ class CachedMediaPreviewSourceTest {
 
         assertArrayEquals(byteArrayOf(2), changed.image!!.readBytes())
         assertEquals(2, extractor.imageRequests.size)
-        assertEquals(2, directory.listFiles()!!.size)
+        assertEquals(2, imageFileCount())
     }
 
     @Test
@@ -136,7 +149,7 @@ class CachedMediaPreviewSourceTest {
         source.preview(networkAt("a.mkv", lastModified = 1_000))
         source.preview(networkAt("b.mkv", lastModified = 1_000))
 
-        assertEquals(2, directory.listFiles()!!.size)
+        assertEquals(2, imageFileCount())
 
         source.preview(networkAt("a.mkv", lastModified = 1_000))
         source.preview(networkAt("b.mkv", lastModified = 1_000))
@@ -146,28 +159,65 @@ class CachedMediaPreviewSourceTest {
 
     @Test
     fun `修改时间缺失时按大小与有效期缓存`() = runTest {
-        var now = 0L
+        var now = 1_000L
         val fallback = CachedMediaPreviewSource(
             extractor = extractor,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
-            clock = { now },
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now }),
         )
         extractor.imageBytes = byteArrayOf(1)
 
         val first = fallback.preview(network("电影.mkv", lastModified = 0))
+        now += MISSING_MODIFIED_VALIDITY_MILLIS - 1
         val second = fallback.preview(network("电影.mkv", lastModified = 0))
 
         assertNotNull(first.image)
         assertEquals(first.image, second.image)
         assertEquals(1, extractor.imageRequests.size)
-        assertEquals(1, directory.listFiles()!!.size)
+        assertEquals(1, imageFileCount())
 
-        now = MISSING_MODIFIED_VALIDITY_MILLIS
+        now += 2
         extractor.imageBytes = byteArrayOf(2)
         val expired = fallback.preview(network("电影.mkv", lastModified = 0))
 
         assertArrayEquals(byteArrayOf(2), expired.image!!.readBytes())
         assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `修改时间缺失时有效期变化不命中旧缓存`() = runTest {
+        val cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { 1_000L })
+        val shortLived = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = cache,
+            policy = ThumbnailPolicy(missingModifiedValidityMillis = 1_000),
+        )
+        val longLived = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = cache,
+            policy = ThumbnailPolicy(missingModifiedValidityMillis = 2_000),
+        )
+        extractor.imageBytes = byteArrayOf(1)
+
+        shortLived.preview(network("电影.mkv", lastModified = 0))
+        longLived.preview(network("电影.mkv", lastModified = 0))
+
+        assertEquals(2, extractor.imageRequests.size)
+        assertEquals(2, imageFileCount())
+    }
+
+    @Test
+    fun `缓存命中时并发读取时长只发生一次`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        extractor.durationMillis = 187_000
+        val first = source.preview(local("电影.mkv"))
+        assertEquals(187_000L, first.durationMillis)
+        val callsAfterFirst = extractor.durationRequests.size
+
+        extractor.durationDelayMillis = 10
+        val results = (1..5).map { async { source.preview(local("电影.mkv")) } }.awaitAll()
+
+        assertTrue(results.all { it.durationMillis == 187_000L })
+        assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
     }
 
     @Test
@@ -200,7 +250,7 @@ class CachedMediaPreviewSourceTest {
         second.preview(local("电影.mkv"))
 
         assertEquals(2, extractor.imageRequests.size)
-        assertEquals(2, directory.listFiles()!!.size)
+        assertEquals(2, imageFileCount())
     }
 
     @Test
@@ -221,7 +271,7 @@ class CachedMediaPreviewSourceTest {
         second.preview(local("电影.mkv"))
 
         assertEquals(2, extractor.imageRequests.size)
-        assertEquals(2, directory.listFiles()!!.size)
+        assertEquals(2, imageFileCount())
     }
 
     @Test
@@ -316,6 +366,9 @@ class CachedMediaPreviewSourceTest {
         assertNull(preview.durationMillis)
         assertTrue(extractor.imageRequests.isEmpty())
     }
+
+    private fun imageFileCount(): Int =
+        directory.listFiles().orEmpty().count { file -> file.name.endsWith(".img") }
 
     private fun local(name: String, size: Long = 0) =
         MediaFile(name = name, location = "root/$name", size = size)

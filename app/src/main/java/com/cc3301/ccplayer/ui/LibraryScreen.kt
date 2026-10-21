@@ -380,7 +380,12 @@ private fun EntryArea(
 
 @Composable
 private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
-    val preview by produceState<MediaPreview?>(initialValue = null, entry.location) {
+    val preview by produceState<MediaPreview?>(
+        initialValue = null,
+        entry.location,
+        entry.size,
+        entry.lastModified,
+    ) {
         value = mediaPreview.preview(entry)
     }
     Row(
@@ -416,7 +421,12 @@ private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenE
 /** 网格卡片：缩略图（或占位图）+ 文件名。 */
 @Composable
 private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
-    val preview by produceState<MediaPreview?>(initialValue = null, entry.location) {
+    val preview by produceState<MediaPreview?>(
+        initialValue = null,
+        entry.location,
+        entry.size,
+        entry.lastModified,
+    ) {
         value = mediaPreview.preview(entry)
     }
     Column(modifier = Modifier.clickable { onOpenEntry(entry) }) {

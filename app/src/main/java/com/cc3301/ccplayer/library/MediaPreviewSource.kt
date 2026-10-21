@@ -59,7 +59,6 @@ class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
     private val cache: ThumbnailCache,
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
-    private val clock: () -> Long = System::currentTimeMillis,
 ) : MediaPreviewSource {
 
     /** 本地同时提取数上限。 */
@@ -73,7 +72,7 @@ class CachedMediaPreviewSource(
 
     override suspend fun preview(file: MediaFile): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
-        val key = thumbnailCacheKey(file, policy, clock())
+        val key = thumbnailCacheKey(file, policy)
         return when (file.source) {
             MediaSource.Local -> localPreview(file, key)
             MediaSource.Network -> MediaPreview(image = networkImage(file, key), durationMillis = null)
@@ -81,13 +80,16 @@ class CachedMediaPreviewSource(
     }
 
     private suspend fun localPreview(file: MediaFile, key: String): MediaPreview {
+        val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             key = key,
+            maxAgeMillis = maxAge,
             onCacheHit = { cached -> LoadedPreview(cached, localDuration(file)) },
             load = {
                 val extracted = localPermits.withPermit { extractor.imageAndDuration(file) }
+                currentCoroutineContext().ensureActive()
                 LoadedPreview(
-                    image = extracted.imageBytes?.let { bytes -> cache.save(key, bytes) },
+                    image = extracted.imageBytes?.let { bytes -> cache.save(key, bytes, maxAge) },
                     durationMillis = extracted.durationMillis,
                 )
             },
@@ -99,8 +101,10 @@ class CachedMediaPreviewSource(
         localPermits.withPermit { extractor.durationMillis(file) }
 
     private suspend fun networkImage(file: MediaFile, key: String): File? {
+        val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             key = key,
+            maxAgeMillis = maxAge,
             onCacheHit = { cached -> LoadedPreview(cached, durationMillis = null) },
             load = {
                 val bytes = try {
@@ -113,23 +117,29 @@ class CachedMediaPreviewSource(
                 } catch (failure: Exception) {
                     null
                 }
-                LoadedPreview(bytes?.let { cache.save(key, it) }, durationMillis = null)
+                currentCoroutineContext().ensureActive()
+                LoadedPreview(bytes?.let { cache.save(key, it, maxAge) }, durationMillis = null)
             },
         )
         return loaded.image
     }
 
+    /** 修改时间缺失时按有效期缓存；有修改时间时由缓存键判断是否过期。 */
+    private fun cacheMaxAge(file: MediaFile): Long? =
+        if (file.lastModified > 0) null else policy.missingModifiedValidityMillis.coerceAtLeast(1)
+
     /**
      * 先查缓存；没有就让第一个调用者抽取，同一缓存键的并发调用等待同一结果。
+     * 命中缓存时的时长读取也由第一个调用者完成，并发调用共享结果。
      * 首个调用者被取消时，等待者重新竞争，避免把取消当成抽取失败。
      */
     private suspend fun cachedOrLoad(
         key: String,
+        maxAgeMillis: Long?,
         onCacheHit: suspend (File) -> LoadedPreview,
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
         while (true) {
-            cache.file(key)?.let { return onCacheHit(it) }
             inFlight[key]?.let { pending ->
                 try {
                     return pending.await()
@@ -142,7 +152,7 @@ class CachedMediaPreviewSource(
             if (inFlight.putIfAbsent(key, mine) != null) continue
             try {
                 val loaded = try {
-                    cache.file(key)?.let { cached -> onCacheHit(cached) } ?: load()
+                    cache.file(key, maxAgeMillis)?.let { cached -> onCacheHit(cached) } ?: load()
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
@@ -188,14 +198,13 @@ class CachedMediaPreviewSource(
 
 /**
  * 缩略图缓存键：位置、大小、修改时间、抽帧策略版本与目标宽度。
- * 修改时间缺失时用大小与有效期时段代替修改时间。
+ * 修改时间缺失时用有效期代替修改时间；有效期变化必须视为另一份缓存。
  */
-internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy, now: Long): String {
+internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String {
     val base = "${file.location}|${file.size}|v${policy.version}|w${policy.targetWidth}"
     return if (file.lastModified > 0) {
         "$base|m${file.lastModified}"
     } else {
-        val validity = policy.missingModifiedValidityMillis.coerceAtLeast(1)
-        "$base|t${now / validity}"
+        "$base|validity:${policy.missingModifiedValidityMillis.coerceAtLeast(1)}"
     }
 }

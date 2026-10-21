@@ -3,8 +3,14 @@ package com.cc3301.ccplayer.library
 /** 抽帧策略版本；策略变化时缓存键随之变化。 */
 internal const val THUMBNAIL_POLICY_VERSION = 1
 
-/** 目标宽度（像素）：抽到的帧先缩到该宽度再压 JPEG。 */
+/** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
 internal const val THUMBNAIL_TARGET_WIDTH = 512
+
+/** 输出宽度的下限；源图更窄时放大到该宽度。 */
+internal const val THUMBNAIL_MIN_WIDTH = 320
+
+/** 输出宽度的上限。 */
+internal const val THUMBNAIL_MAX_WIDTH = 512
 
 /** 抽帧 JPEG 质量。 */
 internal const val THUMBNAIL_JPEG_QUALITY = 85
@@ -18,8 +24,8 @@ internal const val NETWORK_FRAME_COUNT = 2
 /** 全部候选都不合格时退回的比例位置。 */
 internal const val FALLBACK_FRAME_FRACTION = 1.0 / 3.0
 
-/** 时长未知时尝试的抽帧位置（微秒）。 */
-internal const val UNKNOWN_DURATION_FRAME_MICROS = 1_000_000L
+/** 时长未知时依次尝试的抽帧位置（微秒）；最后一个用于兜底。 */
+private val UNKNOWN_DURATION_POSITIONS_MICROS = listOf(1_000_000L, 3_000_000L, 5_000_000L)
 
 /** 修改时间缺失时缓存键的有效期。 */
 internal const val MISSING_MODIFIED_VALIDITY_MILLIS = 24 * 60 * 60 * 1000L
@@ -32,11 +38,14 @@ internal data class FramePosition(val micros: Long, val fallback: Boolean)
 
 /**
  * 按比例给出抽帧位置：本地最多三帧，网络最多两帧，都包含约三分之一处的兜底帧。
- * 时长未知时只在约一秒处尝试一次。
+ * 时长未知时也取多个固定位置，最后一个兜底。
  */
 internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePosition> {
     if (durationMillis <= 0 || frameCount <= 0) {
-        return listOf(FramePosition(UNKNOWN_DURATION_FRAME_MICROS, fallback = true))
+        val count = frameCount.coerceIn(1, UNKNOWN_DURATION_POSITIONS_MICROS.size)
+        return UNKNOWN_DURATION_POSITIONS_MICROS.take(count).mapIndexed { index, micros ->
+            FramePosition(micros, fallback = index == count - 1)
+        }
     }
     val fractions = when {
         frameCount == 1 -> listOf(FALLBACK_FRAME_FRACTION)
@@ -63,6 +72,9 @@ internal fun isSolidLuminance(luminances: IntArray): Boolean {
     return luminances.max() - luminances.min() < SOLID_LUMINANCE_RANGE
 }
 
-/** 缩放后的宽度：超过目标宽度就缩到目标宽度，小图保持原样。 */
-internal fun targetFrameWidth(originalWidth: Int, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): Int =
-    if (originalWidth <= 0) 0 else minOf(originalWidth, targetWidth)
+/** 缩放后的宽度：输出钳在 320–512，源图更窄时放大到下限。 */
+internal fun targetFrameWidth(originalWidth: Int, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): Int {
+    if (originalWidth <= 0) return 0
+    val upperBound = targetWidth.coerceIn(THUMBNAIL_MIN_WIDTH, THUMBNAIL_MAX_WIDTH)
+    return originalWidth.coerceIn(THUMBNAIL_MIN_WIDTH, upperBound)
+}
