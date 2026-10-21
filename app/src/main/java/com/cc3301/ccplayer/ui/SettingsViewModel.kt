@@ -24,6 +24,7 @@ data class SettingsState(
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
     val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
     val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
+    val diagnosticsEnabled: Boolean = SettingsRepository.DEFAULT_DIAGNOSTICS_ENABLED,
 )
 
 /**
@@ -45,7 +46,7 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             ) { autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode ->
                 PlaybackSettings(autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode)
             }
-            combine(playback, settings.backgroundPlayback) { playbackSettings, backgroundPlayback ->
+            combine(playback, settings.backgroundPlayback, settings.diagnosticsEnabled) { playbackSettings, backgroundPlayback, diagnosticsEnabled ->
                 SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
                     backgroundPlayback = backgroundPlayback,
@@ -53,6 +54,7 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
                     autoRestorePosition = playbackSettings.autoRestorePosition,
                     decodeMode = playbackSettings.decodeMode,
                     orientationMode = playbackSettings.orientationMode,
+                    diagnosticsEnabled = diagnosticsEnabled,
                 )
             }.collect { state -> _state.value = state }
         }
@@ -80,6 +82,10 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
 
     fun setOrientationMode(mode: OrientationMode) {
         viewModelScope.launch { settings.setOrientationMode(mode) }
+    }
+
+    fun setDiagnosticsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setDiagnosticsEnabled(enabled) }
     }
 
     /** 播放相关的设置项。 */

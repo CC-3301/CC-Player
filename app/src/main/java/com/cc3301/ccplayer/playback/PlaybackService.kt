@@ -18,6 +18,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import androidx.media.app.NotificationCompat.MediaStyle
+import com.cc3301.ccplayer.CcPlayerApplication
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
@@ -73,6 +74,7 @@ class PlaybackService : Service() {
             RoomPlaybackProgressRepository.create(this),
             scope,
             marshalCallbacks = true,
+            diagnostics = (application as CcPlayerApplication).diagnostics,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pause,
