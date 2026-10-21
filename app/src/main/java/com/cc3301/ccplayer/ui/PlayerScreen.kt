@@ -13,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -141,7 +142,7 @@ private val PlayerBottomBarGradient = Brush.verticalGradient(
     1f to Color.Black.copy(alpha = 0.78f),
 )
 
-/** 播放列表抽屉：从右向左加深的低透明度黑色渐变。 */
+/** 播放列表抽屉：左侧透明、越靠右越深的低透明度黑色渐变。 */
 private val PlayerPlaylistGradient = Brush.horizontalGradient(
     0f to Color(0x14020509),
     0.34f to Color(0x6B020509),
@@ -292,9 +293,7 @@ fun PlayerScreen(
     LaunchedEffect(switching, initialLoading) {
         // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
         controls.onInteraction()
-        if (switching || initialLoading) {
-            panels.close()
-        }
+        panels.closeWhenBlocked(switching, initialLoading)
     }
 
     LaunchedEffect(panelOpen) {
@@ -414,7 +413,7 @@ fun PlayerScreen(
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
             // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
             // 播放列表抽屉打开时隐藏顶栏、底栏与其它面板，画面留给左侧。
-            if (backEntryVisible(controlsVisible, initialLoading) && !playlistVisible) {
+            if (backEntryVisible(controlsVisible, initialLoading) && panels.controlBarsVisible) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
@@ -523,10 +522,12 @@ fun PlayerScreen(
             val closeHint = stringResource(R.string.player_playlist_close)
             Box(
                 modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .fillMaxHeight()
-                    .fillMaxWidth(0.5f)
-                    .noRippleClickable { panels.close() }
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            if (playlistDismissTap(offset.x, size.width.toFloat())) panels.close()
+                        }
+                    }
                     .semantics { contentDescription = closeHint },
             )
         }
@@ -542,10 +543,7 @@ fun PlayerScreen(
             PlaylistDrawer(
                 playlist = playlist,
                 currentIndex = currentIndex,
-                onSelect = { media ->
-                    panels.close()
-                    onPlaylistSelect(media)
-                },
+                onSelect = { media -> panels.selectPlaylistItem(media, onPlaylistSelect) },
             )
         }
     }
@@ -1569,7 +1567,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
     }
 }
 
-/** 播放列表抽屉：占右半屏，从右向左加深的低透明度黑底，当前项居中。 */
+/** 播放列表抽屉：占右半屏，右侧加深的低透明度黑底，当前项居中。 */
 @Composable
 private fun PlaylistDrawer(
     playlist: List<MediaFile>,
@@ -1582,6 +1580,7 @@ private fun PlaylistDrawer(
         modifier = modifier
             .fillMaxSize()
             .background(PlayerPlaylistGradient)
+            .safeDrawingPadding()
             .blockPlayerGestures(),
     ) {
         Text(
@@ -1595,18 +1594,27 @@ private fun PlaylistDrawer(
                 bottom = AppSpacing.Xs,
             ),
         )
-        BoxWithConstraints(modifier = Modifier
-            .fillMaxWidth()
-            .weight(1f)) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+        ) {
             val density = LocalDensity.current
             val viewportPx = with(density) { maxHeight.roundToPx() }
             val itemPx = with(density) { PlayerPlaylistItemHeight.roundToPx() }
-            val centerOffset = playlistCenterScrollOffset(viewportPx, itemPx)
-            val verticalPadding = with(density) { centerOffset.toDp() }
-            LaunchedEffect(currentIndex, playlist.size) {
-                if (currentIndex in playlist.indices) {
-                    listState.scrollToItem(currentIndex)
-                    listState.scrollBy(-centerOffset.toFloat())
+            // 上下各留半个视口，当前项才能滚到中间；末尾由可滚动范围夹紧。
+            val edgePaddingPx = ((viewportPx - itemPx) / 2f).roundToInt().coerceAtLeast(0)
+            val verticalPadding = with(density) { edgePaddingPx.toDp() }
+            LaunchedEffect(currentIndex, playlist.size, viewportPx, itemPx) {
+                if (playlist.isNotEmpty()) {
+                    val targetOffset = playlistCenterScrollOffset(
+                        index = currentIndex,
+                        itemCount = playlist.size,
+                        viewportPx = viewportPx,
+                        itemPx = itemPx,
+                    )
+                    listState.scrollToItem(0)
+                    listState.scrollBy(targetOffset.toFloat())
                 }
             }
             LazyColumn(
