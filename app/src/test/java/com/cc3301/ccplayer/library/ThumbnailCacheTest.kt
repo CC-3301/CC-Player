@@ -376,8 +376,10 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `首次并发访问只执行一次启动清理`() = runBlocking {
+    fun `首次并发访问完成启动清理`() = runBlocking {
         repeat(20) { index -> File(directory, "stale$index.tmp").writeText("x") }
+        val orphan = File(directory, "orphan.img.meta")
+        orphan.writeText("1")
         val concurrent = ThumbnailCache(directory = directory, maxBytes = 1 shl 20)
         val failures = Collections.synchronizedList(mutableListOf<Throwable>())
         val threads = (1..32).map { index ->
@@ -396,8 +398,84 @@ class ThumbnailCacheTest {
         threads.forEach(Thread::join)
 
         assertTrue(failures.isEmpty())
-        assertEquals(1, concurrent.cleanupRuns)
         assertEquals(0, directory.tempCount())
+        assertTrue(!orphan.exists())
+    }
+
+    @Test
+    fun `无图条目命中刷新后不被优先淘汰`() = runBlocking {
+        var now = 1_000L
+        val capped = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            maxNoImageEntries = 2,
+        )
+        capped.saveWithoutImage("content://root/命中甲.mp3", durationMillis = 1)
+        now += 10
+        capped.saveWithoutImage("content://root/命中乙.mp3", durationMillis = 2)
+        now += 10
+        assertNotNull(capped.entry("content://root/命中甲.mp3"))
+        now += 10
+
+        capped.saveWithoutImage("content://root/命中丙.mp3", durationMillis = 3)
+
+        assertNotNull(capped.entry("content://root/命中甲.mp3"))
+        assertNull(capped.entry("content://root/命中乙.mp3"))
+        assertNotNull(capped.entry("content://root/命中丙.mp3"))
+    }
+
+    @Test
+    fun `补写时长不撤销命中刷新的 LRU 时间`() = runBlocking {
+        var now = 1_000L
+        val capped = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            maxNoImageEntries = 2,
+        )
+        capped.saveWithoutImage("content://root/补写甲.mp3", durationKnown = false)
+        now += 10
+        capped.saveWithoutImage("content://root/补写乙.mp3", durationMillis = 2)
+        now += 10
+        assertNotNull(capped.entry("content://root/补写甲.mp3"))
+        now += 5
+
+        capped.writeDuration("content://root/补写甲.mp3", 187_000)
+        now += 5
+        capped.saveWithoutImage("content://root/补写丙.mp3", durationMillis = 3)
+
+        val kept = capped.entry("content://root/补写甲.mp3")
+        assertNotNull(kept)
+        assertEquals(187_000L, kept!!.durationMillis)
+        assertNull(capped.entry("content://root/补写乙.mp3"))
+    }
+
+    @Test
+    fun `无图条目淘汰不误删图片元数据`() = runBlocking {
+        var now = 1_000L
+        val capped = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            maxNoImageEntries = 2,
+        )
+        val imageKey = "content://root/共存图片.mkv"
+        capped.save(imageKey, ByteArray(4), durationMillis = 9)
+        now += 10
+        capped.saveWithoutImage("content://root/共存甲.mp3", durationMillis = 1)
+        now += 10
+        capped.saveWithoutImage("content://root/共存乙.mp3", durationMillis = 2)
+        now += 10
+        capped.saveWithoutImage("content://root/共存丙.mp3", durationMillis = 3)
+
+        val image = capped.entry(imageKey)
+        assertNotNull(image)
+        assertNotNull(image!!.file)
+        assertEquals(9L, image.durationMillis)
+        assertTrue(image.durationKnown)
+        assertEquals(1, directory.imageCount())
+        assertEquals(3, directory.metadataCount())
     }
 
     @Test

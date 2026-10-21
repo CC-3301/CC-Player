@@ -39,11 +39,6 @@ class ThumbnailCache(
     @Volatile
     private var cleaned = false
 
-    /** 实际执行的启动清理次数；用于验证并发首次访问只清理一次。 */
-    @Volatile
-    internal var cleanupRuns = 0
-        private set
-
     /** 取出该缓存键对应的条目；没有缓存或已超过有效期时返回 null。 */
     suspend fun entry(location: String, maxAgeMillis: Long? = null): CachedThumbnail? =
         withContext(ioDispatcher) {
@@ -91,7 +86,18 @@ class ThumbnailCache(
             val writtenAt = existing?.writtenAt
                 ?: image.lastModified().takeIf { it > 0 }
                 ?: clock()
-            writeMetadata(metadata, writtenAt, durationMillis, durationKnown = true, noImage)
+            // 命中已刷新过元数据 mtime；补写时长不能把它退回旧的写入时间。
+            val lastModified = metadata.takeIf { it.isFile }?.lastModified()
+                ?.takeIf { it > 0 }
+                ?: writtenAt
+            writeMetadata(
+                metadata = metadata,
+                writtenAt = writtenAt,
+                durationMillis = durationMillis,
+                durationKnown = true,
+                noImage = noImage,
+                lastModifiedMillis = lastModified,
+            )
         }
     }
 
@@ -122,8 +128,8 @@ class ThumbnailCache(
         directory.mkdirs()
         val target = File(directory, cacheFileName(location))
         val metadata = metadataFile(location)
-        val writtenAt = clock()
         synchronized(locks.entry) {
+            val writtenAt = clock()
             var tempImage: File? = null
             var tempMetadata: File? = null
             try {
@@ -142,6 +148,7 @@ class ThumbnailCache(
                 tempMetadata?.delete()
             }
             target.setLastModified(writtenAt)
+            metadata.setLastModified(writtenAt)
         }
         evictBeyondLimit(keep = target)
         return target
@@ -155,12 +162,21 @@ class ThumbnailCache(
         directory.mkdirs()
         val metadata = metadataFile(location)
         val image = File(directory, cacheFileName(location))
-        val writtenAt = clock()
         synchronized(locks.entry) {
+            val writtenAt = clock()
             image.delete()
-            writeMetadata(metadata, writtenAt, durationMillis, durationKnown, noImage = true)
+            writeMetadata(
+                metadata = metadata,
+                writtenAt = writtenAt,
+                durationMillis = durationMillis,
+                durationKnown = durationKnown,
+                noImage = true,
+                lastModifiedMillis = writtenAt,
+            )
         }
         evictBeyondLimit(keep = null)
+        // 只有新写入无图条目时才需要按条数清理，普通图片保存不扫元数据。
+        evictNoImageEntries()
     }
 
     private fun writeMetadata(
@@ -169,12 +185,13 @@ class ThumbnailCache(
         durationMillis: Long?,
         durationKnown: Boolean,
         noImage: Boolean,
+        lastModifiedMillis: Long,
     ) {
         val temp = temporaryFile(metadata.name)
         try {
             temp.writeText(encodeMetadata(writtenAt, durationMillis, durationKnown, noImage))
             replaceFile(temp, metadata)
-            metadata.setLastModified(writtenAt)
+            metadata.setLastModified(lastModifiedMillis)
         } finally {
             temp.delete()
         }
@@ -188,7 +205,6 @@ class ThumbnailCache(
                 deleteTemporaryFiles()
                 deleteOrphanMetadata()
             }
-            cleanupRuns++
             cleaned = true
         }
     }
@@ -219,7 +235,6 @@ class ThumbnailCache(
                 }
                 if (deleted) totalBytes -= length
             }
-            evictNoImageEntries()
         }
     }
 

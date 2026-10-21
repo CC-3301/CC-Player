@@ -1,9 +1,11 @@
 package com.cc3301.ccplayer.library
 
+import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ThumbnailFramePolicyTest {
@@ -104,6 +106,36 @@ class ThumbnailFramePolicyTest {
         )
 
         assertEquals("片头纯色帧", chooseFrame(frames) { true })
+    }
+
+    @Test
+    fun `候选帧全空时按抽取失败抛出`() {
+        try {
+            requireDecodedFrame(emptyList<Pair<FramePosition, String>>()) { false }
+            fail("应抛出抽取失败")
+        } catch (expected: IOException) {
+            // 预期失败路径。
+        }
+    }
+
+    @Test
+    fun `压缩失败时按抽取失败抛出`() {
+        try {
+            requireCompressedFrame(null)
+            fail("应抛出压缩失败")
+        } catch (expected: IOException) {
+            // 预期失败路径。
+        }
+        assertEquals("帧", String(requireCompressedFrame("帧".toByteArray())))
+    }
+
+    @Test
+    fun `封面降采样按目标宽度取二的幂`() {
+        assertEquals(1, coverSampleSize(300, 320))
+        assertEquals(2, coverSampleSize(1_024, 512))
+        assertEquals(4, coverSampleSize(2_048, 512))
+        assertEquals(1, coverSampleSize(0, 512))
+        assertEquals(1, coverSampleSize(1_024, 0))
     }
 
     @Test

@@ -326,7 +326,7 @@ class CachedMediaPreviewSource(
         return loaded
     }
 
-    /** 记录失败退避；记录数达到上限时先清掉已过期的，再移除最旧的一条。 */
+    /** 记录失败退避；记录数达到上限时先清掉已过期的，再淘汰最早到期的键。 */
     private fun <K> recordRetry(
         failures: ConcurrentHashMap<K, RetryState>,
         key: K,
@@ -336,7 +336,8 @@ class CachedMediaPreviewSource(
         if (failures.size >= MAX_RETRY_ENTRIES) {
             failures.entries.removeAll { it.value.retryAtMillis <= now }
             if (failures.size >= MAX_RETRY_ENTRIES) {
-                failures.keys.firstOrNull()?.let { failures.remove(it) }
+                failures.entries.minByOrNull { it.value.retryAtMillis }
+                    ?.let { failures.remove(it.key) }
             }
         }
         failures[key] = state

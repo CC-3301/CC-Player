@@ -569,6 +569,33 @@ class CachedMediaPreviewSourceTest {
         assertEquals(8, tracker.requests)
     }
 
+    @Test
+    fun `退避记录满上限时淘汰最早到期键`() = runTest {
+        var now = 1_000L
+        val tracker = PerKeyFailureExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            monotonicClock = { now },
+        )
+        val entries = (1..513).map { index ->
+            local("第$index 集.mkv", lastModified = index.toLong())
+        }
+        entries.forEach { file ->
+            now += 1
+            assertNull(bounded.preview(file).image)
+        }
+
+        // 第 1 个键到期最早，第 513 次失败时被淘汰；第 2 个键仍在退避中。
+        val earliest = entries.first()
+        val retained = entries[1]
+        assertNull(bounded.preview(retained).image)
+        assertEquals(1, tracker.requests.getValue(retained.location))
+
+        assertNull(bounded.preview(earliest).image)
+        assertEquals(2, tracker.requests.getValue(earliest.location))
+    }
+
     private fun cache(): ThumbnailCache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
 
     @Test
@@ -688,10 +715,11 @@ class CachedMediaPreviewSourceTest {
         )
         extractor.imageBytes = byteArrayOf(1)
 
-        first.preview(local("歌.mp3", lastModified = 1_000))
-        second.preview(local("歌.mp3", lastModified = 1_000))
+        first.preview(network("歌.mp3"))
+        second.preview(network("歌.mp3"))
 
         assertEquals(2, extractor.imageRequests.size)
+        assertEquals(listOf(320, 512), extractor.imageWidths)
         assertEquals(2, imageFileCount())
     }
 
@@ -1003,6 +1031,19 @@ private class RetryAfterFailureExtractor : MediaPreviewExtractor {
         requests++
         failure?.let { throw it }
         return byteArrayOf(1)
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 每个位置都抽取失败，并按位置记录请求次数，用来验证退避记录上限。 */
+private class PerKeyFailureExtractor : MediaPreviewExtractor {
+
+    val requests = mutableMapOf<String, Int>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+        requests[file.location] = (requests[file.location] ?: 0) + 1
+        throw IllegalStateException("抽取失败")
     }
 
     override suspend fun durationMillis(file: MediaFile): Long? = null

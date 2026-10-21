@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.library
 
+import java.io.IOException
+
 /** 抽帧策略版本；策略变化时缓存键随之变化。 */
 internal const val THUMBNAIL_POLICY_VERSION = 2
 
@@ -74,6 +76,27 @@ internal fun <T> chooseFrame(frames: List<Pair<FramePosition, T>>, isSolid: (T) 
     frames.firstOrNull { (_, frame) -> !isSolid(frame) }?.second
         ?: frames.firstOrNull { (position, _) -> position.fallback }?.second
         ?: frames.firstOrNull()?.second
+
+/** 候选帧全部解码失败属于抽取失败，不能落成“确定没有图”。 */
+internal fun <T> requireDecodedFrame(
+    frames: List<Pair<FramePosition, T>>,
+    isSolid: (T) -> Boolean,
+): T {
+    if (frames.isEmpty()) throw IOException("没有解出可用的视频帧")
+    return chooseFrame(frames, isSolid) ?: throw IOException("没有解出可用的视频帧")
+}
+
+/** 帧压缩失败同样属于抽取失败。 */
+internal fun requireCompressedFrame(bytes: ByteArray?): ByteArray =
+    bytes ?: throw IOException("视频帧压缩失败")
+
+/** 封面解码的降采样倍数：按 2 的幂降采样，避免先解出全尺寸大图。 */
+internal fun coverSampleSize(sourceWidth: Int, targetWidth: Int): Int {
+    if (sourceWidth <= 0 || targetWidth <= 0) return 1
+    var sample = 1
+    while (sourceWidth / (sample * 2) >= targetWidth) sample *= 2
+    return sample
+}
 
 /** 采样亮度判纯色：亮度差小于阈值即视为纯色。 */
 internal fun isSolidLuminance(luminances: IntArray): Boolean {
