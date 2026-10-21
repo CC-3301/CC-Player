@@ -177,6 +177,12 @@ class PlaybackController(
     private var switchOriginPositionMillis = 0L
     private var switchOriginDurationMillis = 0L
 
+    /** 原视频停在片尾：恢复时没有可等待的首帧，以文件加载完成作为就绪。 */
+    private var restoreAtEndOfEpisode = false
+
+    /** 本次切集已经报过“播放失败”；恢复再失败时不重复提示。 */
+    private var switchFailureReported = false
+
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
@@ -250,7 +256,7 @@ class PlaybackController(
         if (index >= 0) playAt(index)
     }
 
-    /** 名称自然排序下的一集；列表末尾时不动作。切集缓冲期间实时前移目标。 */
+    /** 名称自然排序下的下一集；列表末尾时不动作。切集缓冲期间实时前移目标。 */
     fun next() {
         playAdjacent(_currentIndex.value + 1)
     }
@@ -263,7 +269,7 @@ class PlaybackController(
     private fun playAdjacent(index: Int) {
         when (loadPhase) {
             LoadPhase.Switching -> retargetSwitch(index)
-            LoadPhase.Restoring -> Unit
+            // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
             else -> playIndex(index)
         }
     }
@@ -305,6 +311,8 @@ class PlaybackController(
         watchedToEnd = false
         mediaLoaded = false
         pausedAtEpisodeEnd = false
+        restoreAtEndOfEpisode = false
+        switchFailureReported = false
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Initial
@@ -327,22 +335,8 @@ class PlaybackController(
         switchOriginIndex = _currentIndex.value
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
-        _currentIndex.value = index
-        loadTargetIndex = index
-        loadTargetUrl = media.playbackLocation
-        loadPhase = LoadPhase.Switching
-        beginLoadTracking()
-        _switching.value = true
-        _seekPreviewMillis.value = null
-        _subtitleTracks.value = emptyList()
-        _externalSubtitles.value = emptyList()
-        _subtitleSelection.value = SubtitleSelection.Off
-        resumePositionMillis = null
-        watchedToEnd = false
-        mediaLoaded = false
-        pausedAtEpisodeEnd = false
-        savedPositionMillis = 0
-        _state.value = PlaybackState.Loading
+        switchFailureReported = false
+        applySwitchTarget(index, media)
         beginBufferingIndicator()
         beginLoadWatchdog()
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
@@ -353,18 +347,13 @@ class PlaybackController(
         lookUpResumePosition(index, media)
     }
 
-    /**
-     * 切集缓冲期间再次选择上一集/下一集：只把目标前移，直接加载最终目标。
-     * 冻结画面与缓冲计时沿用第一次切集，不重新抓帧。
-     */
-    private fun retargetSwitch(index: Int) {
-        val media = _playlist.value.getOrNull(index) ?: return
+    /** 切集目标切换时共用的状态重置；抓帧与缓冲计时由调用方决定。 */
+    private fun applySwitchTarget(index: Int, media: MediaFile) {
         _currentIndex.value = index
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Switching
         beginLoadTracking()
-        beginLoadWatchdog()
         _switching.value = true
         _seekPreviewMillis.value = null
         _subtitleTracks.value = emptyList()
@@ -376,6 +365,16 @@ class PlaybackController(
         pausedAtEpisodeEnd = false
         savedPositionMillis = 0
         _state.value = PlaybackState.Loading
+    }
+
+    /**
+     * 切集缓冲期间再次选择上一集/下一集：只把目标前移，直接加载最终目标。
+     * 冻结画面与缓冲计时沿用第一次切集，不重新抓帧。
+     */
+    private fun retargetSwitch(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
+        applySwitchTarget(index, media)
+        beginLoadWatchdog()
         engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -547,7 +546,12 @@ class PlaybackController(
             }
             LoadPhase.Restoring -> {
                 applyStartSubtitles(_currentIndex.value)
-                finishLoadWithoutSurface()
+                // 从片尾恢复没有可等待的首帧：文件打开即就绪，保持黑底暂停。
+                if (restoreAtEndOfEpisode) {
+                    finishReady(LoadPhase.Restoring)
+                } else {
+                    finishLoadWithoutSurface()
+                }
             }
             LoadPhase.None -> Unit
         }
@@ -788,6 +792,8 @@ class PlaybackController(
         loadPhase = LoadPhase.Restoring
         loadTargetIndex = switchOriginIndex
         loadTargetUrl = origin.playbackLocation
+        restoreAtEndOfEpisode = switchOriginDurationMillis > 0 &&
+            switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
         // 清掉被取消目标的续播 seek 与抓帧确认残留。
         frameProbeJob?.cancel()
         frameProbeJob = null
@@ -827,6 +833,8 @@ class PlaybackController(
         endLoadWatchdog()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
+        restoreAtEndOfEpisode = false
+        switchFailureReported = false
         replaceFreezeFrame(null)
         if (paused) {
             _state.value = PlaybackState.Paused
@@ -846,6 +854,7 @@ class PlaybackController(
         endLoadWatchdog()
         when (loadPhase) {
             LoadPhase.Switching -> {
+                switchFailureReported = true
                 restoreOrigin()
                 _playbackFailures.tryEmit(Unit)
             }
@@ -859,12 +868,14 @@ class PlaybackController(
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Restoring -> {
+                val reportFailure = !switchFailureReported
                 resetLoadState()
                 active = false
                 paused = true
                 _state.value = PlaybackState.Ended
                 engine.stop()
-                _playbackFailures.tryEmit(Unit)
+                // 同一次切集只提示一次“播放失败”。
+                if (reportFailure) _playbackFailures.tryEmit(Unit)
             }
             // 播放中出错：引擎已卸载，按失败结束；播放键可重开当前文件。
             LoadPhase.None -> {
@@ -932,6 +943,8 @@ class PlaybackController(
         requiredSeekSerial = 0
         resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
+        restoreAtEndOfEpisode = false
+        switchFailureReported = false
         replaceFreezeFrame(null)
     }
 

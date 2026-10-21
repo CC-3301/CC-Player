@@ -233,9 +233,10 @@ fun PlayerScreen(
     val locked = lock.locked
     val panelOpen = playlistVisible || subtitleMenuVisible || moreVisible
 
-    // 切集缓冲期间只允许返回与上一集/下一集，已打开的面板一并收起。
+    // 切集缓冲期间除返回、上一集与下一集外全部禁用；控制条保持可见，面板收起。
     LaunchedEffect(switching) {
         if (switching) {
+            controlsVisible = true
             playlistVisible = false
             subtitleMenuVisible = false
             moreVisible = false
@@ -379,7 +380,7 @@ fun PlayerScreen(
                     subtitleSelection = subtitleSelection,
                     playlistVisible = playlistVisible,
                     subtitleMenuVisible = subtitleMenuVisible,
-                    interactionsEnabled = !switching,
+                    playbackControlsEnabled = !switching,
                     onTogglePlayPause = onTogglePlayPause,
                     onPrevious = onPrevious,
                     onNext = onNext,
@@ -467,14 +468,9 @@ private fun PlayerGestureLayer(
     Box(
         modifier = modifier
             .pointerInput(enabled, switching) {
-                if (!enabled) {
-                    tapGesture.cancel()
-                    return@pointerInput
-                }
-                detectPlayerTaps(tapGesture) { action ->
-                    // 切集缓冲期间只保留单击显隐控制条；双击跳转与暂停禁用。
-                    if (!switching || action == TapGestureAction.ToggleControls) dispatchTap(action)
-                }
+                tapGesture.cancel()
+                if (!enabled || switching) return@pointerInput
+                detectPlayerTaps(tapGesture, dispatchTap)
             }
             .pointerInput(enabled, switching) {
                 if (!enabled || switching) return@pointerInput
@@ -647,7 +643,7 @@ private fun PlayerTopBar(
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
                     contentDescription = stringResource(R.string.player_more),
-                    tint = if (moreEnabled) playerToolColor(moreVisible) else AppColors.Faint.copy(alpha = 0.45f),
+                    tint = if (moreEnabled) playerToolColor(moreVisible) else DisabledToolColor,
                 )
             }
         }
@@ -689,7 +685,7 @@ private fun Controls(
     subtitleSelection: SubtitleSelection,
     playlistVisible: Boolean,
     subtitleMenuVisible: Boolean,
-    interactionsEnabled: Boolean,
+    playbackControlsEnabled: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -733,7 +729,7 @@ private fun Controls(
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
-            enabled = interactionsEnabled,
+            enabled = playbackControlsEnabled,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
         )
@@ -741,7 +737,7 @@ private fun Controls(
             playing = state == PlaybackState.Playing,
             canGoPrevious = currentIndex > 0,
             canGoNext = currentIndex in 0 until playlist.lastIndex,
-            interactionsEnabled = interactionsEnabled,
+            playbackControlsEnabled = playbackControlsEnabled,
             subtitleMenuVisible = subtitleMenuVisible,
             playlistVisible = playlistVisible,
             onTogglePlayPause = onTogglePlayPause,
@@ -760,7 +756,7 @@ private fun PlayerIconBar(
     playing: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
-    interactionsEnabled: Boolean,
+    playbackControlsEnabled: Boolean,
     subtitleMenuVisible: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
@@ -783,7 +779,7 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
-                enabled = interactionsEnabled,
+                enabled = playbackControlsEnabled,
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .size(iconSize),
@@ -807,7 +803,7 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onTogglePlayPause,
-                    enabled = interactionsEnabled,
+                    enabled = playbackControlsEnabled,
                     modifier = Modifier.size(iconSize),
                 )
                 PlayerIconButton(
@@ -827,7 +823,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
-                    enabled = interactionsEnabled,
+                    enabled = playbackControlsEnabled,
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(iconSize),
                 )
@@ -835,7 +831,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
-                    enabled = interactionsEnabled,
+                    enabled = playbackControlsEnabled,
                     active = playlistVisible,
                     modifier = Modifier.size(iconSize),
                 )
@@ -843,6 +839,9 @@ private fun PlayerIconBar(
         }
     }
 }
+
+/** 禁用控件的画布色。 */
+private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
 
 /** 播放器图标按钮：只有图标，禁用或展开时改变颜色。 */
 @Composable
@@ -859,7 +858,7 @@ private fun PlayerIconButton(
             painter = painterResource(icon),
             contentDescription = contentDescription,
             tint = when {
-                !enabled -> AppColors.Faint.copy(alpha = 0.45f)
+                !enabled -> DisabledToolColor
                 active -> AppColors.Accent
                 else -> AppColors.Foreground
             },

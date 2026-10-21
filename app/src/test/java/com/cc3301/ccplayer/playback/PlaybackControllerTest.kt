@@ -179,12 +179,18 @@ class PlaybackControllerTest {
     @Test
     fun `next episode still works after the current media ended`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
+        controller.setAutoPlayNext(false)
         controller.openPlaylist(files, mediaFile("ep1.mkv"))
+        engine.reportMediaLoaded()
         engine.reportPlaybackEnded()
+
+        assertEquals(PlaybackState.Ended, controller.state.value)
 
         controller.next()
 
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
     }
 
     @Test

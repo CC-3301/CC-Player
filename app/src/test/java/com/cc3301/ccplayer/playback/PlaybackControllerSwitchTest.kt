@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import android.graphics.Bitmap
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
@@ -13,11 +14,12 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 切集与缓冲指示的状态机：1000ms 阈值、首帧判定、失败与取消回退、
+ * 切集与缓冲指示的状态机：缓冲延迟阈值、首帧判定、失败与取消回退、
  * 替换事件不触发连播，以及加载超时。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -27,7 +29,7 @@ class PlaybackControllerSwitchTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `initial loading shows the indicator only after 1000ms`() = runTest {
+    fun `initial loading shows the indicator after the buffer delay`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -43,7 +45,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a first frame within 1000ms never shows the indicator`() = runTest {
+    fun `a first frame within the buffer delay never shows the indicator`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -87,7 +89,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `switching pauses the old video and grabs a frame before loading the target`() = runTest {
+    fun `switching pauses the old video and grabs a frame`() = runTest {
         val controller = playingController()
 
         controller.next()
@@ -95,7 +97,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
-        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertEquals(1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(1, engine.grabFrameCalls)
         assertEquals(0, engine.resumeCalls)
@@ -121,7 +123,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `switching uses the same 1000ms indicator threshold`() = runTest {
+    fun `switching uses the same indicator threshold`() = runTest {
         val controller = playingController()
 
         controller.next()
@@ -227,6 +229,8 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `automatic next uses the same switch transition as a manual switch`() = runTest {
         val controller = playingController()
+        val pauseCallsBefore = engine.pauseCalls
+        val grabCallsBefore = engine.grabFrameCalls
 
         engine.reportPlaybackEnded()
 
@@ -234,7 +238,8 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertTrue(controller.switching.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
-        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertEquals(pauseCallsBefore + 1, engine.pauseCalls)
+        assertEquals(grabCallsBefore + 1, engine.grabFrameCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(0, engine.resumeCalls)
         // 自然播完后已无帧可抓：冻结画面为空，界面按黑底等待。
@@ -296,6 +301,142 @@ class PlaybackControllerSwitchTest {
         assertEquals(true, engine.startedPaused.last())
         assertEquals(590_000L, engine.startedPositions.last())
         assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a failed automatic switch at the end restores a black paused frame on file load`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        engine.reportPositionChanged(600_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(600_000L, controller.progress.value.positionMillis)
+        assertEquals(600_000L, engine.startedPositions.last())
+        assertTrue(controller.switching.value)
+        assertNull(controller.freezeFrame.value)
+        assertEquals(1, failures.size)
+
+        // 片尾恢复没有首帧可等：文件加载完成即结束恢复，保持黑底暂停。
+        engine.reportFileLoaded()
+        assertFalse(controller.switching.value)
+        assertNull(controller.freezeFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a restore that times out after a failed switch reports failure only once`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        engine.reportPositionChanged(600_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        assertEquals(1, failures.size)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `a failed retarget restores the original video position`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        controller.next()
+        engine.reportPlaybackFailed()
+
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(40_000L, controller.progress.value.positionMillis)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(40_000L, engine.startedPositions.last())
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a grabbed frame stays frozen until the target is ready`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+
+        assertSame(frame, controller.freezeFrame.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertNull(controller.freezeFrame.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a manual switch leaves the origin progress untouched until the target is ready`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(40_000, 600_000)
+
+        controller.next()
+
+        assertEquals(PlaybackProgress(40_000, 600_000), controller.progress.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(0L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `retargeting does not restart the buffering indicator timer`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS - 1)
+        runCurrent()
+        assertFalse(controller.buffering.value)
+
+        controller.next()
+        runCurrent()
+        assertFalse(controller.buffering.value)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(controller.buffering.value)
+    }
+
+    @Test
+    fun `next during a restore starts a switch from the origin`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+
+        controller.next()
+
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(1, controller.currentIndex.value)
     }
 
     @Test
@@ -528,7 +669,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grab before 1000ms keeps the indicator hidden`() = runTest {
+    fun `a grab before the buffer delay keeps the indicator hidden`() = runTest {
         val controller = playingController()
         controller.pause()
 
@@ -626,7 +767,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `the indicator appears when the probe crosses the 1000ms threshold`() = runTest {
+    fun `the indicator appears when the probe crosses the buffer delay`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -844,7 +985,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a failing restore ends the session and reports failure`() = runTest {
+    fun `a failing restore ends the session without repeating the failure`() = runTest {
         val controller = playingController()
         val failures = collectFailures(controller)
 
@@ -855,7 +996,7 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Ended, controller.state.value)
-        assertEquals(2, failures.size)
+        assertEquals(1, failures.size)
         assertFalse(controller.switching.value)
         assertNull(controller.freezeFrame.value)
     }
@@ -930,6 +1071,18 @@ class PlaybackControllerSwitchTest {
     ) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
         controller.openPlaylist(files, files.first { it.name == current })
+    }
+
+    /**
+     * 测试只需要一个非空帧身份；android.jar 的 Bitmap 构造器在单测里是桩，
+     * 用 Unsafe 绕过构造器分配实例。
+     */
+    private fun testBitmap(): Bitmap {
+        val unsafeClass = Class.forName("sun.misc.Unsafe")
+        val field = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }
+        val unsafe = field.get(null)
+        val allocate = unsafeClass.getMethod("allocateInstance", Class::class.java)
+        return allocate.invoke(unsafe, Bitmap::class.java) as Bitmap
     }
 
     private companion object {
