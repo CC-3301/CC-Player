@@ -37,6 +37,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.DiagnosticsExporter
+import com.cc3301.ccplayer.diagnostics.connectionLogLine
+import com.cc3301.ccplayer.diagnostics.logLibraryNavigation
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
@@ -164,6 +166,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
             onLeavePlayer = ::closePlayer,
+            diagnostics = diagnostics,
         )
     }
 
@@ -244,15 +247,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
                 LaunchedEffect(navState.screen, navState.sourcesProtocol, playerVisible) {
-                    diagnostics.log(
+                    diagnostics.log {
                         if (playerVisible) {
                             "导航: 播放页"
                         } else if (navState.screen == AppScreen.Sources) {
                             "导航: ${navState.screen.name} ${navState.sourcesProtocol.name}"
                         } else {
                             "导航: ${navState.screen.name}"
-                        },
-                    )
+                        }
+                    }
                 }
                 // 缓冲指示交给播放控制层后撤掉准备态；首次加载就绪或转入切集时解除失败退回。
                 LaunchedEffect(playbackState, buffering, switching) {
@@ -379,7 +382,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 }
                             },
                             onOpenSource = { source ->
-                                diagnostics.log("连接源: ${source.protocol} ${source.name}")
+                                diagnostics.log {
+                                    connectionLogLine(source.protocol, source.name, source.location)
+                                }
                                 library.openSource(source)
                                 navigation.openLibrary()
                             },
@@ -402,6 +407,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = libraryState,
                             mediaPreview = mediaPreview,
                             onOpenEntry = { entry ->
+                                logLibraryNavigation(
+                                    diagnostics = diagnostics,
+                                    rootName = libraryState.stack.firstOrNull()?.name ?: "",
+                                    relativePath = libraryState.stack
+                                        .drop(1)
+                                        .joinToString("/") { it.name },
+                                    entryName = entry.name,
+                                    directory = entry.isDirectory,
+                                )
                                 if (entry.isDirectory) {
                                     library.enter(entry)
                                 } else {
@@ -440,14 +454,29 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 汇总轮转日志为一个纯文本文件，交给系统分享面板。 */
     private fun exportDiagnostics() {
         lifecycleScope.launch {
-            val file = withContext(Dispatchers.IO) {
-                runCatching { diagnosticsExporter.export() }.getOrNull()
+            val exported = withContext(Dispatchers.IO) {
+                runCatching { diagnosticsExporter.export() }
             }
-            val uri = file?.let {
-                runCatching {
-                    FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", it)
-                }.getOrNull()
+            if (exported.isFailure) {
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.settings_export_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
             }
+            val file = exported.getOrNull()
+            if (file == null) {
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.settings_export_empty),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+            val uri = runCatching {
+                FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
+            }.getOrNull()
             if (uri == null) {
                 Toast.makeText(
                     this@MainActivity,
@@ -683,7 +712,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onDestroy() {
-        if (isFinishing) diagnostics.log("应用退出")
+        if (isFinishing) diagnostics.logSync("应用退出")
         releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()

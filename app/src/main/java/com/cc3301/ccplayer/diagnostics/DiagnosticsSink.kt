@@ -28,15 +28,18 @@ class RotatingFileSink(
     private val directory: File,
     private val maxFileBytes: Long = Diagnostics.MAX_FILE_BYTES,
     private val maxFiles: Int = Diagnostics.MAX_FILES,
+    private val moveFile: (File, File) -> Boolean = { source, target -> source.renameTo(target) },
 ) : DiagnosticsSink {
 
     private val lock = Any()
+    private val limit = maxFileBytes.coerceAtLeast(1L)
 
     override fun write(message: String) {
         synchronized(lock) {
-            val line = "${timestamp()} $message\n".toByteArray(Charsets.UTF_8)
+            var line = "${timestamp()} $message\n".toByteArray(Charsets.UTF_8)
+            if (line.size > limit) line = line.copyOf(limit.toInt())
             val current = File(directory, CURRENT_FILE_NAME)
-            if (current.length() > 0 && current.length() + line.size > maxFileBytes) rotate()
+            if (current.length() > 0 && current.length() + line.size > limit) rotate()
             directory.mkdirs()
             FileOutputStream(File(directory, CURRENT_FILE_NAME), true).use { it.write(line) }
         }
@@ -50,10 +53,15 @@ class RotatingFileSink(
         File(directory, rotatedFileName(maxFiles - 1)).delete()
         for (index in maxFiles - 2 downTo 1) {
             val source = File(directory, rotatedFileName(index))
-            if (source.exists()) source.renameTo(File(directory, rotatedFileName(index + 1)))
+            if (source.exists()) move(source, File(directory, rotatedFileName(index + 1)))
         }
         val current = File(directory, CURRENT_FILE_NAME)
-        if (current.exists()) current.renameTo(File(directory, rotatedFileName(1)))
+        if (current.exists()) move(current, File(directory, rotatedFileName(1)))
+    }
+
+    /** 重命名失败时删除源文件，避免旧文件让后续写入持续超限。 */
+    private fun move(source: File, target: File) {
+        if (!moveFile(source, target)) source.delete()
     }
 
     private fun timestamp(): String =

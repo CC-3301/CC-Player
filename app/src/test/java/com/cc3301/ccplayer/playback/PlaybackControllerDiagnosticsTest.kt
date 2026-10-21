@@ -16,7 +16,7 @@ class PlaybackControllerDiagnosticsTest {
     @Test
     fun `开启后记录加载与播放状态迁移`() {
         val sink = MemoryDiagnosticsSink()
-        val diagnostics = Diagnostics(sink).apply { enabled = true }
+        val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher()).apply { enabled = true }
         val engine = FakePlaybackEngine()
         val media = MediaFile(name = "ep1.mkv", location = "smb://nas/share/ep1.mkv")
         val controller = PlaybackController(
