@@ -91,7 +91,7 @@ import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
@@ -117,6 +117,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var pendingDirectoryEntries: List<MediaFile> = emptyList()
     private var stateCollection: Job? = null
     private var streams: NetworkStreams? = null
+
+    /** 退后台时等待抓帧的分离任务；新的生命周期切换会取消旧任务。 */
+    private var backgroundDetachJob: Job? = null
 
     private var playerVisible by mutableStateOf(false)
 
@@ -513,11 +516,30 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStop()
         val binder = playback
         binder?.setAppInForeground(false)
-        // 后台上报可能已把播放暂停；抓帧必须在分离 Surface 之前完成。
-        binder?.let {
-            runBlocking { it.controller.captureBackgroundFrame() }
-            it.engine.detachSurface()
-            it.controller.setRenderSurfaceAvailable(false)
+        // 后台上报可能已把播放暂停；抓帧成功后再分离 Surface，等待有上限。
+        detachAfterBackgroundCapture { !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
+    }
+
+    /**
+     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，主线程最多等
+     * [BACKGROUND_DETACH_WAIT_MILLIS]；超时即丢弃本次抓帧并直接分离。
+     */
+    private fun detachAfterBackgroundCapture(shouldDetach: () -> Boolean) {
+        val binder = playback ?: return
+        backgroundDetachJob?.cancel()
+        val capture = binder.controller.beginBackgroundCapture()
+        backgroundDetachJob = lifecycleScope.launch {
+            val captured = capture != null && withTimeoutOrNull(BACKGROUND_DETACH_WAIT_MILLIS) {
+                capture.join()
+                true
+            } == true
+            if (!shouldDetach()) {
+                binder.controller.abandonBackgroundCapture()
+                return@launch
+            }
+            if (!captured) binder.controller.abandonBackgroundCapture()
+            binder.engine.detachSurface()
+            binder.controller.setRenderSurfaceAvailable(false)
         }
     }
 
@@ -548,13 +570,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onSurfaceReleased() {
         if (surface == null) return
-        // Surface 可能先于 onStop 销毁，在这里补抓；播放中与已停止的会话不抓。
-        playback?.let {
-            runBlocking { it.controller.captureBackgroundFrame() }
-            it.engine.detachSurface()
-            it.controller.setRenderSurfaceAvailable(false)
-        }
         surface = null
+        // 退后台时 Surface 可能先于 onStop 销毁，在这里补抓；转屏或关闭播放页不抓。
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            detachAfterBackgroundCapture { surface == null }
+        } else {
+            val binder = playback ?: return
+            backgroundDetachJob?.cancel()
+            binder.controller.abandonBackgroundCapture()
+            binder.engine.detachSurface()
+            binder.controller.setRenderSurfaceAvailable(false)
+        }
     }
 
     private fun closePlayer() {
@@ -648,5 +674,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private companion object {
         const val NO_MEDIA = -1
+
+        /** 主线程等待后台抓帧的上限；超时直接分离 Surface，不让原生调用阻塞离开后台。 */
+        const val BACKGROUND_DETACH_WAIT_MILLIS = 100L
     }
 }

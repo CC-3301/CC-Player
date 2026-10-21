@@ -1,9 +1,15 @@
 package com.cc3301.ccplayer.playback
 
 import android.graphics.Bitmap
+import android.view.Surface
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -27,7 +33,7 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = PlaybackEngine.Frame(frame)
         val controller = pausedController()
 
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(1, engine.grabFrameCalls)
@@ -38,8 +44,8 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
         val controller = pausedController()
 
-        controller.captureBackgroundFrame()
-        controller.captureBackgroundFrame()
+        capture(controller)
+        capture(controller)
 
         assertEquals(1, engine.grabFrameCalls)
     }
@@ -48,7 +54,7 @@ class PlaybackControllerBackgroundTest {
     fun `播放中退到后台不截帧`() = runTest {
         val controller = playingController()
 
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertEquals(0, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
@@ -58,7 +64,7 @@ class PlaybackControllerBackgroundTest {
     fun `没有会话时不截帧`() = runTest {
         engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
 
-        controller().captureBackgroundFrame()
+        capture(controller())
 
         assertEquals(0, engine.grabFrameCalls)
     }
@@ -71,7 +77,7 @@ class PlaybackControllerBackgroundTest {
         controller.openPlaylist(files, files.first())
         controller.pause()
 
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertEquals(0, engine.grabFrameCalls)
     }
@@ -81,7 +87,7 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         val controller = pausedController()
 
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertEquals(1, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
@@ -97,7 +103,7 @@ class PlaybackControllerBackgroundTest {
         assertTrue(controller.holdBlack.value)
         val grabsBefore = engine.grabFrameCalls
 
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertEquals(grabsBefore, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
@@ -186,7 +192,7 @@ class PlaybackControllerBackgroundTest {
         policy.setBackgroundPlaybackEnabled(false)
 
         policy.setAppInForeground(false)
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertSame(frame, controller.backgroundRestoreFrame.value)
     }
@@ -198,7 +204,7 @@ class PlaybackControllerBackgroundTest {
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
 
         policy.setAppInForeground(false)
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertEquals(0, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
@@ -212,7 +218,7 @@ class PlaybackControllerBackgroundTest {
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
 
         policy.setAppInForeground(false)
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertSame(frame, controller.backgroundRestoreFrame.value)
     }
@@ -226,7 +232,7 @@ class PlaybackControllerBackgroundTest {
         policy.setBackgroundPlaybackEnabled(false)
 
         policy.setAppInForeground(false)
-        controller.captureBackgroundFrame()
+        capture(controller)
 
         assertSame(frame, controller.backgroundRestoreFrame.value)
     }
@@ -245,12 +251,91 @@ class PlaybackControllerBackgroundTest {
         assertTrue(controller.holdBlack.value)
     }
 
-    private fun TestScope.controller(): PlaybackController =
+    @Test
+    fun `暂停态抓帧确认有重试上限`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.frameToGrab = null
+        reattach(controller)
+        engine.reportSurfaceReconfigured()
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS * (PlaybackController.BACKGROUND_FRAME_PROBE_MAX_ATTEMPTS + 2))
+        runCurrent()
+        val callsAfterLimit = engine.grabFrameCalls
+
+        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS * 5)
+        runCurrent()
+
+        assertEquals(callsAfterLimit, engine.grabFrameCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+    }
+
+    @Test
+    fun `抓帧任务不阻塞调用方且超时后丢弃结果`() = runBlocking {
+        val gate = CountDownLatch(1)
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        engine.beforeGrab = { gate.await() }
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                this,
+                frameProbeDispatcher = dispatcher,
+            )
+            openPaused(controller)
+            val startedAt = System.nanoTime()
+
+            val job = controller.beginBackgroundCapture()
+
+            assertTrue(job != null)
+            // 抓帧在后台线程等待，调用方立即返回。
+            assertTrue(System.nanoTime() - startedAt < 100_000_000L)
+            controller.abandonBackgroundCapture()
+            gate.countDown()
+            job?.join()
+
+            assertNull(controller.backgroundRestoreFrame.value)
+        } finally {
+            dispatcher.close()
+        }
+    }
+
+    @Test
+    fun `假引擎重复挂载同一 Surface 不重复递增代数`() {
+        val surface = testSurface()
+
+        engine.attachSurface(surface)
+        engine.attachSurface(surface)
+        assertEquals(1, engine.surfaceGeneration)
+
+        engine.detachSurface()
+        engine.attachSurface(surface)
+        assertEquals(2, engine.surfaceGeneration)
+    }
+
+    private fun openPaused(controller: PlaybackController) {
+        val files = listOf(
+            MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
+            MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"),
+        )
+        controller.openPlaylist(files, files.first())
+        engine.reportMediaLoaded()
+        controller.pause()
+        engine.reportPauseChanged(true)
+    }
+
+    private suspend fun capture(controller: PlaybackController) {
+        controller.beginBackgroundCapture()?.join()
+    }
+
+    private fun TestScope.controller(
+        frameProbeDispatcher: CoroutineDispatcher = UnconfinedTestDispatcher(testScheduler),
+    ): PlaybackController =
         PlaybackController(
             engine,
             progress,
             backgroundScope,
-            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+            frameProbeDispatcher = frameProbeDispatcher,
         )
 
     private fun TestScope.playingController(): PlaybackController {
@@ -276,7 +361,7 @@ class PlaybackControllerBackgroundTest {
     ): PlaybackController {
         engine.frameToGrab = PlaybackEngine.Frame(frame)
         val controller = pausedController()
-        controller.captureBackgroundFrame()
+        capture(controller)
         assertSame(frame, controller.backgroundRestoreFrame.value)
         return controller
     }
@@ -291,11 +376,16 @@ class PlaybackControllerBackgroundTest {
      * 测试只需要一个非空帧身份；android.jar 的 Bitmap 构造器在单测里是桩，
      * 沿用现有测试的 Unsafe 分配方式。
      */
-    private fun testBitmap(): Bitmap {
+    private fun testBitmap(): Bitmap = unsafeAllocate(Bitmap::class.java)
+
+    private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> unsafeAllocate(type: Class<T>): T {
         val unsafeClass = Class.forName("sun.misc.Unsafe")
         val field = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }
         val unsafe = field.get(null)
         val allocate = unsafeClass.getMethod("allocateInstance", Class::class.java)
-        return allocate.invoke(unsafe, Bitmap::class.java) as Bitmap
+        return allocate.invoke(unsafe, type) as T
     }
 }

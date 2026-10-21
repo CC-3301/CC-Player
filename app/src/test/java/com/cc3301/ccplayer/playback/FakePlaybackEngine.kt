@@ -21,6 +21,9 @@ class FakePlaybackEngine : PlaybackEngine {
     var grabFrameCalls = 0
         private set
 
+    /** 抓帧前执行，用于模拟不可中断的原生调用。 */
+    var beforeGrab: (() -> Unit)? = null
+
     /** 最近一次 start 的目标与代际，回调带上它们供控制层过滤迟到事件。 */
     var currentTargetUrl: String? = null
         private set
@@ -68,6 +71,7 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun grabFrame(): PlaybackEngine.Frame? {
         actions += "grab"
         grabFrameCalls++
+        beforeGrab?.invoke()
         return frameToGrab
     }
 
@@ -129,9 +133,17 @@ class FakePlaybackEngine : PlaybackEngine {
         surfaceGeneration++
     }
 
-    override fun attachSurface(surface: Surface) = Unit
+    private var attachedSurface: Surface? = null
 
-    override fun detachSurface() = Unit
+    override fun attachSurface(surface: Surface) {
+        if (attachedSurface === surface) return
+        attachedSurface = surface
+        surfaceGeneration++
+    }
+
+    override fun detachSurface() {
+        attachedSurface = null
+    }
 
     override fun setSurfaceSize(width: Int, height: Int) = Unit
 

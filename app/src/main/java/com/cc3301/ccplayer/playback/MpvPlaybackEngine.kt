@@ -170,9 +170,9 @@ class MpvPlaybackEngine(
         if (videoOutputStopped) {
             // 先进入等待，再切回视频输出，避免首个重配事件先到而被漏掉。
             awaitingSurfaceFrame = true
+            videoOutputStopped = false
             surfaceGenerationCounter++
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
-            videoOutputStopped = false
         }
         attachedSurface = surface
         MPVLib.attachSurface(surface)
