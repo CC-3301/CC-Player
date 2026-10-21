@@ -67,20 +67,24 @@ class DiagnosticsTest {
     }
 
     @Test
-    fun `脱敏 URL userinfo、Authorization 与含空格值`() {
+    fun `脱敏 URL userinfo、认证头、全角与 JSON 键`() {
         diagnostics.enabled = true
 
-        diagnostics.log("地址 https://user:pass@nas/dav")
+        diagnostics.log("地址 https://user:p@ss@nas/dav")
         diagnostics.log("Authorization: Basic dXNlcjpwYXNz")
         diagnostics.log("password = my secret value")
         diagnostics.log("token: abc def")
+        diagnostics.log("密码：全角秘密")
+        diagnostics.log("{\"password\":\"json-secret\"}")
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("https://nas/dav"))
-        assertFalse(text.contains("user:pass"))
+        assertFalse(text.contains("p@ss"))
         assertFalse(text.contains("dXNlcjpwYXNz"))
         assertFalse(text.contains("my secret value"))
         assertFalse(text.contains("abc def"))
+        assertFalse(text.contains("全角秘密"))
+        assertFalse(text.contains("json-secret"))
     }
 
     @Test
@@ -168,6 +172,29 @@ class DiagnosticsTest {
 
         val current = File(directory, RotatingFileSink.CURRENT_FILE_NAME)
         assertTrue(current.length() <= 16)
+    }
+
+    @Test
+    fun `超长多字节行按字符边界截断`() {
+        val directory = temporaryFolder.newFolder("utf8")
+        val fileSink = RotatingFileSink(directory, maxFileBytes = 40, maxFiles = 3)
+
+        fileSink.write("中".repeat(100))
+
+        val text = File(directory, RotatingFileSink.CURRENT_FILE_NAME).readText(Charsets.UTF_8)
+        assertTrue(text.isNotEmpty())
+        assertFalse(text.contains('�'))
+    }
+
+    @Test
+    fun `有内容时不清理旧导出`() {
+        val logDirectory = temporaryFolder.newFolder("keep-old-logs")
+        val outputDirectory = temporaryFolder.newFolder("keep-old-output")
+        val oldExport = File(outputDirectory, "cc-player-diagnostics-old.txt").apply { writeText("旧") }
+        File(logDirectory, RotatingFileSink.CURRENT_FILE_NAME).writeText("new\n", Charsets.UTF_8)
+
+        assertTrue(DiagnosticsExporter(logDirectory, outputDirectory).export() != null)
+        assertTrue(oldExport.exists())
     }
 
     @Test

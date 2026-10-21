@@ -36,13 +36,21 @@ class RotatingFileSink(
 
     override fun write(message: String) {
         synchronized(lock) {
-            var line = "${timestamp()} $message\n".toByteArray(Charsets.UTF_8)
-            if (line.size > limit) line = line.copyOf(limit.toInt())
+            val line = truncate("${timestamp()} $message\n".toByteArray(Charsets.UTF_8))
             val current = File(directory, CURRENT_FILE_NAME)
             if (current.length() > 0 && current.length() + line.size > limit) rotate()
             directory.mkdirs()
             FileOutputStream(File(directory, CURRENT_FILE_NAME), true).use { it.write(line) }
         }
+    }
+
+    /** 超长行截到文件上限，并回退到 UTF-8 字符边界，避免写出半个字符。 */
+    private fun truncate(line: ByteArray): ByteArray {
+        val max = limit.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        if (line.size <= max) return line
+        var end = max
+        while (end > 0 && (line[end].toInt() and 0xC0) == 0x80) end--
+        return line.copyOf(end)
     }
 
     private fun rotate() {

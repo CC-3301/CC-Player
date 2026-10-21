@@ -14,16 +14,22 @@ class DiagnosticsExporter(
 
     fun export(): File? {
         outputDirectory.mkdirs()
-        outputDirectory.listFiles()
-            ?.filter { it.isFile && it.extension == "txt" }
-            ?.forEach { it.delete() }
-
         val content = buildContent()
-        if (content.isBlank()) return null
+        if (content.isBlank()) {
+            cleanOldExports()
+            return null
+        }
 
-        val output = File(outputDirectory, "cc-player-diagnostics-${System.currentTimeMillis()}.txt")
+        val output = File(outputDirectory, "$EXPORT_PREFIX${System.currentTimeMillis()}.txt")
         output.writeText(content, Charsets.UTF_8)
         return output
+    }
+
+    /** 只清理本应用命名的旧导出，避免误删分享面板可能仍持有的其他文件。 */
+    private fun cleanOldExports() {
+        outputDirectory.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(EXPORT_PREFIX) && it.extension == "txt" }
+            ?.forEach { it.delete() }
     }
 
     private fun buildContent(): String {
@@ -43,5 +49,9 @@ class DiagnosticsExporter(
         builder.append("===== ${file.name} =====\n")
         builder.append(text)
         if (builder.last() != '\n') builder.append('\n')
+    }
+
+    private companion object {
+        const val EXPORT_PREFIX = "cc-player-diagnostics-"
     }
 }

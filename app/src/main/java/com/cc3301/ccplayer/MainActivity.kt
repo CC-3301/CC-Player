@@ -95,6 +95,7 @@ import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavMediaReads
 import com.cc3301.ccplayer.webdav.WebDavStreams
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -455,7 +456,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun exportDiagnostics() {
         lifecycleScope.launch {
             val exported = withContext(Dispatchers.IO) {
-                runCatching { diagnosticsExporter.export() }
+                try {
+                    Result.success(diagnosticsExporter.export())
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    Result.failure(failure)
+                }
             }
             if (exported.isFailure) {
                 Toast.makeText(

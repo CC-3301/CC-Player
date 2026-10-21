@@ -2,7 +2,7 @@ package com.cc3301.ccplayer.diagnostics
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class CrashLoggerTest {
@@ -48,14 +48,25 @@ class CrashLoggerTest {
 
     @Test
     fun `读取开关抛异常仍交回默认处理器`() {
+        var written = false
         var delegated: Throwable? = null
-        val logger = CrashLogger({ throw IllegalStateException("读不了设置") }, { error ->
-            assertTrue(error.message == "boom")
-        })
+        val logger = CrashLogger({ throw IllegalStateException("读不了设置") }, { written = true })
         val previous = Thread.UncaughtExceptionHandler { _, throwable -> delegated = throwable }
 
         logger.handle(Thread.currentThread(), error, previous)
 
+        assertFalse(written)
         assertSame(error, delegated)
+    }
+
+    @Test
+    fun `没有默认处理器时重抛原异常`() {
+        val logger = CrashLogger({ true }, { })
+
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            logger.handle(Thread.currentThread(), error, null)
+        }
+
+        assertSame(error, thrown)
     }
 }

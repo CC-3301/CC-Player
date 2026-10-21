@@ -76,10 +76,11 @@ class Diagnostics(
 
         private val SINGLE_IO = Dispatchers.IO.limitedParallelism(1)
 
-        private val USERINFO_PATTERN = Regex("(?i)([a-z][a-z0-9+.-]*://)[^/\\s@]*@")
+        private val USERINFO_PATTERN = Regex("(?i)([a-z][a-z0-9+.-]*://)[^/\\s]*@")
 
         private val SECRET_PATTERN = Regex(
-            "(?i)\\b(password|passwd|pwd|authorization|token|secret|密码)\\b\\s*[=:]\\s*[^\\n]*",
+            "(?i)(?<![A-Za-z0-9_])[\"'“”]?(password|passwd|pwd|authorization|token|secret|密码)" +
+                "[\"'“”]?\\s*[:=：＝]\\s*[^\\n]*",
         )
 
         /** 去掉 URL 中的 userinfo，并把密码、令牌与整条认证头隐去。 */
