@@ -195,6 +195,9 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 只上报加载活动，不给 ready/end。 */
     fun reportLoadActivity() = listener?.onLoadActivity()
 
+    /** 视频输出重新挂上后已输出画面。 */
+    fun reportFramePresented() = listener?.onFramePresented()
+
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
     fun reportPlaybackEnded() {

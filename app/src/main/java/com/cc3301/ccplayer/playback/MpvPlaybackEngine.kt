@@ -23,7 +23,12 @@ class MpvPlaybackEngine(
     private var videoOutputStopped = false
 
     /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
+    @Volatile
     private var attachedSurface: Surface? = null
+
+    /** 退后台后重新挂上 Surface，等待视频输出再次出帧。 */
+    @Volatile
+    private var awaitingSurfaceFrame = false
 
     /** 加载代际、结束判定与 ready 序号；同一临界区，控制层与事件线程都会调用。 */
     private val loadCoordinator = MpvLoadCoordinator()
@@ -159,15 +164,17 @@ class MpvPlaybackEngine(
         if (videoOutputStopped) {
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
             videoOutputStopped = false
+            awaitingSurfaceFrame = true
         }
-        MPVLib.attachSurface(surface)
         attachedSurface = surface
+        MPVLib.attachSurface(surface)
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         MPVLib.setOptionString("force-window", "yes")
     }
 
     override fun detachSurface() {
         if (attachedSurface == null) return
+        awaitingSurfaceFrame = false
         MPVLib.setPropertyString("vo", "null")
         MPVLib.setOptionString("force-window", "no")
         MPVLib.detachSurface()
@@ -205,6 +212,7 @@ class MpvPlaybackEngine(
                 if (loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
                     reportReady(needsFrameConfirmation = true)
                 }
+                notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
                 if (loadCoordinator.isFileLoaded && !hasVideoTrack) reportReady()
@@ -212,6 +220,7 @@ class MpvPlaybackEngine(
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (loadCoordinator.isFileLoaded) {
                 reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+                notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
@@ -237,6 +246,15 @@ class MpvPlaybackEngine(
             MpvFileEvents.End.Ended -> listener?.onPlaybackEnded()
             MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
         }
+    }
+
+    /** 重新挂上 Surface 后的首次视频输出：通知控制层撤掉后台恢复帧。 */
+    private fun notifySurfaceFrame() {
+        if (!awaitingSurfaceFrame) return
+        if (attachedSurface == null || videoOutputStopped) return
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+        awaitingSurfaceFrame = false
+        listener?.onFramePresented()
     }
 
     /**

@@ -138,6 +138,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标首帧就绪。 */
     private var freezeFrame by mutableStateOf<Bitmap?>(null)
+
+    /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
+    private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -162,6 +165,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
+                launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
                         Toast.makeText(
@@ -246,6 +250,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             restoring = restoring,
                             buffering = buffering,
                             freezeFrame = freezeFrame,
+                            backgroundRestoreFrame = backgroundRestoreFrame,
                             holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
@@ -506,6 +511,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onStop() {
         super.onStop()
         playback?.setAppInForeground(false)
+        // 后台上报可能已把播放暂停；抓帧必须在分离 Surface 之前完成。
+        playback?.controller?.captureBackgroundFrame()
         playback?.engine?.detachSurface()
         playback?.controller?.setRenderSurfaceAvailable(false)
     }
@@ -537,6 +544,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onSurfaceReleased() {
         if (surface == null) return
+        // Surface 可能先于 onStop 销毁，在这里补抓；播放中与已停止的会话不抓。
+        playback?.controller?.captureBackgroundFrame()
         surface = null
         playback?.engine?.detachSurface()
         playback?.controller?.setRenderSurfaceAvailable(false)

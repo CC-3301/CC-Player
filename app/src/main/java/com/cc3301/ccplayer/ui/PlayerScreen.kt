@@ -237,6 +237,7 @@ fun PlayerScreen(
     restoring: Boolean,
     buffering: Boolean,
     freezeFrame: Bitmap?,
+    backgroundRestoreFrame: Bitmap?,
     holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
@@ -340,6 +341,15 @@ fun PlayerScreen(
         if (switching && freezeFrame != null) {
             Image(
                 bitmap = freezeFrame.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // 后台回来先盖住离开前的画面；播放核心重新出帧后由控制层撤掉这一层。
+        if (!switching && backgroundRestoreFrame != null) {
+            Image(
+                bitmap = backgroundRestoreFrame.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),

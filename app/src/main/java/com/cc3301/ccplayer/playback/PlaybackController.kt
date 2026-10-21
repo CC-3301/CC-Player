@@ -94,6 +94,13 @@ class PlaybackController(
     private val _renderSurfaceAvailable = MutableStateFlow(true)
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
 
+    /**
+     * 暂停态退到后台前缓存的画面。回前台先盖在视频视图上，
+     * 等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
+     */
+    private val _backgroundRestoreFrame = MutableStateFlow<Bitmap?>(null)
+    val backgroundRestoreFrame: StateFlow<Bitmap?> = _backgroundRestoreFrame.asStateFlow()
+
     /** 播放失败事件，供界面提示“播放失败”。 */
     private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val playbackFailures: SharedFlow<Unit> = _playbackFailures.asSharedFlow()
@@ -317,6 +324,16 @@ class PlaybackController(
         evaluateDeferredReady()
     }
 
+    /**
+     * 界面在退到后台、分离 Surface 之前调用：暂停态先抓一帧备用。
+     * 播放态不截帧，回前台由播放核心继续输出。
+     */
+    fun captureBackgroundFrame() {
+        if (!active || !paused || loadPhase != LoadPhase.None || _holdBlack.value) return
+        val frame = engine.grabFrame()?.bitmap ?: return
+        _backgroundRestoreFrame.value = frame
+    }
+
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
     private fun startSession(index: Int, media: MediaFile) {
         _currentIndex.value = index
@@ -346,6 +363,7 @@ class PlaybackController(
         _restoring.value = false
         restartFromStartAfterRestore = false
         replaceFreezeFrame(null)
+        replaceBackgroundRestoreFrame(null)
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
         beginLoadWatchdog()
@@ -365,6 +383,7 @@ class PlaybackController(
         switchOriginEnded = originAtEnd
         switchFailureReported = false
         _holdBlack.value = false
+        replaceBackgroundRestoreFrame(null)
         applySwitchTarget(index, media)
         beginBufferingIndicator()
         beginLoadWatchdog()
@@ -715,6 +734,11 @@ class PlaybackController(
         if (loadPhase != LoadPhase.None) beginLoadWatchdog()
     }
 
+    /** 播放核心重新输出画面，后台恢复帧不再需要遮挡。 */
+    override fun onFramePresented() {
+        replaceBackgroundRestoreFrame(null)
+    }
+
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
         when (loadPhase) {
@@ -1021,6 +1045,11 @@ class PlaybackController(
         _freezeFrame.value = frame
     }
 
+    /** 换掉后台恢复帧；同样交给 GC，不手动回收。 */
+    private fun replaceBackgroundRestoreFrame(frame: Bitmap?) {
+        _backgroundRestoreFrame.value = frame
+    }
+
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */
     private fun resetLoadState() {
         loadGeneration++
@@ -1045,6 +1074,7 @@ class PlaybackController(
         switchFailureReported = false
         _holdBlack.value = false
         replaceFreezeFrame(null)
+        replaceBackgroundRestoreFrame(null)
     }
 
     /** 开始一轮加载：续播位置未查明前不允许判定就绪，seek 序号从零比较。 */
@@ -1167,6 +1197,10 @@ class PlaybackController(
 
         override fun onLoadActivity() {
             scope.launch { target.onLoadActivity() }
+        }
+
+        override fun onFramePresented() {
+            scope.launch { target.onFramePresented() }
         }
 
         override fun onPauseChanged(paused: Boolean) {

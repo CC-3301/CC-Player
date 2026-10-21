@@ -98,6 +98,9 @@ interface PlaybackEngine {
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()
 
+        /** 视频输出重新挂上后已输出画面；用于撤掉后台恢复帧。 */
+        fun onFramePresented()
+
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)
 
