@@ -133,15 +133,17 @@ fun LibraryScreen(
     }
 
     // 离开目录或离开库页面时补记一次，覆盖刚滚动就离开的情况。
+    // 视图切换会让 effect 重建：用切换前的视图取对应滚动状态，避免拿新视图的初始位置覆盖记录。
+    val viewModeForSave = state.viewMode
     DisposableEffect(state.currentDirectory?.location, state.viewMode) {
         onDispose {
             val current = latestState
-            val index = if (current.viewMode == ViewMode.List) {
+            val index = if (viewModeForSave == ViewMode.List) {
                 listState.firstVisibleItemIndex
             } else {
                 gridState.firstVisibleItemIndex
             }
-            val offset = if (current.viewMode == ViewMode.List) {
+            val offset = if (viewModeForSave == ViewMode.List) {
                 listState.firstVisibleItemScrollOffset
             } else {
                 gridState.firstVisibleItemScrollOffset

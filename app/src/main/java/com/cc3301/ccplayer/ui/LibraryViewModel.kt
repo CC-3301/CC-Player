@@ -166,6 +166,8 @@ data class LibraryState(
         return when {
             sortChanged -> updated.scrolledToTop(pendingWhileLoading = updated.loading)
             recomputePositionOnFirstApply && preferencesChanged -> updated.retargeted()
+            // 加载中条目已清空，先记下强制定位意图，等 withLoadedEntries 读完目录再定位。
+            viewChanged && updated.loading -> updated.copy(restorePositionForced = true)
             viewChanged -> updated.retargeted(restorePosition = true)
             else -> updated
         }

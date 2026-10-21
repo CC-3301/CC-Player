@@ -654,6 +654,35 @@ class LibraryViewModelTest {
     }
 
     @Test
+    fun `排序与视图偏好晚到时按新次序定位`() = runTest {
+        val seedStore = FakePreferencesDataStore()
+        val seedSettings = SettingsRepository(seedStore)
+        seedSettings.setSortOrder(SortOrder.NameDescending)
+        seedSettings.setView(ViewMode.Grid, 3)
+        val gatedStore = GatedPreferencesDataStore(seedStore.data.first())
+        val gatedViewModel = createViewModel(
+            settings = SettingsRepository(gatedStore),
+            state = SavedStateHandle(),
+        )
+        tree.addDirectory(
+            smbRoot,
+            testVideo("ep10.mkv", "smb://nas/media/ep10.mkv"),
+            testVideo("ep2.mkv", "smb://nas/media/ep2.mkv"),
+        )
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/ep2.mkv", 8))
+        val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
+
+        gatedViewModel.openSource(source)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 8), gatedViewModel.state.value.scrollTarget)
+
+        gatedStore.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 8), gatedViewModel.state.value.scrollTarget)
+    }
+
+    @Test
     fun `空目录、读取失败或条目不在列表时不写位置`() = runTest {
         val emptyRoot = testDirectory("空", "smb://nas/empty")
         tree.addDirectory(emptyRoot)
@@ -1068,6 +1097,36 @@ class LibraryViewModelTest {
         assertFalse(gatedViewModel.state.value.loading)
         assertFalse(gatedViewModel.state.value.pendingScrollToTop)
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), gatedViewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `加载中切换视图且开关关闭时仍按记录定位`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40))
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
+        val gatedViewModel = createViewModel(library = gated, state = SavedStateHandle())
+        val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
+
+        gatedViewModel.openSource(source)
+        advanceUntilIdle()
+        assertTrue(gatedViewModel.state.value.loading)
+        assertNull(gatedViewModel.state.value.scrollTarget)
+
+        settings.setView(ViewMode.Grid, 3)
+        advanceUntilIdle()
+        assertTrue(gatedViewModel.state.value.restorePositionForced)
+
+        gated.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 40), gatedViewModel.state.value.scrollTarget)
+        assertFalse(gatedViewModel.state.value.restorePositionForced)
     }
 
     @Test
