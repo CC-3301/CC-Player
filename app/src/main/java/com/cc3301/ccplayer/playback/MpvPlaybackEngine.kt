@@ -35,9 +35,18 @@ class MpvPlaybackEngine(
     @Volatile
     private var hasVideoTrack = false
 
-    /** 本次 loadfile 的目标位置，用 mpv 的 path 属性识别迟到的旧 FILE_LOADED。 */
+    /** 当前 loadfile 的目标与代际；URL 与序号总是成对读取。 */
     @Volatile
-    private var targetUrl: String? = null
+    private var currentLoad: LoadSpec? = null
+
+    /** 每次 start 递增的加载代际；事件按产生它的那次加载上报。 */
+    private var nextLoadToken = 0
+
+    /** 已通过校验的 FILE_LOADED 对应的目标与代际；ready 事件沿用同一份快照。 */
+    @Volatile
+    private var loadedTargetUrl: String? = null
+    @Volatile
+    private var loadedLoadToken = 0
 
     @Volatile
     private var positionSeconds = 0.0
@@ -64,12 +73,15 @@ class MpvPlaybackEngine(
         this.listener = listener
     }
 
-    override fun start(url: String, paused: Boolean, startPositionMillis: Long) {
+    override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
+        val loadToken = ++nextLoadToken
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
         readySignals.onStart()
-        targetUrl = url
+        currentLoad = LoadSpec(url, loadToken)
+        loadedTargetUrl = null
+        loadedLoadToken = 0
         fileEvents.onStart()
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -78,6 +90,7 @@ class MpvPlaybackEngine(
             command += "start=${formatSeconds(startPositionMillis)}"
         }
         MPVLib.command(command.toTypedArray())
+        return loadToken
     }
 
     /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
@@ -96,7 +109,9 @@ class MpvPlaybackEngine(
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
         fileEvents.onStop()
         hasVideoTrack = false
-        targetUrl = null
+        currentLoad = null
+        loadedTargetUrl = null
+        loadedLoadToken = 0
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -221,17 +236,23 @@ class MpvPlaybackEngine(
     }
 
     private fun onFileLoaded() {
+        // 目标与代际来自同一份快照，避免校验期间被新的 start 改掉。
+        val load = currentLoad ?: return
         // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
-        if (!fileEvents.onFileLoaded(isTargetFile())) return
+        if (!fileEvents.onFileLoaded(isTargetFile(load.url))) return
+        loadedTargetUrl = load.url
+        loadedLoadToken = load.token
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded(targetUrl)
+        listener?.onMediaLoaded(load.url, load.token)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
 
     /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
-    private fun isTargetFile(): Boolean =
-        isTargetPath(targetUrl, MPVLib.getPropertyString(PATH_PROPERTY))
+    private fun isTargetFile(target: String?): Boolean =
+        isTargetPath(target, MPVLib.getPropertyString(PATH_PROPERTY))
+
+    private data class LoadSpec(val url: String, val token: Int)
 
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
@@ -252,7 +273,12 @@ class MpvPlaybackEngine(
      */
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
         val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
-        listener?.onFirstFrameReady(needsFrameConfirmation, targetUrl, serial)
+        listener?.onFirstFrameReady(
+            needsFrameConfirmation,
+            loadedTargetUrl,
+            serial,
+            loadedLoadToken,
+        )
     }
 
     override fun eventProperty(property: String) = Unit

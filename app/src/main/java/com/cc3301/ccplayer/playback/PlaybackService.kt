@@ -117,9 +117,13 @@ class PlaybackService : Service() {
         }
     }
 
-    /** 按策略决定通知栏动作是否执行；后台关闭时只放过暂停。 */
+    /** 按策略决定通知栏动作是否执行；首次加载与切集期间按可用性拦截。 */
     private fun dispatch(action: MediaSessionAction) {
-        backgroundPolicy.dispatch(action) { allowed -> allowed.applyTo(playbackController) }
+        val controller = playbackController
+        val switching = controller.switching.value
+        val initialLoading = isInitialLoading(controller.state.value, switching)
+        if (!mediaActionAllowed(action, switching, initialLoading)) return
+        backgroundPolicy.dispatch(action) { allowed -> allowed.applyTo(controller) }
     }
 
     /** 状态或前后台变化时同步 MediaSession 与通知栏，前后台切换后按钮集合随之变化。 */

@@ -14,8 +14,9 @@ interface PlaybackEngine {
      * 打开媒体；[paused] 为真时新文件加载后保持暂停，等控制层放行才出声。
      * [startPositionMillis] 为正时从该位置打开，首帧就是目标位置的画面。
      * 每次开始都显式设置暂停状态，避免上一次会话的暂停残留。
+     * 返回本次加载的代际序号；后续加载回调带上同一序号，控制层据此丢弃迟到的旧事件。
      */
-    fun start(url: String, paused: Boolean = false, startPositionMillis: Long = 0)
+    fun start(url: String, paused: Boolean = false, startPositionMillis: Long = 0): Int
 
     /**
      * 取当前画面的一帧。非 null 表示确实有帧可显示；位图本身可为 null 仅用于测试替身。
@@ -70,17 +71,23 @@ interface PlaybackEngine {
 
     /** 引擎向控制层上报的播放事件。 */
     interface Listener {
-        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。[targetUrl] 是本次加载的目标。 */
-        fun onMediaLoaded(targetUrl: String?)
+        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。[targetUrl] 与 [loadToken] 标识本次加载。 */
+        fun onMediaLoaded(targetUrl: String?, loadToken: Int)
 
         /**
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
          * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要用抓帧确认后才算就绪。
          * [targetUrl] 是本次加载的目标，控制层据此丢弃取消/恢复之后迟到的 ready。
          * [seekSerial] 是本次信号对应的 seek 序号，控制层只接受续播 seek 之后的信号。
+         * [loadToken] 是产生该信号的那次加载，控制层据此丢弃同 URL 重载后的迟到事件。
          * seek 后引擎会再次上报 PLAYBACK_RESTART。
          */
-        fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int)
+        fun onFirstFrameReady(
+            needsFrameConfirmation: Boolean,
+            targetUrl: String?,
+            seekSerial: Int,
+            loadToken: Int,
+        )
 
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()

@@ -109,6 +109,21 @@ class PlaybackControllerProgressTest {
     }
 
     @Test
+    fun `切集期间原媒体的迟到位置不作用到目标`() = runTest {
+        val controller = controller()
+        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        engine.reportPositionChanged(30_000, 60_000)
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(0L, controller.progress.value.positionMillis)
+        assertNull(progress.records[ep1.location])
+    }
+
+    @Test
     fun `位置按间隔落库`() = runTest {
         val controller = controller()
 

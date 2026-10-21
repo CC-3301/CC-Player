@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.isInitialLoading
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -136,5 +138,37 @@ class PlayerGesturesTest {
         PlayerAction.entries.forEach { action ->
             assertEquals(action.name, true, actionAllowed(action, switching = false))
         }
+    }
+
+    @Test
+    fun `首次加载期间只放行返回`() {
+        val allowed = PlayerAction.entries
+            .filter { actionAllowed(it, switching = false, initialLoading = true) }
+            .toSet()
+        assertEquals(setOf(PlayerAction.Back), allowed)
+        assertEquals(
+            9,
+            PlayerAction.entries.count {
+                !actionAllowed(it, switching = false, initialLoading = true)
+            },
+        )
+    }
+
+    @Test
+    fun `首次加载完成后所有操作恢复`() {
+        PlayerAction.entries.forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionAllowed(action, switching = false, initialLoading = false),
+            )
+        }
+    }
+
+    @Test
+    fun `加载中且未切集才算首次加载`() {
+        assertTrue(isInitialLoading(PlaybackState.Loading, switching = false))
+        assertFalse(isInitialLoading(PlaybackState.Loading, switching = true))
+        assertFalse(isInitialLoading(PlaybackState.Playing, switching = false))
     }
 }

@@ -77,7 +77,7 @@ class PlaybackController(
     val freezeFrame: StateFlow<Bitmap?> = _freezeFrame.asStateFlow()
 
     /**
-     * 片尾恢复就绪后保持黑底，直到下一次用户操作或新加载。
+     * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
      * 片尾没有首帧可显示，不能用冻结画面占位。
      */
     private val _holdBlack = MutableStateFlow(false)
@@ -178,6 +178,9 @@ class PlaybackController(
 
     /** 正在加载的目标位置；ready 回调据此丢弃取消/恢复后迟到的目标事件。 */
     private var loadTargetUrl: String? = null
+
+    /** 当前加载的代际序号；与引擎回调携带的序号不一致即视为迟到事件。 */
+    private var expectedLoadToken = 0
 
     /** 切集前原视频的下标与位置，失败或取消时回到这里。 */
     private var switchOriginIndex = NO_MEDIA
@@ -336,7 +339,7 @@ class PlaybackController(
         _state.value = PlaybackState.Loading
         beginBufferingIndicator()
         beginLoadWatchdog()
-        engine.start(media.playbackLocation, paused = false)
+        expectedLoadToken = engine.start(media.playbackLocation, paused = false)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
     }
@@ -358,7 +361,7 @@ class PlaybackController(
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
         replaceFreezeFrame(engine.grabFrame()?.bitmap)
-        engine.start(media.playbackLocation, paused = true)
+        expectedLoadToken = engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
     }
@@ -392,7 +395,7 @@ class PlaybackController(
         val media = _playlist.value.getOrNull(index) ?: return
         applySwitchTarget(index, media)
         beginLoadWatchdog()
-        engine.start(media.playbackLocation, paused = true)
+        expectedLoadToken = engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
     }
@@ -550,9 +553,10 @@ class PlaybackController(
         applySubtitleSelection(SubtitleSelection.Off)
     }
 
-    override fun onMediaLoaded(targetUrl: String?) {
+    override fun onMediaLoaded(targetUrl: String?, loadToken: Int) {
         if (!active) return
         // 被放弃目标或恢复后迟到的 FILE_LOADED 不能作用于当前加载。
+        if (loadToken != expectedLoadToken) return
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         mediaLoaded = true
         when (loadPhase) {
@@ -585,10 +589,17 @@ class PlaybackController(
      * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号不早于该 seek 的信号。
      * 真正就绪时才停掉缓冲计时并撤冻结层，探测失败不设独立短超时。
      */
-    override fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int) {
+    override fun onFirstFrameReady(
+        needsFrameConfirmation: Boolean,
+        targetUrl: String?,
+        seekSerial: Int,
+        loadToken: Int,
+    ) {
         if (!active || !mediaLoaded) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
+        // 同一 URL 重载时只有当前代际的信号有效。
+        if (loadToken != expectedLoadToken) return
         // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         if (!resumeLookupDone) {
@@ -854,7 +865,7 @@ class PlaybackController(
         _state.value = PlaybackState.Paused
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
-        engine.start(
+        expectedLoadToken = engine.start(
             origin.playbackLocation,
             paused = true,
             startPositionMillis = switchOriginPositionMillis,
@@ -864,7 +875,8 @@ class PlaybackController(
     /** 原视频重新出帧：撤掉冻结画面；恢复期间按过播放就继续，否则保持暂停。 */
     private fun finishRestore() {
         if (loadPhase != LoadPhase.Restoring) return
-        val holdBlack = restoreAtEndOfEpisode
+        // 片尾恢复且没有用户要求播放时保持黑底；用户已按播放则直接继续。
+        val holdBlack = restoreAtEndOfEpisode && paused
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
@@ -874,6 +886,8 @@ class PlaybackController(
         switchOriginEnded = false
         // 片尾没有可显示的首帧：直到下一次用户操作或新加载前保持黑底。
         _holdBlack.value = holdBlack
+        // 普通恢复成功后允许后续真实失败重新提示；黑底期间保持去重到用户操作。
+        if (!holdBlack) switchFailureReported = false
         replaceFreezeFrame(null)
         if (paused) {
             _state.value = PlaybackState.Paused
@@ -986,6 +1000,7 @@ class PlaybackController(
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
+        expectedLoadToken = 0
         switchFailureReported = false
         _holdBlack.value = false
         replaceFreezeFrame(null)
@@ -1094,12 +1109,19 @@ class PlaybackController(
         private val target: PlaybackEngine.Listener,
         private val scope: CoroutineScope,
     ) : PlaybackEngine.Listener {
-        override fun onMediaLoaded(targetUrl: String?) {
-            scope.launch { target.onMediaLoaded(targetUrl) }
+        override fun onMediaLoaded(targetUrl: String?, loadToken: Int) {
+            scope.launch { target.onMediaLoaded(targetUrl, loadToken) }
         }
 
-        override fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int) {
-            scope.launch { target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekSerial) }
+        override fun onFirstFrameReady(
+            needsFrameConfirmation: Boolean,
+            targetUrl: String?,
+            seekSerial: Int,
+            loadToken: Int,
+        ) {
+            scope.launch {
+                target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekSerial, loadToken)
+            }
         }
 
         override fun onLoadActivity() {

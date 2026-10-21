@@ -132,9 +132,13 @@ enum class PlayerAction {
     Subtitles,
 }
 
-/** 切集缓冲期间只放行返回、上一集与下一集。 */
-fun actionAllowed(action: PlayerAction, switching: Boolean): Boolean =
-    !switching ||
-        action == PlayerAction.Back ||
-        action == PlayerAction.Previous ||
-        action == PlayerAction.Next
+/** 当前可用的播放页操作：首次加载只放行返回，切集只放行返回与上一集/下一集。 */
+fun actionAllowed(action: PlayerAction, switching: Boolean, initialLoading: Boolean = false): Boolean =
+    when {
+        initialLoading -> action == PlayerAction.Back
+        switching ->
+            action == PlayerAction.Back ||
+                action == PlayerAction.Previous ||
+                action == PlayerAction.Next
+        else -> true
+    }

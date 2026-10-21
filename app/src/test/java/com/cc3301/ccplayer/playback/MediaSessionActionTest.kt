@@ -6,7 +6,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -95,6 +97,31 @@ class MediaSessionActionTest {
     fun `an intent action that is not from the notification maps to no action`() {
         assertNull(MediaSessionAction.fromIntentAction("android.intent.action.VIEW"))
         assertNull(MediaSessionAction.fromIntentAction(null))
+    }
+
+    @Test
+    fun `initial loading disables every media action`() {
+        MediaSessionAction.entries.forEach { action ->
+            assertFalse(mediaActionAllowed(action, switching = false, initialLoading = true))
+        }
+    }
+
+    @Test
+    fun `switching allows only previous and next media actions`() {
+        MediaSessionAction.entries.forEach { action ->
+            assertEquals(
+                action.name,
+                action == MediaSessionAction.Previous || action == MediaSessionAction.Next,
+                mediaActionAllowed(action, switching = true, initialLoading = false),
+            )
+        }
+    }
+
+    @Test
+    fun `outside loading every media action is allowed`() {
+        MediaSessionAction.entries.forEach { action ->
+            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false))
+        }
     }
 
     private fun open(vararg names: String, current: String) {

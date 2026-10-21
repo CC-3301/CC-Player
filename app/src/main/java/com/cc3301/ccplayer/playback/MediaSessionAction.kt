@@ -32,3 +32,16 @@ enum class MediaSessionAction(
 /** 通知栏播放/暂停按钮的动作：播放中显示暂停，其余状态显示播放。 */
 fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
     if (state == PlaybackState.Playing) MediaSessionAction.Pause else MediaSessionAction.Play
+
+/** 媒体会话动作的可用性：首次加载全部禁用，切集期间只允许上一集/下一集。 */
+fun mediaActionAllowed(
+    action: MediaSessionAction,
+    switching: Boolean,
+    initialLoading: Boolean,
+): Boolean = when {
+    initialLoading -> false
+    switching ->
+        action == MediaSessionAction.Previous ||
+            action == MediaSessionAction.Next
+    else -> true
+}

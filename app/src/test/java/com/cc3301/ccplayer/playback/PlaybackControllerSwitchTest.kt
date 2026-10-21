@@ -28,9 +28,12 @@ class PlaybackControllerSwitchTest {
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
 
+    /** 与产品常量独立的临界值来源。 */
+    private val bufferDelayMillis = 1000L
+
     @Test
     fun `the buffer indicator delay is one second`() {
-        assertEquals(1000L, PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
+        assertEquals(bufferDelayMillis, PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
     }
 
     @Test
@@ -40,7 +43,7 @@ class PlaybackControllerSwitchTest {
         open(controller, "ep1.mkv")
         assertFalse(controller.buffering.value)
 
-        advanceTimeBy(999L)
+        advanceTimeBy(bufferDelayMillis - 1)
         runCurrent()
         assertFalse(controller.buffering.value)
 
@@ -54,13 +57,13 @@ class PlaybackControllerSwitchTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(900L)
+        advanceTimeBy(bufferDelayMillis - 100)
         runCurrent()
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
         assertFalse(controller.buffering.value)
-        advanceTimeBy(1000L)
+        advanceTimeBy(bufferDelayMillis)
         runCurrent()
         assertFalse(controller.buffering.value)
     }
@@ -70,13 +73,13 @@ class PlaybackControllerSwitchTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(1000L)
+        advanceTimeBy(bufferDelayMillis)
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
         runCurrent()
 
         assertFalse(controller.buffering.value)
-        advanceTimeBy(1000L)
+        advanceTimeBy(bufferDelayMillis)
         runCurrent()
         assertFalse(controller.buffering.value)
     }
@@ -136,7 +139,7 @@ class PlaybackControllerSwitchTest {
         controller.next()
         assertFalse(controller.buffering.value)
 
-        advanceTimeBy(999L)
+        advanceTimeBy(bufferDelayMillis - 1)
         runCurrent()
         assertFalse(controller.buffering.value)
 
@@ -407,6 +410,91 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a late event from a same URL reload is ignored`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv")
+        engine.reportMediaLoaded()
+        controller.setLoopMode(LoopMode.SingleLoop)
+
+        engine.reportPlaybackEnded()
+        assertTrue(controller.switching.value)
+        val staleToken = engine.currentLoadToken - 1
+
+        // 单集重播与旧加载 URL 相同，只能靠代际区分。
+        engine.reportFileLoaded(targetUrl = "root/ep1.mkv", loadToken = staleToken)
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady(targetUrl = "root/ep1.mkv", loadToken = staleToken)
+        assertTrue(controller.switching.value)
+
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `playing during an end restore clears the black hold and failure dedup`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        engine.reportPositionChanged(600_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        assertEquals(1, failures.size)
+
+        // 用户在恢复期间经媒体控制按了播放：恢复完成后直接继续，不保持黑底。
+        controller.resume()
+        engine.reportFileLoaded()
+
+        assertFalse(controller.switching.value)
+        assertFalse(controller.holdBlack.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 后续真实失败仍会上报。
+        engine.reportPlaybackFailed()
+        assertEquals(2, failures.size)
+    }
+
+    @Test
+    fun `a real failure after a successful restore is reported`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        engine.reportPositionChanged(40_000, 600_000)
+
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertEquals(1, failures.size)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertFalse(controller.holdBlack.value)
+
+        engine.reportPlaybackFailed()
+        assertEquals(2, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `an automatic switch that grabbed a frame still restores at the end on file load`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        engine.reportPositionChanged(590_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        assertEquals(frame, controller.freezeFrame.value)
+
+        engine.reportPlaybackFailed()
+        assertTrue(controller.switching.value)
+
+        // 自然播完标记优先：即使抓到了帧，片尾恢复仍以文件加载完成为就绪。
+        engine.reportFileLoaded()
+        assertFalse(controller.switching.value)
+        assertTrue(controller.holdBlack.value)
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
     fun `a restore that times out after a failed switch reports failure only once`() = runTest {
         val controller = playingController()
         val failures = collectFailures(controller)
@@ -478,7 +566,7 @@ class PlaybackControllerSwitchTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
 
         controller.next()
-        advanceTimeBy(999L)
+        advanceTimeBy(bufferDelayMillis - 1)
         runCurrent()
         assertFalse(controller.buffering.value)
 
@@ -748,13 +836,13 @@ class PlaybackControllerSwitchTest {
         controller.pause()
 
         controller.next()
-        advanceTimeBy(900L)
+        advanceTimeBy(bufferDelayMillis - 100)
         engine.reportFileLoaded()
         engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
 
         assertFalse(controller.buffering.value)
-        advanceTimeBy(1000L)
+        advanceTimeBy(bufferDelayMillis)
         runCurrent()
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -845,7 +933,7 @@ class PlaybackControllerSwitchTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(980L)
+        advanceTimeBy(bufferDelayMillis - 20)
         engine.reportFileLoaded()
         // 重配已到但抓不到帧：不能取消计时，也不能算就绪。
         engine.reportVideoReconfigured()
