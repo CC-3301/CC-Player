@@ -347,7 +347,7 @@ fun PlayerScreen(
             )
         }
         // 后台回来先盖住离开前的画面；播放核心重新出帧后由控制层撤掉这一层。
-        if (!switching && backgroundRestoreFrame != null) {
+        if (!switching && !holdBlack && backgroundRestoreFrame != null) {
             Image(
                 bitmap = backgroundRestoreFrame.asImageBitmap(),
                 contentDescription = null,

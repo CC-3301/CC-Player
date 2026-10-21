@@ -91,6 +91,7 @@ import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
@@ -510,11 +511,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 退到后台停止画面渲染；是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
-        playback?.setAppInForeground(false)
+        val binder = playback
+        binder?.setAppInForeground(false)
         // 后台上报可能已把播放暂停；抓帧必须在分离 Surface 之前完成。
-        playback?.controller?.captureBackgroundFrame()
-        playback?.engine?.detachSurface()
-        playback?.controller?.setRenderSurfaceAvailable(false)
+        binder?.let {
+            runBlocking { it.controller.captureBackgroundFrame() }
+            it.engine.detachSurface()
+            it.controller.setRenderSurfaceAvailable(false)
+        }
     }
 
     override fun onStart() {
@@ -545,10 +549,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onSurfaceReleased() {
         if (surface == null) return
         // Surface 可能先于 onStop 销毁，在这里补抓；播放中与已停止的会话不抓。
-        playback?.controller?.captureBackgroundFrame()
+        playback?.let {
+            runBlocking { it.controller.captureBackgroundFrame() }
+            it.engine.detachSurface()
+            it.controller.setRenderSurfaceAvailable(false)
+        }
         surface = null
-        playback?.engine?.detachSurface()
-        playback?.controller?.setRenderSurfaceAvailable(false)
     }
 
     private fun closePlayer() {

@@ -20,6 +20,7 @@ class MpvPlaybackEngine(
     private var listener: PlaybackEngine.Listener? = null
 
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
+    @Volatile
     private var videoOutputStopped = false
 
     /** 当前挂着的 Surface；重复挂载同一块时不重建渲染上下文。 */
@@ -29,6 +30,11 @@ class MpvPlaybackEngine(
     /** 退后台后重新挂上 Surface，等待视频输出再次出帧。 */
     @Volatile
     private var awaitingSurfaceFrame = false
+
+    @Volatile
+    private var surfaceGenerationCounter = 0
+
+    override val surfaceGeneration: Int get() = surfaceGenerationCounter
 
     /** 加载代际、结束判定与 ready 序号；同一临界区，控制层与事件线程都会调用。 */
     private val loadCoordinator = MpvLoadCoordinator()
@@ -162,9 +168,11 @@ class MpvPlaybackEngine(
     override fun attachSurface(surface: Surface) {
         if (attachedSurface === surface && !videoOutputStopped) return
         if (videoOutputStopped) {
+            // 先进入等待，再切回视频输出，避免首个重配事件先到而被漏掉。
+            awaitingSurfaceFrame = true
+            surfaceGenerationCounter++
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
             videoOutputStopped = false
-            awaitingSurfaceFrame = true
         }
         attachedSurface = surface
         MPVLib.attachSurface(surface)
@@ -248,13 +256,21 @@ class MpvPlaybackEngine(
         }
     }
 
-    /** 重新挂上 Surface 后的首次视频输出：通知控制层撤掉后台恢复帧。 */
+    /**
+     * 重新挂上 Surface 后的首次视频输出：播放态直接通知画面已输出；
+     * 暂停态重配不代表首帧已上屏，交给控制层抓帧确认。
+     */
     private fun notifySurfaceFrame() {
         if (!awaitingSurfaceFrame) return
         if (attachedSurface == null || videoOutputStopped) return
         if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
         awaitingSurfaceFrame = false
-        listener?.onFramePresented()
+        val generation = surfaceGenerationCounter
+        if (isPaused()) {
+            listener?.onSurfaceReconfigured(generation)
+        } else {
+            listener?.onFramePresented(generation)
+        }
     }
 
     /**

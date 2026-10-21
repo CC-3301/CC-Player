@@ -120,6 +120,15 @@ class FakePlaybackEngine : PlaybackEngine {
         disableSubtitleCalls++
     }
 
+    /** 重新挂载 Surface 时递增，模拟引擎的挂载代数。 */
+    override var surfaceGeneration: Int = 0
+        private set
+
+    /** 模拟一次重新挂载 Surface。 */
+    fun reportSurfaceReattached() {
+        surfaceGeneration++
+    }
+
     override fun attachSurface(surface: Surface) = Unit
 
     override fun detachSurface() = Unit
@@ -195,8 +204,13 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 只上报加载活动，不给 ready/end。 */
     fun reportLoadActivity() = listener?.onLoadActivity()
 
-    /** 视频输出重新挂上后已输出画面。 */
-    fun reportFramePresented() = listener?.onFramePresented()
+    /** 播放态重新出帧。 */
+    fun reportFramePresented(generation: Int = surfaceGeneration) =
+        listener?.onFramePresented(generation)
+
+    /** 暂停态视频输出重配，播放核心要求抓帧确认。 */
+    fun reportSurfaceReconfigured(generation: Int = surfaceGeneration) =
+        listener?.onSurfaceReconfigured(generation)
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
