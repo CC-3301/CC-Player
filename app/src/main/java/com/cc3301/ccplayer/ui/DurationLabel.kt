@@ -12,3 +12,33 @@ fun formatDuration(millis: Long): String {
         "%d:%02d".format(minutes, seconds)
     }
 }
+
+/** 进度条显示的进度：拖动预览优先，并限制在总时长内。 */
+fun seekBarProgressMillis(positionMillis: Long, durationMillis: Long, previewMillis: Long?): Long =
+    (previewMillis ?: positionMillis).coerceIn(0L, durationMillis.coerceAtLeast(0L))
+
+/** 进度条左右文本与 seek 可用性；时长未知时总时长显示 [unknownText] 且禁用 seek。 */
+data class SeekBarLabels(
+    val current: String,
+    val total: String,
+    val seekEnabled: Boolean,
+)
+
+fun seekBarLabels(
+    positionMillis: Long,
+    durationMillis: Long,
+    previewMillis: Long?,
+    unknownText: String,
+): SeekBarLabels {
+    val known = durationMillis > 0L
+    val currentMillis = if (known) {
+        seekBarProgressMillis(positionMillis, durationMillis, previewMillis)
+    } else {
+        positionMillis.coerceAtLeast(0L)
+    }
+    return SeekBarLabels(
+        current = formatDuration(currentMillis),
+        total = if (known) formatDuration(durationMillis) else unknownText,
+        seekEnabled = known,
+    )
+}

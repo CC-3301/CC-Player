@@ -2,7 +2,9 @@ package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.roundToLong
 
 /** 视频区矩形：坐标与尺寸相对容器左上角，单位像素。 */
 data class VideoViewport(val left: Float, val top: Float, val width: Float, val height: Float)
@@ -38,6 +40,18 @@ val PlayerSideTouchTarget = 48.dp
 
 /** 播放页次级按钮的视觉图标尺寸。 */
 val PlayerSideIconSize = 26.dp
+
+/** 进度条整行触控高度。 */
+val PlayerSeekTouchHeight = 48.dp
+
+/** 进度条左右时间区的固定宽度。 */
+val PlayerSeekTimeWidth = 64.dp
+
+/** 进度条圆形滑块直径。 */
+val PlayerSeekThumbSize = 16.dp
+
+/** 进度条视觉轨道线宽。 */
+val PlayerSeekTrackHeight = 3.dp
 
 /** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
 val PlayerTransportButtonSize = 48.dp
@@ -93,6 +107,73 @@ data class PlayerIconBarMetrics(
     val overlapped: Boolean =
         leftGroupEnd > transportStart || transportEnd > rightGroupStart
 }
+
+/** 松手后预览保留到播放位置追平的时间容差，毫秒。 */
+const val SEEK_PREVIEW_SETTLE_MILLIS = 1_000L
+
+/** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
+const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
+
+/** 进度条视觉轨道的像素范围。 */
+data class SeekBarTrackBounds(val start: Float, val end: Float)
+
+/**
+ * 计算进度条视觉轨道范围：两侧时间区、间距与滑块半径都从整行宽度中扣除。
+ * 空间不足时两端退到同一位置，交由 [seekBarMillisAt] 判为不可拖动。
+ */
+fun seekBarTrackBounds(
+    widthPx: Float,
+    leftTimeWidthPx: Float,
+    rightTimeWidthPx: Float,
+    spacingPx: Float,
+    thumbRadiusPx: Float,
+): SeekBarTrackBounds {
+    val half = widthPx / 2f
+    val start = (leftTimeWidthPx + spacingPx + thumbRadiusPx).coerceIn(0f, half)
+    val end = (widthPx - rightTimeWidthPx - spacingPx - thumbRadiusPx).coerceIn(start, widthPx)
+    return SeekBarTrackBounds(start, end)
+}
+
+/**
+ * 把进度条整行的横向坐标换算成毫秒。
+ * [trackStart] 与 [trackEnd] 为视觉轨道的像素范围；落在两侧时间区时取最近端点。
+ * 轨道无效或时长未知时返回 null。
+ */
+fun seekBarMillisAt(
+    x: Float,
+    trackStart: Float,
+    trackEnd: Float,
+    durationMillis: Long,
+): Long? {
+    if (trackEnd <= trackStart || durationMillis <= 0L) return null
+    val fraction = ((x - trackStart) / (trackEnd - trackStart)).coerceIn(0f, 1f)
+    return (fraction * durationMillis).roundToLong().coerceIn(0L, durationMillis)
+}
+
+/**
+ * 末次拖动预览是否继续保留：未切媒体、未超时，且播放位置尚未到达目标。
+ * 按 [baseMillis]（拖动起点）判断方向；位置越过目标时立即停止保留。
+ */
+fun shouldKeepSeekPreview(
+    positionMillis: Long,
+    heldMillis: Long?,
+    baseMillis: Long?,
+    mediaChanged: Boolean,
+    timedOut: Boolean,
+): Boolean {
+    if (heldMillis == null || mediaChanged || timedOut) return false
+    if (abs(positionMillis - heldMillis) <= SEEK_PREVIEW_SETTLE_MILLIS) return false
+    val base = baseMillis ?: return true
+    return if (heldMillis >= base) {
+        positionMillis < heldMillis - SEEK_PREVIEW_SETTLE_MILLIS
+    } else {
+        positionMillis > heldMillis + SEEK_PREVIEW_SETTLE_MILLIS
+    }
+}
+
+/** 拖动事件里是否出现主指针以外的按下指针；出现时取消本次手势。 */
+fun isMultiPointerDrag(primaryId: Long, pressedPointerIds: List<Long>): Boolean =
+    pressedPointerIds.any { it != primaryId }
 
 /** 按图标条可用宽度计算三组按钮的尺寸与排布。 */
 fun playerIconBarMetrics(
