@@ -84,6 +84,7 @@ import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.mediaFailureText
+import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
@@ -417,13 +418,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 双击三分区的快退/快进：目标位置夹取在当前时长内；时长未知时不动作。 */
-    private fun seekBy(deltaMillis: Long) {
-        val controller = playback?.controller ?: return
-        val duration = progress.durationMillis
-        if (duration <= 0) return
-        controller.updateSeekPreview((progress.positionMillis + deltaMillis).coerceIn(0L, duration))
+    /** 双击三分区的快退/快进：返回夹取后的实际位移，时长未知时不动作。 */
+    private fun seekBy(deltaMillis: Long): Long {
+        val controller = playback?.controller ?: return 0L
+        val target = relativeSeekTarget(
+            positionMillis = progress.positionMillis,
+            durationMillis = progress.durationMillis,
+            deltaMillis = deltaMillis,
+        ) ?: return 0L
+        controller.updateSeekPreview(target.targetMillis)
         controller.commitSeekPreview()
+        return target.deltaMillis
     }
 
     /** 取持久读授权：目录选定后重启仍可读，不需要任何存储权限。 */

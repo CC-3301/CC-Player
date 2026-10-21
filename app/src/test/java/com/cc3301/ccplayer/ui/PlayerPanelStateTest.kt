@@ -81,6 +81,23 @@ class PlayerPanelStateTest {
     }
 
     @Test
+    fun `更多面板点外部关闭`() {
+        panels.toggle(PlayerPanel.More)
+
+        assertTrue(panels.dismissOutside())
+
+        assertFalse(panels.anyOpen)
+        assertTrue(panels.controlBarsVisible)
+    }
+
+    @Test
+    fun `没有面板时外部点击不动作`() {
+        assertFalse(panels.dismissOutside())
+
+        assertFalse(panels.anyOpen)
+    }
+
+    @Test
     fun `选择列表项时先关闭抽屉再切集`() {
         panels.toggle(PlayerPanel.Playlist)
         var openDuringSelect: Boolean? = null

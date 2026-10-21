@@ -70,6 +70,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -91,6 +92,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
@@ -270,7 +272,7 @@ fun PlayerScreen(
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
-    onSeekBy: (Long) -> Unit,
+    onSeekBy: (Long) -> Long,
     onPlaylistSelect: (MediaFile) -> Unit,
     onSelectDecodeMode: (DecodeMode) -> Unit,
     onSelectLoopMode: (LoopMode) -> Unit,
@@ -288,7 +290,8 @@ fun PlayerScreen(
     val panels = remember { PlayerPanelState() }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
-    val doubleTapFeedback = remember { PlayerDoubleTapFeedback() }
+    val mediaKey = playlist.getOrNull(currentIndex)?.location.orEmpty()
+    val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
     val panelOpen = panels.anyOpen
@@ -332,6 +335,15 @@ fun PlayerScreen(
             val remaining = doubleTapFeedback.millisUntilExpire() ?: break
             delay(remaining)
             doubleTapFeedback.expire()
+        }
+    }
+
+    // 切集、加载、恢复、面板或锁定状态切换时清空手势反馈，避免盖在缓冲层上。
+    LaunchedEffect(switching, initialLoading, restoring, panelOpen, locked) {
+        if (doubleTapFeedbackBlocked(locked, panelOpen, switching, initialLoading, restoring)) {
+            doubleTapFeedback.reset()
+            seekHint = null
+            volumeHint = null
         }
     }
 
@@ -403,8 +415,7 @@ fun PlayerScreen(
                 controls.onInteraction()
                 onSeekBy(it)
             },
-            onDoubleTapFeedback = doubleTapFeedback::onDoubleTap,
-            onSeekPreview = {
+            onDoubleTapFeedback = doubleTapFeedback::onDoubleTap,            onSeekPreview = {
                 controls.onInteraction()
                 onSeekPreview(it)
             },
@@ -424,8 +435,13 @@ fun PlayerScreen(
         seekHint?.let { hint ->
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
-        doubleTapFeedback.ripple?.let { ripple ->
-            DoubleTapEdgeRipple(ripple = ripple)
+        doubleTapFeedback.ripples.forEach { ripple ->
+            key(ripple.id) {
+                DoubleTapEdgeRipple(
+                    ripple = ripple,
+                    onFinished = { doubleTapFeedback.removeRipple(ripple.id) },
+                )
+            }
         }
         doubleTapFeedback.left?.let { hint ->
             DoubleTapHint(
@@ -527,8 +543,11 @@ fun PlayerScreen(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
-                                .pointerInput(Unit) { detectTapGestures { panels.close() } }
-                                .semantics { contentDescription = closeHint },
+                                .noRippleClickable { panels.dismissOutside() }
+                                .semantics {
+                                    contentDescription = closeHint
+                                    role = Role.Button
+                                },
                         )
                         MorePanel(
                             decodeMode = decodeMode,
@@ -617,7 +636,7 @@ private fun PlayerGestureLayer(
     durationMillis: Long,
     levelControls: PlayerLevelControls,
     onTogglePlayPause: () -> Unit,
-    onSeekBy: (Long) -> Unit,
+    onSeekBy: (Long) -> Long,
     onDoubleTapFeedback: (DoubleTapSide, Long) -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
@@ -633,6 +652,13 @@ private fun PlayerGestureLayer(
     val playPauseAllowed = actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring)
     val seekAllowed = actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring)
     val volumeAllowed = actionAllowed(PlayerAction.Volume, switching, initialLoading, restoring)
+    val doubleTapFeedbackEnabled = doubleTapFeedbackAllowed(
+        locked = locked,
+        panelOpen = panelOpen,
+        switching = switching,
+        initialLoading = initialLoading,
+        restoring = restoring,
+    )
     // 回调与播放位置取最新一份，避免手势层在位置变化时重启。
     val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
     val latestOnSeekBy = rememberUpdatedState(onSeekBy)
@@ -652,12 +678,12 @@ private fun PlayerGestureLayer(
             is TapGestureAction.DoubleTap -> {
                 latestOnUserInteraction.value()
                 when (val doubleTap = action.action) {
-                    is DoubleTapAction.Seek -> if (seekAllowed) {
-                        latestOnSeekBy.value(doubleTap.deltaMillis)
-                        latestOnDoubleTapFeedback.value(
-                            if (doubleTap.deltaMillis < 0L) DoubleTapSide.Left else DoubleTapSide.Right,
-                            doubleTap.deltaMillis,
-                        )
+                    is DoubleTapAction.Seek -> if (doubleTapFeedbackEnabled) {
+                        // 用夹取后的实际位移累计，时长未知、到边界或片尾不叠加。
+                        val actualDelta = latestOnSeekBy.value(doubleTap.deltaMillis)
+                        if (actualDelta != 0L) {
+                            latestOnDoubleTapFeedback.value(doubleTap.side, actualDelta)
+                        }
                     }
 
                     DoubleTapAction.TogglePlayPause -> if (playPauseAllowed) {
@@ -856,10 +882,11 @@ private fun DoubleTapHint(
 
 /** 每次双击从对应屏幕边缘向内扩散的黑色半透明涟漪。 */
 @Composable
-private fun DoubleTapEdgeRipple(ripple: DoubleTapRipple) {
+private fun DoubleTapEdgeRipple(ripple: DoubleTapRipple, onFinished: () -> Unit) {
     val progress = remember(ripple.id) { Animatable(0f) }
     LaunchedEffect(ripple.id) {
         progress.animateTo(1f, tween(durationMillis = 580, easing = LinearOutSlowInEasing))
+        onFinished()
     }
     Canvas(modifier = Modifier.fillMaxSize()) {
         val scale = 0.35f + (1.35f - 0.35f) * progress.value

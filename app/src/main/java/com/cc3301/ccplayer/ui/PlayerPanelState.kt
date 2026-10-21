@@ -35,6 +35,13 @@ class PlayerPanelState {
         openPanel = null
     }
 
+    /** 面板外点击：有面板打开时关闭并返回 true。 */
+    fun dismissOutside(): Boolean {
+        if (openPanel == null) return false
+        close()
+        return true
+    }
+
     /** 选择播放列表条目：先关闭抽屉，再切集。 */
     fun <T> selectPlaylistItem(item: T, onSelect: (T) -> Unit) {
         close()

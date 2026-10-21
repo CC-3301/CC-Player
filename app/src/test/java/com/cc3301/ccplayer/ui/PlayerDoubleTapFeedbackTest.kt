@@ -61,14 +61,65 @@ class PlayerDoubleTapFeedbackTest {
     @Test
     fun `每次双击产生一条对应侧的涟漪`() {
         feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
-        val first = feedback.ripple
+        val first = feedback.ripples.single()
         feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
-        val second = feedback.ripple
+        val second = feedback.ripples.last()
 
-        assertEquals(DoubleTapSide.Left, first?.side)
-        assertEquals(DoubleTapSide.Right, second?.side)
-        assertEquals(1L, first?.id)
-        assertEquals(2L, second?.id)
+        assertEquals(DoubleTapSide.Left, first.side)
+        assertEquals(DoubleTapSide.Right, second.side)
+        assertEquals(1L, first.id)
+        assertEquals(2L, second.id)
+    }
+
+    @Test
+    fun `连点两侧的涟漪同时保留`() {
+        feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
+
+        assertEquals(listOf(DoubleTapSide.Left, DoubleTapSide.Right), feedback.ripples.map { it.side })
+        assertEquals(2, feedback.ripples.size)
+    }
+
+    @Test
+    fun `涟漪动画结束后只移除对应条目`() {
+        feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
+
+        feedback.removeRipple(1L)
+
+        assertEquals(listOf(2L), feedback.ripples.map { it.id })
+    }
+
+    @Test
+    fun `累计使用夹取后的实际位移`() {
+        feedback.onDoubleTap(DoubleTapSide.Right, 3_000L)
+
+        assertEquals(3_000L, feedback.right?.accumulatedMillis)
+    }
+
+    @Test
+    fun `一侧到期时另一侧仍保留`() {
+        feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
+        now = 1_000L
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
+        now = 3_001L
+
+        feedback.expire()
+
+        assertNull(feedback.left)
+        assertEquals(10_000L, feedback.right?.accumulatedMillis)
+    }
+
+    @Test
+    fun `切集重置清空提示与涟漪`() {
+        feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
+
+        feedback.reset()
+
+        assertNull(feedback.left)
+        assertNull(feedback.right)
+        assertEquals(emptyList<DoubleTapRipple>(), feedback.ripples)
     }
 
     @Test

@@ -9,10 +9,7 @@ import kotlin.math.abs
 /** 双击累计提示的保留时长，毫秒。 */
 const val DOUBLE_TAP_FEEDBACK_MILLIS = 3_000L
 
-/** 双击落点所在侧。 */
-enum class DoubleTapSide { Left, Right }
-
-/** 一侧的双击提示：窗口内累计的秒数与最后一次双击时刻。 */
+/** 一侧的双击提示：窗口内累计时长（毫秒）与最后一次双击时刻。 */
 data class DoubleTapHintState(
     val accumulatedMillis: Long,
     val updatedAtMillis: Long,
@@ -34,7 +31,8 @@ class PlayerDoubleTapFeedback(
     var right by mutableStateOf<DoubleTapHintState?>(null)
         private set
 
-    var ripple by mutableStateOf<DoubleTapRipple?>(null)
+    /** 当前仍在播放涟漪的条目；每条动画结束后由界面按编号移除。 */
+    var ripples by mutableStateOf<List<DoubleTapRipple>>(emptyList())
         private set
 
     private var nextRippleId = 1L
@@ -45,8 +43,20 @@ class PlayerDoubleTapFeedback(
         val previous = hint(side)
         val accumulated = (previous?.accumulatedMillis ?: 0L) + abs(deltaMillis)
         setHint(side, DoubleTapHintState(accumulated, now))
-        ripple = DoubleTapRipple(nextRippleId, side)
+        ripples = ripples + DoubleTapRipple(nextRippleId, side)
         nextRippleId += 1
+    }
+
+    /** 一条涟漪动画结束后移除；不影响其它仍在扩散的涟漪。 */
+    fun removeRipple(id: Long) {
+        ripples = ripples.filterNot { it.id == id }
+    }
+
+    /** 切集时清空提示与涟漪，避免沿用上一集累计。 */
+    fun reset() {
+        left = null
+        right = null
+        ripples = emptyList()
     }
 
     /** 清除超过窗口仍未再次双击的提示。 */
