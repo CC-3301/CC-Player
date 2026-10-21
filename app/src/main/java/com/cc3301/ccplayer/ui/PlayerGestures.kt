@@ -46,10 +46,13 @@ enum class GestureZone {
     RightVolume,
 }
 
+/** 双击落点所在侧。 */
+enum class DoubleTapSide { Left, Right }
+
 /** 双击的结果：相对当前位置跳转，或切换播放暂停。 */
 sealed interface DoubleTapAction {
     /** 相对当前位置跳转 [deltaMillis] 毫秒，负数为快退。 */
-    data class Seek(val deltaMillis: Long) : DoubleTapAction
+    data class Seek(val deltaMillis: Long, val side: DoubleTapSide) : DoubleTapAction
 
     data object TogglePlayPause : DoubleTapAction
 }
@@ -77,9 +80,23 @@ fun gestureZone(x: Float, width: Int): GestureZone {
 
 /** 双击落点对应的动作：左侧倒退 10 秒，中间暂停/继续，右侧前进 10 秒。 */
 fun doubleTapAction(x: Float, width: Int): DoubleTapAction = when (gestureZone(x, width)) {
-    GestureZone.LeftVolume -> DoubleTapAction.Seek(-SEEK_STEP_MILLIS)
+    GestureZone.LeftVolume -> DoubleTapAction.Seek(-SEEK_STEP_MILLIS, DoubleTapSide.Left)
     GestureZone.Center -> DoubleTapAction.TogglePlayPause
-    GestureZone.RightVolume -> DoubleTapAction.Seek(SEEK_STEP_MILLIS)
+    GestureZone.RightVolume -> DoubleTapAction.Seek(SEEK_STEP_MILLIS, DoubleTapSide.Right)
+}
+
+/** 相对当前位置跳转的结果：目标位置与实际位移（已夹取到 0..时长）。 */
+data class RelativeSeekTarget(val targetMillis: Long, val deltaMillis: Long)
+
+/** 时长未知时不跳转；目标夹取后实际位移可能小于请求步长，甚至为 0。 */
+fun relativeSeekTarget(
+    positionMillis: Long,
+    durationMillis: Long,
+    deltaMillis: Long,
+): RelativeSeekTarget? {
+    if (durationMillis <= 0L) return null
+    val target = (positionMillis + deltaMillis).coerceIn(0L, durationMillis)
+    return RelativeSeekTarget(target, target - positionMillis)
 }
 
 /** 中间区域横向拖动换算的跳转量：整屏宽对应 [SEEK_FULL_WIDTH_MILLIS]，右拖为正。 */
@@ -113,6 +130,24 @@ fun dragGesture(
 
 /** 锁定或任一面板打开时，手势层不响应。 */
 fun gesturesAllowed(locked: Boolean, panelOpen: Boolean): Boolean = !locked && !panelOpen
+
+/** 切集、首次加载、恢复、面板打开或锁定时，手势反馈应清空且不再显示。 */
+fun doubleTapFeedbackBlocked(
+    locked: Boolean,
+    panelOpen: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): Boolean = locked || panelOpen || switching || initialLoading || restoring
+
+/** 双击跳转反馈是否应触发：手势可用且当前允许跳转。 */
+fun doubleTapFeedbackAllowed(
+    locked: Boolean,
+    panelOpen: Boolean,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+): Boolean = !doubleTapFeedbackBlocked(locked, panelOpen, switching, initialLoading, restoring)
 
 /** 锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。 */
 fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =

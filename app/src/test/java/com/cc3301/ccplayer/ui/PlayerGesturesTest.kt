@@ -26,7 +26,7 @@ class PlayerGesturesTest {
 
     @Test
     fun `左侧双击后退 10 秒`() {
-        assertEquals(DoubleTapAction.Seek(-10_000L), doubleTapAction(100f, width))
+        assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(100f, width))
     }
 
     @Test
@@ -36,15 +36,15 @@ class PlayerGesturesTest {
 
     @Test
     fun `右侧双击前进 10 秒`() {
-        assertEquals(DoubleTapAction.Seek(10_000L), doubleTapAction(800f, width))
+        assertEquals(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right), doubleTapAction(800f, width))
     }
 
     @Test
     fun `双击分区边界归中间与右侧`() {
-        assertEquals(DoubleTapAction.Seek(-10_000L), doubleTapAction(161.9f, width))
+        assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(161.9f, width))
         assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(162f, width))
         assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(737.9f, width))
-        assertEquals(DoubleTapAction.Seek(10_000L), doubleTapAction(738f, width))
+        assertEquals(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right), doubleTapAction(738f, width))
     }
 
     @Test
@@ -181,5 +181,59 @@ class PlayerGesturesTest {
         assertTrue(backEntryVisible(controlsVisible = true, initialLoading = false))
         assertTrue(backEntryVisible(controlsVisible = false, initialLoading = true))
         assertFalse(backEntryVisible(controlsVisible = false, initialLoading = false))
+    }
+
+    @Test
+    fun `双击跳转按当前位置与时长夹取实际位移`() {
+        assertEquals(
+            RelativeSeekTarget(targetMillis = 20_000L, deltaMillis = 10_000L),
+            relativeSeekTarget(positionMillis = 10_000L, durationMillis = 100_000L, deltaMillis = 10_000L),
+        )
+        assertEquals(
+            RelativeSeekTarget(targetMillis = 100_000L, deltaMillis = 5_000L),
+            relativeSeekTarget(positionMillis = 95_000L, durationMillis = 100_000L, deltaMillis = 10_000L),
+        )
+        assertEquals(
+            RelativeSeekTarget(targetMillis = 0L, deltaMillis = -5_000L),
+            relativeSeekTarget(positionMillis = 5_000L, durationMillis = 100_000L, deltaMillis = -10_000L),
+        )
+    }
+
+    @Test
+    fun `时长未知或已到边界时不跳转`() {
+        assertNull(relativeSeekTarget(positionMillis = 10_000L, durationMillis = 0L, deltaMillis = 10_000L))
+        assertEquals(
+            RelativeSeekTarget(targetMillis = 100_000L, deltaMillis = 0L),
+            relativeSeekTarget(positionMillis = 100_000L, durationMillis = 100_000L, deltaMillis = 10_000L),
+        )
+        assertEquals(
+            RelativeSeekTarget(targetMillis = 0L, deltaMillis = 0L),
+            relativeSeekTarget(positionMillis = 0L, durationMillis = 100_000L, deltaMillis = -10_000L),
+        )
+    }
+
+    @Test
+    fun `锁定或面板打开时不触发双击反馈`() {
+        assertFalse(doubleTapFeedbackAllowed(false, true, false, false, false))
+        assertFalse(doubleTapFeedbackAllowed(true, false, false, false, false))
+        assertFalse(doubleTapFeedbackAllowed(true, true, false, false, false))
+    }
+
+    @Test
+    fun `切集首次加载与恢复期间不触发双击反馈`() {
+        assertFalse(doubleTapFeedbackAllowed(false, false, switching = true, initialLoading = false, restoring = false))
+        assertFalse(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = true, restoring = false))
+        assertFalse(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = false, restoring = true))
+        assertTrue(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = false, restoring = false))
+    }
+
+    @Test
+    fun `反馈清空条件覆盖锁定面板加载与恢复`() {
+        assertTrue(doubleTapFeedbackBlocked(true, false, false, false, false))
+        assertTrue(doubleTapFeedbackBlocked(false, true, false, false, false))
+        assertTrue(doubleTapFeedbackBlocked(false, false, true, false, false))
+        assertTrue(doubleTapFeedbackBlocked(false, false, false, true, false))
+        assertTrue(doubleTapFeedbackBlocked(false, false, false, false, true))
+        assertFalse(doubleTapFeedbackBlocked(false, false, false, false, false))
     }
 }

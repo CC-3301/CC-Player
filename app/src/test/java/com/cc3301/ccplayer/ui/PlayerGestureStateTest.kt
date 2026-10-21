@@ -28,7 +28,10 @@ class PlayerGestureStateTest {
         tap.release(50L, width)
         tap.press(300L, Offset(800f, 0f))
 
-        assertEquals(TapGestureAction.DoubleTap(DoubleTapAction.Seek(10_000L)), tap.release(350L, width))
+        assertEquals(
+            TapGestureAction.DoubleTap(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right)),
+            tap.release(350L, width),
+        )
     }
 
     @Test
@@ -37,7 +40,10 @@ class PlayerGestureStateTest {
         tap.release(50L, width)
         tap.press(350L, Offset(100f, 0f))
 
-        assertEquals(TapGestureAction.DoubleTap(DoubleTapAction.Seek(-10_000L)), tap.release(400L, width))
+        assertEquals(
+            TapGestureAction.DoubleTap(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left)),
+            tap.release(400L, width),
+        )
     }
 
     @Test
