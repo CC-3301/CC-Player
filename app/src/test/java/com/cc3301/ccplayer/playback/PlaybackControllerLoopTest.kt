@@ -37,14 +37,22 @@ class PlaybackControllerLoopTest {
     }
 
     @Test
-    fun `auto advance starts the next episode with a fresh progress`() {
+    fun `auto advance keeps the origin progress until the next episode is ready`() {
         open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
         engine.reportMediaLoaded()
         engine.reportPositionChanged(30_000, 60_000)
 
         endCurrentEpisode()
 
-        assertEquals(PlaybackProgress(), controller.progress.value)
+        // 自动连播与手动切集一样，目标就绪前进度仍停在原视频上。
+        assertEquals(PlaybackProgress(30_000, 60_000), controller.progress.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(0L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, controller.currentIndex.value)
     }
 
     @Test

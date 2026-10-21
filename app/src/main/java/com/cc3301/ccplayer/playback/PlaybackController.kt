@@ -26,7 +26,8 @@ import kotlin.math.abs
  * 播放控制层：把播放指令翻译成引擎调用，把引擎回调汇成 [PlaybackState]。
  *
  * 播放列表取自当前目录的媒体文件，恒按名称自然排序（ADR-0007）；上一集/下一集取该序列的相邻项，
- * 与列表视图当前的排序无关。当前媒体播完后按循环模式与自动连播开关决定下一步。
+ * 与列表视图当前的排序无关。当前媒体播完后按循环模式与自动连播开关决定下一步，
+ * 自然播完的下一集与手动切集共用同一切换与就绪判定（ADR-0024）。
  * 循环模式与解码模式的快捷切换只作用于本次会话。
  *
  * 起播位置按 [ResumeMode] 取上次位置或从头；播放中按间隔落进度记录，位置到达时长（播到 100%）时清除记录。
@@ -227,11 +228,15 @@ class PlaybackController(
         playAt(index)
     }
 
-    /** 切换到播放列表第 [index] 项；超出范围或正在加载时不动作。 */
+    /** 切换到播放列表第 [index] 项；超出范围、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
-        val media = _playlist.value.getOrNull(index) ?: return
-        // 切集缓冲期间重复切集不生效；首次加载还没开始播放时仍可直接改目标。
+        // 切集缓冲期间只允许上一集/下一集；播放列表选择等直接跳转不生效。
         if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
+        playIndex(index)
+    }
+
+    private fun playIndex(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
         if (active) {
             startSwitch(index, media)
         } else {
@@ -245,14 +250,22 @@ class PlaybackController(
         if (index >= 0) playAt(index)
     }
 
-    /** 名称自然排序下的一集；列表末尾时不动作。 */
+    /** 名称自然排序下的一集；列表末尾时不动作。切集缓冲期间实时前移目标。 */
     fun next() {
-        playAt(_currentIndex.value + 1)
+        playAdjacent(_currentIndex.value + 1)
     }
 
-    /** 名称自然排序下的上一集；列表开头时不动作。 */
+    /** 名称自然排序下的上一集；列表开头时不动作。切集缓冲期间实时前移目标。 */
     fun previous() {
-        playAt(_currentIndex.value - 1)
+        playAdjacent(_currentIndex.value - 1)
+    }
+
+    private fun playAdjacent(index: Int) {
+        when (loadPhase) {
+            LoadPhase.Switching -> retargetSwitch(index)
+            LoadPhase.Restoring -> Unit
+            else -> playIndex(index)
+        }
     }
 
     /**
@@ -335,6 +348,34 @@ class PlaybackController(
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
         replaceFreezeFrame(engine.grabFrame()?.bitmap)
+        engine.start(media.playbackLocation, paused = true)
+        engine.fadeInAudio(FADE_IN_MILLIS)
+        lookUpResumePosition(index, media)
+    }
+
+    /**
+     * 切集缓冲期间再次选择上一集/下一集：只把目标前移，直接加载最终目标。
+     * 冻结画面与缓冲计时沿用第一次切集，不重新抓帧。
+     */
+    private fun retargetSwitch(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
+        _currentIndex.value = index
+        loadTargetIndex = index
+        loadTargetUrl = media.playbackLocation
+        loadPhase = LoadPhase.Switching
+        beginLoadTracking()
+        beginLoadWatchdog()
+        _switching.value = true
+        _seekPreviewMillis.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        resumePositionMillis = null
+        watchedToEnd = false
+        mediaLoaded = false
+        pausedAtEpisodeEnd = false
+        savedPositionMillis = 0
+        _state.value = PlaybackState.Loading
         engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -516,7 +557,7 @@ class PlaybackController(
      * 首帧可显示后才算就绪。播放中加载以 PLAYBACK_RESTART 为准；
      * 暂停态只有 VIDEO_RECONFIG，它可能早于首帧上屏，必须抓帧确认才算数。
      * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号不早于该 seek 的信号。
-     * 真正就绪时才停掉 500ms 计时并撤冻结层，探测失败不设独立短超时。
+     * 真正就绪时才停掉缓冲计时并撤冻结层，探测失败不设独立短超时。
      */
     override fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int) {
         if (!active || !mediaLoaded) return
@@ -639,14 +680,20 @@ class PlaybackController(
             _state.value = PlaybackState.Paused
             return
         }
-        active = false
+        // 自然播完后的下一集与手动切集共用同一条切换路径。
         when {
             _loopMode.value == LoopMode.SingleLoop -> playAt(_currentIndex.value)
-            !_autoPlayNext.value -> _state.value = PlaybackState.Ended
+            !_autoPlayNext.value -> endSession()
             _currentIndex.value < _playlist.value.lastIndex -> playAt(_currentIndex.value + 1)
             _loopMode.value == LoopMode.ListLoop -> playAt(0)
-            else -> _state.value = PlaybackState.Ended
+            else -> endSession()
         }
+    }
+
+    /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
+    private fun endSession() {
+        active = false
+        _state.value = PlaybackState.Ended
     }
 
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
@@ -1029,7 +1076,7 @@ class PlaybackController(
         const val FADE_IN_MILLIS = 500L
 
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
-        const val BUFFER_INDICATOR_DELAY_MILLIS = 500L
+        const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L
 
         /** 暂停态抓帧失败后的重试间隔；没有失败次数上限，失败由无事件看门狗判定。 */
         const val FRAME_PROBE_RETRY_MILLIS = 100L

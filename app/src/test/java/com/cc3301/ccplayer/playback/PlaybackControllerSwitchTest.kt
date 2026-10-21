@@ -17,7 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 切集与缓冲指示的状态机：500ms 阈值、首帧判定、失败与取消回退、
+ * 切集与缓冲指示的状态机：1000ms 阈值、首帧判定、失败与取消回退、
  * 替换事件不触发连播，以及加载超时。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -27,7 +27,7 @@ class PlaybackControllerSwitchTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `initial loading shows the indicator only after 500ms`() = runTest {
+    fun `initial loading shows the indicator only after 1000ms`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -43,7 +43,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a first frame within 500ms never shows the indicator`() = runTest {
+    fun `a first frame within 1000ms never shows the indicator`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -121,7 +121,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `switching uses the same 500ms indicator threshold`() = runTest {
+    fun `switching uses the same 1000ms indicator threshold`() = runTest {
         val controller = playingController()
 
         controller.next()
@@ -169,17 +169,133 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `repeated switches during buffering do nothing`() = runTest {
-        val controller = playingController()
+    fun `repeated next during a switch advances the target to the final episode`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.next()
+
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals("root/ep3.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertTrue(controller.switching.value)
+        // 重定目标不再抓帧，冻结画面沿用第一次切集的结果。
+        assertEquals(1, engine.grabFrameCalls)
+
+        // 被跳过的第 2 集迟到的就绪不能结束切换。
+        engine.reportFirstFrameReady(targetUrl = "root/ep2.mkv")
+        assertTrue(controller.switching.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `playlist selection is ignored during a switch`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.playAt(2)
+        controller.play(MediaFile(name = "ep3.mkv", location = "root/ep3.mkv"))
+
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertTrue(controller.switching.value)
+    }
+
+    @Test
+    fun `previous during a switch moves the target back`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
 
         controller.next()
         controller.previous()
-        controller.playAt(0)
-        controller.play(MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"))
 
-        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertTrue(controller.switching.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `automatic next uses the same switch transition as a manual switch`() = runTest {
+        val controller = playingController()
+
+        engine.reportPlaybackEnded()
+
         assertEquals(1, controller.currentIndex.value)
-        assertEquals(1, engine.grabFrameCalls)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertTrue(controller.switching.value)
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(0, engine.resumeCalls)
+        // 自然播完后已无帧可抓：冻结画面为空，界面按黑底等待。
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `automatic next completes on the target first frame instead of the watchdog`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+        assertEquals(0, engine.resumeCalls)
+
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(1, engine.resumeCalls)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `automatic next with a resume record completes after the seek`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+
+        assertEquals(20_000L, engine.seekPositions.last())
+
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial - 1)
+        assertTrue(controller.switching.value)
+
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        assertFalse(controller.switching.value)
+        assertEquals(20_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `a failed automatic switch restores the original video paused at its position`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+        engine.reportPositionChanged(590_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(590_000L, controller.progress.value.positionMillis)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(true, engine.startedPaused.last())
+        assertEquals(590_000L, engine.startedPositions.last())
+        assertEquals(1, failures.size)
     }
 
     @Test
@@ -412,7 +528,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grab before 500ms keeps the indicator hidden`() = runTest {
+    fun `a grab before 1000ms keeps the indicator hidden`() = runTest {
         val controller = playingController()
         controller.pause()
 
@@ -510,7 +626,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `the indicator appears when the probe crosses the 500ms threshold`() = runTest {
+    fun `the indicator appears when the probe crosses the 1000ms threshold`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
@@ -790,9 +906,11 @@ class PlaybackControllerSwitchTest {
         )
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
-    private fun TestScope.playingController(): PlaybackController {
+    private fun TestScope.playingController(
+        vararg names: String = arrayOf("ep1.mkv", "ep2.mkv"),
+    ): PlaybackController {
         val controller = controller()
-        open(controller, "ep1.mkv", "ep2.mkv")
+        open(controller, *names)
         engine.reportMediaLoaded()
         return controller
     }
