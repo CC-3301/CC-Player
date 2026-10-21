@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -74,13 +75,13 @@ import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.NavigationViewModel
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
+import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.mediaFailureText
-import com.cc3301.ccplayer.ui.resolvedOrientation
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
@@ -117,6 +118,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var streams: NetworkStreams? = null
 
     private var playerVisible by mutableStateOf(false)
+
+    /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
+    private val sessionOrientation = PlayerSessionOrientation()
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -201,10 +205,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
-                LaunchedEffect(playerVisible, orientationMode, videoAspectRatio) {
+                LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
                     applyOrientation(
-                        if (playerVisible) resolvedOrientation(orientationMode, videoAspectRatio)
-                        else ScreenOrientation.System,
+                        if (playerVisible) {
+                            sessionOrientation.resolve(orientationMode, videoAspectRatio)
+                        } else {
+                            ScreenOrientation.System
+                        },
                     )
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -247,6 +254,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
                             onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
                             onSelectOrientationMode = { mode ->
+                                sessionOrientation.clearOverride()
                                 lifecycleScope.launch { settings.setOrientationMode(mode) }
                             },
                             onToggleAutoPlayNext = {
@@ -263,6 +271,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                     is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
                                     is SubtitleMenuItem.Off -> controller?.disableSubtitles()
                                 }
+                            },
+                            onToggleRotation = {
+                                sessionOrientation.toggle(currentScreenOrientation())
                             },
                             onClose = { handlePlayerBack() },
                         )
@@ -454,6 +465,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         pendingPlaylist = files
         pendingMedia = current
         pendingDirectoryEntries = directoryEntries
+        sessionOrientation.beginPlayback()
         playerVisible = true
         requestNotificationPermission()
         if (!bound) {
@@ -530,6 +542,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         pendingPlaylist = emptyList()
         pendingMedia = null
         pendingDirectoryEntries = emptyList()
+        // 先恢复系统栏与方向，再切回浏览页，避免 insets 变化让浏览页布局跳动。
+        restoreBrowserSystemUi()
         playerVisible = false
         playbackState = PlaybackState.Idle
         progress = PlaybackProgress()
@@ -566,6 +580,23 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             stopService(Intent(this, PlaybackService::class.java))
         }
     }
+
+    /**
+     * 退出播放页：先同步恢复系统栏与方向，保证系统栏在页面切换前出现；
+     * 状态变化后 [LaunchedEffect] 会按非播放状态再兜底应用一次，重复调用无副作用。
+     */
+    private fun restoreBrowserSystemUi() {
+        applyImmersive(false)
+        sessionOrientation.endPlayback()
+        applyOrientation(ScreenOrientation.System)
+    }
+
+    /** 当前屏幕的横竖状态，供转屏按钮从现状切换。 */
+    private fun currentScreenOrientation(): ScreenOrientation =
+        when (resources.configuration.orientation) {
+            Configuration.ORIENTATION_LANDSCAPE -> ScreenOrientation.Landscape
+            else -> ScreenOrientation.Portrait
+        }
 
     private fun applyImmersive(immersive: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
