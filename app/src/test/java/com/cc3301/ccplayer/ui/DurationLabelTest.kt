@@ -39,5 +39,13 @@ class DurationLabelTest {
     fun `进度条时间限制在总时长内`() {
         assertEquals(0L, seekBarProgressMillis(10_000L, 100_000L, -1L))
         assertEquals(100_000L, seekBarProgressMillis(10_000L, 100_000L, 150_000L))
+        assertEquals(100_000L, seekBarProgressMillis(150_000L, 100_000L, null))
+        assertEquals(0L, seekBarProgressMillis(-1L, 100_000L, null))
+    }
+
+    @Test
+    fun `未知时长不显示进度`() {
+        assertEquals(0L, seekBarProgressMillis(10_000L, 0L, 45_000L))
+        assertEquals(0L, seekBarProgressMillis(10_000L, -1L, null))
     }
 }

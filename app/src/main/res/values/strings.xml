@@ -56,6 +56,8 @@
     <string name="player_subtitles">字幕</string>
     <string name="player_buffering">正在缓冲</string>
     <string name="player_playback_failed">播放失败</string>
+    <string name="player_time_unknown">--:--</string>
+    <string name="player_progress_state">当前 %1$s，总时长 %2$s</string>
     <string name="player_more">更多</string>
     <string name="player_rotate">切换横竖屏</string>
     <string name="player_more_expanded">已展开</string>

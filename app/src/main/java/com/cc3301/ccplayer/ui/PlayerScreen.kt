@@ -82,6 +82,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -117,6 +118,12 @@ private val PlayerTopBarHeight = 56.dp
 
 /** “更多”面板为底部控制条预留的高度。 */
 private val PlayerControlBarReserve = 224.dp
+
+/** 松手后预览保留到播放位置追平的时间容差，毫秒。 */
+private const val SEEK_PREVIEW_SETTLE_MILLIS = 1_000L
+
+/** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
+private const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
@@ -1018,7 +1025,7 @@ private fun PlayerIconButton(
     }
 }
 
-/** 进度条：左侧当前时间、右侧总时长；拖动时左侧时间跟随预览，松手才提交。 */
+/** 进度条：左侧当前时间、右侧总时长；整行可拖动，拖动时左侧时间跟随预览，松手才提交。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SeekBar(
@@ -1030,8 +1037,39 @@ private fun SeekBar(
     onCommit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val maximum = durationMillis.coerceAtLeast(1L)
-    val progress = seekBarProgressMillis(positionMillis, durationMillis, previewMillis)
+    val durationKnown = durationMillis > 0L
+    val maximum = if (durationKnown) durationMillis else 1L
+    val sliderEnabled = enabled && durationKnown
+    var dragMillis by remember { mutableStateOf<Long?>(null) }
+    var heldMillis by remember { mutableStateOf<Long?>(null) }
+    var pendingSliderMillis by remember { mutableStateOf<Long?>(null) }
+    val progress = seekBarProgressMillis(
+        positionMillis = positionMillis,
+        durationMillis = durationMillis,
+        previewMillis = dragMillis ?: previewMillis ?: heldMillis,
+    )
+    // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
+    LaunchedEffect(positionMillis, heldMillis) {
+        val held = heldMillis ?: return@LaunchedEffect
+        if (abs(positionMillis - held) <= SEEK_PREVIEW_SETTLE_MILLIS) {
+            heldMillis = null
+        }
+    }
+    LaunchedEffect(heldMillis) {
+        val held = heldMillis ?: return@LaunchedEffect
+        delay(SEEK_PREVIEW_HOLD_MILLIS)
+        if (heldMillis == held) heldMillis = null
+    }
+    val previewAt: (Long) -> Unit = {
+        heldMillis = null
+        onPreview(it)
+    }
+    val commitAt: (Long) -> Unit = {
+        heldMillis = it
+        onCommit()
+    }
+    val latestPreviewAt = rememberUpdatedState(previewAt)
+    val latestCommitAt = rememberUpdatedState(commitAt)
     val colors = SliderDefaults.colors(
         thumbColor = MaterialTheme.colorScheme.onPrimary,
         activeTrackColor = AppColors.Accent,
@@ -1039,69 +1077,151 @@ private fun SeekBar(
         activeTickColor = Color.Transparent,
         inactiveTickColor = Color.Transparent,
     )
-    val thumbColor = if (enabled) colors.thumbColor else colors.disabledThumbColor
-    val activeTrackColor = if (enabled) colors.activeTrackColor else colors.disabledActiveTrackColor
-    val inactiveTrackColor = if (enabled) colors.inactiveTrackColor else colors.disabledInactiveTrackColor
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(PlayerSeekTouchHeight),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
-    ) {
-        Text(
-            text = formatDuration(progress),
-            style = MaterialTheme.typography.labelLarge,
-            color = AppColors.Foreground,
-            maxLines = 1,
-        )
-        Slider(
-            value = progress.toFloat(),
-            onValueChange = { onPreview(it.toLong()) },
-            onValueChangeFinished = onCommit,
-            enabled = enabled,
-            valueRange = 0f..maximum.toFloat(),
+    val thumbColor = if (sliderEnabled) colors.thumbColor else colors.disabledThumbColor
+    val activeTrackColor = if (sliderEnabled) colors.activeTrackColor else colors.disabledActiveTrackColor
+    val inactiveTrackColor = if (sliderEnabled) colors.inactiveTrackColor else colors.disabledInactiveTrackColor
+    val currentMillis = if (durationKnown) progress else positionMillis.coerceAtLeast(0L)
+    val currentText = formatDuration(currentMillis)
+    val totalText = if (durationKnown) {
+        formatDuration(durationMillis)
+    } else {
+        stringResource(R.string.player_time_unknown)
+    }
+    val stateText = stringResource(R.string.player_progress_state, currentText, totalText)
+    val timeStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
+    val timeColor = if (sliderEnabled) AppColors.Foreground else DisabledToolColor
+    val density = LocalDensity.current
+    val trackInsetPx = with(density) { (PlayerSeekTimeWidth + AppSpacing.Sm).toPx() }
+
+    Box(modifier = modifier.fillMaxWidth()) {
+        Row(
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .height(PlayerSeekTouchHeight),
-            colors = colors,
-            thumb = {
-                Box(
-                    modifier = Modifier
-                        .size(PlayerSeekThumbSize)
-                        .background(thumbColor, CircleShape),
-                )
-            },
-            track = {
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(PlayerSeekTrackHeight),
-                ) {
-                    val centerY = size.height / 2f
-                    drawLine(
-                        color = inactiveTrackColor,
-                        start = Offset(0f, centerY),
-                        end = Offset(size.width, centerY),
-                        strokeWidth = size.height,
-                        cap = StrokeCap.Round,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
+        ) {
+            Text(
+                text = currentText,
+                style = timeStyle,
+                color = timeColor,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(PlayerSeekTimeWidth),
+            )
+            Slider(
+                value = progress.toFloat(),
+                onValueChange = {
+                    val target = it.toLong()
+                    pendingSliderMillis = target
+                    previewAt(target)
+                },
+                onValueChangeFinished = {
+                    val target = pendingSliderMillis
+                    pendingSliderMillis = null
+                    if (target != null) commitAt(target) else onCommit()
+                },
+                enabled = sliderEnabled,
+                valueRange = 0f..maximum.toFloat(),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(PlayerSeekTouchHeight)
+                    .semantics { stateDescription = stateText },
+                colors = colors,
+                thumb = {
+                    Box(
+                        modifier = Modifier
+                            .size(PlayerSeekThumbSize)
+                            .background(thumbColor, CircleShape),
                     )
-                    drawLine(
-                        color = activeTrackColor,
-                        start = Offset(0f, centerY),
-                        end = Offset(size.width * progress.toFloat() / maximum.toFloat(), centerY),
-                        strokeWidth = size.height,
-                        cap = StrokeCap.Round,
-                    )
-                }
-            },
-        )
-        Text(
-            text = formatDuration(durationMillis),
-            style = MaterialTheme.typography.labelLarge,
-            color = AppColors.Foreground,
-            maxLines = 1,
-        )
+                },
+                track = {
+                    Canvas(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(PlayerSeekTrackHeight),
+                    ) {
+                        val centerY = size.height / 2f
+                        drawLine(
+                            color = inactiveTrackColor,
+                            start = Offset(0f, centerY),
+                            end = Offset(size.width, centerY),
+                            strokeWidth = size.height,
+                            cap = StrokeCap.Round,
+                        )
+                        if (progress > 0L) {
+                            drawLine(
+                                color = activeTrackColor,
+                                start = Offset(0f, centerY),
+                                end = Offset(
+                                    size.width * progress.toFloat() / maximum.toFloat(),
+                                    centerY,
+                                ),
+                                strokeWidth = size.height,
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                    }
+                },
+            )
+            Text(
+                text = totalText,
+                style = timeStyle,
+                color = timeColor,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(PlayerSeekTimeWidth),
+            )
+        }
+        if (sliderEnabled) {
+            // 覆盖整行接收触摸：两侧时间区与间隙也能开始拖动；Slider 保留无障碍语义。
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .pointerInput(sliderEnabled, maximum, trackInsetPx) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            down.consume()
+                            val trackStart = trackInsetPx.coerceIn(0f, size.width / 2f)
+                            val trackEnd = size.width - trackStart
+                            var target = seekBarMillisAt(
+                                x = down.position.x,
+                                trackStart = trackStart,
+                                trackEnd = trackEnd,
+                                durationMillis = maximum,
+                            ) ?: return@awaitEachGesture
+                            dragMillis = target
+                            latestPreviewAt.value(target)
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (!change.pressed) {
+                                        change.consume()
+                                        break
+                                    }
+                                    seekBarMillisAt(
+                                        x = change.position.x,
+                                        trackStart = trackStart,
+                                        trackEnd = trackEnd,
+                                        durationMillis = maximum,
+                                    )?.let { updated ->
+                                        if (updated != target) {
+                                            target = updated
+                                            dragMillis = target
+                                            latestPreviewAt.value(target)
+                                        }
+                                    }
+                                    change.consume()
+                                }
+                            } finally {
+                                dragMillis = null
+                            }
+                            latestCommitAt.value(target)
+                        }
+                    },
+            )
+        }
     }
 }
 

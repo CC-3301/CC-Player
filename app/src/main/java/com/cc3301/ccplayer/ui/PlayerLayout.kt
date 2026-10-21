@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.ui
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.min
+import kotlin.math.roundToLong
 
 /** 视频区矩形：坐标与尺寸相对容器左上角，单位像素。 */
 data class VideoViewport(val left: Float, val top: Float, val width: Float, val height: Float)
@@ -39,8 +40,11 @@ val PlayerSideTouchTarget = 48.dp
 /** 播放页次级按钮的视觉图标尺寸。 */
 val PlayerSideIconSize = 26.dp
 
-/** 进度条触控高度。 */
-val PlayerSeekTouchHeight = 44.dp
+/** 进度条整行触控高度。 */
+val PlayerSeekTouchHeight = 48.dp
+
+/** 进度条左右时间区的固定宽度。 */
+val PlayerSeekTimeWidth = 64.dp
 
 /** 进度条圆形滑块直径。 */
 val PlayerSeekThumbSize = 16.dp
@@ -101,6 +105,22 @@ data class PlayerIconBarMetrics(
     /** 左右两组与中间三键是否重叠。 */
     val overlapped: Boolean =
         leftGroupEnd > transportStart || transportEnd > rightGroupStart
+}
+
+/**
+ * 把进度条整行的横向坐标换算成毫秒。
+ * [trackStart] 与 [trackEnd] 为视觉轨道的像素范围；落在两侧时间区时取最近端点。
+ * 轨道无效或时长未知时返回 null。
+ */
+fun seekBarMillisAt(
+    x: Float,
+    trackStart: Float,
+    trackEnd: Float,
+    durationMillis: Long,
+): Long? {
+    if (trackEnd <= trackStart || durationMillis <= 0L) return null
+    val fraction = ((x - trackStart) / (trackEnd - trackStart)).coerceIn(0f, 1f)
+    return (fraction * durationMillis).roundToLong().coerceIn(0L, durationMillis)
 }
 
 /** 按图标条可用宽度计算三组按钮的尺寸与排布。 */
