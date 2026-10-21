@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
 fun interface NetworkPreviewDecoder {
 
     /** 从 [source] 取图；没有可用图时返回 null。 */
-    fun imageBytes(source: ByteSource, kind: MediaKind): ByteArray?
+    fun imageBytes(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray?
 }
 
 /**
@@ -26,25 +26,26 @@ class NetworkPreviewExtractor(
     private val decoder: NetworkPreviewDecoder,
 ) {
 
-    suspend fun imageBytes(file: MediaFile): ByteArray? = withContext(Dispatchers.IO) {
-        val kind = mediaKindOf(file.name) ?: return@withContext null
-        val source = try {
-            reads.openRead(file.location)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Exception) {
-            return@withContext null
+    suspend fun imageBytes(file: MediaFile, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): ByteArray? =
+        withContext(Dispatchers.IO) {
+            val kind = mediaKindOf(file.name) ?: return@withContext null
+            val source = try {
+                reads.openRead(file.location)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                return@withContext null
+            }
+            try {
+                decoder.imageBytes(source, kind, targetWidth)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                null
+            } finally {
+                runCatching { source.close() }
+            }
         }
-        try {
-            decoder.imageBytes(source, kind)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Exception) {
-            null
-        } finally {
-            runCatching { source.close() }
-        }
-    }
 }
 
 /**

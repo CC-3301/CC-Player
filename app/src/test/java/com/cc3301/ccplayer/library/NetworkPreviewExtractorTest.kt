@@ -23,7 +23,7 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `网络取图成功时返回解码结果并关闭句柄`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { opened, kind ->
+        val extractor = NetworkPreviewExtractor(reads) { opened, kind, _ ->
             askedKind = kind
             ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
         }
@@ -36,9 +36,22 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `网络取图使用调用方的目标宽度`() = runTest {
+        var askedWidth: Int? = null
+        val extractor = NetworkPreviewExtractor(reads) { _, _, width ->
+            askedWidth = width
+            ByteArray(1)
+        }
+
+        extractor.imageBytes(movie, targetWidth = 320)
+
+        assertEquals(320, askedWidth)
+    }
+
+    @Test
     fun `音频按内嵌封面取图`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { _, kind ->
+        val extractor = NetworkPreviewExtractor(reads) { _, kind, _ ->
             askedKind = kind
             ByteArray(2)
         }
@@ -51,7 +64,7 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `解码抛异常时返回空并关闭句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _ -> error("解码失败") }
+        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> error("解码失败") }
 
         assertNull(extractor.imageBytes(movie))
         assertTrue(source.closed)
@@ -59,14 +72,14 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `打开句柄失败时返回空`() = runTest {
-        val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _ -> ByteArray(1) }
+        val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _, _ -> ByteArray(1) }
 
         assertNull(extractor.imageBytes(movie))
     }
 
     @Test
     fun `非媒体文件不打开句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _ -> ByteArray(1) }
+        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> ByteArray(1) }
 
         assertNull(extractor.imageBytes(movie.copy(name = "说明.txt")))
         assertTrue(reads.opened.isEmpty())

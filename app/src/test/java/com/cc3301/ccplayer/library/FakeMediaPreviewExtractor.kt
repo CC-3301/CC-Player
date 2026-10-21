@@ -17,10 +17,12 @@ class FakeMediaPreviewExtractor(
 ) : MediaPreviewExtractor {
 
     val imageRequests = mutableListOf<String>()
+    val imageWidths = mutableListOf<Int>()
     val durationRequests = mutableListOf<String>()
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         imageRequests += file.location
+        imageWidths += targetWidth
         if (imageDelayMillis > 0) delay(imageDelayMillis)
         imageFailure?.let { throw it }
         return imageBytes

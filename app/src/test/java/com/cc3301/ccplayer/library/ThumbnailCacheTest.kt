@@ -104,13 +104,76 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `清理没有对应图片的孤儿元数据`() {
+    fun `启动时清理没有对应图片的孤儿元数据`() {
         val orphan = File(directory, "orphan.img.meta")
         orphan.writeText("1")
 
-        cache.save("content://root/a.mkv", ByteArray(4))
+        ThumbnailCache(directory = directory, maxBytes = 10, clock = { now })
 
         assertTrue(!orphan.exists())
+    }
+
+    @Test
+    fun `旧格式单行元数据视为时长未知`() {
+        cache.save("content://root/a.mkv", ByteArray(4), durationMillis = 187_000)
+        metadataFile().writeText("1000")
+
+        val entry = cache.entry("content://root/a.mkv")
+
+        assertNotNull(entry)
+        assertNull(entry!!.durationMillis)
+        assertTrue(!entry.durationKnown)
+    }
+
+    @Test
+    fun `元数据第二行 null 表示确定无时长`() {
+        cache.save("content://root/a.mkv", ByteArray(4), durationMillis = null)
+
+        val entry = cache.entry("content://root/a.mkv")
+
+        assertNotNull(entry)
+        assertNull(entry!!.durationMillis)
+        assertTrue(entry.durationKnown)
+    }
+
+    @Test
+    fun `回写时长后命中直接复用`() {
+        cache.save("content://root/a.mkv", ByteArray(4), durationMillis = null)
+
+        cache.writeDuration("content://root/a.mkv", 187_000)
+
+        val entry = cache.entry("content://root/a.mkv")
+        assertEquals(187_000L, entry!!.durationMillis)
+        assertTrue(entry.durationKnown)
+    }
+
+    @Test
+    fun `并发写入不同键都保留图片与元数据`() {
+        val concurrentDirectory = Files.createTempDirectory("thumbnail-concurrent").toFile()
+        try {
+            val concurrent = ThumbnailCache(directory = concurrentDirectory, maxBytes = 1 shl 20)
+            val keys = (1..50).map { index -> "content://root/$index.mkv" }
+            val failures = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+            val threads = keys.map { key ->
+                Thread {
+                    try {
+                        concurrent.save(key, ByteArray(4), durationMillis = 1)
+                    } catch (failure: Throwable) {
+                        failures += failure
+                    }
+                }
+            }
+
+            threads.forEach(Thread::start)
+            threads.forEach(Thread::join)
+
+            assertTrue(failures.isEmpty())
+            assertEquals(50, concurrentDirectory.listFiles().orEmpty().count { it.name.endsWith(".img") })
+            assertEquals(50, concurrentDirectory.listFiles().orEmpty().count { it.name.endsWith(".meta") })
+            keys.forEach { key -> assertNotNull(concurrent.entry(key)) }
+        } finally {
+            concurrentDirectory.deleteRecursively()
+        }
     }
 
     @Test
@@ -128,4 +191,7 @@ class ThumbnailCacheTest {
 
     private fun metadataFileCount(): Int =
         directory.listFiles().orEmpty().count { file -> file.name.endsWith(".meta") }
+
+    private fun metadataFile(): File =
+        directory.listFiles().orEmpty().first { file -> file.name.endsWith(".meta") }
 }

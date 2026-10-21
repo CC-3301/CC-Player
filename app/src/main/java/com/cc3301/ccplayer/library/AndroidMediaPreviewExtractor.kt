@@ -23,16 +23,15 @@ import kotlinx.coroutines.withContext
 class AndroidMediaPreviewExtractor(
     private val context: Context,
     networkReads: NetworkMediaReads? = null,
-    private val targetWidth: Int = THUMBNAIL_TARGET_WIDTH,
 ) : MediaPreviewExtractor {
 
     private val networkPreview = networkReads?.let { reads ->
-        NetworkPreviewExtractor(reads, AndroidNetworkPreviewDecoder(targetWidth))
+        NetworkPreviewExtractor(reads, AndroidNetworkPreviewDecoder())
     }
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? = withContext(Dispatchers.IO) {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = withContext(Dispatchers.IO) {
         if (file.source == MediaSource.Network) {
-            return@withContext networkPreview?.imageBytes(file)
+            return@withContext networkPreview?.imageBytes(file, targetWidth)
         }
         withRetriever(file) { retriever ->
             when (mediaKindOf(file.name)) {
@@ -52,10 +51,10 @@ class AndroidMediaPreviewExtractor(
     }
 
     /** 本地文件一次打开读取器，同时取时长与预览图。 */
-    override suspend fun imageAndDuration(file: MediaFile): MediaPreviewExtraction =
+    override suspend fun imageAndDuration(file: MediaFile, targetWidth: Int): MediaPreviewExtraction =
         withContext(Dispatchers.IO) {
             if (file.source == MediaSource.Network) {
-                return@withContext MediaPreviewExtraction(networkPreview?.imageBytes(file), null)
+                return@withContext MediaPreviewExtraction(networkPreview?.imageBytes(file, targetWidth), null)
             }
             withRetriever(file) { retriever ->
                 when (mediaKindOf(file.name)) {
@@ -90,9 +89,9 @@ class AndroidMediaPreviewExtractor(
 }
 
 /** 网络解码：把随机读句柄包成系统数据源，交给 MediaMetadataRetriever 取图。 */
-private class AndroidNetworkPreviewDecoder(private val targetWidth: Int) : NetworkPreviewDecoder {
+private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
 
-    override fun imageBytes(source: ByteSource, kind: MediaKind): ByteArray? {
+    override fun imageBytes(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? {
         val retriever = MediaMetadataRetriever()
         val dataSource = RangeMediaDataSource(source)
         return try {

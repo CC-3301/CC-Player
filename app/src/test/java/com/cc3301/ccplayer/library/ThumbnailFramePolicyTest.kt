@@ -97,6 +97,22 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
+    fun `极短时长的抽帧位置仍落在时长内`() {
+        val positions = framePositions(1, LOCAL_FRAME_COUNT)
+
+        assertEquals(listOf(100L, 333L, 666L), positions.map { it.micros })
+        assertTrue(positions.all { it.micros in 0L..999L })
+    }
+
+    @Test
+    fun `目标宽度为零或负值按下限输出`() {
+        assertEquals(320, effectiveTargetWidth(0))
+        assertEquals(320, effectiveTargetWidth(-1))
+        assertEquals(320, targetFrameWidth(100, targetWidth = 0))
+        assertEquals(320, targetFrameWidth(100, targetWidth = -1))
+    }
+
+    @Test
     fun `抽帧输出宽度钳在 320 到 512`() {
         assertEquals(512, targetFrameWidth(1920))
         assertEquals(512, targetFrameWidth(513))

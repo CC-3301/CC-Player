@@ -93,6 +93,7 @@ class CachedMediaPreviewSourceTest {
 
         assertArrayEquals(frame, preview.image!!.readBytes())
         assertEquals(listOf("smb://nas/media/共享电影.mkv"), extractor.imageRequests)
+        assertEquals(listOf(512), extractor.imageWidths)
         assertTrue(extractor.durationRequests.isEmpty())
         assertNull(preview.durationMillis)
     }
@@ -234,17 +235,65 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `命中缓存时读时长失败仍返回图片`() = runTest {
+    fun `旧格式单行元数据命中后重新读取时长并回写`() = runTest {
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
-        source.preview(local("电影.mkv", lastModified = 1_000))
-        directory.listFiles().orEmpty().filter { it.name.endsWith(".meta") }.forEach { it.delete() }
+        val file = local("电影.mkv", lastModified = 1_000)
+        source.preview(file)
+        val metadata = metadataFile()
+        metadata.writeText("1000")
+        val callsAfterFirst = extractor.durationRequests.size
+
+        val hit = source.preview(file)
+
+        assertEquals(187_000L, hit.durationMillis)
+        assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
+        assertTrue(metadata.readLines().size >= 2)
+
+        val second = source.preview(file)
+        assertEquals(187_000L, second.durationMillis)
+        assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
+    }
+
+    @Test
+    fun `无元数据的旧条目命中后重新读取时长并回写`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        extractor.durationMillis = 187_000
+        val file = local("电影.mkv", lastModified = 1_000)
+        source.preview(file)
+        metadataFile().delete()
+        val callsAfterFirst = extractor.durationRequests.size
+
+        val hit = source.preview(file)
+
+        assertEquals(187_000L, hit.durationMillis)
+        assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
+        assertTrue(metadataFile().readLines().size >= 2)
+
+        source.preview(file)
+        assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
+    }
+
+    @Test
+    fun `命中缓存时读时长失败保留图片且保持未知`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        extractor.durationMillis = 187_000
+        val file = local("电影.mkv", lastModified = 1_000)
+        source.preview(file)
+        val metadata = metadataFile()
+        metadata.writeText("1000")
         extractor.durationFailure = IllegalStateException("读时长失败")
 
-        val hit = source.preview(local("电影.mkv", lastModified = 1_000))
+        val hit = source.preview(file)
 
         assertNotNull(hit.image)
         assertNull(hit.durationMillis)
+        assertEquals(1, metadata.readLines().size)
+
+        extractor.durationFailure = null
+        val retried = source.preview(file)
+        assertEquals(187_000L, retried.durationMillis)
+        assertTrue(metadata.readLines().size >= 2)
     }
 
     @Test
@@ -323,6 +372,27 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `抽取器收到钳制后的目标宽度`() = runTest {
+        val narrow = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(targetWidth = 100),
+        )
+        val wide = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(targetWidth = 4_096),
+        )
+        extractor.imageBytes = byteArrayOf(1)
+
+        narrow.preview(local("窄.mkv", lastModified = 1_000))
+        wide.preview(local("宽.mkv", lastModified = 1_000))
+        wide.preview(network("网络.mkv"))
+
+        assertEquals(listOf(320, 512, 512), extractor.imageWidths)
+    }
+
+    @Test
     fun `首个调用者取消后等待者重新抽取`() = runTest {
         val tracker = RetryExtractor()
         val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
@@ -363,6 +433,34 @@ class CachedMediaPreviewSourceTest {
         job.join()
 
         assertTrue(directory.listFiles().isNullOrEmpty())
+    }
+
+    @Test
+    fun `本地取消慢提取后不写入缓存`() = runTest {
+        val tracker = SlowFileExtractor(slowDelayMillis = 60_000)
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+        val job = launch { bounded.preview(local("慢.mkv")) }
+        runCurrent()
+
+        job.cancel()
+        job.join()
+
+        assertTrue(directory.listFiles().isNullOrEmpty())
+    }
+
+    @Test
+    fun `取消后同键可重新抽取`() = runTest {
+        val tracker = RetryExtractor()
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+        val job = launch { bounded.preview(network("电影.mkv")) }
+        runCurrent()
+
+        job.cancel()
+        job.join()
+
+        val retried = bounded.preview(network("电影.mkv"))
+        assertNotNull(retried.image)
+        assertEquals(2, tracker.requests)
     }
 
     @Test
@@ -461,6 +559,9 @@ class CachedMediaPreviewSourceTest {
     private fun imageFileCount(): Int =
         directory.listFiles().orEmpty().count { file -> file.name.endsWith(".img") }
 
+    private fun metadataFile(): File =
+        directory.listFiles().orEmpty().first { file -> file.name.endsWith(".meta") }
+
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
         MediaFile(name = name, location = "root/$name", size = size, lastModified = lastModified)
 
@@ -479,7 +580,7 @@ private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPrevie
 
     val requests = mutableListOf<String>()
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests += file.location
         if (file.name.startsWith("慢")) delay(slowDelayMillis)
         return byteArrayOf(1)
@@ -495,7 +596,7 @@ private class ConcurrentExtractor(private val failure: Exception? = null) : Medi
     var concurrent = 0
     var maxConcurrent = 0
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests++
         concurrent++
         maxConcurrent = maxOf(maxConcurrent, concurrent)
@@ -516,7 +617,7 @@ private class RetryExtractor : MediaPreviewExtractor {
 
     var requests = 0
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests++
         if (requests == 1) delay(60_000)
         return byteArrayOf(1)
@@ -530,7 +631,7 @@ private class ErrorOnceExtractor : MediaPreviewExtractor {
 
     var requests = 0
 
-    override suspend fun imageBytes(file: MediaFile): ByteArray? {
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests++
         if (requests == 1) {
             yield()
