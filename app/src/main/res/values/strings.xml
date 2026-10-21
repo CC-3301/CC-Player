@@ -55,6 +55,7 @@
     <string name="player_playlist">播放列表</string>
     <string name="player_playlist_count">播放列表（%1$d）</string>
     <string name="player_playlist_close">关闭播放列表</string>
+    <string name="player_more_close">关闭更多设置</string>
     <string name="player_subtitles">字幕</string>
     <string name="player_buffering">正在缓冲</string>
     <string name="player_playback_failed">播放失败</string>
@@ -96,7 +97,7 @@
     <string name="player_unlock">解锁</string>
     <string name="player_screen_locked_hint">屏幕已锁定，点按显示解锁按钮</string>
     <string name="player_volume_hint">音量 %1$d%%</string>
-    <string name="player_seek_hint">目标 %1$s  %2$s</string>
+    <string name="player_double_tap_seconds">%1$d 秒</string>
     <string name="notification_channel_playback">播放</string>
     <string name="notification_playing">正在播放</string>
     <string name="settings_open">设置</string>

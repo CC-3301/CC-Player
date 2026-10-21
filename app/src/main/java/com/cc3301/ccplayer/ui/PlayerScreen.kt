@@ -3,6 +3,8 @@ package com.cc3301.ccplayer.ui
 import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -92,11 +94,13 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFile
@@ -116,6 +120,7 @@ import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 /** 播放器浮层的半透明面板与圆角，叠在画面上也保持主题一致。 */
@@ -282,6 +287,7 @@ fun PlayerScreen(
     val panels = remember { PlayerPanelState() }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
+    val doubleTapFeedback = remember { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
     val panelOpen = panels.anyOpen
@@ -317,6 +323,14 @@ fun PlayerScreen(
         if (lock.locked && lock.unlockVisible) {
             delay(UNLOCK_AUTO_HIDE_MILLIS)
             lock.hideUnlockIfExpired()
+        }
+    }
+
+    LaunchedEffect(doubleTapFeedback.left, doubleTapFeedback.right) {
+        while (doubleTapFeedback.left != null || doubleTapFeedback.right != null) {
+            val remaining = doubleTapFeedback.millisUntilExpire() ?: break
+            delay(remaining)
+            doubleTapFeedback.expire()
         }
     }
 
@@ -379,6 +393,7 @@ fun PlayerScreen(
                 controls.onInteraction()
                 onSeekBy(it)
             },
+            onDoubleTapFeedback = doubleTapFeedback::onDoubleTap,
             onSeekPreview = {
                 controls.onInteraction()
                 onSeekPreview(it)
@@ -398,6 +413,27 @@ fun PlayerScreen(
         }
         seekHint?.let { hint ->
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
+        }
+        doubleTapFeedback.ripple?.let { ripple ->
+            DoubleTapEdgeRipple(ripple = ripple)
+        }
+        doubleTapFeedback.left?.let { hint ->
+            DoubleTapHint(
+                side = DoubleTapSide.Left,
+                accumulatedMillis = hint.accumulatedMillis,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = maxWidth * 0.06f),
+            )
+        }
+        doubleTapFeedback.right?.let { hint ->
+            DoubleTapHint(
+                side = DoubleTapSide.Right,
+                accumulatedMillis = hint.accumulatedMillis,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = maxWidth * 0.06f),
+            )
         }
         // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
         // 加载期间动作按钮仍由 actionAllowed 禁用；点按只用于解锁，始终放行。
@@ -429,34 +465,6 @@ fun PlayerScreen(
                     },
                     modifier = Modifier.align(Alignment.TopStart),
                 )
-                if (moreVisible) {
-                    MorePanel(
-                        decodeMode = decodeMode,
-                        loopMode = loopMode,
-                        orientationMode = orientationMode,
-                        autoPlayNext = autoPlayNext,
-                        sleepTimerState = sleepTimerState,
-                        selectedSleepTimerOption = sleepTimerOption,
-                        onSelectDecodeMode = onSelectDecodeMode,
-                        onSelectLoopMode = onSelectLoopMode,
-                        onSelectOrientationMode = onSelectOrientationMode,
-                        onToggleAutoPlayNext = onToggleAutoPlayNext,
-                        onSelectSleepTimer = { option ->
-                            onSelectSleepTimer(option)
-                            panels.close()
-                        },
-                        onCancelSleepTimer = {
-                            onCancelSleepTimer()
-                            panels.close()
-                        },
-                        panelWidth = morePanelWidth,
-                        panelMaxHeight = morePanelMaxHeight,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .safeDrawingPadding()
-                            .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
-                    )
-                }
                 Controls(
                     state = state,
                     progress = progress,
@@ -502,6 +510,44 @@ fun PlayerScreen(
                     onSelectSubtitle = onSelectSubtitle,
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
+                // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
+                if (moreVisible) {
+                    val closeHint = stringResource(R.string.player_more_close)
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) { detectTapGestures { panels.close() } }
+                                .semantics { contentDescription = closeHint },
+                        )
+                        MorePanel(
+                            decodeMode = decodeMode,
+                            loopMode = loopMode,
+                            orientationMode = orientationMode,
+                            autoPlayNext = autoPlayNext,
+                            sleepTimerState = sleepTimerState,
+                            selectedSleepTimerOption = sleepTimerOption,
+                            onSelectDecodeMode = onSelectDecodeMode,
+                            onSelectLoopMode = onSelectLoopMode,
+                            onSelectOrientationMode = onSelectOrientationMode,
+                            onToggleAutoPlayNext = onToggleAutoPlayNext,
+                            onSelectSleepTimer = { option ->
+                                onSelectSleepTimer(option)
+                                panels.close()
+                            },
+                            onCancelSleepTimer = {
+                                onCancelSleepTimer()
+                                panels.close()
+                            },
+                            panelWidth = morePanelWidth,
+                            panelMaxHeight = morePanelMaxHeight,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .safeDrawingPadding()
+                                .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
+                        )
+                    }
+                }
             }
         } else {
             if (lock.unlockVisible) {
@@ -562,6 +608,7 @@ private fun PlayerGestureLayer(
     levelControls: PlayerLevelControls,
     onTogglePlayPause: () -> Unit,
     onSeekBy: (Long) -> Unit,
+    onDoubleTapFeedback: (DoubleTapSide, Long) -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onToggleControls: () -> Unit,
@@ -579,6 +626,7 @@ private fun PlayerGestureLayer(
     // 回调与播放位置取最新一份，避免手势层在位置变化时重启。
     val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
     val latestOnSeekBy = rememberUpdatedState(onSeekBy)
+    val latestOnDoubleTapFeedback = rememberUpdatedState(onDoubleTapFeedback)
     val latestOnSeekPreview = rememberUpdatedState(onSeekPreview)
     val latestOnSeekCommit = rememberUpdatedState(onSeekCommit)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
@@ -596,6 +644,10 @@ private fun PlayerGestureLayer(
                 when (val doubleTap = action.action) {
                     is DoubleTapAction.Seek -> if (seekAllowed) {
                         latestOnSeekBy.value(doubleTap.deltaMillis)
+                        latestOnDoubleTapFeedback.value(
+                            if (doubleTap.deltaMillis < 0L) DoubleTapSide.Left else DoubleTapSide.Right,
+                            doubleTap.deltaMillis,
+                        )
                     }
 
                     DoubleTapAction.TogglePlayPause -> if (playPauseAllowed) {
@@ -720,21 +772,105 @@ private fun LevelHintLabel(fraction: Float, modifier: Modifier = Modifier) {
     )
 }
 
-/** 拖动进度时的目标时间与增减量提示。 */
+/** 拖动进度时的目标时间与增减量提示：居中两行、同字号白字、无底板。 */
 @Composable
 private fun SeekHintLabel(hint: SeekHint, modifier: Modifier = Modifier) {
-    Text(
-        text = stringResource(
-            R.string.player_seek_hint,
-            formatDuration(hint.targetMillis),
-            signedDuration(hint.deltaMillis),
+    val style = MaterialTheme.typography.titleMedium.copy(
+        color = Color.White,
+        fontSize = 34.sp,
+        fontWeight = FontWeight.Medium,
+        fontFeatureSettings = "tnum",
+        shadow = Shadow(
+            color = Color.Black.copy(alpha = 0.9f),
+            offset = Offset(0f, 2f),
+            blurRadius = 14f,
         ),
-        style = MaterialTheme.typography.titleMedium,
-        color = AppColors.Foreground,
-        modifier = modifier
-            .playerPanel()
-            .padding(horizontal = AppSpacing.Xl, vertical = AppSpacing.Sm),
     )
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(text = formatDuration(hint.targetMillis), style = style, maxLines = 1)
+        Text(
+            text = signedDuration(hint.deltaMillis),
+            style = style,
+            maxLines = 1,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+    }
+}
+
+/** 双击快退/快进提示：箭头在上，3 秒内累计秒数在下。 */
+@Composable
+private fun DoubleTapHint(
+    side: DoubleTapSide,
+    accumulatedMillis: Long,
+    modifier: Modifier = Modifier,
+) {
+    val shadow = Shadow(
+        color = Color.Black.copy(alpha = 0.9f),
+        offset = Offset(0f, 2f),
+        blurRadius = 14f,
+    )
+    val arrowStyle = MaterialTheme.typography.titleMedium.copy(
+        color = Color.White,
+        fontSize = 30.sp,
+        fontWeight = FontWeight.Medium,
+        shadow = shadow,
+    )
+    val secondsStyle = MaterialTheme.typography.titleMedium.copy(
+        color = Color.White,
+        fontSize = 13.sp,
+        fontFeatureSettings = "tnum",
+        shadow = shadow,
+    )
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = if (side == DoubleTapSide.Left) "◀◀" else "▶▶",
+            style = arrowStyle,
+            maxLines = 1,
+        )
+        Text(
+            text = stringResource(
+                R.string.player_double_tap_seconds,
+                (accumulatedMillis / 1_000L).toInt(),
+            ),
+            style = secondsStyle,
+            maxLines = 1,
+        )
+    }
+}
+
+/** 每次双击从对应屏幕边缘向内扩散的黑色半透明涟漪。 */
+@Composable
+private fun DoubleTapEdgeRipple(ripple: DoubleTapRipple) {
+    val progress = remember(ripple.id) { Animatable(0f) }
+    LaunchedEffect(ripple.id) {
+        progress.animateTo(1f, tween(durationMillis = 580, easing = LinearOutSlowInEasing))
+    }
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val scale = 0.35f + (1.35f - 0.35f) * progress.value
+        val alpha = (1f - progress.value).coerceIn(0f, 1f)
+        val radius = max(size.width * 0.46f, 44.dp.toPx()) / 2f * scale
+        val center = Offset(
+            x = if (ripple.side == DoubleTapSide.Left) 0f else size.width,
+            y = size.height / 2f,
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                0f to Color.Black.copy(alpha = 0.4f * alpha),
+                0.58f to Color.Black.copy(alpha = 0.22f * alpha),
+                0.74f to Color.Transparent,
+                center = center,
+                radius = radius,
+            ),
+            radius = radius,
+            center = center,
+        )
+    }
 }
 
 private fun signedDuration(millis: Long): String =
