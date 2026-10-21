@@ -2,6 +2,10 @@ package com.cc3301.ccplayer.ui
 
 import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -9,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +22,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +36,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
@@ -133,6 +140,16 @@ private val PlayerBottomBarGradient = Brush.verticalGradient(
     0.48f to Color.Black.copy(alpha = 0.46f),
     1f to Color.Black.copy(alpha = 0.78f),
 )
+
+/** 播放列表抽屉：从右向左加深的低透明度黑色渐变。 */
+private val PlayerPlaylistGradient = Brush.horizontalGradient(
+    0f to Color(0x14020509),
+    0.34f to Color(0x6B020509),
+    1f to Color(0xB8020509),
+)
+
+/** 播放列表条目固定高度，用于把当前项滚到可视区域中间。 */
+private val PlayerPlaylistItemHeight = 44.dp
 
 /** 吞掉区域内触摸，避免落到下层手势层；不建立可点击语义。 */
 private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
@@ -261,23 +278,22 @@ fun PlayerScreen(
 ) {
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
-    var playlistVisible by remember { mutableStateOf(false) }
-    var subtitleMenuVisible by remember { mutableStateOf(false) }
-    var moreVisible by remember { mutableStateOf(false) }
+    val panels = remember { PlayerPanelState() }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
     val locked = lock.locked
     val controlsVisible = controls.visible
-    val panelOpen = playlistVisible || subtitleMenuVisible || moreVisible
+    val panelOpen = panels.anyOpen
+    val playlistVisible = panels.playlistOpen
+    val subtitleMenuVisible = panels.subtitlesOpen
+    val moreVisible = panels.moreOpen
 
     // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
     LaunchedEffect(switching, initialLoading) {
         // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
         controls.onInteraction()
         if (switching || initialLoading) {
-            playlistVisible = false
-            subtitleMenuVisible = false
-            moreVisible = false
+            panels.close()
         }
     }
 
@@ -397,7 +413,8 @@ fun PlayerScreen(
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
             // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
-            if (backEntryVisible(controlsVisible, initialLoading)) {
+            // 播放列表抽屉打开时隐藏顶栏、底栏与其它面板，画面留给左侧。
+            if (backEntryVisible(controlsVisible, initialLoading) && !playlistVisible) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
@@ -409,12 +426,7 @@ fun PlayerScreen(
                     },
                     onToggleMore = {
                         controls.onInteraction()
-                        val opening = !moreVisible
-                        moreVisible = opening
-                        if (opening) {
-                            playlistVisible = false
-                            subtitleMenuVisible = false
-                        }
+                        panels.toggle(PlayerPanel.More)
                     },
                     modifier = Modifier.align(Alignment.TopStart),
                 )
@@ -432,11 +444,11 @@ fun PlayerScreen(
                         onToggleAutoPlayNext = onToggleAutoPlayNext,
                         onSelectSleepTimer = { option ->
                             onSelectSleepTimer(option)
-                            moreVisible = false
+                            panels.close()
                         },
                         onCancelSleepTimer = {
                             onCancelSleepTimer()
-                            moreVisible = false
+                            panels.close()
                         },
                         panelWidth = morePanelWidth,
                         panelMaxHeight = morePanelMaxHeight,
@@ -455,7 +467,6 @@ fun PlayerScreen(
                     subtitleTracks = subtitleTracks,
                     externalSubtitles = externalSubtitles,
                     subtitleSelection = subtitleSelection,
-                    playlistVisible = playlistVisible,
                     subtitleMenuVisible = subtitleMenuVisible,
                     switching = switching,
                     initialLoading = initialLoading,
@@ -480,24 +491,13 @@ fun PlayerScreen(
                         controls.onInteraction()
                         onSeekCommit()
                     },
-                    onPlaylistSelect = onPlaylistSelect,
                     onTogglePlaylist = {
                         controls.onInteraction()
-                        val opening = !playlistVisible
-                        playlistVisible = opening
-                        if (opening) {
-                            subtitleMenuVisible = false
-                            moreVisible = false
-                        }
+                        panels.toggle(PlayerPanel.Playlist)
                     },
                     onToggleSubtitleMenu = {
                         controls.onInteraction()
-                        val opening = !subtitleMenuVisible
-                        subtitleMenuVisible = opening
-                        if (opening) {
-                            playlistVisible = false
-                            moreVisible = false
-                        }
+                        panels.toggle(PlayerPanel.Subtitles)
                     },
                     onLock = { lock.tapLockButton() },
                     onSelectSubtitle = onSelectSubtitle,
@@ -517,6 +517,36 @@ fun PlayerScreen(
                         .padding(AppSpacing.Lg),
                 )
             }
+        }
+        // 左半屏是关闭抽屉的点击区；抽屉从右侧滑出，只盖住右半屏。
+        if (playlistVisible) {
+            val closeHint = stringResource(R.string.player_playlist_close)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.5f)
+                    .noRippleClickable { panels.close() }
+                    .semantics { contentDescription = closeHint },
+            )
+        }
+        AnimatedVisibility(
+            visible = playlistVisible,
+            enter = slideInHorizontally(animationSpec = tween(260)) { it },
+            exit = slideOutHorizontally(animationSpec = tween(260)) { it },
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .width(maxWidth / 2),
+        ) {
+            PlaylistDrawer(
+                playlist = playlist,
+                currentIndex = currentIndex,
+                onSelect = { media ->
+                    panels.close()
+                    onPlaylistSelect(media)
+                },
+            )
         }
     }
 }
@@ -810,7 +840,6 @@ private fun Controls(
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
-    playlistVisible: Boolean,
     subtitleMenuVisible: Boolean,
     switching: Boolean,
     initialLoading: Boolean,
@@ -820,7 +849,6 @@ private fun Controls(
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
-    onPlaylistSelect: (MediaFile) -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
     onLock: () -> Unit,
@@ -837,14 +865,6 @@ private fun Controls(
             .padding(top = 24.dp, bottom = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
     ) {
-        if (playlistVisible) {
-            PlaylistPanel(
-                playlist = playlist,
-                currentIndex = currentIndex,
-                onSelect = onPlaylistSelect,
-                modifier = Modifier.padding(horizontal = AppSpacing.Lg),
-            )
-        }
         if (subtitleMenuVisible) {
             SubtitlePanel(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
@@ -870,7 +890,6 @@ private fun Controls(
             initialLoading = initialLoading,
             restoring = restoring,
             subtitleMenuVisible = subtitleMenuVisible,
-            playlistVisible = playlistVisible,
             onTogglePlayPause = onTogglePlayPause,
             onPrevious = onPrevious,
             onNext = onNext,
@@ -891,7 +910,6 @@ private fun PlayerIconBar(
     initialLoading: Boolean,
     restoring: Boolean,
     subtitleMenuVisible: Boolean,
-    playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -969,7 +987,6 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
                     enabled = actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
-                    active = playlistVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
             }
@@ -1552,31 +1569,97 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
     }
 }
 
-/** 播放列表：点击即切换到对应媒体。 */
+/** 播放列表抽屉：占右半屏，从右向左加深的低透明度黑底，当前项居中。 */
 @Composable
-private fun PlaylistPanel(
+private fun PlaylistDrawer(
     playlist: List<MediaFile>,
     currentIndex: Int,
     onSelect: (MediaFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val listState = rememberLazyListState()
     Column(
         modifier = modifier
-            .fillMaxWidth()
-            .heightIn(max = 240.dp)
-            .playerPanel(),
+            .fillMaxSize()
+            .background(PlayerPlaylistGradient)
+            .blockPlayerGestures(),
     ) {
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
-            itemsIndexed(playlist) { index, media ->
-                Text(
-                    text = media.name,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (index == currentIndex) AppColors.Accent else AppColors.Foreground,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .noRippleClickable { onSelect(media) }
-                        .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
-                )
+        Text(
+            text = stringResource(R.string.player_playlist_count, playlist.size),
+            style = MaterialTheme.typography.titleSmall,
+            color = AppColors.Muted,
+            modifier = Modifier.padding(
+                start = AppSpacing.Lg,
+                end = AppSpacing.Lg,
+                top = AppSpacing.Md,
+                bottom = AppSpacing.Xs,
+            ),
+        )
+        BoxWithConstraints(modifier = Modifier
+            .fillMaxWidth()
+            .weight(1f)) {
+            val density = LocalDensity.current
+            val viewportPx = with(density) { maxHeight.roundToPx() }
+            val itemPx = with(density) { PlayerPlaylistItemHeight.roundToPx() }
+            val centerOffset = playlistCenterScrollOffset(viewportPx, itemPx)
+            val verticalPadding = with(density) { centerOffset.toDp() }
+            LaunchedEffect(currentIndex, playlist.size) {
+                if (currentIndex in playlist.indices) {
+                    listState.scrollToItem(currentIndex)
+                    listState.scrollBy(-centerOffset.toFloat())
+                }
+            }
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(
+                    start = AppSpacing.Xs,
+                    end = AppSpacing.Xs,
+                    top = verticalPadding,
+                    bottom = verticalPadding,
+                ),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                itemsIndexed(playlist) { index, media ->
+                    val active = index == currentIndex
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(PlayerPlaylistItemHeight)
+                            .background(
+                                color = if (active) AppColors.Accent.copy(alpha = 0.16f) else Color.Transparent,
+                                shape = RoundedCornerShape(AppRadius.Sm),
+                            )
+                            .noRippleClickable { onSelect(media) }
+                            .padding(horizontal = AppSpacing.Sm),
+                    ) {
+                        Text(
+                            text = (index + 1).toString().padStart(2, '0'),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (active) AppColors.Accent else AppColors.Faint,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier.width(22.dp),
+                        )
+                        Text(
+                            text = media.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (active) AppColors.Foreground else AppColors.Foreground.copy(alpha = 0.86f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (active) {
+                            Text(
+                                text = "▶",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AppColors.Accent,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.width(16.dp),
+                            )
+                        }
+                    }
+                }
             }
         }
     }
