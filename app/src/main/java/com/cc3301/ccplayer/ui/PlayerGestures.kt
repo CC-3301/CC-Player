@@ -37,6 +37,9 @@ enum class PlayerInput {
 
     /** 解锁按钮。 */
     UnlockButton,
+
+    /** 播放页返回按钮。 */
+    Back,
 }
 
 /** 手势分区：左右各 [VOLUME_ZONE_FRACTION] 竖条为音量区，中间为跳转与双击区。 */
@@ -111,9 +114,15 @@ fun dragGesture(
     }
 }
 
-/** 锁定或任一面板打开时，手势层不响应。 */
-fun gesturesAllowed(locked: Boolean, panelOpen: Boolean): Boolean = !locked && !panelOpen
+/** 锁定、任一面板打开或首次加载期间，手势层不响应。 */
+fun gesturesAllowed(locked: Boolean, panelOpen: Boolean, initialLoading: Boolean = false): Boolean =
+    !locked && !panelOpen && !initialLoading
 
-/** 锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。 */
-fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
-    !locked || input == PlayerInput.UnlockButton
+/**
+ * 首次加载期间只放行返回；锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。
+ */
+fun inputAllowed(input: PlayerInput, locked: Boolean, initialLoading: Boolean = false): Boolean = when {
+    initialLoading -> input == PlayerInput.Back
+    locked -> input == PlayerInput.UnlockButton
+    else -> true
+}

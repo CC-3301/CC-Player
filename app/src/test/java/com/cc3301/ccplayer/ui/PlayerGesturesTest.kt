@@ -123,4 +123,13 @@ class PlayerGesturesTest {
         assertEquals(false, inputAllowed(PlayerInput.ControlBar, locked = true))
         assertEquals(true, inputAllowed(PlayerInput.UnlockButton, locked = true))
     }
+
+    @Test
+    fun `首次加载期间只放行返回`() {
+        assertFalse(gesturesAllowed(locked = false, panelOpen = false, initialLoading = true))
+        assertTrue(inputAllowed(PlayerInput.Back, locked = false, initialLoading = true))
+        PlayerInput.entries.filter { it != PlayerInput.Back }.forEach { input ->
+            assertFalse(input.name, inputAllowed(input, locked = false, initialLoading = true))
+        }
+    }
 }

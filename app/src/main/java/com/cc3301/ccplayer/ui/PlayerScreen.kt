@@ -217,6 +217,7 @@ fun PlayerScreen(
     videoAspectRatio: Double?,
     switching: Boolean,
     buffering: Boolean,
+    initialLoading: Boolean,
     freezeFrame: Bitmap?,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
@@ -253,7 +254,8 @@ fun PlayerScreen(
     LaunchedEffect(panelOpen) {
         controls.updatePanelOpen(panelOpen)
     }
-    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis) {
+    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, initialLoading) {
+        if (initialLoading) return@LaunchedEffect
         while (controls.visible && !controls.panelOpen) {
             val remaining = controls.millisUntilAutoHide()
             if (remaining < 0L) break
@@ -317,6 +319,7 @@ fun PlayerScreen(
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelOpen,
+            initialLoading = initialLoading,
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             levelControls = levelControls,
@@ -358,11 +361,14 @@ fun PlayerScreen(
                     .semantics { contentDescription = lockedHint },
             )
         }
-        if (inputAllowed(PlayerInput.ControlBar, locked)) {
+        val backAllowed = inputAllowed(PlayerInput.Back, locked, initialLoading)
+        val controlsAllowed = inputAllowed(PlayerInput.ControlBar, locked, initialLoading)
+        if (backAllowed) {
             if (controlsVisible) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
+                    controlsEnabled = controlsAllowed,
                     onBack = onClose,
                     onRotate = {
                         controls.onInteraction()
@@ -379,7 +385,7 @@ fun PlayerScreen(
                     },
                     modifier = Modifier.align(Alignment.TopStart),
                 )
-                if (moreVisible) {
+                if (controlsAllowed && moreVisible) {
                     MorePanel(
                         decodeMode = decodeMode,
                         loopMode = loopMode,
@@ -407,60 +413,62 @@ fun PlayerScreen(
                             .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
                     )
                 }
-                Controls(
-                    state = state,
-                    progress = progress,
-                    seekPreviewMillis = seekPreviewMillis,
-                    playlist = playlist,
-                    currentIndex = currentIndex,
-                    subtitleTracks = subtitleTracks,
-                    externalSubtitles = externalSubtitles,
-                    subtitleSelection = subtitleSelection,
-                    playlistVisible = playlistVisible,
-                    subtitleMenuVisible = subtitleMenuVisible,
-                    onTogglePlayPause = {
-                        controls.onInteraction()
-                        onTogglePlayPause()
-                    },
-                    onPrevious = {
-                        controls.onInteraction()
-                        onPrevious()
-                    },
-                    onNext = {
-                        controls.onInteraction()
-                        onNext()
-                    },
-                    onSeekPreview = {
-                        controls.onInteraction()
-                        onSeekPreview(it)
-                    },
-                    onSeekCommit = {
-                        controls.onInteraction()
-                        onSeekCommit()
-                    },
-                    onPlaylistSelect = onPlaylistSelect,
-                    onTogglePlaylist = {
-                        controls.onInteraction()
-                        val opening = !playlistVisible
-                        playlistVisible = opening
-                        if (opening) {
-                            subtitleMenuVisible = false
-                            moreVisible = false
-                        }
-                    },
-                    onToggleSubtitleMenu = {
-                        controls.onInteraction()
-                        val opening = !subtitleMenuVisible
-                        subtitleMenuVisible = opening
-                        if (opening) {
-                            playlistVisible = false
-                            moreVisible = false
-                        }
-                    },
-                    onLock = { lock.tapLockButton() },
-                    onSelectSubtitle = onSelectSubtitle,
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
+                if (controlsAllowed) {
+                    Controls(
+                        state = state,
+                        progress = progress,
+                        seekPreviewMillis = seekPreviewMillis,
+                        playlist = playlist,
+                        currentIndex = currentIndex,
+                        subtitleTracks = subtitleTracks,
+                        externalSubtitles = externalSubtitles,
+                        subtitleSelection = subtitleSelection,
+                        playlistVisible = playlistVisible,
+                        subtitleMenuVisible = subtitleMenuVisible,
+                        onTogglePlayPause = {
+                            controls.onInteraction()
+                            onTogglePlayPause()
+                        },
+                        onPrevious = {
+                            controls.onInteraction()
+                            onPrevious()
+                        },
+                        onNext = {
+                            controls.onInteraction()
+                            onNext()
+                        },
+                        onSeekPreview = {
+                            controls.onInteraction()
+                            onSeekPreview(it)
+                        },
+                        onSeekCommit = {
+                            controls.onInteraction()
+                            onSeekCommit()
+                        },
+                        onPlaylistSelect = onPlaylistSelect,
+                        onTogglePlaylist = {
+                            controls.onInteraction()
+                            val opening = !playlistVisible
+                            playlistVisible = opening
+                            if (opening) {
+                                subtitleMenuVisible = false
+                                moreVisible = false
+                            }
+                        },
+                        onToggleSubtitleMenu = {
+                            controls.onInteraction()
+                            val opening = !subtitleMenuVisible
+                            subtitleMenuVisible = opening
+                            if (opening) {
+                                playlistVisible = false
+                                moreVisible = false
+                            }
+                        },
+                        onLock = { lock.tapLockButton() },
+                        onSelectSubtitle = onSelectSubtitle,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
             }
         } else {
             if (lock.unlockVisible) {
@@ -484,6 +492,7 @@ fun PlayerScreen(
 private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
+    initialLoading: Boolean,
     positionMillis: Long,
     durationMillis: Long,
     levelControls: PlayerLevelControls,
@@ -497,7 +506,7 @@ private fun PlayerGestureLayer(
     onSeekHint: (SeekHint?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val enabled = gesturesAllowed(locked, panelOpen)
+    val enabled = gesturesAllowed(locked, panelOpen, initialLoading)
     // 回调与播放位置取最新一份，避免手势层在位置变化时重启。
     val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
     val latestOnSeekBy = rememberUpdatedState(onSeekBy)
@@ -667,6 +676,7 @@ private fun signedDuration(millis: Long): String =
 private fun PlayerTopBar(
     title: String,
     moreVisible: Boolean,
+    controlsEnabled: Boolean,
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
@@ -702,18 +712,18 @@ private fun PlayerTopBar(
                     .weight(1f)
                     .padding(end = AppSpacing.Xs),
             )
-            IconButton(onClick = onRotate) {
+            IconButton(onClick = onRotate, enabled = controlsEnabled) {
                 Icon(
                     painter = painterResource(R.drawable.ic_player_screen_rotation),
                     contentDescription = stringResource(R.string.player_rotate),
-                    tint = AppColors.Foreground,
+                    tint = if (controlsEnabled) AppColors.Foreground else AppColors.Faint.copy(alpha = 0.45f),
                 )
             }
-            IconButton(onClick = onToggleMore) {
+            IconButton(onClick = onToggleMore, enabled = controlsEnabled) {
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
                     contentDescription = stringResource(R.string.player_more),
-                    tint = playerToolColor(moreVisible),
+                    tint = if (controlsEnabled) playerToolColor(moreVisible) else AppColors.Faint.copy(alpha = 0.45f),
                 )
             }
         }

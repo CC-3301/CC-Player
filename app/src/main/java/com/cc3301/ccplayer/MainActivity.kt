@@ -37,8 +37,10 @@ import androidx.lifecycle.lifecycleScope
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.library.NetworkMediaReads
+import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
@@ -70,7 +72,9 @@ import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
 import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.NavigationViewModel
+import com.cc3301.ccplayer.ui.PendingPlayback
 import com.cc3301.ccplayer.ui.PlaybackEntryOpener
+import com.cc3301.ccplayer.ui.PlaybackEntryState
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
@@ -106,11 +110,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
     private var surface: Surface? = null
-    private var pendingPlaylist: List<MediaFile> = emptyList()
-    private var pendingMedia: MediaFile? = null
 
-    /** 当前目录的原始条目（含外挂字幕），起播时交给控制层做字幕匹配。 */
-    private var pendingDirectoryEntries: List<MediaFile> = emptyList()
+    /** 后台准备完成的播放请求，等播放服务与 Surface 就绪后起播。 */
+    private val pendingPlayback = PendingPlayback()
+
     private var stateCollection: Job? = null
     private var streams: NetworkStreams? = null
 
@@ -131,21 +134,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var switching by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
 
-    /** 已进入播放页、正在后台解析目录与连接；此期间保持黑屏与缓冲提示。 */
-    private var openingPlayback by mutableStateOf(false)
+    /** 浏览页进入播放页的准备态与首次加载门禁。 */
+    private val playbackEntry = PlaybackEntryState()
 
-    /** 首次起播尚未就绪；此阶段加载失败直接退回列表。 */
-    private var awaitingInitialPlayback by mutableStateOf(false)
-
-    /** 点开媒体：先进入播放页，再在后台准备播放列表与网络连接。 */
+    /** 点开媒体：视频先进入播放页，音频等媒体准备完成后进入。 */
     private val playbackEntryOpener by lazy {
         PlaybackEntryOpener(
             scope = lifecycleScope,
             directoryEntries = { library.directoryEntries() },
             networkStreams = { networkStreams() },
             onEnterPlayer = ::enterPlayer,
-            onReady = { current, files, directoryEntries -> openMedia(current, files, directoryEntries) },
-            onFailure = ::failOpeningPlayback,
+            onStartPlayback = ::openMedia,
+            onShowFailure = ::showFailure,
+            onLeavePlayer = ::closePlayer,
         )
     }
 
@@ -175,13 +176,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
+                        // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
                         Toast.makeText(
                             this@MainActivity,
                             getString(R.string.player_playback_failed),
                             Toast.LENGTH_SHORT,
                         ).show()
                         // 首次起播失败时没有可停留的画面，退回浏览页。
-                        if (awaitingInitialPlayback) closePlayer()
+                        if (playbackEntry.consumeInitialFailure()) closePlayer()
                     }
                 }
                 launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
@@ -222,18 +224,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
-                // 后台准备完成后撤掉进入播放页时的临时缓冲提示，由播放控制层接管。
-                LaunchedEffect(playerVisible, openingPlayback, buffering, playbackState, switching) {
-                    if (playerVisible && openingPlayback &&
-                        (buffering || playbackState == PlaybackState.Playing || playbackState == PlaybackState.Paused)
-                    ) {
-                        openingPlayback = false
-                    }
-                    if (!playerVisible || switching ||
-                        playbackState == PlaybackState.Playing || playbackState == PlaybackState.Paused
-                    ) {
-                        awaitingInitialPlayback = false
-                    }
+                // 缓冲指示交给播放控制层后撤掉准备态；首次加载就绪或转入切集时解除失败退回。
+                LaunchedEffect(playbackState, buffering, switching) {
+                    playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
                     applyOrientation(
@@ -269,7 +262,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             surfaceCallback = this@MainActivity,
                             videoAspectRatio = videoAspectRatio,
                             switching = switching,
-                            buffering = buffering || openingPlayback,
+                            buffering = buffering || playbackEntry.openingPlayback,
+                            initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             freezeFrame = freezeFrame,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
@@ -376,7 +370,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 if (entry.isDirectory) {
                                     library.enter(entry)
                                 } else {
-                                    playbackEntryOpener.open(entry, libraryState.entries)
+                                    playbackEntryOpener.open(
+                                        entry = entry,
+                                        entries = libraryState.entries,
+                                        enterBeforePreparing = mediaKindOf(entry.name) == MediaKind.Video,
+                                    )
                                 }
                             },
                             onOpenSettings = navigation::openSettings,
@@ -419,12 +417,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         library.addLocalRoot(uri.toString())
     }
 
-    /** 点开媒体后立即进入播放页：黑屏与缓冲提示先出现，准备在后台继续。 */
-    private fun enterPlayer() {
+    /** 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。 */
+    private fun enterPlayer(preparing: Boolean) {
         sessionOrientation.beginPlayback()
         playerVisible = true
-        openingPlayback = true
-        awaitingInitialPlayback = true
+        playbackEntry.enter(preparing)
         requestNotificationPermission()
         if (!bound) {
             val intent = Intent(this, PlaybackService::class.java)
@@ -432,12 +429,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             bindService(intent, connection, BIND_AUTO_CREATE)
             bound = true
         }
-    }
-
-    /** 后台准备失败：退回浏览页并提示来源原因。 */
-    private fun failOpeningPlayback(failure: MediaFailure) {
-        showFailure(failure)
-        closePlayer()
     }
 
     /** 起播前连不上时用提示条告知。 */
@@ -481,21 +472,18 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 后台准备完成：把播放列表与字幕目录交给播放控制层。 */
     private fun openMedia(current: MediaFile, files: List<MediaFile>, directoryEntries: List<MediaFile>) {
-        pendingPlaylist = files
-        pendingMedia = current
-        pendingDirectoryEntries = directoryEntries
+        pendingPlayback.set(current, files, directoryEntries)
         startPendingPlayback()
     }
 
     /** 引擎就绪且 Surface 已就位时才开始播放。 */
     private fun startPendingPlayback() {
-        val current = pendingMedia ?: return
         val binder = playback ?: return
-        if (surface == null) return
-        pendingMedia = null
-        binder.controller.openPlaylist(pendingPlaylist, current, pendingDirectoryEntries)
-        // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
-        binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        pendingPlayback.start(canStart = surface != null) { current, files, directoryEntries ->
+            binder.controller.openPlaylist(files, current, directoryEntries)
+            // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
+            binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        }
     }
 
     /** 通知栏要能显示就得有这个权限（Android 13 起）。 */
@@ -550,11 +538,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         playbackEntryOpener.cancel()
         playback?.controller?.stop()
         onSurfaceReleased()
-        pendingPlaylist = emptyList()
-        pendingMedia = null
-        pendingDirectoryEntries = emptyList()
-        openingPlayback = false
-        awaitingInitialPlayback = false
+        pendingPlayback.clear()
+        playbackEntry.reset()
         // 先恢复系统栏与方向，再切回浏览页，避免 insets 变化让浏览页布局跳动。
         restoreBrowserSystemUi()
         playerVisible = false
