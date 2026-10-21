@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class NetworkPreviewExtractorTest {
@@ -63,18 +64,28 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
-    fun `解码抛异常时返回空并关闭句柄`() = runTest {
+    fun `解码抛异常时向调用方抛出并关闭句柄`() = runTest {
         val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> error("解码失败") }
 
-        assertNull(extractor.imageBytes(movie))
+        try {
+            extractor.imageBytes(movie)
+            fail("应抛出解码异常")
+        } catch (expected: IllegalStateException) {
+            // 预期失败路径。
+        }
         assertTrue(source.closed)
     }
 
     @Test
-    fun `打开句柄失败时返回空`() = runTest {
+    fun `打开句柄失败时向调用方抛出`() = runTest {
         val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _, _ -> ByteArray(1) }
 
-        assertNull(extractor.imageBytes(movie))
+        try {
+            extractor.imageBytes(movie)
+            fail("应抛出打开失败")
+        } catch (expected: IllegalStateException) {
+            // 预期失败路径。
+        }
     }
 
     @Test

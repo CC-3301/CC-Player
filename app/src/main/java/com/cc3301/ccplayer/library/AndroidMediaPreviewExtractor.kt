@@ -33,18 +33,12 @@ class AndroidMediaPreviewExtractor(
         if (file.source == MediaSource.Network) {
             return@withContext networkPreview?.imageBytes(file, targetWidth)
         }
-        try {
-            withRetriever(file) { retriever ->
-                when (mediaKindOf(file.name)) {
-                    MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
-                    MediaKind.Audio -> retriever.embeddedPicture
-                    null -> null
-                }
+        withRetriever(file) { retriever ->
+            when (mediaKindOf(file.name)) {
+                MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
+                MediaKind.Audio -> retriever.embeddedPicture
+                null -> null
             }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (unreadable: Exception) {
-            null
         }
     }
 
@@ -57,25 +51,28 @@ class AndroidMediaPreviewExtractor(
         }
     }
 
-    /** 本地文件一次打开读取器，同时取时长与预览图；读取失败向上抛，由调用方保持占位图并重试。 */
+    /** 本地文件一次打开读取器，同时取时长与预览图；时长读取失败不影响已解出的图片。 */
     override suspend fun imageAndDuration(file: MediaFile, targetWidth: Int): MediaPreviewExtraction =
         withContext(Dispatchers.IO) {
             if (file.source == MediaSource.Network) {
-                return@withContext MediaPreviewExtraction(networkPreview?.imageBytes(file, targetWidth), null)
+                return@withContext MediaPreviewExtraction(
+                    imageBytes = networkPreview?.imageBytes(file, targetWidth),
+                    duration = PreviewDuration.Unavailable,
+                )
             }
             withRetriever(file) { retriever ->
                 when (mediaKindOf(file.name)) {
                     MediaKind.Video -> MediaPreviewExtraction(
                         imageBytes = videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth),
-                        durationMillis = durationMillis(retriever),
+                        duration = retriever.readDuration(),
                     )
 
                     MediaKind.Audio -> MediaPreviewExtraction(
                         imageBytes = retriever.embeddedPicture,
-                        durationMillis = durationMillis(retriever),
+                        duration = retriever.readDuration(),
                     )
 
-                    null -> MediaPreviewExtraction(imageBytes = null, durationMillis = durationMillis(retriever))
+                    null -> MediaPreviewExtraction(imageBytes = null, duration = retriever.readDuration())
                 }
             }
         }
@@ -103,8 +100,6 @@ private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
                 MediaKind.Video -> videoFrameBytes(retriever, NETWORK_FRAME_COUNT, targetWidth)
                 MediaKind.Audio -> retriever.embeddedPicture
             }
-        } catch (unreadable: Exception) {
-            null
         } finally {
             retriever.release()
             // 句柄由调用方在 release 之后关闭。
@@ -127,7 +122,14 @@ private class RangeMediaDataSource(private val source: ByteSource) : MediaDataSo
 
 /** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
 private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray? {
-    val duration = durationMillis(retriever) ?: 0
+    // 时长读不到时改用固定候选位置，不因此丢弃已经能解出的帧。
+    val duration = try {
+        durationMillis(retriever)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (unreadable: Exception) {
+        null
+    } ?: 0
     val decoded = decodedFrames(framePositions(duration, frameCount)) { position ->
         retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             ?.let { frame -> scaleFrame(frame, targetWidth) }
@@ -139,6 +141,17 @@ private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, 
     return chosen?.let { frame ->
         compressFrame(frame).also { frame.recycle() }
     }
+}
+
+private fun MediaMetadataRetriever.readDuration(): PreviewDuration = try {
+    when (val millis = durationMillis(this)) {
+        null -> PreviewDuration.Unavailable
+        else -> PreviewDuration.Known(millis)
+    }
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (unreadable: Exception) {
+    PreviewDuration.Failed
 }
 
 private fun durationMillis(retriever: MediaMetadataRetriever): Long? =

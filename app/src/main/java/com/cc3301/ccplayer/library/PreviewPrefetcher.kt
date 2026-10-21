@@ -22,10 +22,18 @@ class PreviewPrefetcher(
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val wanted = prefetchEntries(entries, firstVisible, lastVisible, rowSize)
         val wantedLocations = wanted.mapTo(HashSet(), MediaFile::location)
+        // 已进入可见区的条目不再算离屏：保留在途请求，让可见项复用同一次抽取。
+        val visibleLocations = if (firstVisible >= 0 && lastVisible >= firstVisible) {
+            (firstVisible..lastVisible).mapNotNullTo(HashSet()) { index ->
+                entries.getOrNull(index)?.location
+            }
+        } else {
+            emptySet()
+        }
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
             val (location, job) = iterator.next()
-            if (location !in wantedLocations) {
+            if (location !in wantedLocations && location !in visibleLocations) {
                 job.cancel()
                 iterator.remove()
             }

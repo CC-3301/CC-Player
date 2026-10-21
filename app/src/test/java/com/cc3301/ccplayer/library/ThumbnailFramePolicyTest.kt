@@ -32,14 +32,14 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `时长未知时取多个固定候选且最后一个兜底`() {
+    fun `时长未知时从片头开始取固定候选且最后一个兜底`() {
         val local = framePositions(0, LOCAL_FRAME_COUNT)
 
-        assertEquals(listOf(1_000_000L, 3_000_000L, 5_000_000L), local.map { it.micros })
+        assertEquals(listOf(0L, 1_000_000L, 3_000_000L), local.map { it.micros })
         assertEquals(listOf(false, false, true), local.map { it.fallback })
 
         val network = framePositions(0, NETWORK_FRAME_COUNT)
-        assertEquals(listOf(1_000_000L, 3_000_000L), network.map { it.micros })
+        assertEquals(listOf(0L, 1_000_000L), network.map { it.micros })
         assertTrue(network.last().fallback)
     }
 
@@ -94,6 +94,16 @@ class ThumbnailFramePolicyTest {
     @Test
     fun `没有可用帧时返回空`() {
         assertNull(chooseFrame(emptyList<Pair<FramePosition, String>>()) { true })
+    }
+
+    @Test
+    fun `兜底帧解码失败时回退到已解出的其它帧`() {
+        val frames = listOf(
+            FramePosition(1, fallback = false) to "片头纯色帧",
+            FramePosition(3, fallback = false) to "片尾纯色帧",
+        )
+
+        assertEquals("片头纯色帧", chooseFrame(frames) { true })
     }
 
     @Test

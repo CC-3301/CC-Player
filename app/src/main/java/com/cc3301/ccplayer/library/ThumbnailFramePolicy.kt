@@ -1,7 +1,7 @@
 package com.cc3301.ccplayer.library
 
 /** 抽帧策略版本；策略变化时缓存键随之变化。 */
-internal const val THUMBNAIL_POLICY_VERSION = 1
+internal const val THUMBNAIL_POLICY_VERSION = 2
 
 /** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
 internal const val THUMBNAIL_TARGET_WIDTH = 512
@@ -24,8 +24,8 @@ internal const val NETWORK_FRAME_COUNT = 2
 /** 全部候选都不合格时退回的比例位置。 */
 internal const val FALLBACK_FRAME_FRACTION = 1.0 / 3.0
 
-/** 时长未知时依次尝试的抽帧位置（微秒）；最后一个用于兜底。 */
-private val UNKNOWN_DURATION_POSITIONS_MICROS = listOf(1_000_000L, 3_000_000L, 5_000_000L)
+/** 时长未知时依次尝试的抽帧位置（微秒）；从片头开始，最后一个用于兜底。 */
+private val UNKNOWN_DURATION_POSITIONS_MICROS = listOf(0L, 1_000_000L, 3_000_000L, 5_000_000L)
 
 /** 修改时间缺失时缓存键的有效期。 */
 internal const val MISSING_MODIFIED_VALIDITY_MILLIS = 24 * 60 * 60 * 1000L
@@ -69,10 +69,11 @@ internal fun <T> decodedFrames(
 ): List<Pair<FramePosition, T>> =
     positions.mapNotNull { position -> decode(position)?.let { frame -> position to frame } }
 
-/** 优先返回第一帧非纯色帧；全部纯色时退回兜底帧。 */
+/** 优先返回第一帧非纯色帧；全部纯色时退回兜底帧；兜底帧缺失时用任一已解帧。 */
 internal fun <T> chooseFrame(frames: List<Pair<FramePosition, T>>, isSolid: (T) -> Boolean): T? =
     frames.firstOrNull { (_, frame) -> !isSolid(frame) }?.second
         ?: frames.firstOrNull { (position, _) -> position.fallback }?.second
+        ?: frames.firstOrNull()?.second
 
 /** 采样亮度判纯色：亮度差小于阈值即视为纯色。 */
 internal fun isSolidLuminance(luminances: IntArray): Boolean {

@@ -19,7 +19,7 @@ fun interface NetworkPreviewDecoder {
 /**
  * 网络预览取图：打开随机读句柄后交给 [decoder]，只在需要时读字节范围。
  *
- * 句柄无论解码成功与否都会关闭；打开或解码失败返回 null，由界面保留占位图。
+ * 句柄无论解码成功与否都会关闭；打开或解码失败抛出异常，由上层保持占位图并退避重试。
  */
 class NetworkPreviewExtractor(
     private val reads: NetworkMediaReads,
@@ -29,19 +29,9 @@ class NetworkPreviewExtractor(
     suspend fun imageBytes(file: MediaFile, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): ByteArray? =
         withContext(Dispatchers.IO) {
             val kind = mediaKindOf(file.name) ?: return@withContext null
-            val source = try {
-                reads.openRead(file.location)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Exception) {
-                return@withContext null
-            }
+            val source = reads.openRead(file.location)
             try {
                 decoder.imageBytes(source, kind, targetWidth)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Exception) {
-                null
             } finally {
                 runCatching { source.close() }
             }

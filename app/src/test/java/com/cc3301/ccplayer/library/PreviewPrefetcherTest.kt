@@ -60,12 +60,30 @@ class PreviewPrefetcherTest {
         prefetcher.update(entries, firstVisible = 6, lastVisible = 8, rowSize = 2)
         runCurrent()
 
-        assertEquals(4, source.cancelled.size)
+        // 6、7 已进入可见区，保留在途请求；只取消真正离开范围的 1、2。
+        assertEquals(listOf(1, 2), source.cancelled.map { entry -> entries.indexOf(entry) }.sorted())
         assertEquals(4, source.previewed.size)
     }
 
     @Test
-    fun `快速滑过时只有最后窗口发起请求`() = runTest {
+    fun `进入可见区的预取不取消，交给可见项复用`() = runTest {
+        val source = RecordingPreviewSource()
+        val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
+
+        prefetcher.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+        advanceTimeBy(100)
+        runCurrent()
+        assertEquals(listOf(3), source.previewed.map { entry -> entries.indexOf(entry) })
+
+        prefetcher.update(entries, firstVisible = 2, lastVisible = 4, rowSize = 1)
+        runCurrent()
+
+        assertTrue(source.cancelled.isEmpty())
+        assertEquals(listOf(3), source.previewed.map { entry -> entries.indexOf(entry) })
+    }
+
+    @Test
+    fun `快速滑过时取消真正离屏的旧预取`() = runTest {
         val source = RecordingPreviewSource()
         val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
 
@@ -75,7 +93,8 @@ class PreviewPrefetcherTest {
         advanceTimeBy(100)
         runCurrent()
 
-        assertEquals(listOf(3, 4, 7, 8), source.previewed.map { entry -> entries.indexOf(entry) }.sorted())
+        // 5 已进入可见区，保留在途请求，因此同样出现在结果中。
+        assertEquals(listOf(3, 4, 5, 7, 8), source.previewed.map { entry -> entries.indexOf(entry) }.sorted())
     }
 }
 
