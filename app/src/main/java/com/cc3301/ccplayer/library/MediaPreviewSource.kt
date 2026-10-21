@@ -62,6 +62,7 @@ class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
     private val cache: ThumbnailCache,
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : MediaPreviewSource {
 
     /** 本地同时提取数上限。 */
@@ -72,6 +73,9 @@ class CachedMediaPreviewSource(
 
     /** 同一缓存键正在进行的抽取；等待者共享同一次结果。 */
     private val inFlight = ConcurrentHashMap<String, CompletableDeferred<LoadedPreview>>()
+
+    /** 时长读取失败后的退避记录；失败不落盘，退避结束再重试。 */
+    private val durationFailures = ConcurrentHashMap<String, DurationFailure>()
 
     /** 实际交给抽取器的目标宽度；策略值先钳到 320–512。 */
     private val targetWidth = effectiveTargetWidth(policy.targetWidth)
@@ -91,18 +95,24 @@ class CachedMediaPreviewSource(
             key = key,
             maxAgeMillis = maxAge,
             onCacheHit = { cached ->
-                val duration = if (cached.durationKnown) {
-                    DurationRead.Loaded(cached.durationMillis)
+                if (cached.durationKnown) {
+                    LoadedPreview(cached.file, cached.durationMillis)
                 } else {
-                    readLocalDuration(file)
-                }
-                when (duration) {
-                    is DurationRead.Loaded -> {
-                        if (!cached.durationKnown) writeDurationSafely(key, duration.millis)
-                        LoadedPreview(cached.file, duration.millis)
-                    }
+                    when (val duration = readLocalDuration(file, key)) {
+                        is DurationRead.Loaded -> {
+                            writeDurationSafely(key, duration.millis)
+                            LoadedPreview(cached.file, duration.millis)
+                        }
 
-                    DurationRead.Failed -> LoadedPreview(cached.file, durationMillis = null)
+                        DurationRead.Unavailable -> {
+                            // 确定没有时长：写入后，后续命中不再重读。
+                            writeDurationSafely(key, null)
+                            LoadedPreview(cached.file, durationMillis = null)
+                        }
+
+                        // 读取失败只影响角标；不落盘，退避后重试。
+                        DurationRead.Failed -> LoadedPreview(cached.file, durationMillis = null)
+                    }
                 }
             },
             load = {
@@ -120,18 +130,42 @@ class CachedMediaPreviewSource(
         return MediaPreview(loaded.image, loaded.durationMillis)
     }
 
-    /** 时长读取失败只影响角标；成功后把结果写回元数据，失败则保持未知。 */
-    private suspend fun readLocalDuration(file: MediaFile): DurationRead = try {
-        DurationRead.Loaded(localPermits.withPermit { extractor.durationMillis(file) })
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (failure: Exception) {
-        DurationRead.Failed
+    /** 读时长失败只影响角标；失败后退避，避免慢源每次命中都重试并长期占用本地名额。 */
+    private suspend fun readLocalDuration(file: MediaFile, key: String): DurationRead {
+        val now = clock()
+        val previous = durationFailures[key]
+        if (previous != null && now < previous.retryAtMillis) return DurationRead.Failed
+        val result = try {
+            when (val millis = localPermits.withPermit { extractor.durationMillis(file) }) {
+                null -> DurationRead.Unavailable
+                else -> DurationRead.Loaded(millis)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            DurationRead.Failed
+        }
+        when (result) {
+            is DurationRead.Loaded, DurationRead.Unavailable -> durationFailures.remove(key)
+            DurationRead.Failed -> {
+                val attempts = (previous?.attempts ?: 0) + 1
+                durationFailures[key] = DurationFailure(attempts, now + durationRetryDelay(attempts))
+            }
+        }
+        return result
     }
 
-    private fun writeDurationSafely(key: String, durationMillis: Long?) {
+    /** 连续失败按倍数退避，上限为十分钟。 */
+    private fun durationRetryDelay(attempts: Int): Long {
+        val shift = (attempts - 1).coerceIn(0, 6)
+        return (DURATION_RETRY_BASE_MILLIS shl shift).coerceAtMost(DURATION_RETRY_MAX_MILLIS)
+    }
+
+    private suspend fun writeDurationSafely(key: String, durationMillis: Long?) {
         try {
             cache.writeDuration(key, durationMillis)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (failure: Exception) {
             // 回写失败不影响本次图片返回，下次命中仍会重试。
         }
@@ -210,9 +244,12 @@ class CachedMediaPreviewSource(
     }
 
     private sealed interface DurationRead {
-        data class Loaded(val millis: Long?) : DurationRead
+        data class Loaded(val millis: Long) : DurationRead
+        object Unavailable : DurationRead
         object Failed : DurationRead
     }
+
+    private data class DurationFailure(val attempts: Int, val retryAtMillis: Long)
 
     private data class LoadedPreview(val image: File?, val durationMillis: Long?)
 
@@ -228,6 +265,12 @@ class CachedMediaPreviewSource(
 
         /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
+
+        /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
+        private const val DURATION_RETRY_BASE_MILLIS = 30_000L
+
+        /** 时长读取失败后的最大重试间隔。 */
+        private const val DURATION_RETRY_MAX_MILLIS = 10 * 60 * 1000L
 
         fun create(context: Context, networkReads: NetworkMediaReads): CachedMediaPreviewSource {
             val appContext = context.applicationContext

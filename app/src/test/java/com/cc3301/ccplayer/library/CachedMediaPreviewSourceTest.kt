@@ -276,24 +276,105 @@ class CachedMediaPreviewSourceTest {
 
     @Test
     fun `命中缓存时读时长失败保留图片且保持未知`() = runTest {
+        var now = 1_000L
+        val bounded = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now }),
+            clock = { now },
+        )
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
         val file = local("电影.mkv", lastModified = 1_000)
-        source.preview(file)
+        bounded.preview(file)
         val metadata = metadataFile()
         metadata.writeText("1000")
         extractor.durationFailure = IllegalStateException("读时长失败")
 
-        val hit = source.preview(file)
+        val hit = bounded.preview(file)
 
         assertNotNull(hit.image)
         assertNull(hit.durationMillis)
         assertEquals(1, metadata.readLines().size)
 
+        now += 60 * 60 * 1000L
         extractor.durationFailure = null
-        val retried = source.preview(file)
+        val retried = bounded.preview(file)
         assertEquals(187_000L, retried.durationMillis)
         assertTrue(metadata.readLines().size >= 2)
+    }
+
+    @Test
+    fun `读时长失败后退避，退避期内不再重试`() = runTest {
+        var now = 1_000L
+        val bounded = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now }),
+            clock = { now },
+        )
+        extractor.imageBytes = byteArrayOf(1)
+        extractor.durationMillis = 187_000
+        val file = local("电影.mkv", lastModified = 1_000)
+        bounded.preview(file)
+        metadataFile().writeText("1000")
+        val callsBeforeFailure = extractor.durationRequests.size
+        extractor.durationFailure = IllegalStateException("读时长失败")
+
+        assertNull(bounded.preview(file).durationMillis)
+        assertEquals(callsBeforeFailure + 1, extractor.durationRequests.size)
+
+        assertNull(bounded.preview(file).durationMillis)
+        assertNull(bounded.preview(file).durationMillis)
+        assertEquals(callsBeforeFailure + 1, extractor.durationRequests.size)
+
+        now += 60 * 60 * 1000L
+        extractor.durationFailure = null
+        assertEquals(187_000L, bounded.preview(file).durationMillis)
+        assertEquals(callsBeforeFailure + 2, extractor.durationRequests.size)
+    }
+
+    @Test
+    fun `确定没有时长时写入元数据且后续命中不再重读`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        extractor.durationMillis = null
+        val file = local("电影.mkv", lastModified = 1_000)
+
+        assertNull(source.preview(file).durationMillis)
+        val callsAfterFirst = extractor.durationRequests.size
+
+        assertNull(source.preview(file).durationMillis)
+        assertNull(source.preview(file).durationMillis)
+
+        assertEquals(callsAfterFirst, extractor.durationRequests.size)
+        val entry = ThumbnailCache(directory = directory, maxBytes = 1 shl 20)
+            .entry(thumbnailCacheKey(file, ThumbnailPolicy()))
+        assertNotNull(entry)
+        assertTrue(entry!!.durationKnown)
+        assertNull(entry.durationMillis)
+    }
+
+    @Test
+    fun `真实读取失败不写缓存并在下次重试`() = runTest {
+        val filesDirectory = Files.createTempDirectory("preview-real-failure").toFile()
+        try {
+            val reading = FileReadingExtractor()
+            val bounded = CachedMediaPreviewSource(
+                extractor = reading,
+                cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            )
+            val file = MediaFile(name = "电影.mkv", location = File(filesDirectory, "电影.mkv").path)
+
+            val failed = bounded.preview(file)
+
+            assertNull(failed.image)
+            assertTrue(directory.listFiles().isNullOrEmpty())
+
+            File(file.location).writeBytes(byteArrayOf(1, 2, 3))
+            val retried = bounded.preview(file)
+
+            assertArrayEquals(byteArrayOf(1, 2, 3), retried.image!!.readBytes())
+        } finally {
+            filesDirectory.deleteRecursively()
+        }
     }
 
     @Test
@@ -639,6 +720,15 @@ private class ErrorOnceExtractor : MediaPreviewExtractor {
         }
         return byteArrayOf(1)
     }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 直接读本地文件，文件不存在或不可读时由真实 IO 抛错，用来验证未经注入的失败路径。 */
+private class FileReadingExtractor : MediaPreviewExtractor {
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+        File(file.location).readBytes()
 
     override suspend fun durationMillis(file: MediaFile): Long? = null
 }

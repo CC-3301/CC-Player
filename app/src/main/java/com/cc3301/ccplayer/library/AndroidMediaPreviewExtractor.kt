@@ -33,24 +33,31 @@ class AndroidMediaPreviewExtractor(
         if (file.source == MediaSource.Network) {
             return@withContext networkPreview?.imageBytes(file, targetWidth)
         }
-        withRetriever(file) { retriever ->
-            when (mediaKindOf(file.name)) {
-                MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
-                MediaKind.Audio -> retriever.embeddedPicture
-                null -> null
+        try {
+            withRetriever(file) { retriever ->
+                when (mediaKindOf(file.name)) {
+                    MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
+                    MediaKind.Audio -> retriever.embeddedPicture
+                    null -> null
+                }
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (unreadable: Exception) {
+            null
         }
     }
 
     override suspend fun durationMillis(file: MediaFile): Long? {
         // 网络条目不显示时长角标（ADR-0017）。
         if (file.source != MediaSource.Local) return null
+        // 读取异常向上抛：调用方据此区分“确定没有时长”与“读取失败”。
         return withContext(Dispatchers.IO) {
             withRetriever(file) { retriever -> durationMillis(retriever) }
         }
     }
 
-    /** 本地文件一次打开读取器，同时取时长与预览图。 */
+    /** 本地文件一次打开读取器，同时取时长与预览图；读取失败向上抛，由调用方保持占位图并重试。 */
     override suspend fun imageAndDuration(file: MediaFile, targetWidth: Int): MediaPreviewExtraction =
         withContext(Dispatchers.IO) {
             if (file.source == MediaSource.Network) {
@@ -70,18 +77,14 @@ class AndroidMediaPreviewExtractor(
 
                     null -> MediaPreviewExtraction(imageBytes = null, durationMillis = durationMillis(retriever))
                 }
-            } ?: MediaPreviewExtraction(imageBytes = null, durationMillis = null)
+            }
         }
 
-    private fun <T> withRetriever(file: MediaFile, block: (MediaMetadataRetriever) -> T): T? {
+    private fun <T> withRetriever(file: MediaFile, block: (MediaMetadataRetriever) -> T): T {
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(context, Uri.parse(file.location))
             block(retriever)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (unreadable: Exception) {
-            null
         } finally {
             retriever.release()
         }
