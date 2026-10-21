@@ -247,8 +247,7 @@ class CachedMediaPreviewSource(
     }
 
     /** 修改时间缺失时按有效期缓存；有修改时间时由缓存键判断是否过期。 */
-    private fun cacheMaxAge(file: MediaFile): Long? =
-        if (file.lastModified > 0) null else policy.missingModifiedValidityMillis.coerceAtLeast(1)
+    private fun cacheMaxAge(file: MediaFile): Long? = thumbnailCacheMaxAge(file, policy)
 
     /**
      * 先查缓存；没有就让第一个调用者抽取，同一缓存键的并发调用等待同一结果。
@@ -410,3 +409,7 @@ internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String
         "$base|validity:${policy.missingModifiedValidityMillis.coerceAtLeast(1)}"
     }
 }
+
+/** 修改时间缺失的条目按有效期读取；有修改时间时不限有效期。 */
+internal fun thumbnailCacheMaxAge(file: MediaFile, policy: ThumbnailPolicy): Long? =
+    if (file.lastModified > 0) null else policy.missingModifiedValidityMillis.coerceAtLeast(1)

@@ -53,14 +53,13 @@ class BackgroundPlaybackPolicy(
         switching: Boolean = false,
         initialLoading: Boolean = false,
         restoring: Boolean = false,
-    ): List<MediaSessionAction> {
-        val actions = if (blocksBackgroundPlayback) {
-            listOf(MediaSessionAction.Pause)
-        } else {
-            listOf(MediaSessionAction.Previous, mediaSessionActionFor(state), MediaSessionAction.Next)
-        }
-        return actions.filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
-    }
+    ): List<MediaSessionAction> = notificationActions(
+        state = state,
+        switching = switching,
+        initialLoading = initialLoading,
+        restoring = restoring,
+        blocksBackgroundPlayback = blocksBackgroundPlayback,
+    )
 
     private fun pauseIfBlocked() {
         if (blocksBackgroundPlayback) pausePlayback()

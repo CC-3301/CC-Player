@@ -128,7 +128,7 @@ class MediaSessionActionTest {
     @Test
     fun `restoring allows play pause and both episode actions`() {
         MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = true, initialLoading = false, restoring = true))
+            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = true))
         }
     }
 
@@ -159,7 +159,7 @@ class MediaSessionActionTest {
         dispatchMediaAction(
             MediaSessionAction.Play,
             state = PlaybackState.Paused,
-            switching = true,
+            switching = false,
             restoring = true,
         ) { applied += it }
 
@@ -186,6 +186,7 @@ class MediaSessionActionTest {
     fun `seek is blocked while loading switching or restoring`() {
         assertFalse(
             mediaSeekAllowed(
+                state = PlaybackState.Loading,
                 hasMedia = true,
                 switching = false,
                 initialLoading = true,
@@ -195,6 +196,7 @@ class MediaSessionActionTest {
         )
         assertFalse(
             mediaSeekAllowed(
+                state = PlaybackState.Loading,
                 hasMedia = true,
                 switching = true,
                 initialLoading = false,
@@ -204,8 +206,9 @@ class MediaSessionActionTest {
         )
         assertFalse(
             mediaSeekAllowed(
+                state = PlaybackState.Paused,
                 hasMedia = true,
-                switching = true,
+                switching = false,
                 initialLoading = false,
                 restoring = true,
                 blocksBackgroundPlayback = false,
@@ -217,6 +220,7 @@ class MediaSessionActionTest {
     fun `seek is blocked without media and when background playback is off in background`() {
         assertFalse(
             mediaSeekAllowed(
+                state = PlaybackState.Playing,
                 hasMedia = false,
                 switching = false,
                 initialLoading = false,
@@ -226,6 +230,7 @@ class MediaSessionActionTest {
         )
         assertFalse(
             mediaSeekAllowed(
+                state = PlaybackState.Playing,
                 hasMedia = true,
                 switching = false,
                 initialLoading = false,
@@ -262,7 +267,7 @@ class MediaSessionActionTest {
                 PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE,
             playbackStateActions(
-                availableMediaActions(switching = true, initialLoading = false, restoring = true),
+                availableMediaActions(switching = false, initialLoading = false, restoring = true),
             ),
         )
         assertEquals(

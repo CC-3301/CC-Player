@@ -74,14 +74,31 @@ fun dispatchMediaAction(
     }
 }
 
-/** 拖动定位只在正常播放且未被后台策略限制时可用。 */
+/** 通知栏动作集合：后台关闭时只保留暂停，其余情况按加载阶段收窄。 */
+fun notificationActions(
+    state: PlaybackState,
+    switching: Boolean,
+    initialLoading: Boolean,
+    restoring: Boolean,
+    blocksBackgroundPlayback: Boolean,
+): List<MediaSessionAction> =
+    if (blocksBackgroundPlayback) {
+        listOf(MediaSessionAction.Pause)
+    } else {
+        listOf(MediaSessionAction.Previous, mediaSessionActionFor(state), MediaSessionAction.Next)
+            .filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
+    }
+
+/** 拖动定位只在正常播放或暂停且未被加载阶段、后台策略限制时可用。 */
 fun mediaSeekAllowed(
+    state: PlaybackState,
     hasMedia: Boolean,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
     blocksBackgroundPlayback: Boolean,
-): Boolean = hasMedia && !switching && !initialLoading && !restoring && !blocksBackgroundPlayback
+): Boolean = (state == PlaybackState.Playing || state == PlaybackState.Paused) &&
+    hasMedia && !switching && !initialLoading && !restoring && !blocksBackgroundPlayback
 
 /** 媒体动作集合对应的 [PlaybackStateCompat] 动作位。 */
 fun playbackStateActions(actions: List<MediaSessionAction>, seekable: Boolean = false): Long {

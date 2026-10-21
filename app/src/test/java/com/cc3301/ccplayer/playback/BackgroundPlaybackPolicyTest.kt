@@ -190,9 +190,34 @@ class BackgroundPlaybackPolicyTest {
             listOf(MediaSessionAction.Previous, MediaSessionAction.Play, MediaSessionAction.Next),
             policy.notificationActions(
                 PlaybackState.Paused,
-                switching = true,
+                switching = false,
                 initialLoading = false,
                 restoring = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `后台关闭时加载阶段不滤掉暂停`() {
+        policy.setBackgroundPlaybackEnabled(false)
+        policy.setAppInForeground(false)
+
+        assertEquals(
+            listOf(MediaSessionAction.Pause),
+            policy.notificationActions(
+                PlaybackState.Loading,
+                switching = true,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+        assertEquals(
+            listOf(MediaSessionAction.Pause),
+            policy.notificationActions(
+                PlaybackState.Loading,
+                switching = false,
+                initialLoading = true,
+                restoring = false,
             ),
         )
     }

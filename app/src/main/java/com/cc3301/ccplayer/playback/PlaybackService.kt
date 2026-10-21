@@ -21,11 +21,9 @@ import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
-import com.cc3301.ccplayer.library.ThumbnailCache
-import com.cc3301.ccplayer.library.ThumbnailPolicy
-import com.cc3301.ccplayer.library.thumbnailCacheKey
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,10 +31,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 前台播放服务：唯一持有 mpv 实例、播放控制层与 MediaSession，界面只绑定取用。
@@ -50,15 +47,15 @@ class PlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioOutputMonitor: AudioOutputMonitor
     private lateinit var backgroundPolicy: BackgroundPlaybackPolicy
-    private lateinit var thumbnailCache: ThumbnailCache
+    private lateinit var coverCache: NotificationCoverCache
 
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** 通知刷新串行化：状态与每秒进度都可能触发，只保留最新一次。 */
     private var refreshJob: Job? = null
-    private var cachedCoverKey: String? = null
-    private var cachedCover: CoverArt? = null
     private var appIconBitmap: Bitmap? = null
+
+    private val fileProviderAuthority: String get() = "$packageName.fileprovider"
 
     val engine: PlaybackEngine get() = playbackEngine
 
@@ -80,10 +77,13 @@ class PlaybackService : Service() {
         playbackEngine.initialize()
         audioOutputMonitor = AndroidAudioOutputMonitor(this)
         audioOutputMonitor.start(playbackController::handleAudioOutputLost)
-        thumbnailCache = CachedMediaPreviewSource.thumbnailCache(applicationContext)
+        coverCache = NotificationCoverCache(CachedMediaPreviewSource.thumbnailCache(applicationContext))
         createNotificationChannel()
         setUpMediaSession()
-        startForeground(NOTIFICATION_ID, buildNotification(playbackController.state.value, null, appIconCover()))
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(notificationContent(currentMedia(), coverFile = null), appIconBitmap()),
+        )
         stateScope.launch {
             combine(
                 playbackController.state,
@@ -94,10 +94,13 @@ class PlaybackService : Service() {
             ) { _, _, _, _, _ -> Unit }.collect { requestRefresh() }
         }
         stateScope.launch {
-            playbackController.progress
-                .map { it.durationMillis }
-                .distinctUntilChanged()
-                .collect { requestRefresh() }
+            var previous = PlaybackProgress()
+            playbackController.progress.collect { current ->
+                if (shouldRefreshNotification(playbackController.state.value, previous, current)) {
+                    requestRefresh()
+                }
+                previous = current
+            }
         }
         stateScope.launch {
             while (isActive) {
@@ -160,7 +163,12 @@ class PlaybackService : Service() {
                 },
             )
             isActive = true
-            setPlaybackState(playbackState(playbackController.state.value, playbackController.progress.value))
+            setPlaybackState(
+                playbackState(
+                    playbackController.state.value,
+                    notificationContent(currentMedia(), coverFile = null),
+                ),
+            )
         }
     }
 
@@ -177,12 +185,13 @@ class PlaybackService : Service() {
         }
     }
 
-    /** 系统拖动定位：只在可拖动时落到播放位置。 */
+    /** 系统拖动定位：只在可拖动时落到播放位置，位置回调到达后由通知刷新跟随。 */
     private fun seekTo(positionMillis: Long) {
         val controller = playbackController
         val state = controller.state.value
         val switching = controller.switching.value
         if (!mediaSeekAllowed(
+                state = state,
                 hasMedia = currentMedia() != null,
                 switching = switching,
                 initialLoading = isInitialLoading(state, switching),
@@ -194,7 +203,6 @@ class PlaybackService : Service() {
         }
         controller.updateSeekPreview(positionMillis)
         controller.commitSeekPreview()
-        requestRefresh()
     }
 
     /** 状态、加载阶段、前后台或播放位置变化时同步 MediaSession 与通知栏。 */
@@ -204,14 +212,13 @@ class PlaybackService : Service() {
     }
 
     private suspend fun refreshPlaybackControls() {
-        val controller = playbackController
-        val state = controller.state.value
-        val progress = controller.progress.value
+        val state = playbackController.state.value
         val media = currentMedia()
-        val cover = coverFor(media)
-        mediaSession.setMetadata(mediaMetadata(media, progress, cover))
-        mediaSession.setPlaybackState(playbackState(state, progress))
-        startForeground(NOTIFICATION_ID, buildNotification(state, media, cover))
+        val content = notificationContent(media, coverCache.file(media))
+        val coverBitmap = coverBitmap(content.coverFile)
+        mediaSession.setMetadata(mediaMetadata(content, coverUri(content.coverFile)))
+        mediaSession.setPlaybackState(playbackState(state, content))
+        startForeground(NOTIFICATION_ID, buildNotification(content, coverBitmap))
     }
 
     private fun currentMedia(): MediaFile? {
@@ -219,50 +226,70 @@ class PlaybackService : Service() {
         return controller.playlist.value.getOrNull(controller.currentIndex.value)
     }
 
-    /** 缩略图缓存按缓存键取一次；同一媒体刷新时复用已解码的封面。 */
-    private suspend fun coverFor(media: MediaFile?): CoverArt {
-        if (media == null) return appIconCover()
-        val key = thumbnailCacheKey(media, ThumbnailPolicy())
-        cachedCover?.takeIf { cachedCoverKey == key }?.let { return it }
-        val image = thumbnailCache.file(key)
-        val bitmap = image?.let { BitmapFactory.decodeFile(it.absolutePath) }
-        val cover = if (image != null && bitmap != null) {
-            CoverArt(bitmap, FileProvider.getUriForFile(this, FILE_PROVIDER_AUTHORITY, image))
-        } else {
-            appIconCover()
+    private fun notificationContent(media: MediaFile?, coverFile: File?): MediaNotificationContent {
+        val state = playbackController.state.value
+        val switching = playbackController.switching.value
+        return mediaNotificationContent(
+            state = state,
+            media = media,
+            progress = playbackController.progress.value,
+            switching = switching,
+            initialLoading = isInitialLoading(state, switching),
+            restoring = playbackController.restoring.value,
+            blocksBackgroundPlayback = backgroundPolicy.blocksBackgroundPlayback,
+            coverFile = coverFile,
+            fallbackTitle = getString(R.string.app_name),
+        )
+    }
+
+    /** 封面解码放到 IO；按 256px 上限降采样后再交给通知。 */
+    private suspend fun coverBitmap(file: File?): Bitmap {
+        if (file == null) return appIconBitmap()
+        val decoded = withContext(Dispatchers.IO) { decodeCover(file) }
+        return decoded ?: appIconBitmap()
+    }
+
+    private fun decodeCover(file: File): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        var sample = 1
+        while (longest > 0 && longest / sample > MAX_COVER_SIZE) sample *= 2
+        return BitmapFactory.decodeFile(
+            file.absolutePath,
+            BitmapFactory.Options().apply { inSampleSize = sample },
+        )
+    }
+
+    private fun coverUri(file: File?): Uri? {
+        val uri = file?.let {
+            runCatching { FileProvider.getUriForFile(this, fileProviderAuthority, it) }.getOrNull()
+        } ?: return null
+        runCatching {
+            grantUriPermission(SYSTEM_UI_PACKAGE, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        cachedCoverKey = key
-        cachedCover = cover
-        return cover
+        return uri
     }
 
-    private fun appIconCover(): CoverArt {
-        val bitmap = appIconBitmap ?: run {
-            val drawable = packageManager.getApplicationIcon(packageName)
-            val size = maxOf(drawable.intrinsicWidth, drawable.intrinsicHeight).takeIf { it > 0 } ?: APP_ICON_SIZE
-            Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { icon ->
-                drawable.setBounds(0, 0, size, size)
-                drawable.draw(Canvas(icon))
-            }
-        }.also { appIconBitmap = it }
-        return CoverArt(bitmap, null)
+    private fun appIconBitmap(): Bitmap {
+        appIconBitmap?.let { return it }
+        val drawable = packageManager.getApplicationIcon(packageName)
+        val size = maxOf(drawable.intrinsicWidth, drawable.intrinsicHeight).takeIf { it > 0 } ?: APP_ICON_SIZE
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { icon ->
+            drawable.setBounds(0, 0, size, size)
+            drawable.draw(Canvas(icon))
+        }
+        appIconBitmap = bitmap
+        return bitmap
     }
 
-    private fun mediaMetadata(
-        media: MediaFile?,
-        progress: PlaybackProgress,
-        cover: CoverArt,
-    ): MediaMetadataCompat {
+    private fun mediaMetadata(content: MediaNotificationContent, coverUri: Uri?): MediaMetadataCompat {
         val builder = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, mediaTitle(media))
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, notificationDurationMillis(progress))
-            .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, cover.bitmap)
-        cover.uri?.let { builder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, it.toString()) }
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, content.title)
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, content.durationMillis)
+        coverUri?.let { builder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, it.toString()) }
         return builder.build()
     }
-
-    private fun mediaTitle(media: MediaFile?): String =
-        media?.let { notificationTitle(it.name) } ?: getString(R.string.app_name)
 
     private fun createNotificationChannel() {
         val manager = getSystemService(NotificationManager::class.java)
@@ -271,23 +298,22 @@ class PlaybackService : Service() {
         )
     }
 
-    private fun buildNotification(state: PlaybackState, media: MediaFile?, cover: CoverArt): Notification {
-        val actions = currentActions(state)
+    private fun buildNotification(content: MediaNotificationContent, cover: Bitmap): Notification {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(mediaTitle(media))
+            .setContentTitle(content.title)
             .setContentText(getString(R.string.notification_playing))
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setLargeIcon(cover.bitmap)
+            .setLargeIcon(cover)
             .setOngoing(true)
             .setSilent(true)
-        actions.forEach { action ->
+        content.actions.forEach { action ->
             builder.addAction(actionIcon(action), actionLabel(action), actionIntent(action))
         }
         return builder
             .setStyle(
                 MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(*actions.indices.toList().toIntArray()),
+                    .setShowActionsInCompactView(*content.actions.indices.toList().toIntArray()),
             )
             .build()
     }
@@ -316,30 +342,18 @@ class PlaybackService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** 当前加载阶段与后台策略下可用的媒体动作。 */
-    private fun currentActions(state: PlaybackState): List<MediaSessionAction> {
+    private fun playbackState(state: PlaybackState, content: MediaNotificationContent): PlaybackStateCompat {
         val switching = playbackController.switching.value
-        return backgroundPolicy.notificationActions(
+        val seekable = mediaSeekAllowed(
             state = state,
+            hasMedia = currentMedia() != null,
             switching = switching,
             initialLoading = isInitialLoading(state, switching),
             restoring = playbackController.restoring.value,
-        )
-    }
-
-    private fun playbackState(state: PlaybackState, progress: PlaybackProgress): PlaybackStateCompat {
-        val switching = playbackController.switching.value
-        val initialLoading = isInitialLoading(state, switching)
-        val restoring = playbackController.restoring.value
-        val seekable = mediaSeekAllowed(
-            hasMedia = currentMedia() != null,
-            switching = switching,
-            initialLoading = initialLoading,
-            restoring = restoring,
             blocksBackgroundPlayback = backgroundPolicy.blocksBackgroundPlayback,
         )
         return PlaybackStateCompat.Builder()
-            .setActions(playbackStateActions(currentActions(state), seekable))
+            .setActions(playbackStateActions(content.actions, seekable))
             .setState(
                 when (state) {
                     PlaybackState.Idle -> PlaybackStateCompat.STATE_NONE
@@ -348,19 +362,18 @@ class PlaybackService : Service() {
                     PlaybackState.Paused -> PlaybackStateCompat.STATE_PAUSED
                     PlaybackState.Ended -> PlaybackStateCompat.STATE_STOPPED
                 },
-                progress.positionMillis,
+                content.positionMillis,
                 if (state == PlaybackState.Playing) 1f else 0f,
             )
             .build()
     }
 
-    private data class CoverArt(val bitmap: Bitmap, val uri: Uri?)
-
     private companion object {
         const val CHANNEL_ID = "playback"
         const val NOTIFICATION_ID = 1
         const val MEDIA_SESSION_TAG = "ccplayer-playback"
-        const val FILE_PROVIDER_AUTHORITY = "com.cc3301.ccplayer.fileprovider"
+        const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+        const val MAX_COVER_SIZE = 256
         const val APP_ICON_SIZE = 192
     }
 }
