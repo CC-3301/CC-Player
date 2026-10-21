@@ -120,21 +120,21 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun release() = Unit
 
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
-    fun reportMediaLoaded() {
+    fun reportMediaLoaded(targetUrl: String? = currentTargetUrl) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(targetUrl)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
-            targetUrl = currentTargetUrl,
+            targetUrl = targetUrl,
             seekSerial = currentSeekSerial,
         )
     }
 
     /** 只上报文件打开，首帧还没就绪。 */
-    fun reportFileLoaded() {
+    fun reportFileLoaded(targetUrl: String? = currentTargetUrl) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(targetUrl)
     }
 
     /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */

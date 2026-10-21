@@ -224,7 +224,7 @@ class MpvPlaybackEngine(
         // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
         if (!fileEvents.onFileLoaded(isTargetFile())) return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded()
+        listener?.onMediaLoaded(targetUrl)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }

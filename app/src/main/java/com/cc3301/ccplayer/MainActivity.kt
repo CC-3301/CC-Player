@@ -129,6 +129,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var switching by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
+    private var holdBlack by mutableStateOf(false)
 
     /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标首帧就绪。 */
     private var freezeFrame by mutableStateOf<Bitmap?>(null)
@@ -153,6 +154,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
+                launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -234,6 +236,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             switching = switching,
                             buffering = buffering,
                             freezeFrame = freezeFrame,
+                            holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -543,6 +546,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         videoAspectRatio = null
         switching = false
         buffering = false
+        holdBlack = false
         freezeFrame = null
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()

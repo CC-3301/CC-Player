@@ -125,9 +125,19 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
 
 /** 无涟漪点击。 */
 @Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier {
+private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier =
+    noRippleClickable(onClick, enabled = true)
+
+/** 无涟漪点击；[enabled] 为假时不响应。 */
+@Composable
+private fun Modifier.noRippleClickable(onClick: () -> Unit, enabled: Boolean): Modifier {
     val interaction = remember { MutableInteractionSource() }
-    return clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    return clickable(
+        interactionSource = interaction,
+        indication = null,
+        enabled = enabled,
+        onClick = onClick,
+    )
 }
 
 /** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
@@ -203,6 +213,7 @@ fun PlayerScreen(
     switching: Boolean,
     buffering: Boolean,
     freezeFrame: Bitmap?,
+    holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -273,8 +284,8 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲，或切集抓帧失败时，不露出未就绪的 Surface。
-        if ((buffering && !switching) || (switching && freezeFrame == null)) {
+        // 黑底画在视频视图之后：首次缓冲、切集无冻结帧，或片尾恢复就绪后保持黑底。
+        if (holdBlack || (buffering && !switching) || (switching && freezeFrame == null)) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -314,13 +325,13 @@ fun PlayerScreen(
         seekHint?.let { hint ->
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
-        // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
+        // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。切集期间不响应。
         if (locked) {
             val lockedHint = stringResource(R.string.player_screen_locked_hint)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable { lock.tapScreen() }
+                    .noRippleClickable({ lock.tapScreen() }, enabled = !switching)
                     .semantics { contentDescription = lockedHint },
             )
         }
@@ -329,7 +340,7 @@ fun PlayerScreen(
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
-                    moreEnabled = !switching,
+                    moreEnabled = actionAllowed(PlayerAction.More, switching),
                     onBack = onClose,
                     onToggleMore = {
                         val opening = !moreVisible
@@ -380,7 +391,7 @@ fun PlayerScreen(
                     subtitleSelection = subtitleSelection,
                     playlistVisible = playlistVisible,
                     subtitleMenuVisible = subtitleMenuVisible,
-                    playbackControlsEnabled = !switching,
+                    switching = switching,
                     onTogglePlayPause = onTogglePlayPause,
                     onPrevious = onPrevious,
                     onNext = onNext,
@@ -685,7 +696,7 @@ private fun Controls(
     subtitleSelection: SubtitleSelection,
     playlistVisible: Boolean,
     subtitleMenuVisible: Boolean,
-    playbackControlsEnabled: Boolean,
+    switching: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -729,7 +740,7 @@ private fun Controls(
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
-            enabled = playbackControlsEnabled,
+            enabled = actionAllowed(PlayerAction.Seek, switching),
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
         )
@@ -737,7 +748,7 @@ private fun Controls(
             playing = state == PlaybackState.Playing,
             canGoPrevious = currentIndex > 0,
             canGoNext = currentIndex in 0 until playlist.lastIndex,
-            playbackControlsEnabled = playbackControlsEnabled,
+            switching = switching,
             subtitleMenuVisible = subtitleMenuVisible,
             playlistVisible = playlistVisible,
             onTogglePlayPause = onTogglePlayPause,
@@ -756,7 +767,7 @@ private fun PlayerIconBar(
     playing: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
-    playbackControlsEnabled: Boolean,
+    switching: Boolean,
     subtitleMenuVisible: Boolean,
     playlistVisible: Boolean,
     onTogglePlayPause: () -> Unit,
@@ -779,7 +790,7 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
-                enabled = playbackControlsEnabled,
+                enabled = actionAllowed(PlayerAction.Lock, switching),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .size(iconSize),
@@ -794,7 +805,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
-                    enabled = canGoPrevious,
+                    enabled = canGoPrevious && actionAllowed(PlayerAction.Previous, switching),
                     modifier = Modifier.size(iconSize),
                 )
                 PlayerIconButton(
@@ -803,14 +814,14 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onTogglePlayPause,
-                    enabled = playbackControlsEnabled,
+                    enabled = actionAllowed(PlayerAction.PlayPause, switching),
                     modifier = Modifier.size(iconSize),
                 )
                 PlayerIconButton(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
-                    enabled = canGoNext,
+                    enabled = canGoNext && actionAllowed(PlayerAction.Next, switching),
                     modifier = Modifier.size(iconSize),
                 )
             }
@@ -823,7 +834,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
-                    enabled = playbackControlsEnabled,
+                    enabled = actionAllowed(PlayerAction.Subtitles, switching),
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(iconSize),
                 )
@@ -831,7 +842,7 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
-                    enabled = playbackControlsEnabled,
+                    enabled = actionAllowed(PlayerAction.Playlist, switching),
                     active = playlistVisible,
                     modifier = Modifier.size(iconSize),
                 )

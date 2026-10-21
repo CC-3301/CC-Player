@@ -77,6 +77,13 @@ class PlaybackController(
     val freezeFrame: StateFlow<Bitmap?> = _freezeFrame.asStateFlow()
 
     /**
+     * 片尾恢复就绪后保持黑底，直到下一次用户操作或新加载。
+     * 片尾没有首帧可显示，不能用冻结画面占位。
+     */
+    private val _holdBlack = MutableStateFlow(false)
+    val holdBlack: StateFlow<Boolean> = _holdBlack.asStateFlow()
+
+    /**
      * 当前是否有可渲染的 Surface。退到后台后为假：此时抓不到帧，
      * 切集以文件加载完成作为就绪，回前台由 Surface 重挂恢复画面。
      */
@@ -177,6 +184,9 @@ class PlaybackController(
     private var switchOriginPositionMillis = 0L
     private var switchOriginDurationMillis = 0L
 
+    /** 本次切集是否由自然播完触发；片尾恢复以它为权威判据。 */
+    private var switchOriginEnded = false
+
     /** 原视频停在片尾：恢复时没有可等待的首帧，以文件加载完成作为就绪。 */
     private var restoreAtEndOfEpisode = false
 
@@ -234,17 +244,17 @@ class PlaybackController(
         playAt(index)
     }
 
-    /** 切换到播放列表第 [index] 项；超出范围、切集或恢复期间不动作。 */
+    /** 切换到播放列表第 [index] 项；超出范围、首次加载、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
-        // 切集缓冲期间只允许上一集/下一集；播放列表选择等直接跳转不生效。
-        if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
+        // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
+        if (loadPhase != LoadPhase.None) return
         playIndex(index)
     }
 
-    private fun playIndex(index: Int) {
+    private fun playIndex(index: Int, originAtEnd: Boolean = false) {
         val media = _playlist.value.getOrNull(index) ?: return
         if (active) {
-            startSwitch(index, media)
+            startSwitch(index, media, originAtEnd)
         } else {
             startSession(index, media)
         }
@@ -269,6 +279,8 @@ class PlaybackController(
     private fun playAdjacent(index: Int) {
         when (loadPhase) {
             LoadPhase.Switching -> retargetSwitch(index)
+            // 首次加载缓冲期间只允许返回，上一集/下一集不生效。
+            LoadPhase.Initial -> Unit
             // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
             else -> playIndex(index)
         }
@@ -312,7 +324,9 @@ class PlaybackController(
         mediaLoaded = false
         pausedAtEpisodeEnd = false
         restoreAtEndOfEpisode = false
+        switchOriginEnded = false
         switchFailureReported = false
+        _holdBlack.value = false
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Initial
@@ -331,11 +345,13 @@ class PlaybackController(
      * 切集：立即暂停原视频保留当前画面，再加载目标；首帧就绪后替换。
      * 进度保持在原视频上，直到目标就绪。
      */
-    private fun startSwitch(index: Int, media: MediaFile) {
+    private fun startSwitch(index: Int, media: MediaFile, originAtEnd: Boolean = false) {
         switchOriginIndex = _currentIndex.value
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
+        switchOriginEnded = originAtEnd
         switchFailureReported = false
+        _holdBlack.value = false
         applySwitchTarget(index, media)
         beginBufferingIndicator()
         beginLoadWatchdog()
@@ -364,6 +380,7 @@ class PlaybackController(
         mediaLoaded = false
         pausedAtEpisodeEnd = false
         savedPositionMillis = 0
+        restoreAtEndOfEpisode = false
         _state.value = PlaybackState.Loading
     }
 
@@ -382,6 +399,7 @@ class PlaybackController(
 
     fun pause() {
         if (!active) return
+        clearRestoreHoldOnUserAction()
         paused = true
         engine.pause()
     }
@@ -396,6 +414,7 @@ class PlaybackController(
             return
         }
         if (!active) return
+        clearRestoreHoldOnUserAction()
         paused = false
         // 切集加载中的继续只记为意图，等目标文件就绪再出声。
         if (loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring) return
@@ -476,6 +495,7 @@ class PlaybackController(
         val target = _seekPreviewMillis.value ?: return
         _seekPreviewMillis.value = null
         if (!active) return
+        clearRestoreHoldOnUserAction()
         engine.seekTo(target)
         engine.fadeInAudio(FADE_IN_MILLIS)
     }
@@ -530,8 +550,10 @@ class PlaybackController(
         applySubtitleSelection(SubtitleSelection.Off)
     }
 
-    override fun onMediaLoaded() {
+    override fun onMediaLoaded(targetUrl: String?) {
         if (!active) return
+        // 被放弃目标或恢复后迟到的 FILE_LOADED 不能作用于当前加载。
+        if (targetUrl != null && targetUrl != loadTargetUrl) return
         mediaLoaded = true
         when (loadPhase) {
             LoadPhase.Initial -> {
@@ -686,10 +708,11 @@ class PlaybackController(
         }
         // 自然播完后的下一集与手动切集共用同一条切换路径。
         when {
-            _loopMode.value == LoopMode.SingleLoop -> playAt(_currentIndex.value)
+            _loopMode.value == LoopMode.SingleLoop -> playIndex(_currentIndex.value, originAtEnd = true)
             !_autoPlayNext.value -> endSession()
-            _currentIndex.value < _playlist.value.lastIndex -> playAt(_currentIndex.value + 1)
-            _loopMode.value == LoopMode.ListLoop -> playAt(0)
+            _currentIndex.value < _playlist.value.lastIndex ->
+                playIndex(_currentIndex.value + 1, originAtEnd = true)
+            _loopMode.value == LoopMode.ListLoop -> playIndex(0, originAtEnd = true)
             else -> endSession()
         }
     }
@@ -698,6 +721,13 @@ class PlaybackController(
     private fun endSession() {
         active = false
         _state.value = PlaybackState.Ended
+    }
+
+    /** 用户恢复播放操作：解除片尾黑底，并允许后续失败重新提示。 */
+    private fun clearRestoreHoldOnUserAction() {
+        if (loadPhase != LoadPhase.None) return
+        _holdBlack.value = false
+        switchFailureReported = false
     }
 
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
@@ -766,6 +796,7 @@ class PlaybackController(
         endLoadWatchdog()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
+        switchOriginEnded = false
         replaceFreezeFrame(null)
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
@@ -792,8 +823,13 @@ class PlaybackController(
         loadPhase = LoadPhase.Restoring
         loadTargetIndex = switchOriginIndex
         loadTargetUrl = origin.playbackLocation
-        restoreAtEndOfEpisode = switchOriginDurationMillis > 0 &&
-            switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
+        // 自然播完以显式标记为准；位置兜底只在抓不到末帧时补充。
+        restoreAtEndOfEpisode = switchOriginEnded ||
+            (
+                _freezeFrame.value == null &&
+                    switchOriginDurationMillis > 0 &&
+                    switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
+                )
         // 清掉被取消目标的续播 seek 与抓帧确认残留。
         frameProbeJob?.cancel()
         frameProbeJob = null
@@ -828,13 +864,16 @@ class PlaybackController(
     /** 原视频重新出帧：撤掉冻结画面；恢复期间按过播放就继续，否则保持暂停。 */
     private fun finishRestore() {
         if (loadPhase != LoadPhase.Restoring) return
+        val holdBlack = restoreAtEndOfEpisode
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
-        switchFailureReported = false
+        switchOriginEnded = false
+        // 片尾没有可显示的首帧：直到下一次用户操作或新加载前保持黑底。
+        _holdBlack.value = holdBlack
         replaceFreezeFrame(null)
         if (paused) {
             _state.value = PlaybackState.Paused
@@ -879,6 +918,8 @@ class PlaybackController(
             }
             // 播放中出错：引擎已卸载，按失败结束；播放键可重开当前文件。
             LoadPhase.None -> {
+                // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
+                if (switchFailureReported) return
                 active = false
                 paused = true
                 _state.value = PlaybackState.Ended
@@ -944,7 +985,9 @@ class PlaybackController(
         resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
+        switchOriginEnded = false
         switchFailureReported = false
+        _holdBlack.value = false
         replaceFreezeFrame(null)
     }
 
@@ -1051,8 +1094,8 @@ class PlaybackController(
         private val target: PlaybackEngine.Listener,
         private val scope: CoroutineScope,
     ) : PlaybackEngine.Listener {
-        override fun onMediaLoaded() {
-            scope.launch { target.onMediaLoaded() }
+        override fun onMediaLoaded(targetUrl: String?) {
+            scope.launch { target.onMediaLoaded(targetUrl) }
         }
 
         override fun onFirstFrameReady(needsFrameConfirmation: Boolean, targetUrl: String?, seekSerial: Int) {

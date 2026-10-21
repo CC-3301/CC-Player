@@ -123,4 +123,18 @@ class PlayerGesturesTest {
         assertEquals(false, inputAllowed(PlayerInput.ControlBar, locked = true))
         assertEquals(true, inputAllowed(PlayerInput.UnlockButton, locked = true))
     }
+
+    @Test
+    fun `切集期间只放行返回、上一集与下一集`() {
+        val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true) }.toSet()
+        assertEquals(setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next), allowed)
+        assertEquals(7, PlayerAction.entries.count { !actionAllowed(it, switching = true) })
+    }
+
+    @Test
+    fun `未切集时所有操作放行`() {
+        PlayerAction.entries.forEach { action ->
+            assertEquals(action.name, true, actionAllowed(action, switching = false))
+        }
+    }
 }

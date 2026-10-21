@@ -92,14 +92,15 @@ class PlaybackControllerProgressTest {
     }
 
     @Test
-    fun `迟到的记录不作用到已切换的媒体上`() = runTest {
+    fun `迟到的记录不作用到新会话的媒体上`() = runTest {
         progress.records[ep1.location] = MediaProgress(ep1.location, 30_000, 60_000, ep1.lastModified)
         progress.holdFinds()
         val controller = controller()
 
         controller.openPlaylist(listOf(ep1, ep2), ep1)
         runCurrent()
-        controller.playAt(1)
+        controller.stop()
+        controller.openPlaylist(listOf(ep1, ep2), ep2)
         progress.releaseFinds()
         runCurrent()
         engine.reportMediaLoaded()

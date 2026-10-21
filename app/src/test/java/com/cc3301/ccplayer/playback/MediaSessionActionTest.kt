@@ -54,6 +54,7 @@ class MediaSessionActionTest {
     @Test
     fun `the next action plays the next episode`() {
         open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
 
         MediaSessionAction.Next.applyTo(controller)
 
@@ -63,6 +64,7 @@ class MediaSessionActionTest {
     @Test
     fun `the previous action plays the previous episode`() {
         open("ep1.mkv", "ep2.mkv", current = "ep2.mkv")
+        engine.reportMediaLoaded()
 
         MediaSessionAction.Previous.applyTo(controller)
 

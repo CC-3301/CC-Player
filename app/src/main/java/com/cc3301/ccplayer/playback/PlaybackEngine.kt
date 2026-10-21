@@ -70,8 +70,8 @@ interface PlaybackEngine {
 
     /** 引擎向控制层上报的播放事件。 */
     interface Listener {
-        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。 */
-        fun onMediaLoaded()
+        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。[targetUrl] 是本次加载的目标。 */
+        fun onMediaLoaded(targetUrl: String?)
 
         /**
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏

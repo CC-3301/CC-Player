@@ -126,6 +126,7 @@ class PlaybackControllerTest {
     fun `next episode is the adjacent file in natural name order`() {
         val files = listOf(mediaFile("ep10.mkv"), mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
         controller.openPlaylist(files, mediaFile("ep1.mkv"))
+        engine.reportMediaLoaded()
 
         controller.next()
 
@@ -136,6 +137,7 @@ class PlaybackControllerTest {
     fun `previous episode is the adjacent file in natural name order`() {
         val files = listOf(mediaFile("ep2.mkv"), mediaFile("ep10.mkv"), mediaFile("ep1.mkv"))
         controller.openPlaylist(files, mediaFile("ep2.mkv"))
+        engine.reportMediaLoaded()
 
         controller.previous()
 
@@ -150,6 +152,7 @@ class PlaybackControllerTest {
             mediaFile("ep1.mkv", lastModified = 100),
         )
         controller.openPlaylist(byModifiedTime, mediaFile("ep1.mkv"))
+        engine.reportMediaLoaded()
 
         controller.next()
 
@@ -197,6 +200,7 @@ class PlaybackControllerTest {
     fun `selecting a playlist entry plays that file and reports loading`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
         controller.openPlaylist(files, mediaFile("ep1.mkv"))
+        engine.reportMediaLoaded()
 
         controller.playAt(1)
 
