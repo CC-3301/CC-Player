@@ -134,20 +134,35 @@ internal class MpvLoadQueue {
         return spec
     }
 
-    /** 收到 FILE_LOADED：取最早的在途加载，事件按命令顺序对应。 */
+    /**
+     * 校验后取出队首 FILE_LOADED。[path] 是 mpv 当前 path；与队首不一致时保留队列：
+     * 停止后紧接新加载时，迟到的旧 FILE_LOADED 不能占掉新加载的位置。
+     */
     @Synchronized
-    fun onFileLoaded(): LoadSpec? {
-        val spec = pendingLoads.removeFirstOrNull() ?: return null
-        loaded = spec
-        return spec
+    fun takeFileLoaded(path: String?): LoadSpec? {
+        val head = pendingLoads.firstOrNull() ?: return null
+        if (!isTargetPath(head.url, path)) return null
+        pendingLoads.removeFirst()
+        loaded = head
+        return head
     }
 
-    /** 收到 END_FILE：取出产生这次结束的加载，并清掉它在途记录。 */
+    /** 已加载且仍是当前代际；旧代际的 FILE_LOADED 不满足，ready 不能上报。 */
     @Synchronized
-    fun onEndFile(): LoadSpec? {
-        val ended = endingLoads.removeFirstOrNull()
-            ?: current?.also { current = null }
-            ?: return null
+    fun currentLoaded(): LoadSpec? = loaded?.takeIf { it === current }
+
+    /**
+     * 收到 END_FILE：取出产生这次结束的加载，并清掉它在途记录。
+     * [isReplaced] 为假表示这是当前代际自己的结束；为真时只有确实登记过的旧文件才能被移出，
+     * 否则丢弃死代际后迟到的结束事件会误伤当前加载。
+     */
+    @Synchronized
+    fun onEndFile(isReplaced: Boolean): LoadSpec? {
+        val ended = if (isReplaced) {
+            endingLoads.removeFirstOrNull() ?: return null
+        } else {
+            current
+        }
         pendingLoads.remove(ended)
         if (current === ended) current = null
         if (loaded === ended) loaded = null
@@ -163,6 +178,18 @@ internal class MpvLoadQueue {
         pendingLoads.clear()
     }
 
+    /**
+     * 丢弃不会再产生事件的死代际（看门狗恢复前）。
+     * 保留结束队列为空：迟到的 END_FILE 由旧代际吞掉，不能作用到恢复加载。
+     */
+    @Synchronized
+    fun discardInFlight() {
+        current = null
+        loaded = null
+        pendingLoads.clear()
+        endingLoads.clear()
+    }
+
     @Synchronized
     fun reset() {
         current = null
@@ -170,6 +197,22 @@ internal class MpvLoadQueue {
         pendingLoads.clear()
         endingLoads.clear()
     }
+}
+
+/** 一次可上报的 ready 信号：产生它的加载与 seek 序号。 */
+internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
+
+/**
+ * 先确认 ready 属于当前代际，再占用去重槽。
+ * 被取代目标的迟到 ready 如果先占槽，会把当前加载的同类信号吞掉。
+ */
+internal fun MpvReadySignals.acceptReadyFor(
+    loads: MpvLoadQueue,
+    needsFrameConfirmation: Boolean,
+): ReadySignal? {
+    val spec = loads.currentLoaded() ?: return null
+    val serial = acceptReady(needsFrameConfirmation) ?: return null
+    return ReadySignal(spec, serial)
 }
 
 /**

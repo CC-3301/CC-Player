@@ -216,21 +216,24 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `previous during a switch moves the target back`() = runTest {
+    fun `previous back to the origin cancels the switch and restores it paused`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
 
         controller.next()
         controller.previous()
 
         assertEquals(0, controller.currentIndex.value)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(40_000L, engine.startedPositions.last())
         assertTrue(controller.switching.value)
+        assertTrue(controller.restoring.value)
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(0, controller.currentIndex.value)
-        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
@@ -389,6 +392,87 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
         assertFalse(controller.holdBlack.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a manual switch at the end without a frame restores black paused`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(600_000, 600_000)
+
+        controller.next()
+        assertNull(controller.freezeFrame.value)
+        engine.reportPlaybackFailed()
+
+        // 抓不到末帧时按位置兜底：片尾恢复等文件加载完成，黑底暂停。
+        engine.reportFileLoaded()
+        assertFalse(controller.switching.value)
+        assertTrue(controller.holdBlack.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `an end restore with a lagging position still restarts from the beginning`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(590_000, 600_000)
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
+
+        // 自然播完的末次位置可能滞后；播放仍应从头重开而不是续播到片尾。
+        dispatch(controller, MediaSessionAction.Play)
+        engine.reportFileLoaded()
+
+        assertTrue(controller.switching.value)
+        assertEquals(0L, engine.startedPositions.last())
+        assertFalse(controller.holdBlack.value)
+    }
+
+    @Test
+    fun `a seek clears the end restore black hold`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        engine.reportFileLoaded()
+        assertTrue(controller.holdBlack.value)
+
+        controller.updateSeekPreview(0)
+        controller.commitSeekPreview()
+
+        assertFalse(controller.holdBlack.value)
+        assertEquals(0L, engine.seekPositions.last())
+    }
+
+    @Test
+    fun `stop clears the end restore black hold`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        engine.reportFileLoaded()
+        assertTrue(controller.holdBlack.value)
+
+        controller.stop()
+
+        assertFalse(controller.holdBlack.value)
+    }
+
+    @Test
+    fun `leaving after an end restore does not save the finished episode position`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(590_000, 600_000)
+        runCurrent()
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        engine.reportFileLoaded()
+        assertTrue(controller.holdBlack.value)
+        progress.records.clear()
+
+        controller.stop()
+        runCurrent()
+
+        assertNull(progress.records["root/ep1.mkv"])
     }
 
     @Test
@@ -932,6 +1016,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(1, failures.size)
+        assertEquals(1, engine.discardInFlightCalls)
     }
 
     @Test

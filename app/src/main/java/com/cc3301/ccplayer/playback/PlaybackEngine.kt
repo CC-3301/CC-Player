@@ -33,6 +33,12 @@ interface PlaybackEngine {
     fun stop()
 
     /**
+     * 丢弃所有在途加载代际。加载看门狗判失败后，在途加载可能永远不会再产生事件，
+     * 恢复原片前必须先丢掉它，否则恢复的 FILE_LOADED 会配到旧代际。
+     */
+    fun discardInFlightLoads()
+
+    /**
      * 跳到指定播放位置，单位毫秒。
      * 返回本次 seek 的序号；之后的 ready 回调带上同一序号，控制层据此只认 seek 之后的信号。
      */

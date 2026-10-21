@@ -130,7 +130,6 @@ class PlayerGesturesTest {
     fun `切集期间只放行返回、上一集与下一集`() {
         val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
         assertEquals(setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next), allowed)
-        assertEquals(7, PlayerAction.entries.count { !actionAllowed(it, switching = true, initialLoading = false, restoring = false) })
     }
 
     @Test

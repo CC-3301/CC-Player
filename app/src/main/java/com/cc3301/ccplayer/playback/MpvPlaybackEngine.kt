@@ -100,6 +100,12 @@ class MpvPlaybackEngine(
         MPVLib.command(arrayOf("stop"))
     }
 
+    /** 看门狗恢复前丢掉不会再有事件的死代际，避免恢复的 FILE_LOADED 配到旧加载。 */
+    override fun discardInFlightLoads() {
+        loadQueue.discardInFlight()
+        fileEvents.onStop()
+    }
+
     /**
      * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
      * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
@@ -222,28 +228,24 @@ class MpvPlaybackEngine(
     }
 
     private fun onFileLoaded() {
-        // FILE_LOADED 按命令顺序对应最早的在途加载，URL 与代际来自同一条记录。
-        val spec = loadQueue.onFileLoaded() ?: return
-        // 旧代际迟到的 FILE_LOADED 不能当成当前目标加载成功。
-        if (!fileEvents.onFileLoaded(isTargetFile(spec.url))) return
+        // 先按 mpv 当前路径校验队首，迟到事件不能先占掉新加载的代际。
+        val spec = loadQueue.takeFileLoaded(MPVLib.getPropertyString(PATH_PROPERTY)) ?: return
+        if (!fileEvents.onFileLoaded(isTarget = true)) return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
         listener?.onMediaLoaded(spec.url, spec.token)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
 
-    /** mpv 的 path 属性与本次目标不一致时，说明是旧文件迟到的加载事件。 */
-    private fun isTargetFile(target: String?): Boolean =
-        isTargetPath(target, MPVLib.getPropertyString(PATH_PROPERTY))
-
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
     /** 替换、自然结束与失败由 [MpvFileEvents] 判定。 */
     private fun onEndFile() {
-        loadQueue.onEndFile()
         val atEndByPosition = durationSeconds > 0 &&
             positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS
-        when (fileEvents.onEndFile(atEndByPosition)) {
+        val end = fileEvents.onEndFile(atEndByPosition)
+        loadQueue.onEndFile(end == MpvFileEvents.End.Replaced)
+        when (end) {
             MpvFileEvents.End.Replaced -> Unit
             MpvFileEvents.End.Ended -> listener?.onPlaybackEnded()
             MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
@@ -255,14 +257,13 @@ class MpvPlaybackEngine(
      * seek 之后序号变化，两类信号都能再次上报。
      */
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
-        val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return
-        // ready 沿用产生它的那次 FILE_LOADED 快照，迟到的旧代际不会被记到新加载上。
-        val spec = loadQueue.loaded ?: return
+        // 先确认 ready 属于当前代际再占去重槽：旧代际不吞当前加载的信号。
+        val ready = readySignals.acceptReadyFor(loadQueue, needsFrameConfirmation) ?: return
         listener?.onFirstFrameReady(
             needsFrameConfirmation,
-            spec.url,
-            serial,
-            spec.token,
+            ready.spec.url,
+            ready.serial,
+            ready.spec.token,
         )
     }
 

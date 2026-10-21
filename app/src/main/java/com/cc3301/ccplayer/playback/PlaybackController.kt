@@ -288,7 +288,8 @@ class PlaybackController(
 
     private fun playAdjacent(index: Int) {
         when (loadPhase) {
-            LoadPhase.Switching -> retargetSwitch(index)
+            // 目标回到原集时直接取消切集，回原位置恢复，不再重新加载同一集。
+            LoadPhase.Switching -> if (index == switchOriginIndex) cancelSwitch() else retargetSwitch(index)
             // 首次加载缓冲期间只允许返回，上一集/下一集不生效。
             LoadPhase.Initial -> Unit
             // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
@@ -465,7 +466,11 @@ class PlaybackController(
 
     fun stop() {
         val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
-        if (active) _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
+        // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
+        val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
+        if (active && !skipEndRestoreSave) {
+            _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
+        }
         active = false
         paused = false
         engine.stop()
@@ -519,6 +524,8 @@ class PlaybackController(
         _seekPreviewMillis.value = null
         if (!active) return
         clearRestoreHoldOnUserAction()
+        // 用户主动跳转后不再算停在片尾。
+        pausedAtEpisodeEnd = false
         engine.seekTo(target)
         engine.fadeInAudio(FADE_IN_MILLIS)
     }
@@ -878,8 +885,8 @@ class PlaybackController(
         savedPositionMillis = switchOriginPositionMillis
         resumePositionMillis = null
         mediaLoaded = false
-        watchedToEnd = false
-        pausedAtEpisodeEnd = false
+        watchedToEnd = restoreAtEndOfEpisode
+        pausedAtEpisodeEnd = restoreAtEndOfEpisode
         paused = true
         _subtitleTracks.value = emptyList()
         _externalSubtitles.value = emptyList()
@@ -932,13 +939,14 @@ class PlaybackController(
     private fun readyDuration(): Long =
         if (loadDurationMillis > 0) loadDurationMillis else playedDurationMillis
 
-    /** 加载失败或超时：按阶段收尾，切集中则回退原视频。 */
-    private fun handleLoadFailure() {
+    /** 加载失败或超时：按阶段收尾，切集中则回退原视频。[fromWatchdog] 表示没有任何加载事件。 */
+    private fun handleLoadFailure(fromWatchdog: Boolean = false) {
         if (!active) return
         endLoadWatchdog()
         when (loadPhase) {
             LoadPhase.Switching -> {
                 switchFailureReported = true
+                if (fromWatchdog) engine.discardInFlightLoads()
                 restoreOrigin()
                 _playbackFailures.tryEmit(Unit)
             }
@@ -999,7 +1007,7 @@ class PlaybackController(
         loadWatchdogJob?.cancel()
         loadWatchdogJob = scope.launch {
             delay(LOAD_WATCHDOG_MILLIS)
-            if (loadPhase != LoadPhase.None) handleLoadFailure()
+            if (loadPhase != LoadPhase.None) handleLoadFailure(fromWatchdog = true)
         }
     }
 

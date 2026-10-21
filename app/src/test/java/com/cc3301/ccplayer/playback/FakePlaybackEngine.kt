@@ -32,6 +32,8 @@ class FakePlaybackEngine : PlaybackEngine {
         private set
     var stopCalls = 0
         private set
+    var discardInFlightCalls = 0
+        private set
     val seekPositions = mutableListOf<Long>()
 
     /** 最近一次 seek 的序号；ready 回调默认带上它。 */
@@ -81,6 +83,10 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun stop() {
         stopCalls++
+    }
+
+    override fun discardInFlightLoads() {
+        discardInFlightCalls++
     }
 
     override fun seekTo(positionMillis: Long): Int {

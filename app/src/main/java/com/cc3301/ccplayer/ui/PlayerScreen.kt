@@ -266,8 +266,9 @@ fun PlayerScreen(
 
     // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
     LaunchedEffect(switching, initialLoading) {
+        // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
+        controls.onInteraction()
         if (switching || initialLoading) {
-            controls.onInteraction()
             playlistVisible = false
             subtitleMenuVisible = false
             moreVisible = false
@@ -277,12 +278,14 @@ fun PlayerScreen(
     LaunchedEffect(panelOpen) {
         controls.updatePanelOpen(panelOpen)
     }
-    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis) {
+    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
+        // 加载全程不自动隐藏，避免切集超过 3 秒时控制条消失。
+        val holdVisible = switching || initialLoading
         while (controls.visible && !controls.panelOpen) {
-            val remaining = controls.millisUntilAutoHide()
+            val remaining = controls.millisUntilAutoHide(holdVisible)
             if (remaining < 0L) break
             if (remaining == 0L) {
-                controls.hideIfExpired()
+                controls.hideIfExpired(holdVisible)
                 break
             }
             delay(remaining)
@@ -375,13 +378,17 @@ fun PlayerScreen(
         seekHint?.let { hint ->
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
-        // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。切集期间不响应。
+        // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
+        // 首次加载与目标加载期间不响应；恢复期放行点按以便解锁后使用播放/暂停。
         if (locked) {
             val lockedHint = stringResource(R.string.player_screen_locked_hint)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable({ lock.tapScreen() }, enabled = !switching)
+                    .noRippleClickable(
+                        { lock.tapScreen() },
+                        enabled = restoring || (!switching && !initialLoading),
+                    )
                     .semantics { contentDescription = lockedHint },
             )
         }

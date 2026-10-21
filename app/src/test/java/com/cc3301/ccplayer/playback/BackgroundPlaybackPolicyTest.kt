@@ -164,6 +164,25 @@ class BackgroundPlaybackPolicyTest {
     }
 
     @Test
+    fun `服务下发链路先按加载阶段过滤再按后台策略过滤`() {
+        policy.setAppInForeground(true)
+        val applied = mutableListOf<MediaSessionAction>()
+
+        MediaSessionAction.entries.forEach { action ->
+            dispatchMediaAction(
+                action,
+                state = PlaybackState.Loading,
+                switching = true,
+                restoring = false,
+            ) { allowedAction ->
+                policy.dispatch(allowedAction) { passed -> applied += passed }
+            }
+        }
+
+        assertEquals(listOf(MediaSessionAction.Previous, MediaSessionAction.Next), applied)
+    }
+
+    @Test
     fun `恢复原片期间通知栏保留上下集与播放暂停`() {
         policy.setAppInForeground(true)
 
