@@ -120,6 +120,8 @@ data class LibraryState(
     val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
     /** "进入目录时自动回到上次停留的位置"开关，默认开。 */
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
+    /** 进程恢复的目录首次读取按位置记录定位，不受位置记忆开关影响。 */
+    val restorePositionForced: Boolean = false,
     /** 当前目录已保存的位置记录；没有记录时为 null。 */
     val savedPosition: DirectoryPosition? = null,
     /** 本次要滚动到的条目与偏移；空目录时为 null。 */
@@ -188,7 +190,11 @@ data class LibraryState(
 
     /** 按当前可见次序重新计算滚动目标并递增序号。 */
     private fun retargeted(): LibraryState = copy(
-        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, autoRestorePosition),
+        scrollTarget = directoryScrollTarget(
+            visibleEntries,
+            savedPosition,
+            autoRestorePosition || restorePositionForced,
+        ),
         scrollRevision = scrollRevision + 1,
     )
 
@@ -197,6 +203,7 @@ data class LibraryState(
         scrollTarget = if (visibleEntries.isEmpty()) null else DirectoryScrollTarget(index = 0, offset = 0),
         scrollRevision = scrollRevision + 1,
         pendingScrollToTop = pendingWhileLoading,
+        restorePositionForced = false,
         savedPosition = if (pendingWhileLoading) {
             savedPosition
         } else {
@@ -402,6 +409,7 @@ class LibraryViewModel(
                 savedPosition = null,
                 scrollTarget = null,
                 pendingScrollToTop = false,
+                restorePositionForced = false,
             )
         }
         persistDirectoryStack()
@@ -409,7 +417,13 @@ class LibraryViewModel(
     }
 
     fun enter(directory: MediaFile) {
-        _state.update { it.copy(stack = it.stack + directory, entries = emptyList()) }
+        _state.update {
+            it.copy(
+                stack = it.stack + directory,
+                entries = emptyList(),
+                restorePositionForced = false,
+            )
+        }
         persistDirectoryStack()
         load(directory)
     }
@@ -419,7 +433,13 @@ class LibraryViewModel(
         val stack = _state.value.stack
         if (stack.size <= 1) return
         val parent = stack.dropLast(1).last()
-        _state.update { it.copy(stack = stack.dropLast(1), entries = emptyList()) }
+        _state.update {
+            it.copy(
+                stack = stack.dropLast(1),
+                entries = emptyList(),
+                restorePositionForced = false,
+            )
+        }
         persistDirectoryStack()
         load(parent)
     }
@@ -574,6 +594,7 @@ class LibraryViewModel(
                 savedPosition = null,
                 scrollTarget = null,
                 pendingScrollToTop = false,
+                restorePositionForced = true,
             )
         }
         load(stack.last())

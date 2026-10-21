@@ -134,4 +134,34 @@ class NavigationViewModelTest {
         recreated.closeSettings()
         assertEquals(AppScreen.Library, recreated.state.value.screen)
     }
+
+    @Test
+    fun `进程回收后设置页返回源列表`() {
+        navigation.openProtocol(SourceProtocol.Smb)
+        navigation.openSettings()
+
+        val restored = restoredNavigation()
+
+        assertEquals(AppScreen.Settings, restored.state.value.screen)
+
+        restored.closeSettings()
+        assertEquals(AppScreen.Sources, restored.state.value.screen)
+        assertEquals(SourceProtocol.Smb, restored.state.value.sourcesProtocol)
+    }
+
+    /**
+     * 模拟进程回收：新建句柄并深拷贝列表值。
+     * 直接构造 SavedStateHandle 不经过 Bundle 序列化，只覆盖键值进入恢复路径。
+     */
+    private fun restoredNavigation(): NavigationViewModel {
+        val restored = SavedStateHandle(
+            savedState.keys().associateWith { key ->
+                when (val value = savedState.get<Any?>(key)) {
+                    is ArrayList<*> -> ArrayList(value)
+                    else -> value
+                }
+            },
+        )
+        return NavigationViewModel(restored) { now }
+    }
 }

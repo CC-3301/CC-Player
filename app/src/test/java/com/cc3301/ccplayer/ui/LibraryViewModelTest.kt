@@ -736,6 +736,37 @@ class LibraryViewModelTest {
     }
 
     @Test
+    fun `关闭位置记忆后进程回收仍恢复浏览位置`() = runTest {
+        val series = testDirectory("剧集", "smb://nas/media/剧集")
+        tree.addDirectory(smbRoot, series)
+        tree.addDirectory(
+            series,
+            testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"),
+            testVideo("第02集.mkv", "smb://nas/media/剧集/第02集.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.enter(series)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "剧集", "smb://nas/media/剧集/第02集.mkv", 36)
+        advanceUntilIdle()
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+
+        val restored = createViewModel(state = restoredHandle())
+        advanceUntilIdle()
+
+        assertEquals(listOf("nas", "剧集"), restored.state.value.stack.map { it.name })
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+
+        restored.openSource(restored.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+    }
+
+    @Test
     fun `离开库页面时记录当前位置作为返回后的目标`() = runTest {
         tree.addDirectory(
             smbRoot,
