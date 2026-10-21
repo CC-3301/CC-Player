@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class NetworkPreviewExtractorTest {
@@ -23,7 +24,7 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `网络取图成功时返回解码结果并关闭句柄`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { opened, kind ->
+        val extractor = NetworkPreviewExtractor(reads) { opened, kind, _ ->
             askedKind = kind
             ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
         }
@@ -36,9 +37,22 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `网络取图使用调用方的目标宽度`() = runTest {
+        var askedWidth: Int? = null
+        val extractor = NetworkPreviewExtractor(reads) { _, _, width ->
+            askedWidth = width
+            ByteArray(1)
+        }
+
+        extractor.imageBytes(movie, targetWidth = 320)
+
+        assertEquals(320, askedWidth)
+    }
+
+    @Test
     fun `音频按内嵌封面取图`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { _, kind ->
+        val extractor = NetworkPreviewExtractor(reads) { _, kind, _ ->
             askedKind = kind
             ByteArray(2)
         }
@@ -50,23 +64,33 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
-    fun `解码抛异常时返回空并关闭句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _ -> error("解码失败") }
+    fun `解码抛异常时向调用方抛出并关闭句柄`() = runTest {
+        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> error("解码失败") }
 
-        assertNull(extractor.imageBytes(movie))
+        try {
+            extractor.imageBytes(movie)
+            fail("应抛出解码异常")
+        } catch (expected: IllegalStateException) {
+            // 预期失败路径。
+        }
         assertTrue(source.closed)
     }
 
     @Test
-    fun `打开句柄失败时返回空`() = runTest {
-        val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _ -> ByteArray(1) }
+    fun `打开句柄失败时向调用方抛出`() = runTest {
+        val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _, _ -> ByteArray(1) }
 
-        assertNull(extractor.imageBytes(movie))
+        try {
+            extractor.imageBytes(movie)
+            fail("应抛出打开失败")
+        } catch (expected: IllegalStateException) {
+            // 预期失败路径。
+        }
     }
 
     @Test
     fun `非媒体文件不打开句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _ -> ByteArray(1) }
+        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> ByteArray(1) }
 
         assertNull(extractor.imageBytes(movie.copy(name = "说明.txt")))
         assertTrue(reads.opened.isEmpty())
