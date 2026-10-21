@@ -41,8 +41,9 @@ internal data class FramePosition(val micros: Long, val fallback: Boolean)
  * 时长未知时也取多个固定位置，最后一个兜底。
  */
 internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePosition> {
-    if (durationMillis <= 0 || frameCount <= 0) {
-        val count = frameCount.coerceIn(1, UNKNOWN_DURATION_POSITIONS_MICROS.size)
+    if (frameCount <= 0) return emptyList()
+    if (durationMillis <= 0) {
+        val count = frameCount.coerceAtMost(UNKNOWN_DURATION_POSITIONS_MICROS.size)
         return UNKNOWN_DURATION_POSITIONS_MICROS.take(count).mapIndexed { index, micros ->
             FramePosition(micros, fallback = index == count - 1)
         }
@@ -61,6 +62,13 @@ internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePo
     }.distinctBy { it.micros }
 }
 
+/** 按位置解码候选帧；解不出的位置直接丢弃。 */
+internal fun <T> decodedFrames(
+    positions: List<FramePosition>,
+    decode: (FramePosition) -> T?,
+): List<Pair<FramePosition, T>> =
+    positions.mapNotNull { position -> decode(position)?.let { frame -> position to frame } }
+
 /** 优先返回第一帧非纯色帧；全部纯色时退回兜底帧。 */
 internal fun <T> chooseFrame(frames: List<Pair<FramePosition, T>>, isSolid: (T) -> Boolean): T? =
     frames.firstOrNull { (_, frame) -> !isSolid(frame) }?.second
@@ -72,9 +80,12 @@ internal fun isSolidLuminance(luminances: IntArray): Boolean {
     return luminances.max() - luminances.min() < SOLID_LUMINANCE_RANGE
 }
 
+/** 策略目标宽度的有效值；低于下限时按 320 输出，缓存键也必须用这个值。 */
+internal fun effectiveTargetWidth(targetWidth: Int): Int =
+    targetWidth.coerceIn(THUMBNAIL_MIN_WIDTH, THUMBNAIL_MAX_WIDTH)
+
 /** 缩放后的宽度：输出钳在 320–512，源图更窄时放大到下限。 */
 internal fun targetFrameWidth(originalWidth: Int, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): Int {
     if (originalWidth <= 0) return 0
-    val upperBound = targetWidth.coerceIn(THUMBNAIL_MIN_WIDTH, THUMBNAIL_MAX_WIDTH)
-    return originalWidth.coerceIn(THUMBNAIL_MIN_WIDTH, upperBound)
+    return originalWidth.coerceIn(THUMBNAIL_MIN_WIDTH, effectiveTargetWidth(targetWidth))
 }

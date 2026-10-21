@@ -44,6 +44,20 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
+    fun `帧数为零时不返回位置`() {
+        assertTrue(framePositions(100_000, 0).isEmpty())
+        assertTrue(framePositions(0, 0).isEmpty())
+    }
+
+    @Test
+    fun `所有候选解码失败时没有可用帧`() {
+        val decoded = decodedFrames<Int>(framePositions(100_000, LOCAL_FRAME_COUNT)) { null }
+
+        assertTrue(decoded.isEmpty())
+        assertNull(chooseFrame(decoded) { false })
+    }
+
+    @Test
     fun `纯黑与亮度差很小的帧判为纯色`() {
         assertTrue(isSolidLuminance(intArrayOf(0, 0, 0, 0)))
         assertTrue(isSolidLuminance(intArrayOf(120, 128, 124, 126)))
@@ -90,5 +104,7 @@ class ThumbnailFramePolicyTest {
         assertEquals(320, targetFrameWidth(300))
         assertEquals(320, targetFrameWidth(100))
         assertEquals(320, targetFrameWidth(1920, targetWidth = 320))
+        assertEquals(320, effectiveTargetWidth(100))
+        assertEquals(512, effectiveTargetWidth(1_000))
     }
 }

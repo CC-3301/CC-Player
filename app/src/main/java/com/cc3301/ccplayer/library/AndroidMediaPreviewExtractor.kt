@@ -126,15 +126,11 @@ private class RangeMediaDataSource(private val source: ByteSource) : MediaDataSo
 /** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
 private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray? {
     val duration = durationMillis(retriever) ?: 0
-    val decoded = framePositions(duration, frameCount).mapNotNull { position ->
+    val decoded = decodedFrames(framePositions(duration, frameCount)) { position ->
         retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            ?.let { frame -> position to scaleFrame(frame, targetWidth) }
-    }
-    var chosen = chooseFrame(decoded, ::isSolidFrame)
-    if (chosen == null) {
-        chosen = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             ?.let { frame -> scaleFrame(frame, targetWidth) }
     }
+    val chosen = chooseFrame(decoded, ::isSolidFrame)
     decoded.forEach { (_, frame) ->
         if (frame !== chosen) frame.recycle()
     }
@@ -146,7 +142,7 @@ private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, 
 private fun durationMillis(retriever: MediaMetadataRetriever): Long? =
     retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
 
-/** 缩到目标宽度；小图保持原样。 */
+/** 按 320–512 的输出宽度缩放；宽度已相同时不重建位图。 */
 private fun scaleFrame(frame: Bitmap, targetWidth: Int): Bitmap {
     val width = targetFrameWidth(frame.width, targetWidth)
     if (width <= 0 || width == frame.width) return frame

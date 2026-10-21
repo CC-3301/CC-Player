@@ -84,12 +84,20 @@ class CachedMediaPreviewSource(
         val loaded = cachedOrLoad(
             key = key,
             maxAgeMillis = maxAge,
-            onCacheHit = { cached -> LoadedPreview(cached, localDuration(file)) },
+            onCacheHit = { cached ->
+                LoadedPreview(
+                    image = cached.file,
+                    durationMillis = if (cached.durationKnown) cached.durationMillis else localDuration(file),
+                )
+            },
             load = {
                 val extracted = localPermits.withPermit { extractor.imageAndDuration(file) }
+                // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
                 currentCoroutineContext().ensureActive()
                 LoadedPreview(
-                    image = extracted.imageBytes?.let { bytes -> cache.save(key, bytes, maxAge) },
+                    image = extracted.imageBytes?.let { bytes ->
+                        cache.save(key, bytes, durationMillis = extracted.durationMillis)
+                    },
                     durationMillis = extracted.durationMillis,
                 )
             },
@@ -97,15 +105,21 @@ class CachedMediaPreviewSource(
         return MediaPreview(loaded.image, loaded.durationMillis)
     }
 
-    private suspend fun localDuration(file: MediaFile): Long? =
+    /** 时长读取失败只影响角标，不影响已命中的图片。 */
+    private suspend fun localDuration(file: MediaFile): Long? = try {
         localPermits.withPermit { extractor.durationMillis(file) }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Exception) {
+        null
+    }
 
     private suspend fun networkImage(file: MediaFile, key: String): File? {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             key = key,
             maxAgeMillis = maxAge,
-            onCacheHit = { cached -> LoadedPreview(cached, durationMillis = null) },
+            onCacheHit = { cached -> LoadedPreview(cached.file, durationMillis = null) },
             load = {
                 val bytes = try {
                     networkPermits.withPermit {
@@ -117,8 +131,9 @@ class CachedMediaPreviewSource(
                 } catch (failure: Exception) {
                     null
                 }
+                // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
                 currentCoroutineContext().ensureActive()
-                LoadedPreview(bytes?.let { cache.save(key, it, maxAge) }, durationMillis = null)
+                LoadedPreview(bytes?.let { cache.save(key, it) }, durationMillis = null)
             },
         )
         return loaded.image
@@ -136,7 +151,7 @@ class CachedMediaPreviewSource(
     private suspend fun cachedOrLoad(
         key: String,
         maxAgeMillis: Long?,
-        onCacheHit: suspend (File) -> LoadedPreview,
+        onCacheHit: suspend (CachedThumbnail) -> LoadedPreview,
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
         while (true) {
@@ -152,7 +167,7 @@ class CachedMediaPreviewSource(
             if (inFlight.putIfAbsent(key, mine) != null) continue
             try {
                 val loaded = try {
-                    cache.file(key, maxAgeMillis)?.let { cached -> onCacheHit(cached) } ?: load()
+                    cache.entry(key, maxAgeMillis)?.let { cached -> onCacheHit(cached) } ?: load()
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
@@ -164,6 +179,8 @@ class CachedMediaPreviewSource(
                 mine.cancel(cancellation)
                 throw cancellation
             } finally {
+                // 抽取抛 Error 或其它未被捕获的异常时也要唤醒等待者，不能留下永远未完成的 Deferred。
+                if (!mine.isCompleted) mine.cancel(CancellationException("预览抽取未完成"))
                 inFlight.remove(key, mine)
             }
         }
@@ -188,7 +205,11 @@ class CachedMediaPreviewSource(
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
             return CachedMediaPreviewSource(
-                extractor = AndroidMediaPreviewExtractor(appContext, networkReads, policy.targetWidth),
+                extractor = AndroidMediaPreviewExtractor(
+                    appContext,
+                    networkReads,
+                    effectiveTargetWidth(policy.targetWidth),
+                ),
                 cache = ThumbnailCache(appContext.filesDir.resolve("thumbnails"), CACHE_BYTES),
                 policy = policy,
             )
@@ -201,7 +222,7 @@ class CachedMediaPreviewSource(
  * 修改时间缺失时用有效期代替修改时间；有效期变化必须视为另一份缓存。
  */
 internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String {
-    val base = "${file.location}|${file.size}|v${policy.version}|w${policy.targetWidth}"
+    val base = "${file.location}|${file.size}|v${policy.version}|w${effectiveTargetWidth(policy.targetWidth)}"
     return if (file.lastModified > 0) {
         "$base|m${file.lastModified}"
     } else {

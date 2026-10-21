@@ -44,7 +44,7 @@ class ThumbnailCacheTest {
         val second = cache.save("content://root/b.mkv", ByteArray(4))
 
         assertNotEquals(first.name, second.name)
-        assertEquals(2, directory.listFiles()!!.size)
+        assertEquals(2, imageFileCount())
     }
 
     @Test
@@ -73,7 +73,7 @@ class ThumbnailCacheTest {
     @Test
     fun `带有效期的条目从写入起算`() {
         now = 1_000L
-        cache.save("content://root/a.mkv", ByteArray(4), maxAgeMillis = 500)
+        cache.save("content://root/a.mkv", ByteArray(4))
 
         now = 1_499L
         assertNotNull(cache.file("content://root/a.mkv", maxAgeMillis = 500))
@@ -83,12 +83,49 @@ class ThumbnailCacheTest {
     }
 
     @Test
+    fun `元数据记录时长`() {
+        cache.save("content://root/a.mkv", ByteArray(4), durationMillis = 187_000)
+
+        val entry = cache.entry("content://root/a.mkv")
+
+        assertNotNull(entry)
+        assertEquals(187_000L, entry!!.durationMillis)
+        assertTrue(entry.durationKnown)
+    }
+
+    @Test
+    fun `淘汰条目时一并删除元数据`() {
+        cache.save("content://root/a.mkv", ByteArray(8))
+        now = 2_000L
+        cache.save("content://root/b.mkv", ByteArray(8))
+
+        assertEquals(1, imageFileCount())
+        assertEquals(1, metadataFileCount())
+    }
+
+    @Test
+    fun `清理没有对应图片的孤儿元数据`() {
+        val orphan = File(directory, "orphan.img.meta")
+        orphan.writeText("1")
+
+        cache.save("content://root/a.mkv", ByteArray(4))
+
+        assertTrue(!orphan.exists())
+    }
+
+    @Test
     fun `再次写入同一位置覆盖旧内容`() {
         cache.save("content://root/a.mkv", ByteArray(4))
 
         val overwritten = cache.save("content://root/a.mkv", byteArrayOf(1, 2, 3))
 
-        assertEquals(1, directory.listFiles()!!.size)
+        assertEquals(1, imageFileCount())
         assertEquals(3L, overwritten.length())
     }
+
+    private fun imageFileCount(): Int =
+        directory.listFiles().orEmpty().count { file -> file.name.endsWith(".img") }
+
+    private fun metadataFileCount(): Int =
+        directory.listFiles().orEmpty().count { file -> file.name.endsWith(".meta") }
 }
