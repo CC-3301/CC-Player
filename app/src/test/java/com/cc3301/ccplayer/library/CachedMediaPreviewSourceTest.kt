@@ -145,14 +145,118 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `修改时间缺失的网络条目不读也不写缓存`() = runTest {
+    fun `修改时间缺失时按大小与有效期缓存`() = runTest {
+        var now = 0L
+        val fallback = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            clock = { now },
+        )
         extractor.imageBytes = byteArrayOf(1)
 
-        val preview = source.preview(network("电影.mkv", lastModified = 0))
+        val first = fallback.preview(network("电影.mkv", lastModified = 0))
+        val second = fallback.preview(network("电影.mkv", lastModified = 0))
 
-        assertNull(preview.image)
-        assertTrue(extractor.imageRequests.isEmpty())
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertNotNull(first.image)
+        assertEquals(first.image, second.image)
+        assertEquals(1, extractor.imageRequests.size)
+        assertEquals(1, directory.listFiles()!!.size)
+
+        now = MISSING_MODIFIED_VALIDITY_MILLIS
+        extractor.imageBytes = byteArrayOf(2)
+        val expired = fallback.preview(network("电影.mkv", lastModified = 0))
+
+        assertArrayEquals(byteArrayOf(2), expired.image!!.readBytes())
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `缓存键包含文件大小，大小变化后重新抽取`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        source.preview(local("电影.mkv", size = 100))
+        extractor.imageBytes = byteArrayOf(2)
+
+        val changed = source.preview(local("电影.mkv", size = 200))
+
+        assertArrayEquals(byteArrayOf(2), changed.image!!.readBytes())
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `缓存键包含抽帧策略版本`() = runTest {
+        val first = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(version = 1),
+        )
+        val second = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(version = 2),
+        )
+        extractor.imageBytes = byteArrayOf(1)
+
+        first.preview(local("电影.mkv"))
+        second.preview(local("电影.mkv"))
+
+        assertEquals(2, extractor.imageRequests.size)
+        assertEquals(2, directory.listFiles()!!.size)
+    }
+
+    @Test
+    fun `缓存键包含目标宽度`() = runTest {
+        val first = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(targetWidth = 320),
+        )
+        val second = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20),
+            policy = ThumbnailPolicy(targetWidth = 512),
+        )
+        extractor.imageBytes = byteArrayOf(1)
+
+        first.preview(local("电影.mkv"))
+        second.preview(local("电影.mkv"))
+
+        assertEquals(2, extractor.imageRequests.size)
+        assertEquals(2, directory.listFiles()!!.size)
+    }
+
+    @Test
+    fun `同一媒体并发请求只抽取一次`() = runTest {
+        val tracker = ConcurrentExtractor()
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+
+        val previews = (1..5).map { async { bounded.preview(network("电影.mkv")) } }
+        val results = previews.awaitAll()
+
+        assertEquals(1, tracker.requests)
+        assertTrue(results.all { it.image != null })
+    }
+
+    @Test
+    fun `同一媒体并发请求失败时也只抽取一次`() = runTest {
+        val tracker = ConcurrentExtractor(failure = MediaSourceException(MediaFailure.Unreachable, "连不上"))
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+
+        val results = (1..5).map { async { bounded.preview(network("电影.mkv")) } }.awaitAll()
+
+        assertEquals(1, tracker.requests)
+        assertTrue(results.all { it.image == null })
+    }
+
+    @Test
+    fun `本地并发提取不超过 2`() = runTest {
+        val tracker = ConcurrentExtractor()
+        val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20))
+
+        val previews = (1..10).map { index -> async { bounded.preview(local("第$index 集.mkv")) } }
+        previews.awaitAll()
+
+        assertTrue(tracker.maxConcurrent <= 2)
+        assertEquals(10, tracker.requests)
     }
 
     @Test
@@ -213,7 +317,8 @@ class CachedMediaPreviewSourceTest {
         assertTrue(extractor.imageRequests.isEmpty())
     }
 
-    private fun local(name: String) = MediaFile(name = name, location = "root/$name")
+    private fun local(name: String, size: Long = 0) =
+        MediaFile(name = name, location = "root/$name", size = size)
 
     private fun network(name: String, lastModified: Long = 1_700_000_000_000) = networkAt(name, lastModified)
 
@@ -239,8 +344,8 @@ private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPrevie
     override suspend fun durationMillis(file: MediaFile): Long? = null
 }
 
-/** 记录同时进行的抽图数，用来验证并发上限。 */
-private class ConcurrentExtractor : MediaPreviewExtractor {
+/** 记录同时进行的抽图数，用来验证并发上限；可注入失败。 */
+private class ConcurrentExtractor(private val failure: Exception? = null) : MediaPreviewExtractor {
 
     var requests = 0
     var concurrent = 0
@@ -251,6 +356,10 @@ private class ConcurrentExtractor : MediaPreviewExtractor {
         concurrent++
         maxConcurrent = maxOf(maxConcurrent, concurrent)
         yield()
+        failure?.let { problem ->
+            concurrent--
+            throw problem
+        }
         concurrent--
         return byteArrayOf(1)
     }

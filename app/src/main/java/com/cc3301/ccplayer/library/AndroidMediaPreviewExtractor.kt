@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import androidx.core.graphics.get
+import androidx.core.graphics.scale
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
@@ -12,7 +14,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Android 取图实现：视频取首帧附近的一帧，音频取文件内嵌封面（mp3 ID3 APIC / flac PICTURE / m4a covr 等）。
+ * Android 取图实现：视频按比例抽帧并跳过纯黑/纯色帧，音频取文件内嵌封面
+ * （mp3 ID3 APIC / flac PICTURE / m4a covr 等）。
  *
  * 本地条目交给系统按 Uri 读；网络条目经随机读句柄交给解码器，按需读取字节范围，不整文件下载。
  * 目录条目不经过这里。
@@ -20,10 +23,11 @@ import kotlinx.coroutines.withContext
 class AndroidMediaPreviewExtractor(
     private val context: Context,
     networkReads: NetworkMediaReads? = null,
+    private val targetWidth: Int = THUMBNAIL_TARGET_WIDTH,
 ) : MediaPreviewExtractor {
 
     private val networkPreview = networkReads?.let { reads ->
-        NetworkPreviewExtractor(reads, AndroidNetworkPreviewDecoder())
+        NetworkPreviewExtractor(reads, AndroidNetworkPreviewDecoder(targetWidth))
     }
 
     override suspend fun imageBytes(file: MediaFile): ByteArray? = withContext(Dispatchers.IO) {
@@ -32,7 +36,7 @@ class AndroidMediaPreviewExtractor(
         }
         withRetriever(file) { retriever ->
             when (mediaKindOf(file.name)) {
-                MediaKind.Video -> frameBytes(retriever)
+                MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
                 MediaKind.Audio -> retriever.embeddedPicture
                 null -> null
             }
@@ -43,11 +47,32 @@ class AndroidMediaPreviewExtractor(
         // 网络条目不显示时长角标（ADR-0017）。
         if (file.source != MediaSource.Local) return null
         return withContext(Dispatchers.IO) {
-            withRetriever(file) { retriever ->
-                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-            }
+            withRetriever(file) { retriever -> durationMillis(retriever) }
         }
     }
+
+    /** 本地文件一次打开读取器，同时取时长与预览图。 */
+    override suspend fun imageAndDuration(file: MediaFile): MediaPreviewExtraction =
+        withContext(Dispatchers.IO) {
+            if (file.source == MediaSource.Network) {
+                return@withContext MediaPreviewExtraction(networkPreview?.imageBytes(file), null)
+            }
+            withRetriever(file) { retriever ->
+                when (mediaKindOf(file.name)) {
+                    MediaKind.Video -> MediaPreviewExtraction(
+                        imageBytes = videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth),
+                        durationMillis = durationMillis(retriever),
+                    )
+
+                    MediaKind.Audio -> MediaPreviewExtraction(
+                        imageBytes = retriever.embeddedPicture,
+                        durationMillis = durationMillis(retriever),
+                    )
+
+                    null -> MediaPreviewExtraction(imageBytes = null, durationMillis = durationMillis(retriever))
+                }
+            } ?: MediaPreviewExtraction(imageBytes = null, durationMillis = null)
+        }
 
     private fun <T> withRetriever(file: MediaFile, block: (MediaMetadataRetriever) -> T): T? {
         val retriever = MediaMetadataRetriever()
@@ -65,7 +90,7 @@ class AndroidMediaPreviewExtractor(
 }
 
 /** 网络解码：把随机读句柄包成系统数据源，交给 MediaMetadataRetriever 取图。 */
-private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
+private class AndroidNetworkPreviewDecoder(private val targetWidth: Int) : NetworkPreviewDecoder {
 
     override fun imageBytes(source: ByteSource, kind: MediaKind): ByteArray? {
         val retriever = MediaMetadataRetriever()
@@ -73,7 +98,7 @@ private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
         return try {
             retriever.setDataSource(dataSource)
             when (kind) {
-                MediaKind.Video -> frameBytes(retriever)
+                MediaKind.Video -> videoFrameBytes(retriever, NETWORK_FRAME_COUNT, targetWidth)
                 MediaKind.Audio -> retriever.embeddedPicture
             }
         } catch (unreadable: Exception) {
@@ -98,16 +123,63 @@ private class RangeMediaDataSource(private val source: ByteSource) : MediaDataSo
     }
 }
 
-/** 抽帧位置取首帧附近：起始处常是黑场。 */
-private const val FRAME_POSITION_MICROS = 1_000_000L
-private const val FRAME_QUALITY = 85
-
-private fun frameBytes(retriever: MediaMetadataRetriever): ByteArray? {
-    val frame = retriever.getFrameAtTime(FRAME_POSITION_MICROS, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        ?: retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-        ?: return null
-    return ByteArrayOutputStream().use { output ->
-        frame.compress(Bitmap.CompressFormat.JPEG, FRAME_QUALITY, output)
-        output.toByteArray()
+/** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
+private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray? {
+    val duration = durationMillis(retriever) ?: 0
+    val decoded = framePositions(duration, frameCount).mapNotNull { position ->
+        retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            ?.let { frame -> position to scaleFrame(frame, targetWidth) }
     }
+    var chosen = chooseFrame(decoded, ::isSolidFrame)
+    if (chosen == null) {
+        chosen = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            ?.let { frame -> scaleFrame(frame, targetWidth) }
+    }
+    decoded.forEach { (_, frame) ->
+        if (frame !== chosen) frame.recycle()
+    }
+    return chosen?.let { frame ->
+        compressFrame(frame).also { frame.recycle() }
+    }
+}
+
+private fun durationMillis(retriever: MediaMetadataRetriever): Long? =
+    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+
+/** 缩到目标宽度；小图保持原样。 */
+private fun scaleFrame(frame: Bitmap, targetWidth: Int): Bitmap {
+    val width = targetFrameWidth(frame.width, targetWidth)
+    if (width <= 0 || width == frame.width) return frame
+    val height = maxOf(1, (frame.height.toLong() * width / frame.width).toInt())
+    return frame.scale(width, height, filter = true).also { frame.recycle() }
+}
+
+private fun compressFrame(frame: Bitmap): ByteArray? = ByteArrayOutputStream().use { output ->
+    if (frame.compress(Bitmap.CompressFormat.JPEG, THUMBNAIL_JPEG_QUALITY, output)) {
+        output.toByteArray()
+    } else {
+        null
+    }
+}
+
+/** 在缩略图上按网格采样亮度，亮度差太小视为纯色。 */
+private fun isSolidFrame(frame: Bitmap): Boolean {
+    if (frame.width <= 0 || frame.height <= 0) return true
+    val columns = 16
+    val rows = 16
+    val luminances = IntArray(columns * rows) { index ->
+        val column = index % columns
+        val row = index / columns
+        val x = column * (frame.width - 1) / (columns - 1)
+        val y = row * (frame.height - 1) / (rows - 1)
+        luminance(frame[x, y])
+    }
+    return isSolidLuminance(luminances)
+}
+
+private fun luminance(pixel: Int): Int {
+    val red = (pixel shr 16) and 0xFF
+    val green = (pixel shr 8) and 0xFF
+    val blue = pixel and 0xFF
+    return (red * 299 + green * 587 + blue * 114) / 1000
 }

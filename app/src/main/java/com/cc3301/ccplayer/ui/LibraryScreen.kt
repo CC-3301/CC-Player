@@ -48,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -67,6 +68,7 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreview
 import com.cc3301.ccplayer.library.MediaPreviewSource
+import com.cc3301.ccplayer.library.PreviewPrefetcher
 import com.cc3301.ccplayer.library.SortOrder
 import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.library.relativeDirectoryPath
@@ -75,6 +77,7 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
 
 /**
@@ -102,6 +105,34 @@ fun LibraryScreen(
     val latestSavePosition by rememberUpdatedState(onSavePosition)
     val sourceLocation = state.sourceLocation
     val relativePath = relativeDirectoryPath(state.stack)
+
+    // 可见项由各自条目立即请求；前后各一行的条目延迟预取，离开范围就取消。
+    val previewScope = rememberCoroutineScope()
+    val prefetcher = remember(mediaPreview, previewScope) { PreviewPrefetcher(mediaPreview, previewScope) }
+    DisposableEffect(prefetcher) {
+        onDispose { prefetcher.cancelAll() }
+    }
+    LaunchedEffect(
+        state.currentDirectory?.location,
+        state.viewMode,
+        state.gridColumns,
+        state.visibleEntries,
+    ) {
+        val entries = state.visibleEntries
+        val rowSize = if (state.viewMode == ViewMode.List) 1 else state.gridColumns
+        prefetcher.cancelAll()
+        snapshotFlow {
+            if (state.viewMode == ViewMode.List) {
+                val visible = listState.layoutInfo.visibleItemsInfo
+                if (visible.isEmpty()) null else visible.first().index to visible.last().index
+            } else {
+                val visible = gridState.layoutInfo.visibleItemsInfo
+                if (visible.isEmpty()) null else visible.first().index to visible.last().index
+            }
+        }.collect { range ->
+            if (range != null) prefetcher.update(entries, range.first, range.second, rowSize)
+        }
+    }
 
     // 目录读完、排序、视图或位置记忆开关变化后，按状态给出的目标定位一次。
     LaunchedEffect(state.scrollRevision) {
