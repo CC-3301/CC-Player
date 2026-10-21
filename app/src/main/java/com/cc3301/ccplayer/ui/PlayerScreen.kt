@@ -101,7 +101,6 @@ import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.playback.customSleepMinutes
-import com.cc3301.ccplayer.playback.isInitialLoading
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
@@ -236,6 +235,7 @@ fun PlayerScreen(
     switching: Boolean,
     restoring: Boolean,
     buffering: Boolean,
+    initialLoading: Boolean,
     freezeFrame: Bitmap?,
     holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
@@ -269,7 +269,6 @@ fun PlayerScreen(
     val locked = lock.locked
     val controlsVisible = controls.visible
     val panelOpen = playlistVisible || subtitleMenuVisible || moreVisible
-    val initialLoading = isInitialLoading(state, switching)
 
     // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
     LaunchedEffect(switching, initialLoading) {
@@ -397,7 +396,8 @@ fun PlayerScreen(
             )
         }
         if (inputAllowed(PlayerInput.ControlBar, locked)) {
-            if (controlsVisible) {
+            // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
+            if (backEntryVisible(controlsVisible, initialLoading)) {
                 PlayerTopBar(
                     title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                     moreVisible = moreVisible,
