@@ -28,8 +28,18 @@ internal class MpvFileEvents {
     /** 显式 stop 之后、下一次 start 之前，所有 END_FILE 都不算播放结果。 */
     private var stopping = false
 
+    /**
+     * 看门狗丢弃死代际后置位：之后迟到的 END_FILE 不改变状态，
+     * 直到下一次 FILE_LOADED 成功，避免死代际的结束把恢复加载判成失败。
+     */
+    private var discardBarrier = false
+
     @get:Synchronized
     val isLoaded: Boolean get() = state == State.Loaded
+
+    /** 是否有被取代文件的 END_FILE 还没消化；此时先到的 FILE_LOADED 一定属于更早代际。 */
+    @get:Synchronized
+    val hasPendingEnds: Boolean get() = pendingEnds > 0
 
     /** 下发新的 loadfile：上一个在途或已加载文件之后会来一次 END_FILE。 */
     @Synchronized
@@ -61,6 +71,7 @@ internal class MpvFileEvents {
         if (stopping || !isTarget) return false
         state = State.Loaded
         eof = false
+        discardBarrier = false
         return true
     }
 
@@ -73,6 +84,8 @@ internal class MpvFileEvents {
     /** 结束事件是否算自然播完；位置到达结尾时兜底 eof 属性未上报。 */
     @Synchronized
     fun onEndFile(atEndByPosition: Boolean): End {
+        // 丢弃死代际后，迟到的结束事件不能作用到恢复加载。
+        if (discardBarrier) return End.Replaced
         if (pendingEnds > 0) {
             pendingEnds--
             return End.Replaced
@@ -88,6 +101,19 @@ internal class MpvFileEvents {
         return if (natural) End.Ended else End.Failed
     }
 
+    /**
+     * 看门狗丢弃死代际：结束计数一并归零，不指望死代际补发 END_FILE；
+     * 之后若真的来了结束事件，用 [discardBarrier] 吞掉。
+     */
+    @Synchronized
+    fun onDiscardInFlight() {
+        state = State.Idle
+        pendingEnds = 0
+        eof = false
+        stopping = false
+        discardBarrier = true
+    }
+
     /** 释放时清空全部代际状态。 */
     @Synchronized
     fun reset() {
@@ -95,6 +121,7 @@ internal class MpvFileEvents {
         pendingEnds = 0
         eof = false
         stopping = false
+        discardBarrier = false
     }
 
     enum class End { Replaced, Ended, Failed }
@@ -203,19 +230,6 @@ internal class MpvLoadQueue {
 internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
 
 /**
- * 先确认 ready 属于当前代际，再占用去重槽。
- * 被取代目标的迟到 ready 如果先占槽，会把当前加载的同类信号吞掉。
- */
-internal fun MpvReadySignals.acceptReadyFor(
-    loads: MpvLoadQueue,
-    needsFrameConfirmation: Boolean,
-): ReadySignal? {
-    val spec = loads.currentLoaded() ?: return null
-    val serial = acceptReady(needsFrameConfirmation) ?: return null
-    return ReadySignal(spec, serial)
-}
-
-/**
  * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
  *
  * seek 命令下发时先登记序号，但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”。
@@ -275,5 +289,88 @@ internal class MpvReadySignals {
         accepted = 0
         lastReconfigSerial = -1
         lastRestartSerial = -1
+    }
+}
+
+/**
+ * 把文件结束判定、加载代际与 ready 序号放在同一临界区：
+ * start 重置序号与 ready 校验占槽不会交错，旧代际 ready 无法占新代际的槽。
+ * 控制层线程调用 start/stop，mpv 事件线程调用其余方法。
+ */
+internal class MpvLoadCoordinator(
+    private val loads: MpvLoadQueue = MpvLoadQueue(),
+    private val fileEvents: MpvFileEvents = MpvFileEvents(),
+    private val readySignals: MpvReadySignals = MpvReadySignals(),
+) {
+
+    @get:Synchronized
+    val isFileLoaded: Boolean get() = fileEvents.isLoaded
+
+    /** 新的 loadfile：重置 ready 序号、登记在途加载。 */
+    @Synchronized
+    fun start(url: String): LoadSpec {
+        fileEvents.onStart()
+        readySignals.onStart()
+        return loads.onStart(url)
+    }
+
+    @Synchronized
+    fun stop() {
+        loads.onStop()
+        fileEvents.onStop()
+    }
+
+    /** 看门狗恢复前丢弃死代际，并归零结束计数，避免吞掉恢复文件的自然结束。 */
+    @Synchronized
+    fun discardInFlight() {
+        loads.discardInFlight()
+        fileEvents.onDiscardInFlight()
+    }
+
+    /**
+     * FILE_LOADED 归属：先看是否还有旧文件的 END_FILE 未消化，再按 mpv path 校验队首。
+     * stop 后同 URL 重开时，迟到的旧 FILE_LOADED 会因待吞结束而先被拒绝。
+     */
+    @Synchronized
+    fun onFileLoaded(path: String?): LoadSpec? {
+        if (fileEvents.hasPendingEnds) return null
+        val spec = loads.takeFileLoaded(path) ?: return null
+        if (!fileEvents.onFileLoaded(isTarget = true)) return null
+        return spec
+    }
+
+    @Synchronized
+    fun onEndFile(atEndByPosition: Boolean): MpvFileEvents.End {
+        val end = fileEvents.onEndFile(atEndByPosition)
+        loads.onEndFile(end == MpvFileEvents.End.Replaced)
+        return end
+    }
+
+    @Synchronized
+    fun onSeekIssued(): Int = readySignals.onSeekIssued()
+
+    @Synchronized
+    fun onSeekEvent() {
+        readySignals.onSeekEvent()
+    }
+
+    @Synchronized
+    fun onEofChanged(value: Boolean) {
+        fileEvents.onEofChanged(value)
+    }
+
+    /** 代际校验与占槽在同一临界区；旧代际 ready 不占当前代际的槽。 */
+    @Synchronized
+    fun acceptReady(needsFrameConfirmation: Boolean): ReadySignal? {
+        val spec = loads.currentLoaded() ?: return null
+        val serial = readySignals.acceptReady(needsFrameConfirmation) ?: return null
+        return ReadySignal(spec, serial)
+    }
+
+    @Synchronized
+    fun reset() {
+        loads.reset()
+        fileEvents.reset()
+        readySignals.reset()
     }
 }

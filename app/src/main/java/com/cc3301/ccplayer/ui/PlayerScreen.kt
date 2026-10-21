@@ -379,16 +379,13 @@ fun PlayerScreen(
             SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
         }
         // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
-        // 首次加载与目标加载期间不响应；恢复期放行点按以便解锁后使用播放/暂停。
+        // 加载期间动作按钮仍由 actionAllowed 禁用；点按只用于解锁，始终放行。
         if (locked) {
             val lockedHint = stringResource(R.string.player_screen_locked_hint)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable(
-                        { lock.tapScreen() },
-                        enabled = restoring || (!switching && !initialLoading),
-                    )
+                    .noRippleClickable({ lock.tapScreen() })
                     .semantics { contentDescription = lockedHint },
             )
         }

@@ -476,6 +476,23 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `leaving before the end restore finishes does not save the finished episode`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(590_000, 600_000)
+        runCurrent()
+
+        engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
+        progress.records.clear()
+
+        controller.stop()
+        runCurrent()
+
+        assertNull(progress.records["root/ep1.mkv"])
+    }
+
+    @Test
     fun `a late FILE_LOADED for the abandoned target is ignored during restore`() = runTest {
         val controller = playingController()
         controller.next()
@@ -1126,6 +1143,7 @@ class PlaybackControllerSwitchTest {
         open(controller, "ep1.mkv")
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
+        runCurrent()
 
         // 续播位置还没查到，不能判定就绪，也不能先起播。
         assertEquals(PlaybackState.Loading, controller.state.value)
