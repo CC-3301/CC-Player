@@ -44,4 +44,46 @@ class ScreenOrientationTest {
             assertEquals(ScreenOrientation.System, resolvedOrientation(OrientationMode.FollowVideo, aspect))
         }
     }
+
+    @Test
+    fun `转屏按钮按当前横竖状态切到另一个方向`() {
+        assertEquals(ScreenOrientation.Portrait, toggledOrientation(isLandscape = true))
+        assertEquals(ScreenOrientation.Landscape, toggledOrientation(isLandscape = false))
+    }
+
+    @Test
+    fun `本次播放的转屏结果优先于方向设置`() {
+        assertEquals(
+            ScreenOrientation.Portrait,
+            playerOrientation(OrientationMode.Landscape, 1.78, ScreenOrientation.Portrait),
+        )
+        assertEquals(
+            ScreenOrientation.Landscape,
+            playerOrientation(OrientationMode.Portrait, 0.56, ScreenOrientation.Landscape),
+        )
+    }
+
+    @Test
+    fun `跟随视频模式下本次播放的转屏结果仍然生效`() {
+        assertEquals(
+            ScreenOrientation.Portrait,
+            playerOrientation(OrientationMode.FollowVideo, 1.78, ScreenOrientation.Portrait),
+        )
+        assertEquals(
+            ScreenOrientation.Landscape,
+            playerOrientation(OrientationMode.FollowVideo, 0.56, ScreenOrientation.Landscape),
+        )
+    }
+
+    @Test
+    fun `没有转屏结果时按设置判定`() {
+        assertEquals(
+            ScreenOrientation.Landscape,
+            playerOrientation(OrientationMode.Landscape, null, null),
+        )
+        assertEquals(
+            ScreenOrientation.Portrait,
+            playerOrientation(OrientationMode.FollowVideo, 0.56, null),
+        )
+    }
 }

@@ -23,3 +23,14 @@ fun resolvedOrientation(mode: OrientationMode, videoAspectRatio: Double?): Scree
             else -> ScreenOrientation.Portrait
         }
     }
+
+/** 播放页朝向：本次播放的转屏结果始终优先（包括跟随视频），没有时按设置判定（ADR-0025）。 */
+fun playerOrientation(
+    mode: OrientationMode,
+    videoAspectRatio: Double?,
+    rotationOverride: ScreenOrientation?,
+): ScreenOrientation = rotationOverride ?: resolvedOrientation(mode, videoAspectRatio)
+
+/** 转屏按钮：按当前是否为横屏给出另一个方向。 */
+fun toggledOrientation(isLandscape: Boolean): ScreenOrientation =
+    if (isLandscape) ScreenOrientation.Portrait else ScreenOrientation.Landscape
