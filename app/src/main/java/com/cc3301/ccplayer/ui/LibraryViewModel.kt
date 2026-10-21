@@ -120,6 +120,8 @@ data class LibraryState(
     val sortOrder: SortOrder = SettingsRepository.DEFAULT_SORT_ORDER,
     /** "进入目录时自动回到上次停留的位置"开关，默认开。 */
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
+    /** 进程恢复的目录首次读取按位置记录定位，不受位置记忆开关影响。 */
+    val restorePositionForced: Boolean = false,
     /** 当前目录已保存的位置记录；没有记录时为 null。 */
     val savedPosition: DirectoryPosition? = null,
     /** 本次要滚动到的条目与偏移；空目录时为 null。 */
@@ -137,19 +139,24 @@ data class LibraryState(
     /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
-    /** 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。 */
+    /**
+     * 套用展示偏好：排序变化回到顶部；切换视图始终按位置记录定位；
+     * 首次套用偏好时若有取值变化，按实际开关重算一次。
+     * 之后就地切换开关不改变当前目录已定的滚动目标。
+     */
     fun withDisplayPreferences(
         viewMode: ViewMode,
         gridColumns: Int,
         sortOrder: SortOrder,
         autoRestorePosition: Boolean,
         sortChangeScrollsToTop: Boolean = true,
+        recomputePositionOnFirstApply: Boolean = false,
     ): LibraryState {
-        val changed = viewMode != this.viewMode ||
-            gridColumns != this.gridColumns ||
+        val viewChanged = viewMode != this.viewMode || gridColumns != this.gridColumns
+        val sortChanged = sortChangeScrollsToTop && sortOrder != this.sortOrder
+        val preferencesChanged = viewChanged ||
             sortOrder != this.sortOrder ||
             autoRestorePosition != this.autoRestorePosition
-        val sortChanged = sortChangeScrollsToTop && sortOrder != this.sortOrder
         val updated = copy(
             viewMode = viewMode,
             gridColumns = gridColumns,
@@ -157,9 +164,12 @@ data class LibraryState(
             autoRestorePosition = autoRestorePosition,
         )
         return when {
-            !changed -> updated
             sortChanged -> updated.scrolledToTop(pendingWhileLoading = updated.loading)
-            else -> updated.retargeted()
+            recomputePositionOnFirstApply && preferencesChanged -> updated.retargeted()
+            // 加载中条目已清空，先记下强制定位意图，等 withLoadedEntries 读完目录再定位。
+            viewChanged && updated.loading -> updated.copy(restorePositionForced = true)
+            viewChanged -> updated.retargeted(restorePosition = true)
+            else -> updated
         }
     }
 
@@ -187,8 +197,10 @@ data class LibraryState(
     }
 
     /** 按当前可见次序重新计算滚动目标并递增序号。 */
-    private fun retargeted(): LibraryState = copy(
-        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, autoRestorePosition),
+    private fun retargeted(
+        restorePosition: Boolean = autoRestorePosition || restorePositionForced,
+    ): LibraryState = copy(
+        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, restorePosition),
         scrollRevision = scrollRevision + 1,
     )
 
@@ -197,6 +209,8 @@ data class LibraryState(
         scrollTarget = if (visibleEntries.isEmpty()) null else DirectoryScrollTarget(index = 0, offset = 0),
         scrollRevision = scrollRevision + 1,
         pendingScrollToTop = pendingWhileLoading,
+        // 用户主动排序回到顶部，不再按进程恢复目标定位。
+        restorePositionForced = false,
         savedPosition = if (pendingWhileLoading) {
             savedPosition
         } else {
@@ -257,12 +271,15 @@ class LibraryViewModel(
                 val firstApply = !displayPreferencesApplied
                 displayPreferencesApplied = true
                 _state.update { current ->
-                    current.withDisplayPreferences(
-                        viewMode = preferences.viewMode,
-                        gridColumns = preferences.gridColumns,
-                        sortOrder = preferences.sortOrder,
-                        autoRestorePosition = preferences.autoRestorePosition,
-                        sortChangeScrollsToTop = !firstApply,
+                    consumeForcedRestore(
+                        current.withDisplayPreferences(
+                            viewMode = preferences.viewMode,
+                            gridColumns = preferences.gridColumns,
+                            sortOrder = preferences.sortOrder,
+                            autoRestorePosition = preferences.autoRestorePosition,
+                            sortChangeScrollsToTop = !firstApply,
+                            recomputePositionOnFirstApply = firstApply,
+                        ),
                     )
                 }
             }
@@ -402,6 +419,7 @@ class LibraryViewModel(
                 savedPosition = null,
                 scrollTarget = null,
                 pendingScrollToTop = false,
+                restorePositionForced = false,
             )
         }
         persistDirectoryStack()
@@ -409,7 +427,13 @@ class LibraryViewModel(
     }
 
     fun enter(directory: MediaFile) {
-        _state.update { it.copy(stack = it.stack + directory, entries = emptyList()) }
+        _state.update {
+            it.copy(
+                stack = it.stack + directory,
+                entries = emptyList(),
+                restorePositionForced = false,
+            )
+        }
         persistDirectoryStack()
         load(directory)
     }
@@ -419,7 +443,13 @@ class LibraryViewModel(
         val stack = _state.value.stack
         if (stack.size <= 1) return
         val parent = stack.dropLast(1).last()
-        _state.update { it.copy(stack = stack.dropLast(1), entries = emptyList()) }
+        _state.update {
+            it.copy(
+                stack = stack.dropLast(1),
+                entries = emptyList(),
+                restorePositionForced = false,
+            )
+        }
         persistDirectoryStack()
         load(parent)
     }
@@ -449,11 +479,11 @@ class LibraryViewModel(
         }
     }
 
-    /** 记录某个目录的第一个可见条目与滚动偏移；关闭位置记忆或加载中不写。 */
+    /** 记录某个目录的第一个可见条目与滚动偏移；位置记录与位置记忆开关无关，加载中或条目不在当前列表时不写。 */
     fun savePosition(sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) {
         if (sourceLocation.isBlank()) return
         val current = _state.value
-        if (!current.autoRestorePosition || current.loading) return
+        if (current.loading || current.visibleEntries.none { it.location == entryLocation }) return
         val position = DirectoryPosition(entryLocation, scrollOffset)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
@@ -482,10 +512,23 @@ class LibraryViewModel(
             val result = library.list(directory)
             currentCoroutineContext().ensureActive()
             _state.update {
-                it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position)
+                consumeForcedRestore(
+                    it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position),
+                )
             }
         }
     }
+
+    /**
+     * 进程恢复的强制定位在首次成功读取且显示偏好已套用后消费。
+     * 读取失败时保留，retry 仍可强制定位。
+     */
+    private fun consumeForcedRestore(state: LibraryState): LibraryState =
+        if (state.restorePositionForced && !state.loading && state.failure == null && displayPreferencesApplied) {
+            state.copy(restorePositionForced = false)
+        } else {
+            state
+        }
 
     /** 位置记录读取失败按没有记录处理，不阻断目录浏览。 */
     private suspend fun loadPosition(sourceLocation: String, relativePath: String): DirectoryPosition? = try {
@@ -574,6 +617,7 @@ class LibraryViewModel(
                 savedPosition = null,
                 scrollTarget = null,
                 pendingScrollToTop = false,
+                restorePositionForced = true,
             )
         }
         load(stack.last())
