@@ -65,6 +65,9 @@ interface PlaybackEngine {
     /** 关闭字幕显示。 */
     fun disableSubtitles()
 
+    /** 当前 Surface 代数；每次重新挂载后递增，用于丢弃迟到的画面事件。 */
+    val surfaceGeneration: Int
+
     /** 把画面接到视图的 Surface 上。 */
     fun attachSurface(surface: Surface)
 
@@ -97,6 +100,12 @@ interface PlaybackEngine {
 
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()
+
+        /** 重新挂上 Surface 后已输出画面（播放态）；[surfaceGeneration] 标识本次挂载。 */
+        fun onFramePresented(surfaceGeneration: Int)
+
+        /** 重新挂上 Surface 后视频输出已重配（暂停态）；由控制层抓帧确认后再撤帧。 */
+        fun onSurfaceReconfigured(surfaceGeneration: Int)
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)

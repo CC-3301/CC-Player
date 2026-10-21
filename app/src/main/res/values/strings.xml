@@ -53,6 +53,8 @@
     <string name="player_previous">上一集</string>
     <string name="player_next">下一集</string>
     <string name="player_playlist">播放列表</string>
+    <string name="player_playlist_count">播放列表（%1$d）</string>
+    <string name="player_playlist_close">关闭播放列表</string>
     <string name="player_subtitles">字幕</string>
     <string name="player_buffering">正在缓冲</string>
     <string name="player_playback_failed">播放失败</string>

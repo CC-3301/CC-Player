@@ -21,6 +21,9 @@ class FakePlaybackEngine : PlaybackEngine {
     var grabFrameCalls = 0
         private set
 
+    /** 抓帧前执行，用于模拟不可中断的原生调用。 */
+    var beforeGrab: (() -> Unit)? = null
+
     /** 最近一次 start 的目标与代际，回调带上它们供控制层过滤迟到事件。 */
     var currentTargetUrl: String? = null
         private set
@@ -68,6 +71,7 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun grabFrame(): PlaybackEngine.Frame? {
         actions += "grab"
         grabFrameCalls++
+        beforeGrab?.invoke()
         return frameToGrab
     }
 
@@ -120,9 +124,26 @@ class FakePlaybackEngine : PlaybackEngine {
         disableSubtitleCalls++
     }
 
-    override fun attachSurface(surface: Surface) = Unit
+    /** 重新挂载 Surface 时递增，模拟引擎的挂载代数。 */
+    override var surfaceGeneration: Int = 0
+        private set
 
-    override fun detachSurface() = Unit
+    /** 模拟一次重新挂载 Surface。 */
+    fun reportSurfaceReattached() {
+        surfaceGeneration++
+    }
+
+    private var attachedSurface: Surface? = null
+
+    override fun attachSurface(surface: Surface) {
+        if (attachedSurface === surface) return
+        attachedSurface = surface
+        surfaceGeneration++
+    }
+
+    override fun detachSurface() {
+        attachedSurface = null
+    }
 
     override fun setSurfaceSize(width: Int, height: Int) = Unit
 
@@ -194,6 +215,14 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 只上报加载活动，不给 ready/end。 */
     fun reportLoadActivity() = listener?.onLoadActivity()
+
+    /** 播放态重新出帧。 */
+    fun reportFramePresented(generation: Int = surfaceGeneration) =
+        listener?.onFramePresented(generation)
+
+    /** 暂停态视频输出重配，播放核心要求抓帧确认。 */
+    fun reportSurfaceReconfigured(generation: Int = surfaceGeneration) =
+        listener?.onSurfaceReconfigured(generation)
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 

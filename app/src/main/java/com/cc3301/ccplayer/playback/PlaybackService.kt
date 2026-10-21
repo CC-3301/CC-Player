@@ -77,7 +77,7 @@ class PlaybackService : Service() {
             diagnostics = (application as CcPlayerApplication).diagnostics,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
-            pausePlayback = playbackController::pause,
+            pausePlayback = playbackController::pauseForBackground,
             onPolicyChanged = ::requestRefresh,
         )
         playbackEngine.initialize()
