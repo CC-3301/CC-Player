@@ -75,7 +75,7 @@ class PlaybackService : Service() {
             marshalCallbacks = true,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
-            pausePlayback = playbackController::pause,
+            pausePlayback = playbackController::pauseForBackground,
             onPolicyChanged = ::requestRefresh,
         )
         playbackEngine.initialize()
