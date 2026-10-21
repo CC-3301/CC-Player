@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,11 +38,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,6 +85,10 @@ import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+
+/** 浏览页条目保留白色点击涟漪；主题其它组件不显示按压反馈。 */
+@OptIn(ExperimentalMaterial3Api::class)
+private val LibraryEntryRippleConfiguration = RippleConfiguration(color = Color.White)
 
 /**
  * 库页面：按「当前目录即列表」浏览单个连接源，点条目进入子目录或起播。
@@ -354,8 +364,8 @@ private fun EntryArea(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
-                start = AppSpacing.Lg,
-                end = AppSpacing.Lg,
+                start = AppSpacing.Sm,
+                end = AppSpacing.Sm,
                 top = 6.dp,
                 bottom = 28.dp,
             ),
@@ -380,6 +390,7 @@ private fun EntryArea(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
     val preview by produceState<MediaPreview?>(
@@ -390,37 +401,44 @@ private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenE
     ) {
         value = mediaPreview.preview(entry)
     }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(AppRadius.Md))
-            .clickable { onOpenEntry(entry) }
-            .padding(horizontal = AppSpacing.Sm, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
-    ) {
-        Thumbnail(entry = entry, preview = preview, width = 76.dp, height = 46.dp)
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = entry.name,
-                style = MaterialTheme.typography.bodyLarge,
-                color = AppColors.Foreground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (entry.isDirectory) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = AppColors.Faint,
-                modifier = Modifier.size(20.dp),
-            )
+    CompositionLocalProvider(LocalRippleConfiguration provides LibraryEntryRippleConfiguration) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(AppRadius.Md))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(),
+                    onClick = { onOpenEntry(entry) },
+                )
+                .padding(horizontal = AppSpacing.Sm, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+        ) {
+            Thumbnail(entry = entry, preview = preview, width = 98.dp, height = 57.dp)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = entry.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = AppColors.Foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (entry.isDirectory) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = AppColors.Faint,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
         }
     }
 }
 
 /** 网格卡片：缩略图（或占位图）+ 文件名。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
     val preview by produceState<MediaPreview?>(
@@ -431,23 +449,31 @@ private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpen
     ) {
         value = mediaPreview.preview(entry)
     }
-    Column(modifier = Modifier.clickable { onOpenEntry(entry) }) {
-        Thumbnail(
-            entry = entry,
-            preview = preview,
-            width = null,
-            height = null,
-            aspectRatio = cardAspectRatio(entry),
-            cornerRadius = 10.dp,
-        )
-        Text(
-            text = entry.name,
-            style = MaterialTheme.typography.bodySmall,
-            color = AppColors.Foreground,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
-        )
+    CompositionLocalProvider(LocalRippleConfiguration provides LibraryEntryRippleConfiguration) {
+        Column(
+            modifier = Modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                onClick = { onOpenEntry(entry) },
+            ),
+        ) {
+            Thumbnail(
+                entry = entry,
+                preview = preview,
+                width = null,
+                height = null,
+                aspectRatio = cardAspectRatio(entry),
+                cornerRadius = 10.dp,
+            )
+            Text(
+                text = entry.name,
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.Foreground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp, start = 2.dp, end = 2.dp),
+            )
+        }
     }
 }
 
