@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import android.graphics.Bitmap
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.compareNatural
 import com.cc3301.ccplayer.progress.MediaProgress
@@ -46,6 +48,8 @@ class PlaybackController(
     marshalCallbacks: Boolean = false,
     /** 抓帧会进入 mpv 原生调用，不能占用控制层所在的主线程。 */
     private val frameProbeDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    /** 诊断日志出口；默认不写。 */
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : PlaybackEngine.Listener {
 
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
@@ -332,6 +336,7 @@ class PlaybackController(
      */
     fun cancelSwitch(): Boolean {
         if (loadPhase != LoadPhase.Switching) return false
+        diagnostics.log { "切集取消: ${_playlist.value.getOrNull(switchOriginIndex)?.name ?: ""}" }
         restoreOrigin()
         return true
     }
@@ -397,6 +402,7 @@ class PlaybackController(
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
     private fun startSession(index: Int, media: MediaFile) {
+        diagnostics.log { "加载开始: ${media.name}" }
         _currentIndex.value = index
         _progress.value = PlaybackProgress()
         _seekPreviewMillis.value = null
@@ -425,7 +431,7 @@ class PlaybackController(
         restartFromStartAfterRestore = false
         replaceFreezeFrame(null)
         resetBackgroundCapture()
-        _state.value = PlaybackState.Loading
+        updateState(PlaybackState.Loading)
         beginBufferingIndicator()
         beginLoadWatchdog()
         expectedLoadToken = engine.start(media.playbackLocation, paused = false)
@@ -438,6 +444,7 @@ class PlaybackController(
      * 进度保持在原视频上，直到目标就绪。
      */
     private fun startSwitch(index: Int, media: MediaFile, originAtEnd: Boolean = false) {
+        diagnostics.log { "切集开始: ${media.name}" }
         switchOriginIndex = _currentIndex.value
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
@@ -476,7 +483,7 @@ class PlaybackController(
         pausedAtEpisodeEnd = false
         savedPositionMillis = 0
         restoreAtEndOfEpisode = false
-        _state.value = PlaybackState.Loading
+        updateState(PlaybackState.Loading)
     }
 
     /**
@@ -485,6 +492,7 @@ class PlaybackController(
      */
     private fun retargetSwitch(index: Int) {
         val media = _playlist.value.getOrNull(index) ?: return
+        diagnostics.log { "切集目标变更: ${media.name}" }
         applySwitchTarget(index, media)
         beginLoadWatchdog()
         expectedLoadToken = engine.start(media.playbackLocation, paused = true)
@@ -531,7 +539,7 @@ class PlaybackController(
         if (!active) return
         paused = true
         engine.pause()
-        _state.value = PlaybackState.Paused
+        updateState(PlaybackState.Paused)
     }
 
     fun togglePlayPause() {
@@ -554,7 +562,7 @@ class PlaybackController(
         active = false
         paused = false
         engine.stop()
-        _state.value = PlaybackState.Idle
+        updateState(PlaybackState.Idle)
         _seekPreviewMillis.value = null
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
@@ -840,7 +848,7 @@ class PlaybackController(
             LoadPhase.Switching, LoadPhase.Restoring -> Unit
             LoadPhase.None -> {
                 this.paused = paused
-                _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
+                updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
             }
         }
     }
@@ -853,11 +861,12 @@ class PlaybackController(
         if (!active) return
         // 旧文件被替换时的结束事件不能触发自动连播；只有真正在播放时才算自然播完。
         if (loadPhase != LoadPhase.None || _state.value != PlaybackState.Playing) return
+        diagnostics.log { "播放结束: ${currentMedia()?.name ?: ""}" }
         if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
             _sleepTimerState.value = SleepTimerState.Off
             _sleepTimerOption.value = null
             pausedAtEpisodeEnd = true
-            _state.value = PlaybackState.Paused
+            updateState(PlaybackState.Paused)
             return
         }
         // 自然播完后的下一集与手动切集共用同一条切换路径。
@@ -874,7 +883,7 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         active = false
-        _state.value = PlaybackState.Ended
+        updateState(PlaybackState.Ended)
     }
 
     /** 用户恢复播放操作：解除片尾黑底，并允许后续失败重新提示。 */
@@ -912,7 +921,7 @@ class PlaybackController(
         if (!active) return
         paused = true
         engine.pause()
-        _state.value = PlaybackState.Paused
+        updateState(PlaybackState.Paused)
     }
 
     /** 播放已停在当前文件的末尾：位置到结尾，或文件播完时被定时暂停。 */
@@ -929,6 +938,7 @@ class PlaybackController(
     /** 首次打开就绪：撤掉缓冲指示，按暂停意图进入播放或暂停。 */
     private fun finishInitialLoad() {
         if (loadPhase != LoadPhase.Initial) return
+        diagnostics.log { "加载成功: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
@@ -938,12 +948,13 @@ class PlaybackController(
         playedPositionMillis = loadStartPositionMillis
         playedDurationMillis = duration
         _progress.value = PlaybackProgress(loadStartPositionMillis, duration)
-        _state.value = if (paused) PlaybackState.Paused else PlaybackState.Playing
+        updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
     }
 
     /** 切集就绪：目标画面直接替换冻结画面，进度从新文件开始。 */
     private fun finishSwitch() {
         if (loadPhase != LoadPhase.Switching) return
+        diagnostics.log { "切集成功: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
@@ -957,10 +968,10 @@ class PlaybackController(
         playedDurationMillis = duration
         _progress.value = PlaybackProgress(loadStartPositionMillis, duration)
         if (paused) {
-            _state.value = PlaybackState.Paused
+            updateState(PlaybackState.Paused)
         } else {
             engine.resume()
-            _state.value = PlaybackState.Playing
+            updateState(PlaybackState.Playing)
         }
     }
 
@@ -1007,7 +1018,7 @@ class PlaybackController(
         _subtitleTracks.value = emptyList()
         _externalSubtitles.value = emptyList()
         _subtitleSelection.value = SubtitleSelection.Off
-        _state.value = PlaybackState.Paused
+        updateState(PlaybackState.Paused)
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
         expectedLoadToken = engine.start(
@@ -1044,10 +1055,10 @@ class PlaybackController(
             return
         }
         if (paused) {
-            _state.value = PlaybackState.Paused
+            updateState(PlaybackState.Paused)
         } else {
             engine.resume()
-            _state.value = PlaybackState.Playing
+            updateState(PlaybackState.Playing)
         }
     }
 
@@ -1061,26 +1072,29 @@ class PlaybackController(
         endLoadWatchdog()
         when (loadPhase) {
             LoadPhase.Switching -> {
+                diagnostics.log { "切集失败: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
                 switchFailureReported = true
                 if (fromWatchdog) engine.discardInFlightLoads()
                 restoreOrigin()
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Initial -> {
+                diagnostics.log { "加载失败: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
                 resetLoadState()
                 active = false
                 paused = true
-                _state.value = PlaybackState.Ended
+                updateState(PlaybackState.Ended)
                 // 清掉引擎里的失败残留，再次打开时不会撞上旧的 END_FILE。
                 engine.stop()
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Restoring -> {
+                diagnostics.log { "恢复失败: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
                 val reportFailure = !switchFailureReported
                 resetLoadState()
                 active = false
                 paused = true
-                _state.value = PlaybackState.Ended
+                updateState(PlaybackState.Ended)
                 engine.stop()
                 // 同一次切集只提示一次“播放失败”。
                 if (reportFailure) _playbackFailures.tryEmit(Unit)
@@ -1089,9 +1103,10 @@ class PlaybackController(
             LoadPhase.None -> {
                 // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
                 if (switchFailureReported) return
+                diagnostics.log { "播放失败: ${currentMedia()?.name ?: ""}" }
                 active = false
                 paused = true
-                _state.value = PlaybackState.Ended
+                updateState(PlaybackState.Ended)
                 _playbackFailures.tryEmit(Unit)
             }
         }
@@ -1274,6 +1289,14 @@ class PlaybackController(
     override fun onVideoSizeChanged(width: Int, height: Int) {
         if (!active || width <= 0 || height <= 0) return
         _videoAspectRatio.value = width.toDouble() / height
+    }
+
+    /** 更新播放状态并记录迁移；相同状态不重复写日志。 */
+    private fun updateState(state: PlaybackState) {
+        val previous = _state.value
+        if (previous == state) return
+        _state.value = state
+        diagnostics.log { "播放状态: $previous -> $state" }
     }
 
     /** 一次加载所处的阶段；切集与首次打开共用缓冲指示，但返回行为不同。 */

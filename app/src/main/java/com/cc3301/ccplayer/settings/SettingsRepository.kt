@@ -85,6 +85,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         DecodeMode.entries.firstOrNull { it.name == preferences[DECODE_MODE] } ?: DEFAULT_DECODE_MODE
     }
 
+    /** "诊断日志"开关，默认关闭；关闭时不生成日志文件。 */
+    val diagnosticsEnabled: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[DIAGNOSTICS_ENABLED] ?: DEFAULT_DIAGNOSTICS_ENABLED
+    }
+
     suspend fun addRoot(location: String) {
         dataStore.edit { preferences ->
             val roots = preferences.rootLocations()
@@ -145,6 +150,10 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[DECODE_MODE] = mode.name }
     }
 
+    suspend fun setDiagnosticsEnabled(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[DIAGNOSTICS_ENABLED] = enabled }
+    }
+
     companion object {
         /** 网格可选的列数。 */
         val GRID_COLUMN_CHOICES = listOf(2, 3, 4)
@@ -156,6 +165,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
         const val DEFAULT_AUTO_RESTORE_POSITION = true
         val DEFAULT_DECODE_MODE = DecodeMode.Hardware
+        const val DEFAULT_DIAGNOSTICS_ENABLED = false
 
         fun create(context: Context): SettingsRepository =
             SettingsRepository(context.applicationContext.settingsDataStore)
@@ -172,6 +182,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val AUTO_RESTORE_POSITION = booleanPreferencesKey("auto_restore_position")
         private val LEGACY_AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
         private val DECODE_MODE = stringPreferencesKey("decode_mode")
+        private val DIAGNOSTICS_ENABLED = booleanPreferencesKey("diagnostics_enabled")
 
         private fun Preferences.rootLocations(): List<String> =
             this[ROOTS].orEmpty().lines().filter { it.isNotBlank() }

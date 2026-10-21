@@ -1,5 +1,9 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.diagnostics.Diagnostics
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaSource
@@ -8,6 +12,7 @@ import com.cc3301.ccplayer.library.testVideo
 import com.cc3301.ccplayer.network.NetworkStreams
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -83,6 +88,7 @@ class PlaybackEntryOpenerTest {
         recorder: EntryRecorder,
         directoryEntries: suspend () -> List<MediaFile>,
         streams: () -> NetworkStreams,
+        diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     ): PlaybackEntryOpener = PlaybackEntryOpener(
         scope = scope,
         directoryEntries = directoryEntries,
@@ -91,6 +97,7 @@ class PlaybackEntryOpenerTest {
         onStartPlayback = recorder::start,
         onShowFailure = recorder::showFailure,
         onLeavePlayer = recorder::leave,
+        diagnostics = diagnostics,
     )
 
     @Test
@@ -216,6 +223,27 @@ class PlaybackEntryOpenerTest {
         assertEquals(MediaFailure.Unknown, recorder.shownFailure)
         assertEquals(1, recorder.leaveCount)
         assertNull(recorder.opened)
+    }
+
+    @Test
+    fun `准备失败写入诊断日志`() = runTest {
+        val localVideo = testVideo("本地.mkv", "content://root/本地.mkv")
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true }
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { throw IllegalStateException("目录读不了") },
+            streams = { throw AssertionError("本地媒体不应建立网络连接") },
+            diagnostics = diagnostics,
+        )
+
+        opener.open(localVideo, listOf(localVideo), enterBeforePreparing = true)
+        advanceUntilIdle()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("准备失败: 本地.mkv (Unknown)"))
     }
 
     @Test

@@ -29,11 +29,16 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import com.cc3301.ccplayer.diagnostics.Diagnostics
+import com.cc3301.ccplayer.diagnostics.DiagnosticsExporter
+import com.cc3301.ccplayer.diagnostics.connectionLogLine
+import com.cc3301.ccplayer.diagnostics.logLibraryNavigation
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
@@ -90,9 +95,13 @@ import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavMediaReads
 import com.cc3301.ccplayer.webdav.WebDavStreams
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
@@ -105,6 +114,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, createPreviewReads()) }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
+
+    private val diagnostics get() = (application as CcPlayerApplication).diagnostics
+
+    private val diagnosticsExporter by lazy {
+        DiagnosticsExporter(
+            logDirectory = File(filesDir, Diagnostics.DIRECTORY_NAME),
+            outputDirectory = File(cacheDir, Diagnostics.DIRECTORY_NAME),
+        )
+    }
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -153,6 +171,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
             onLeavePlayer = ::closePlayer,
+            diagnostics = diagnostics,
         )
     }
 
@@ -236,6 +255,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
+                LaunchedEffect(navState.screen, navState.sourcesProtocol, playerVisible) {
+                    diagnostics.log {
+                        if (playerVisible) {
+                            "导航: 播放页"
+                        } else if (navState.screen == AppScreen.Sources) {
+                            "导航: ${navState.screen.name} ${navState.sourcesProtocol.name}"
+                        } else {
+                            "导航: ${navState.screen.name}"
+                        }
+                    }
+                }
                 // 缓冲指示交给播放控制层后撤掉准备态；首次加载就绪或转入切集时解除失败退回。
                 LaunchedEffect(playbackState, buffering, switching) {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
@@ -328,6 +358,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
                             onSetOrientationMode = settingsViewModel::setOrientationMode,
+                            onSetDiagnosticsEnabled = settingsViewModel::setDiagnosticsEnabled,
+                            onExportDiagnostics = ::exportDiagnostics,
                             onClose = navigation::closeSettings,
                         )
                     }
@@ -360,6 +392,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 }
                             },
                             onOpenSource = { source ->
+                                diagnostics.log {
+                                    connectionLogLine(source.protocol, source.name, source.location)
+                                }
                                 library.openSource(source)
                                 navigation.openLibrary()
                             },
@@ -382,6 +417,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = libraryState,
                             mediaPreview = mediaPreview,
                             onOpenEntry = { entry ->
+                                logLibraryNavigation(
+                                    diagnostics = diagnostics,
+                                    rootName = libraryState.stack.firstOrNull()?.name ?: "",
+                                    relativePath = libraryState.stack
+                                        .drop(1)
+                                        .joinToString("/") { it.name },
+                                    entryName = entry.name,
+                                    directory = entry.isDirectory,
+                                )
                                 if (entry.isDirectory) {
                                     library.enter(entry)
                                 } else {
@@ -414,6 +458,55 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 Toast.makeText(this, getString(R.string.app_exit_hint), Toast.LENGTH_SHORT).show()
 
             HomeBackResult.Exit -> finish()
+        }
+    }
+
+    /** 汇总轮转日志为一个纯文本文件，交给系统分享面板。 */
+    private fun exportDiagnostics() {
+        lifecycleScope.launch {
+            val exported = withContext(Dispatchers.IO) {
+                try {
+                    Result.success(diagnosticsExporter.export())
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    Result.failure(failure)
+                }
+            }
+            if (exported.isFailure) {
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.settings_export_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+            val file = exported.getOrNull()
+            if (file == null) {
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.settings_export_empty),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+            val uri = runCatching {
+                FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file)
+            }.getOrNull()
+            if (uri == null) {
+                Toast.makeText(
+                    this@MainActivity,
+                    getString(R.string.settings_export_failed),
+                    Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, getString(R.string.settings_export_diagnostics)))
         }
     }
 
@@ -512,6 +605,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 退到后台停止画面渲染；是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
+        diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
         // 后台上报可能已把播放暂停；抓帧成功后再分离 Surface，等待有上限。
@@ -543,6 +637,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onStart() {
         super.onStart()
+        diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
         surface?.let {
             playback?.engine?.attachSurface(it)
@@ -665,6 +760,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onDestroy() {
+        if (isFinishing) diagnostics.logSync("应用退出")
         releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()

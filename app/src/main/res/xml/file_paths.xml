@@ -3,4 +3,7 @@
     <files-path
         name="thumbnails"
         path="thumbnails/" />
+    <cache-path
+        name="diagnostics"
+        path="diagnostics/" />
 </paths>

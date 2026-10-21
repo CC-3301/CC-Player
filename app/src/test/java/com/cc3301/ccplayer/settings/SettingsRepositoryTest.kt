@@ -43,6 +43,18 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `默认关闭诊断日志`() = runTest {
+        assertFalse(settings.diagnosticsEnabled.first())
+    }
+
+    @Test
+    fun `诊断日志开关写入后读回`() = runTest {
+        settings.setDiagnosticsEnabled(true)
+
+        assertTrue(settings.diagnosticsEnabled.first())
+    }
+
+    @Test
     fun `后台播放开关写入后读回`() = runTest {
         settings.setBackgroundPlayback(false)
 

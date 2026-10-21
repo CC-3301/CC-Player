@@ -113,6 +113,11 @@
     <string name="settings_decode_hardware">硬件解码</string>
     <string name="settings_decode_software">软件解码</string>
     <string name="settings_orientation_title">屏幕方向</string>
+    <string name="settings_diagnostics_section">诊断</string>
+    <string name="settings_diagnostics_log">诊断日志</string>
+    <string name="settings_export_diagnostics">导出诊断日志</string>
+    <string name="settings_export_failed">导出诊断日志失败</string>
+    <string name="settings_export_empty">没有可导出的诊断日志</string>
     <string name="settings_view_title">视图</string>
     <string name="settings_sort_title">排序</string>
 </resources>
