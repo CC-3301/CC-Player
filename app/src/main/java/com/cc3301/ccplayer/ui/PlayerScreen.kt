@@ -54,6 +54,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -766,6 +767,7 @@ private fun Controls(
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // 图标条有意全宽贴边：窄屏压缩需要全部可用宽度；进度条与面板仍保留水平内边距。
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -830,16 +832,14 @@ private fun PlayerIconBar(
     onLock: () -> Unit,
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val metrics = playerIconBarMetrics(maxWidth)
-        val barHeight = if (metrics.rightStacked) {
-            PlayerSideTouchTarget * 2
-        } else {
-            PlayerPlayPauseButtonSize
-        }
+        // 记住上一次排布，宽度在阈值附近变化时不来回切换布局。
+        var previousRightStacked by remember { mutableStateOf(false) }
+        val metrics = playerIconBarMetrics(maxWidth, previousRightStacked)
+        SideEffect { previousRightStacked = metrics.rightStacked }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(barHeight),
+                .height(metrics.barHeight),
         ) {
             // 左下角锁定键与上一集/播放/下一集同一条水平线。
             PlayerIconButton(
@@ -890,7 +890,6 @@ private fun PlayerIconBar(
                     onClick = onToggleSubtitles,
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
-                    iconSize = PlayerSideIconSize,
                 )
             }
             val playlistButton: @Composable () -> Unit = {
@@ -900,7 +899,6 @@ private fun PlayerIconBar(
                     onClick = onTogglePlaylist,
                     active = playlistVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
-                    iconSize = PlayerSideIconSize,
                 )
             }
             if (metrics.rightStacked) {

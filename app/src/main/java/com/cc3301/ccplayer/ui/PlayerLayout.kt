@@ -33,14 +33,14 @@ fun videoViewport(
     )
 }
 
-/** 播放页次级按钮的触控边长；视觉图标小于该尺寸。 */
+/** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
 
 /** 播放页次级按钮的视觉图标尺寸。 */
 val PlayerSideIconSize = 26.dp
 
-/** 上一集/下一集按钮与图标尺寸（ADR-0025）。 */
-val PlayerTransportButtonSize = 46.dp
+/** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
+val PlayerTransportButtonSize = 48.dp
 val PlayerTransportIconSize = 28.dp
 
 /** 播放/暂停按钮与图标尺寸（ADR-0025）。 */
@@ -52,9 +52,17 @@ val PlayerPlayPauseIconSize = 34.dp
 val PlayerTransportGap = 16.dp
 val PlayerTransportNarrowGap = 8.dp
 
+/** 图标条支持的最小可用宽度；低于该宽度不再保证三组按钮不重叠。 */
+val PlayerIconBarMinimumWidth =
+    PlayerTransportButtonSize * 2 + PlayerPlayPauseNarrowSize + PlayerTransportNarrowGap * 2 +
+        PlayerSideTouchTarget * 2
+
 /**
  * 底部图标条布局：宽屏保持 ADR 尺寸；空间不足时略缩播放键与间距；
  * 仍不足时把字幕与播放列表上下排列，保证三组按钮不重叠。
+ *
+ * [previousRightStacked] 用于宽度接近阈值时保持原排布，避免在两种布局间抖动。
+ * 低于 [PlayerIconBarMinimumWidth] 时布局不再保证不重叠。
  */
 data class PlayerIconBarMetrics(
     val availableWidth: Dp,
@@ -74,43 +82,56 @@ data class PlayerIconBarMetrics(
     val nextIconStart: Dp = nextStart + (previousNextSize - PlayerTransportIconSize) / 2f
     val nextIconEnd: Dp = nextIconStart + PlayerTransportIconSize
 
+    /** 图标条高度：普通排布取三键最大尺寸，上下排列时容纳两个侧键。 */
+    val barHeight: Dp = if (rightStacked) {
+        maxOf(previousNextSize, playPauseSize, sideButtonSize * 2)
+    } else {
+        maxOf(previousNextSize, playPauseSize)
+    }
+
     /** 左右两组与中间三键是否重叠。 */
     val overlapped: Boolean =
         leftGroupEnd > transportStart || transportEnd > rightGroupStart
 }
 
 /** 按图标条可用宽度计算三组按钮的尺寸与排布。 */
-fun playerIconBarMetrics(availableWidth: Dp): PlayerIconBarMetrics {
+fun playerIconBarMetrics(
+    availableWidth: Dp,
+    previousRightStacked: Boolean = false,
+): PlayerIconBarMetrics {
     val wideTransport = PlayerTransportButtonSize * 2 + PlayerPlayPauseButtonSize + PlayerTransportGap * 2
     val narrowTransport = PlayerTransportButtonSize * 2 + PlayerPlayPauseNarrowSize + PlayerTransportNarrowGap * 2
     val horizontalSideWidth = PlayerSideTouchTarget * 2
+    val wideThreshold = wideTransport + horizontalSideWidth * 2
+    val narrowHorizontalThreshold = narrowTransport + horizontalSideWidth * 2
+
+    fun metrics(playPause: Dp, gap: Dp, stacked: Boolean) = PlayerIconBarMetrics(
+        availableWidth = availableWidth,
+        sideButtonSize = PlayerSideTouchTarget,
+        previousNextSize = PlayerTransportButtonSize,
+        playPauseSize = playPause,
+        gap = gap,
+        rightStacked = stacked,
+    )
+
     return when {
-        // 右侧横向排列两组共需 2 倍侧键宽度，中间三键在两种布局下都不能与它重叠。
-        availableWidth >= wideTransport + horizontalSideWidth * 2 -> PlayerIconBarMetrics(
-            availableWidth = availableWidth,
-            sideButtonSize = PlayerSideTouchTarget,
-            previousNextSize = PlayerTransportButtonSize,
-            playPauseSize = PlayerPlayPauseButtonSize,
-            gap = PlayerTransportGap,
-            rightStacked = false,
+        availableWidth >= wideThreshold -> metrics(
+            PlayerPlayPauseButtonSize,
+            PlayerTransportGap,
+            stacked = false,
         )
 
-        availableWidth >= narrowTransport + horizontalSideWidth * 2 -> PlayerIconBarMetrics(
-            availableWidth = availableWidth,
-            sideButtonSize = PlayerSideTouchTarget,
-            previousNextSize = PlayerTransportButtonSize,
-            playPauseSize = PlayerPlayPauseNarrowSize,
-            gap = PlayerTransportNarrowGap,
-            rightStacked = false,
+        // 已处于上下排列时保持到宽屏阈值，避免在窄屏横排边界来回切换。
+        availableWidth >= narrowHorizontalThreshold && !previousRightStacked -> metrics(
+            PlayerPlayPauseNarrowSize,
+            PlayerTransportNarrowGap,
+            stacked = false,
         )
 
-        else -> PlayerIconBarMetrics(
-            availableWidth = availableWidth,
-            sideButtonSize = PlayerSideTouchTarget,
-            previousNextSize = PlayerTransportButtonSize,
-            playPauseSize = PlayerPlayPauseNarrowSize,
-            gap = PlayerTransportNarrowGap,
-            rightStacked = true,
+        else -> metrics(
+            PlayerPlayPauseNarrowSize,
+            PlayerTransportNarrowGap,
+            stacked = true,
         )
     }
 }
