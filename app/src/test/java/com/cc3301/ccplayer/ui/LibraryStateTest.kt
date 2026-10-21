@@ -85,26 +85,6 @@ class LibraryStateTest {
     }
 
     @Test
-    fun `进程恢复强制按记录定位且不受位置记忆开关影响`() {
-        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
-        val restored = LibraryState(restorePositionForced = true).withLoadedEntries(
-            entries = entries,
-            failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 48),
-        )
-
-        assertEquals(DirectoryScrollTarget(index = 1, offset = 48), restored.scrollTarget)
-
-        val settingsApplied = restored.withDisplayPreferences(
-            viewMode = restored.viewMode,
-            gridColumns = restored.gridColumns,
-            sortOrder = restored.sortOrder,
-            autoRestorePosition = false,
-        )
-        assertEquals(DirectoryScrollTarget(index = 1, offset = 48), settingsApplied.scrollTarget)
-    }
-
-    @Test
     fun `没有记录时从顶部开始`() {
         val loaded = LibraryState().withLoadedEntries(
             entries = listOf(entry("ep1.mkv", 1)),

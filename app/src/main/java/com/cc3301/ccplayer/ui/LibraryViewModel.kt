@@ -139,7 +139,10 @@ data class LibraryState(
     /** 列表实际展示的次序：子目录在前，组内按当前排序选项。 */
     val visibleEntries: List<MediaFile> get() = entries.sortedForDisplay(sortOrder)
 
-    /** 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。 */
+    /**
+     * 套用展示偏好；排序变化回到顶部，其余变化按位置记录重新定位。
+     * 位置记忆开关只影响正常进入目录时是否定位，不改变当前目录已定的滚动目标。
+     */
     fun withDisplayPreferences(
         viewMode: ViewMode,
         gridColumns: Int,
@@ -149,8 +152,7 @@ data class LibraryState(
     ): LibraryState {
         val changed = viewMode != this.viewMode ||
             gridColumns != this.gridColumns ||
-            sortOrder != this.sortOrder ||
-            autoRestorePosition != this.autoRestorePosition
+            sortOrder != this.sortOrder
         val sortChanged = sortChangeScrollsToTop && sortOrder != this.sortOrder
         val updated = copy(
             viewMode = viewMode,
@@ -203,6 +205,7 @@ data class LibraryState(
         scrollTarget = if (visibleEntries.isEmpty()) null else DirectoryScrollTarget(index = 0, offset = 0),
         scrollRevision = scrollRevision + 1,
         pendingScrollToTop = pendingWhileLoading,
+        // 用户主动排序回到顶部，不再按进程恢复目标定位。
         restorePositionForced = false,
         savedPosition = if (pendingWhileLoading) {
             savedPosition
@@ -264,12 +267,14 @@ class LibraryViewModel(
                 val firstApply = !displayPreferencesApplied
                 displayPreferencesApplied = true
                 _state.update { current ->
-                    current.withDisplayPreferences(
-                        viewMode = preferences.viewMode,
-                        gridColumns = preferences.gridColumns,
-                        sortOrder = preferences.sortOrder,
-                        autoRestorePosition = preferences.autoRestorePosition,
-                        sortChangeScrollsToTop = !firstApply,
+                    consumeForcedRestore(
+                        current.withDisplayPreferences(
+                            viewMode = preferences.viewMode,
+                            gridColumns = preferences.gridColumns,
+                            sortOrder = preferences.sortOrder,
+                            autoRestorePosition = preferences.autoRestorePosition,
+                            sortChangeScrollsToTop = !firstApply,
+                        ),
                     )
                 }
             }
@@ -469,11 +474,11 @@ class LibraryViewModel(
         }
     }
 
-    /** 记录某个目录的第一个可见条目与滚动偏移；关闭位置记忆或加载中不写。 */
+    /** 记录某个目录的第一个可见条目与滚动偏移；位置记录与位置记忆开关无关，加载中不写。 */
     fun savePosition(sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) {
         if (sourceLocation.isBlank()) return
         val current = _state.value
-        if (!current.autoRestorePosition || current.loading) return
+        if (current.loading) return
         val position = DirectoryPosition(entryLocation, scrollOffset)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
@@ -502,10 +507,23 @@ class LibraryViewModel(
             val result = library.list(directory)
             currentCoroutineContext().ensureActive()
             _state.update {
-                it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position)
+                consumeForcedRestore(
+                    it.withLoadedEntries(result.getOrDefault(emptyList()), result.exceptionOrNull().toFailure(), position),
+                )
             }
         }
     }
+
+    /**
+     * 进程恢复的强制定位在首次成功读取且显示偏好已套用后消费。
+     * 读取失败时保留，retry 仍可强制定位。
+     */
+    private fun consumeForcedRestore(state: LibraryState): LibraryState =
+        if (state.restorePositionForced && !state.loading && state.failure == null && displayPreferencesApplied) {
+            state.copy(restorePositionForced = false)
+        } else {
+            state
+        }
 
     /** 位置记录读取失败按没有记录处理，不阻断目录浏览。 */
     private suspend fun loadPosition(sourceLocation: String, relativePath: String): DirectoryPosition? = try {

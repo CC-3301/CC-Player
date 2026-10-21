@@ -23,6 +23,7 @@ import com.cc3301.ccplayer.network.NetworkSourceVerifier
 import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.settings.FakePreferencesDataStore
 import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.settings.ViewMode
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -61,6 +62,22 @@ private class GatedMediaLibrary(private val delegate: MediaLibrary) : MediaLibra
 
     override suspend fun list(directory: MediaFile): Result<List<MediaFile>> {
         gate.await()
+        return delegate.list(directory)
+    }
+}
+
+/** 第一次列举失败，之后交给真实文件树；用于观察恢复读取失败后的重试。 */
+private class FailOnceMediaLibrary(private val delegate: MediaLibrary) : MediaLibrary {
+
+    private var failed = false
+
+    override suspend fun resolveDirectory(location: String): MediaFile? = delegate.resolveDirectory(location)
+
+    override suspend fun list(directory: MediaFile): Result<List<MediaFile>> {
+        if (!failed) {
+            failed = true
+            return Result.failure(MediaSourceException(MediaFailure.Unreachable, "断线"))
+        }
         return delegate.list(directory)
     }
 }
@@ -561,7 +578,7 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `关闭位置记忆期间浏览不覆盖已有记录`() = runTest {
+    fun `关闭位置记忆期间浏览继续更新位置记录`() = runTest {
         tree.addDirectory(
             smbRoot,
             testVideo("a.mkv", "smb://nas/media/a.mkv"),
@@ -580,8 +597,8 @@ class LibraryViewModelTest {
         advanceUntilIdle()
 
         val saved = positions.load("smb://nas/media", "")
-        assertEquals("smb://nas/media/a.mkv", saved?.entryLocation)
-        assertEquals(20, saved?.scrollOffset)
+        assertEquals("smb://nas/media/b.mkv", saved?.entryLocation)
+        assertEquals(60, saved?.scrollOffset)
     }
 
     @Test
@@ -736,7 +753,88 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `关闭位置记忆后进程回收仍恢复浏览位置`() = runTest {
+    fun `开关始终关闭时进程回收恢复原目录与浏览位置`() = runTest {
+        val series = testDirectory("剧集", "smb://nas/media/剧集")
+        val season = testDirectory("第二季", "smb://nas/media/剧集/第二季")
+        tree.addDirectory(
+            smbRoot,
+            testVideo("根01.mkv", "smb://nas/media/根01.mkv"),
+            series,
+            testVideo("根02.mkv", "smb://nas/media/根02.mkv"),
+        )
+        tree.addDirectory(
+            series,
+            season,
+            testVideo("剧01.mkv", "smb://nas/media/剧集/剧01.mkv"),
+            testVideo("剧02.mkv", "smb://nas/media/剧集/剧02.mkv"),
+        )
+        tree.addDirectory(
+            season,
+            testVideo("第01集.mkv", "smb://nas/media/剧集/第二季/第01集.mkv"),
+            testVideo("第02集.mkv", "smb://nas/media/剧集/第二季/第02集.mkv"),
+        )
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/根02.mkv", 20)
+        viewModel.enter(series)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "剧集", "smb://nas/media/剧集/剧02.mkv", 24)
+        viewModel.enter(season)
+        advanceUntilIdle()
+        viewModel.savePosition(
+            "smb://nas/media",
+            "剧集/第二季",
+            "smb://nas/media/剧集/第二季/第02集.mkv",
+            36,
+        )
+        advanceUntilIdle()
+
+        assertEquals("smb://nas/media/根02.mkv", positions.load("smb://nas/media", "")?.entryLocation)
+        assertEquals("smb://nas/media/剧集/剧02.mkv", positions.load("smb://nas/media", "剧集")?.entryLocation)
+        assertEquals(
+            "smb://nas/media/剧集/第二季/第02集.mkv",
+            positions.load("smb://nas/media", "剧集/第二季")?.entryLocation,
+        )
+
+        val restored = createViewModel(state = restoredHandle())
+        advanceUntilIdle()
+
+        assertEquals(listOf("nas", "剧集", "第二季"), restored.state.value.stack.map { it.name })
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+        assertFalse(restored.state.value.restorePositionForced)
+
+        settings.setAutoRestorePosition(true)
+        advanceUntilIdle()
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+
+        settings.setView(ViewMode.Grid, 3)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+
+        restored.navigateUp()
+        advanceUntilIdle()
+        assertEquals("剧集", restored.state.value.currentDirectory?.name)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+
+        restored.enter(season)
+        advanceUntilIdle()
+        assertEquals("第二季", restored.state.value.currentDirectory?.name)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+
+        restored.openSource(restored.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        assertEquals("nas", restored.state.value.currentDirectory?.name)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `首次恢复读取失败时保留强制定位并在重试后恢复`() = runTest {
         val series = testDirectory("剧集", "smb://nas/media/剧集")
         tree.addDirectory(smbRoot, series)
         tree.addDirectory(
@@ -744,6 +842,8 @@ class LibraryViewModelTest {
             testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"),
             testVideo("第02集.mkv", "smb://nas/media/剧集/第02集.mkv"),
         )
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
         openSmbForm(address = "nas", path = "media")
         advanceUntilIdle()
         viewModel.openSource(viewModel.sourcesState.value.smb.single())
@@ -752,18 +852,77 @@ class LibraryViewModelTest {
         advanceUntilIdle()
         viewModel.savePosition("smb://nas/media", "剧集", "smb://nas/media/剧集/第02集.mkv", 36)
         advanceUntilIdle()
+
+        val restored = createViewModel(
+            library = FailOnceMediaLibrary(DirectoryMediaLibrary(tree)),
+            state = restoredHandle(),
+        )
+        advanceUntilIdle()
+        assertEquals(MediaFailure.Unreachable, restored.state.value.failure)
+        assertTrue(restored.state.value.restorePositionForced)
+
+        restored.retry()
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+        assertFalse(restored.state.value.restorePositionForced)
+    }
+
+    @Test
+    fun `恢复首次读取失败后正常进入目录仍从顶部开始`() = runTest {
+        val series = testDirectory("剧集", "smb://nas/media/剧集")
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+            series,
+        )
+        tree.addDirectory(series, testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"))
         settings.setAutoRestorePosition(false)
         advanceUntilIdle()
-
-        val restored = createViewModel(state = restoredHandle())
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 20)
+        viewModel.enter(series)
         advanceUntilIdle()
 
-        assertEquals(listOf("nas", "剧集"), restored.state.value.stack.map { it.name })
-        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+        val restored = createViewModel(
+            library = FailOnceMediaLibrary(DirectoryMediaLibrary(tree)),
+            state = restoredHandle(),
+        )
+        advanceUntilIdle()
+        assertTrue(restored.state.value.restorePositionForced)
 
         restored.openSource(restored.sourcesState.value.smb.single())
         advanceUntilIdle()
+
+        assertEquals("nas", restored.state.value.currentDirectory?.name)
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), restored.state.value.scrollTarget)
+        assertFalse(restored.state.value.restorePositionForced)
+    }
+
+    @Test
+    fun `开关关闭时长按排序仍写入顶部位置`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        settings.setAutoRestorePosition(false)
+        advanceUntilIdle()
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.smb.single())
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 40)
+        advanceUntilIdle()
+
+        viewModel.scrollToTop()
+        advanceUntilIdle()
+
+        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0), positions.load("smb://nas/media", ""))
     }
 
     @Test
