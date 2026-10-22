@@ -9,13 +9,19 @@ import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
+/** 接受循环连续失败达到该次数后关闭监听，避免忙循环。 */
+internal const val LOOPBACK_ACCEPT_FAILURE_LIMIT = 8
+
 /**
  * 回环 HTTP 代理：只监听 127.0.0.1，把登记的流按 Range 响应给本机播放器。
  *
  * 同一个键恒得同一个地址；字节源在第一个请求到达时才由 opener 建立并缓存。
  * [close] 关闭全部已建立的字节源。
  */
-class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
+class LoopbackStreamServer(
+    port: Int = 0,
+    private val acceptSocket: (ServerSocket) -> Socket = { it.accept() },
+) : AutoCloseable {
 
     private val entries = ConcurrentHashMap<String, Entry>()
     private val idsByKey = ConcurrentHashMap<String, String>()
@@ -47,41 +53,80 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
     }
 
     private fun acceptLoop() {
+        var consecutiveFailures = 0
         while (!serverSocket.isClosed) {
             val connection = try {
-                serverSocket.accept()
-            } catch (closed: IOException) {
+                acceptSocket(serverSocket)
+            } catch (failure: IOException) {
+                if (serverSocket.isClosed) return
+                consecutiveFailures++
+                if (consecutiveFailures >= LOOPBACK_ACCEPT_FAILURE_LIMIT) {
+                    closeAfterAcceptFailure(failure)
+                    return
+                }
+                continue
+            } catch (failure: RuntimeException) {
+                if (serverSocket.isClosed) return
+                consecutiveFailures++
+                if (consecutiveFailures >= LOOPBACK_ACCEPT_FAILURE_LIMIT) {
+                    closeAfterAcceptFailure(failure)
+                    return
+                }
+                continue
+            } catch (failure: Throwable) {
+                // Error 与其它异常无法安全恢复，记录后关闭监听。
+                closeAfterAcceptFailure(failure)
                 return
             }
-            Thread({ handle(connection) }, "loopback-stream-connection").apply { isDaemon = true }.start()
+            consecutiveFailures = 0
+            try {
+                Thread({ handle(connection) }, "loopback-stream-connection").apply { isDaemon = true }.start()
+            } catch (failure: Throwable) {
+                runCatching { connection.close() }
+            }
         }
     }
 
-    private fun handle(connection: Socket) {
-        connection.use { socket ->
-            val request = try {
-                readRequest(socket.getInputStream())
-            } catch (unreadable: IOException) {
-                null
-            } ?: return
-            val entry = entries[request.path.trimStart('/').substringBefore('/')]
-            try {
-                socket.getOutputStream().buffered().use { output ->
-                    when {
-                        entry == null -> writeHead(output, STATUS_NOT_FOUND, statusText(STATUS_NOT_FOUND), emptyMap())
-                        else -> {
-                            val source = runCatching { entry.source() }.getOrNull()
-                            if (source == null) {
-                                writeHead(output, STATUS_UNAVAILABLE, statusText(STATUS_UNAVAILABLE), emptyMap())
-                            } else {
-                                respond(output, request, source)
+    /** 接受线程无法继续时关闭监听并记录，避免线程静默退出后端口看似仍可用。 */
+    private fun closeAfterAcceptFailure(failure: Throwable) {
+        runCatching { System.err.println("回环流接受线程退出: $failure") }
+        runCatching { serverSocket.close() }
+    }
+
+    /**
+     * 连接处理线程的顶层边界：运行时异常（如 SMB 读超时）按连接失败收尾。
+     * 异常不能逃逸到线程顶层，否则会终止整个进程。
+     */
+    internal fun handle(connection: Socket) {
+        try {
+            connection.use { socket ->
+                val request = try {
+                    readRequest(socket.getInputStream())
+                } catch (unreadable: IOException) {
+                    null
+                } ?: return
+                val entry = entries[request.path.trimStart('/').substringBefore('/')]
+                try {
+                    socket.getOutputStream().buffered().use { output ->
+                        when {
+                            entry == null -> writeHead(output, STATUS_NOT_FOUND, statusText(STATUS_NOT_FOUND), emptyMap())
+                            else -> {
+                                val source = runCatching { entry.source() }.getOrNull()
+                                if (source == null) {
+                                    writeHead(output, STATUS_UNAVAILABLE, statusText(STATUS_UNAVAILABLE), emptyMap())
+                                } else {
+                                    respond(output, request, source)
+                                }
                             }
                         }
                     }
+                } catch (disconnected: IOException) {
+                    // 播放器提前断开时只结束本次连接，不失效字节源。
                 }
-            } catch (disconnected: IOException) {
-                // 播放器提前断开时只结束本次连接。
             }
+        } catch (failure: Throwable) {
+            // 读超时等异常只结束本次连接，连接线程正常退出。
+            runCatching { System.err.println("回环流连接结束: $failure") }
         }
     }
 
@@ -159,11 +204,25 @@ class LoopbackStreamServer(port: Int = 0) : AutoCloseable {
         @Volatile
         private var source: ByteSource? = null
 
-        /** 取字节源；建立失败时抛出，下次请求会重试。 */
-        fun source(): ByteSource = source ?: synchronized(lock) { source ?: open().also { source = it } }
+        @Volatile
+        private var closed = false
+
+        /** 取字节源；建立失败时抛出，下次请求会重试。关闭后不再建立新源。 */
+        fun source(): ByteSource {
+            if (closed) throw IllegalStateException("流已关闭")
+            source?.let { return it }
+            synchronized(lock) {
+                check(!closed) { "流已关闭" }
+                return source ?: open().also { source = it }
+            }
+        }
 
         fun close() {
-            source?.let { runCatching { it.close() } }
+            synchronized(lock) {
+                closed = true
+                source?.let { runCatching { it.close() } }
+                source = null
+            }
         }
     }
 

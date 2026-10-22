@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.library
 
 import android.content.Context
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
@@ -82,6 +84,8 @@ class CachedMediaPreviewSource(
     private val cache: ThumbnailCache,
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
     private val monotonicClock: () -> Long = System::nanoTime,
+    /** 诊断日志出口；只记文件名与失败类型，不记连接凭据。 */
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : MediaPreviewSource {
 
     /** 本地同时提取数上限。 */
@@ -115,6 +119,7 @@ class CachedMediaPreviewSource(
     private suspend fun localPreview(file: MediaFile, key: String, targetWidth: Int): MediaPreview {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
+            file = file,
             key = key,
             maxAgeMillis = maxAge,
             onCacheHit = { cached -> durationOnCacheHit(file, key, cached) },
@@ -222,6 +227,7 @@ class CachedMediaPreviewSource(
     private suspend fun networkImage(file: MediaFile, key: String, targetWidth: Int): File? {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
+            file = file,
             key = key,
             maxAgeMillis = maxAge,
             onCacheHit = { cached -> LoadedPreview(cached.file, durationMillis = null) },
@@ -257,6 +263,7 @@ class CachedMediaPreviewSource(
      * 首个调用者被取消时，等待者重新竞争，避免把取消当成抽取失败。
      */
     private suspend fun cachedOrLoad(
+        file: MediaFile,
         key: String,
         maxAgeMillis: Long?,
         onCacheHit: suspend (CachedThumbnail) -> LoadedPreview,
@@ -281,7 +288,7 @@ class CachedMediaPreviewSource(
                         extractionFailures.remove(key)
                         onCacheHit(cached)
                     } else {
-                        loadWithBackoff(key, load)
+                        loadWithBackoff(file, key, load)
                     }
                 } catch (cancellation: CancellationException) {
                     throw cancellation
@@ -302,7 +309,11 @@ class CachedMediaPreviewSource(
     }
 
     /** 整次抽取失败后按键退避；退避到期才允许下一次真正重试。 */
-    private suspend fun loadWithBackoff(key: String, load: suspend () -> LoadedPreview): LoadedPreview {
+    private suspend fun loadWithBackoff(
+        file: MediaFile,
+        key: String,
+        load: suspend () -> LoadedPreview,
+    ): LoadedPreview {
         val now = monotonicClock()
         val previous = extractionFailures[key]
         if (previous != null && now < previous.retryAtMillis) {
@@ -313,6 +324,7 @@ class CachedMediaPreviewSource(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Exception) {
+            diagnostics.log { "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName})" }
             val attempts = (previous?.attempts ?: 0) + 1
             val failedAt = monotonicClock()
             recordRetry(
@@ -382,13 +394,18 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
-        fun create(context: Context, networkReads: NetworkMediaReads): CachedMediaPreviewSource {
+        fun create(
+            context: Context,
+            networkReads: NetworkMediaReads,
+            diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+        ): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
             return CachedMediaPreviewSource(
                 extractor = AndroidMediaPreviewExtractor(appContext, networkReads),
                 cache = thumbnailCache(appContext),
                 policy = policy,
+                diagnostics = diagnostics,
             )
         }
 
