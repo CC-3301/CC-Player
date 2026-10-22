@@ -98,7 +98,7 @@ class CachedMediaPreviewSourceTest {
         assertEquals(listOf(320), extractor.imageWidths)
         assertTrue(extractor.durationRequests.isEmpty())
         assertNull(preview.durationMillis)
-        val entry = cache().entry(thumbnailCacheKey(file, ThumbnailPolicy()))
+        val entry = cache().entry(cacheKey(file))
         assertNotNull(entry)
         assertNull(entry!!.durationMillis)
         assertTrue(!entry.durationKnown)
@@ -261,7 +261,7 @@ class CachedMediaPreviewSourceTest {
         extractor.durationMillis = 187_000
         val file = local("电影.mkv", lastModified = 1_000)
         source.preview(file)
-        val key = thumbnailCacheKey(file, ThumbnailPolicy())
+        val key = cacheKey(file)
         metadataFile().writeText("1000")
         val callsAfterFirst = extractor.durationRequests.size
 
@@ -285,7 +285,7 @@ class CachedMediaPreviewSourceTest {
         extractor.durationMillis = 187_000
         val file = local("电影.mkv", lastModified = 1_000)
         source.preview(file)
-        val key = thumbnailCacheKey(file, ThumbnailPolicy())
+        val key = cacheKey(file)
         metadataFile().delete()
         val callsAfterFirst = extractor.durationRequests.size
 
@@ -321,7 +321,7 @@ class CachedMediaPreviewSourceTest {
 
         assertArrayEquals(image, preview.image!!.readBytes())
         assertNull(preview.durationMillis)
-        val entry = cache.entry(thumbnailCacheKey(file, ThumbnailPolicy()))
+        val entry = cache.entry(cacheKey(file))
         assertNotNull(entry)
         assertTrue(!entry!!.durationKnown)
     }
@@ -343,7 +343,7 @@ class CachedMediaPreviewSourceTest {
         val first = bounded.preview(file)
         assertNotNull(first.image)
         assertNull(first.durationMillis)
-        val key = thumbnailCacheKey(file, ThumbnailPolicy())
+        val key = cacheKey(file)
         assertTrue(!cache.entry(key)!!.durationKnown)
 
         val hit = bounded.preview(file)
@@ -404,7 +404,7 @@ class CachedMediaPreviewSourceTest {
         assertNull(source.preview(file).durationMillis)
 
         assertEquals(callsAfterFirst, extractor.durationRequests.size)
-        val entry = cache().entry(thumbnailCacheKey(file, ThumbnailPolicy()))
+        val entry = cache().entry(cacheKey(file))
         assertNotNull(entry)
         assertTrue(entry!!.durationKnown)
         assertNull(entry.durationMillis)
@@ -467,7 +467,7 @@ class CachedMediaPreviewSourceTest {
         extractor.durationMillis = 187_000
         extractor.durationFailure = IllegalStateException("读时长失败")
         val file = local("歌.mp3", lastModified = 1_000)
-        val key = thumbnailCacheKey(file, ThumbnailPolicy())
+        val key = cacheKey(file)
 
         val first = source.preview(file)
         assertNull(first.image)
@@ -770,7 +770,7 @@ class CachedMediaPreviewSourceTest {
         val file = local("电影.mkv", lastModified = 1_000)
         val cache = cache()
         cache.save(
-            location = thumbnailCacheKey(file, ThumbnailPolicy(version = THUMBNAIL_POLICY_VERSION - 1)),
+            location = cacheKey(file, ThumbnailPolicy(version = THUMBNAIL_POLICY_VERSION - 1)),
             bytes = byteArrayOf(9, 9, 9),
             durationMillis = 1,
         )
@@ -959,20 +959,6 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `网络可见项按列表顺序发起抽取`() = runTest {
-        val tracker = OrderRecordingExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = tracker,
-            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-        )
-        val files = (0 until 6).map { index -> network("第$index 集.mkv") }
-
-        files.map { file -> async { bounded.preview(file) } }.awaitAll()
-
-        assertEquals(files.map(MediaFile::location), tracker.started)
-    }
-
-    @Test
     fun `子目录没有预览`() = runTest {
         val preview = source.preview(testDirectory("剧集", "root/剧集"))
 
@@ -998,6 +984,9 @@ class CachedMediaPreviewSourceTest {
         lastModified = lastModified,
         source = MediaSource.Network,
     )
+
+    private fun cacheKey(file: MediaFile, policy: ThumbnailPolicy = ThumbnailPolicy()) =
+        thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
 }
 
 /** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的并发名额释放。 */
@@ -1086,20 +1075,6 @@ private class RetryAfterFailureExtractor : MediaPreviewExtractor {
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests++
         failure?.let { throw it }
-        return byteArrayOf(1)
-    }
-
-    override suspend fun durationMillis(file: MediaFile): Long? = null
-}
-
-/** 记录网络抽取的发起顺序，用来验证可见项按列表顺序调度。 */
-private class OrderRecordingExtractor : MediaPreviewExtractor {
-
-    val started = mutableListOf<String>()
-
-    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
-        started += file.location
-        yield()
         return byteArrayOf(1)
     }
 

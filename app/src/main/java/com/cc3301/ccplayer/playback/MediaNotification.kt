@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.playback
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.ThumbnailCache
 import com.cc3301.ccplayer.library.ThumbnailPolicy
+import com.cc3301.ccplayer.library.previewTargetWidth
 import com.cc3301.ccplayer.library.thumbnailCacheKey
 import com.cc3301.ccplayer.library.thumbnailCacheMaxAge
 import java.io.File
@@ -89,7 +90,7 @@ internal class NotificationCoverCache(
     suspend fun file(media: MediaFile?): File? {
         if (media == null) return null
         return cache.file(
-            thumbnailCacheKey(media, policy),
+            thumbnailCacheKey(media, policy, previewTargetWidth(media, policy)),
             thumbnailCacheMaxAge(media, policy),
         )
     }

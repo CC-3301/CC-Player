@@ -406,7 +406,7 @@ class CachedMediaPreviewSource(
 internal fun thumbnailCacheKey(
     file: MediaFile,
     policy: ThumbnailPolicy,
-    targetWidth: Int = previewTargetWidth(file, policy),
+    targetWidth: Int,
 ): String {
     val base = "${file.location}|${file.size}|v${policy.version}|w$targetWidth"
     return if (file.lastModified > 0) {

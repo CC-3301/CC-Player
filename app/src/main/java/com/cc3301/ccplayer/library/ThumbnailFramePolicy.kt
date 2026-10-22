@@ -53,7 +53,11 @@ internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePo
             FramePosition(micros, fallback = index == count - 1)
         }
     }
-    val fractions = listOf(0.1, FALLBACK_FRAME_FRACTION, 2.0 / 3.0).take(frameCount)
+    val fractions = when (frameCount) {
+        1 -> listOf(FALLBACK_FRAME_FRACTION)
+        2 -> listOf(FALLBACK_FRAME_FRACTION, 2.0 / 3.0)
+        else -> listOf(0.1, FALLBACK_FRAME_FRACTION, 2.0 / 3.0)
+    }
     val durationMicros = durationMillis * 1_000
     return fractions.map { fraction ->
         FramePosition(
@@ -73,6 +77,7 @@ internal fun networkFramePosition(durationMillis: Long?): FramePosition {
 
 /**
  * 网络单帧抽取：只解码一个位置；解不出或纯色时返回 null，界面保持占位图。
+ * 不合格帧不缓存，下一次请求会重新解码。
  * [release] 在纯色帧被丢弃前调用，用于回收位图。
  */
 internal fun <T> extractNetworkFrame(

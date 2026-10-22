@@ -79,11 +79,13 @@ class ThumbnailFramePolicyTest {
     @Test
     fun `网络单帧解不出时保持占位图`() {
         var decodes = 0
+        var asked: Long? = null
 
         val frame = extractNetworkFrame<String>(
             durationMillis = null,
-            decode = {
+            decode = { position ->
                 decodes++
+                asked = position.micros
                 null
             },
             isSolid = { false },
@@ -91,6 +93,7 @@ class ThumbnailFramePolicyTest {
 
         assertNull(frame)
         assertEquals(1, decodes)
+        assertEquals(1_000_000L, asked)
     }
 
     @Test
