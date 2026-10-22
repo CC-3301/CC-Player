@@ -32,6 +32,19 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a seek after eof allows the next natural end to report again`() {
+        val coordinator = MpvLoadCoordinator()
+        val spec = coordinator.start("root/ep1.mkv")
+        assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+        assertEquals(null, coordinator.onEofChanged(true))
+
+        // 拖回片尾外再播到结尾：同一代际要能再次上报播完。
+        coordinator.onSeekIssued()
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+    }
+
+    @Test
     fun `an end after the reported eof settles the loaded file`() {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
@@ -427,8 +440,11 @@ class MpvFileEventsTest {
         assertEquals("root/ep1.mkv", coordinator.onFileLoaded("root/ep1.mkv")?.url)
 
         assertEquals(1, coordinator.onEofChanged(true))
-        // 没有 END_FILE，代际仍可继续；下一次加载正常接管。
-        assertEquals(2, coordinator.start("root/ep2.mkv").token)
+        // 自然播完本身没有 END_FILE；下一次 loadfile 仍会替换旧文件并产生一次结束事件。
+        val next = coordinator.start("root/ep2.mkv")
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(next, coordinator.onFileLoaded("root/ep2.mkv"))
+        assertEquals(next, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
     }
 
     @Test
@@ -472,5 +488,28 @@ class MpvFileEventsTest {
 
         assertEquals(current, loads.takeFileLoaded("root/ep3.mkv"))
         assertEquals(current, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
+    }
+
+    @Test
+    fun `the first position after a start only rebuilds the baseline`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+
+        assertFalse(gate.onPosition(0))
+        assertTrue(gate.onPosition(40))
+    }
+
+    @Test
+    fun `a queued old position after a backward seek is not progress`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+        assertFalse(gate.onPosition(1_000))
+
+        gate.onSeek(200)
+
+        // 队列里较大的旧位置先到：只能重建基线，不能当作出帧证据。
+        assertFalse(gate.onPosition(1_000))
+        assertFalse(gate.onPosition(250))
+        assertTrue(gate.onPosition(260))
     }
 }

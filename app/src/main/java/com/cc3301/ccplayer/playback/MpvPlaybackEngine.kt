@@ -35,9 +35,8 @@ class MpvPlaybackEngine(
     @Volatile
     private var awaitingLoadFrame = false
 
-    /** 上一次已上报的播放位置；位置真正前进才说明画面/声音输出在推进。 */
-    @Volatile
-    private var lastPositionMillis = 0L
+    /** 位置前进判定：seek 后先重建基线，避免队列里的旧位置冒充前进。 */
+    private val positionGate = PositionProgressGate()
 
     @Volatile
     private var surfaceGenerationCounter = 0
@@ -82,7 +81,7 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         awaitingLoadFrame = true
-        lastPositionMillis = startPositionMillis
+        positionGate.onStart(startPositionMillis)
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
         if (startPositionMillis > 0) {
@@ -124,8 +123,8 @@ class MpvPlaybackEngine(
      */
     override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
-        // 跳转本身不是播放推进；之后的正常前进才算新画面已输出。
-        lastPositionMillis = positionMillis
+        // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
+        positionGate.onSeek(positionMillis)
         val serial = loadCoordinator.onSeekIssued()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
         return serial
@@ -204,10 +203,10 @@ class MpvPlaybackEngine(
     }
 
     /** 重新接一次同一块 Surface 并重设视频输出，逼播放核心再出一帧；不改变播放位置。 */
-    override fun refreshSurface() {
-        val surface = attachedSurface ?: return
-        if (videoOutputStopped) return
-        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+    override fun refreshSurface(): Boolean {
+        val surface = attachedSurface ?: return false
+        if (videoOutputStopped) return false
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return false
         awaitingSurfaceFrame = true
         surfaceGenerationCounter++
         MPVLib.setPropertyString("vo", "null")
@@ -215,6 +214,7 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
         MPVLib.attachSurface(surface)
         MPVLib.setOptionString("force-window", "yes")
+        return true
     }
 
     override fun setSurfaceSize(width: Int, height: Int) {
@@ -284,6 +284,8 @@ class MpvPlaybackEngine(
      */
     private fun notifyProgressFrame() {
         if (isPaused()) return
+        // 纯音频没有画面可证明，首帧信号由 AUDIO_RECONFIG 处理。
+        if (!hasVideoTrack) return
         if (attachedSurface == null || videoOutputStopped) return
         if (!awaitingLoadFrame && !awaitingSurfaceFrame) return
         val token = loadCoordinator.currentLoadedToken() ?: return
@@ -322,13 +324,7 @@ class MpvPlaybackEngine(
         when (property) {
             TIME_POS_PROPERTY -> {
                 positionSeconds = value
-                val millis = toMillis(value)
-                if (millis > lastPositionMillis) {
-                    lastPositionMillis = millis
-                    notifyProgressFrame()
-                } else {
-                    lastPositionMillis = millis
-                }
+                if (positionGate.onPosition(toMillis(value))) notifyProgressFrame()
             }
             DURATION_PROPERTY -> durationSeconds = value
             else -> return
@@ -405,6 +401,56 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+    }
+}
+
+/**
+ * 播放位置前进判定：新加载或 seek 后的首个位置事件只重建基线，
+ * 避免上一个位置或队列里的旧大位置被误判为“前进”。线程由调用方保证。
+ */
+internal class PositionProgressGate {
+
+    private var lastPositionMillis = 0L
+    private var baselineTargetMillis = 0L
+    private var rebuildBaseline = true
+    private var dropAboveBaseline = false
+
+    fun onStart(positionMillis: Long) {
+        lastPositionMillis = positionMillis
+        baselineTargetMillis = positionMillis
+        rebuildBaseline = true
+        dropAboveBaseline = false
+    }
+
+    fun onSeek(positionMillis: Long) {
+        // 只有回退 seek 需要丢掉队列里更大的旧位置。
+        dropAboveBaseline = positionMillis < lastPositionMillis
+        lastPositionMillis = positionMillis
+        baselineTargetMillis = positionMillis
+        rebuildBaseline = true
+    }
+
+    /** 返回 true 表示位置确实前进，可作为画面已输出的证据。 */
+    fun onPosition(positionMillis: Long): Boolean {
+        if (rebuildBaseline) {
+            if (!dropAboveBaseline || positionMillis <= baselineTargetMillis + BASELINE_TOLERANCE_MILLIS) {
+                lastPositionMillis = positionMillis
+                rebuildBaseline = false
+            }
+            return false
+        }
+        val advanced = positionMillis > lastPositionMillis &&
+            positionMillis - lastPositionMillis <= MAX_ADVANCE_MILLIS
+        lastPositionMillis = positionMillis
+        return advanced
+    }
+
+    private companion object {
+        /** seek 后允许作为新基线的目标误差。 */
+        const val BASELINE_TOLERANCE_MILLIS = 500L
+
+        /** 单次正常推进的上限；更大的跳变只重建基线。 */
+        const val MAX_ADVANCE_MILLIS = 2_000L
     }
 }
 

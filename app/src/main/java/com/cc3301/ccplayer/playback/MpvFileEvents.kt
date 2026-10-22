@@ -89,6 +89,15 @@ internal class MpvFileEvents {
         return true
     }
 
+    /**
+     * 真正离开 EOF：seek 发起后允许同一代际再次上报自然播完。
+     * 单纯 eof=false 可能只是卸载前的属性回落，不能重置。
+     */
+    @Synchronized
+    fun onSeekIssued() {
+        if (state == State.Loaded) ended = false
+    }
+
     /** END_FILE 只用来区分替换与失败；自然播完已由 [onEofChanged] 上报。 */
     @Synchronized
     fun onEndFile(): End {
@@ -358,7 +367,11 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onSeekIssued(): Int = readySignals.onSeekIssued()
+    fun onSeekIssued(): Int {
+        // seek 发起表示真正离开片尾，允同一代际再次上报播完。
+        fileEvents.onSeekIssued()
+        return readySignals.onSeekIssued()
+    }
 
     @Synchronized
     fun onSeekEvent() {

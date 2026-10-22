@@ -145,9 +145,10 @@ class FakePlaybackEngine : PlaybackEngine {
     var refreshSurfaceCalls = 0
         private set
 
-    override fun refreshSurface() {
+    override fun refreshSurface(): Boolean {
         actions += "refresh"
         refreshSurfaceCalls++
+        return true
     }
 
     override fun setSurfaceSize(width: Int, height: Int) = Unit

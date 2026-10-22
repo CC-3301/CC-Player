@@ -380,10 +380,11 @@ class PlaybackController(
                 if (!_renderSurfaceAvailable.value) return@launch
                 if (generation != engine.surfaceGeneration) return@launch
                 if (surfaceRefreshAttempted) return@launch
-                surfaceRefreshAttempted = true
-                engine.refreshSurface()
+                // 未加载、无视频轨或输出已停时不消耗这次刷新。
+                if (engine.refreshSurface()) surfaceRefreshAttempted = true
             } finally {
-                surfaceRefreshJob = null
+                val runningJob = coroutineContext[Job]
+                if (surfaceRefreshJob === runningJob) surfaceRefreshJob = null
             }
         }
     }
@@ -434,6 +435,13 @@ class PlaybackController(
         if (!active) return
         paused = true
         engine.pause()
+        settleStartedSwitchAsPaused()
+    }
+
+    /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾，保留冻结画面。 */
+    private fun settleStartedSwitchAsPaused() {
+        if (loadPhase != LoadPhase.Switching || !switchPlaybackStarted) return
+        finishReady(LoadPhase.Switching)
     }
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
@@ -545,6 +553,7 @@ class PlaybackController(
         clearRestoreHoldOnUserAction()
         paused = true
         engine.pause()
+        settleStartedSwitchAsPaused()
     }
 
     /**
@@ -559,8 +568,11 @@ class PlaybackController(
         if (!active) return
         clearRestoreHoldOnUserAction()
         paused = false
-        // 切集加载中的继续只记为意图，等目标文件就绪再出声。
-        if (loadPhase == LoadPhase.Switching) return
+        // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
+        if (loadPhase == LoadPhase.Switching) {
+            if (switchPlaybackStarted) engine.resume()
+            return
+        }
         if (loadPhase == LoadPhase.Restoring) {
             // 片尾恢复没有可续播位置：文件重新打开后从头开始，不在片尾立即再次 EOF。
             if (restoreAtEndOfEpisode) restartFromStartAfterRestore = true
@@ -579,6 +591,7 @@ class PlaybackController(
         if (!active) return
         paused = true
         engine.pause()
+        settleStartedSwitchAsPaused()
         updateState(PlaybackState.Paused)
     }
 
@@ -996,6 +1009,7 @@ class PlaybackController(
         playedDurationMillis = duration
         _progress.value = PlaybackProgress(loadStartPositionMillis, duration)
         if (paused) {
+            switchPlaybackStarted = false
             updateState(PlaybackState.Paused)
         } else {
             if (!switchPlaybackStarted) engine.resume()

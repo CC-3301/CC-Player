@@ -182,6 +182,32 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `pausing after the target started settles the switch paused and keeps the freeze`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        assertTrue(controller.switching.value)
+        assertEquals(1, engine.resumeCalls)
+
+        // 就绪后又暂停：不能再等位置前进，直接按已就绪暂停收尾。
+        controller.pause()
+
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(frame, controller.freezeFrame.value)
+
+        // 用户继续播放后真正出帧，冻结画面才撤。
+        controller.resume()
+        engine.reportPauseChanged(false)
+        engine.reportPositionChanged(1_000, 600_000)
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
     fun `a paused switch starts playing even when it began paused`() = runTest {
         val controller = playingController()
         controller.pause()
