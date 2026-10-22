@@ -89,14 +89,18 @@ class CachedMediaPreviewSourceTest {
     fun `网络视频抽帧并显示，对外不返回时长`() = runTest {
         val frame = byteArrayOf(4, 5, 6)
         extractor.imageBytes = frame
+        val file = network("共享电影.mkv")
 
-        val preview = source.preview(network("共享电影.mkv"))
+        val preview = source.preview(file)
 
         assertArrayEquals(frame, preview.image!!.readBytes())
         assertEquals(listOf("smb://nas/media/共享电影.mkv"), extractor.imageRequests)
-        assertEquals(listOf(512), extractor.imageWidths)
+        assertEquals(listOf(320), extractor.imageWidths)
         assertTrue(extractor.durationRequests.isEmpty())
         assertNull(preview.durationMillis)
+        val entry = cache().entry(thumbnailCacheKey(file, ThumbnailPolicy()))
+        assertNotNull(entry)
+        assertNull(entry!!.durationMillis)
     }
 
     @Test
@@ -715,8 +719,8 @@ class CachedMediaPreviewSourceTest {
         )
         extractor.imageBytes = byteArrayOf(1)
 
-        first.preview(network("歌.mp3"))
-        second.preview(network("歌.mp3"))
+        first.preview(local("歌.mp3"))
+        second.preview(local("歌.mp3"))
 
         assertEquals(2, extractor.imageRequests.size)
         assertEquals(listOf(320, 512), extractor.imageWidths)
@@ -724,11 +728,33 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `网络目标宽度固定为 320，不受策略宽度影响`() = runTest {
+        val wide = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            policy = ThumbnailPolicy(targetWidth = 512),
+        )
+        val narrow = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            policy = ThumbnailPolicy(targetWidth = 320),
+        )
+        extractor.imageBytes = byteArrayOf(1)
+
+        wide.preview(network("电影.mkv"))
+        narrow.preview(network("电影.mkv"))
+
+        assertEquals(1, extractor.imageRequests.size)
+        assertEquals(listOf(320), extractor.imageWidths)
+        assertEquals(1, imageFileCount())
+    }
+
+    @Test
     fun `旧策略版本的缓存图不被新策略复用`() = runTest {
         val file = local("电影.mkv", lastModified = 1_000)
         val cache = cache()
         cache.save(
-            location = thumbnailCacheKey(file, ThumbnailPolicy(version = 1)),
+            location = thumbnailCacheKey(file, ThumbnailPolicy(version = THUMBNAIL_POLICY_VERSION - 1)),
             bytes = byteArrayOf(9, 9, 9),
             durationMillis = 1,
         )
@@ -758,7 +784,7 @@ class CachedMediaPreviewSourceTest {
         wide.preview(local("宽.mkv", lastModified = 1_000))
         wide.preview(network("网络.mkv"))
 
-        assertEquals(listOf(320, 512, 512), extractor.imageWidths)
+        assertEquals(listOf(320, 512, 320), extractor.imageWidths)
     }
 
     @Test
@@ -894,7 +920,7 @@ class CachedMediaPreviewSourceTest {
         val bounded = CachedMediaPreviewSource(extractor = tracker, cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined))
         val slow = (1..3).map { index -> async { bounded.preview(network("慢$index.mkv")) } }
         runCurrent()
-        assertEquals(3, tracker.requests.size)
+        assertEquals(2, tracker.requests.size)
 
         val fast = async { bounded.preview(network("快.mkv")) }
         val fastPreview = fast.await()
@@ -912,7 +938,7 @@ class CachedMediaPreviewSourceTest {
         val previews = (1..10).map { index -> async { bounded.preview(network("第$index 集.mkv")) } }
         previews.awaitAll()
 
-        assertTrue(tracker.maxConcurrent <= 3)
+        assertTrue(tracker.maxConcurrent <= 2)
         assertEquals(10, tracker.requests)
     }
 

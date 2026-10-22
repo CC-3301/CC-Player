@@ -102,8 +102,8 @@ class CachedMediaPreviewSource(
     /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
-    /** 实际交给抽取器的目标宽度；策略值先钳到 320–512。 */
-    private val targetWidth = effectiveTargetWidth(policy.targetWidth)
+    /** 本地实际交给抽取器的目标宽度；策略值先钳到 320–512。 */
+    private val localTargetWidth = effectiveTargetWidth(policy.targetWidth)
 
     override suspend fun preview(file: MediaFile): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
@@ -151,7 +151,7 @@ class CachedMediaPreviewSource(
 
     /** 一次读取会话取图与时长；无图条目也记录时长，避免下次重开文件。 */
     private suspend fun extractLocal(file: MediaFile, key: String): LoadedPreview {
-        val extracted = localPermits.withPermit { extractor.imageAndDuration(file, targetWidth) }
+        val extracted = localPermits.withPermit { extractor.imageAndDuration(file, localTargetWidth) }
         // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
         currentCoroutineContext().ensureActive()
         val durationKnown = extracted.duration != PreviewDuration.Failed
@@ -232,7 +232,7 @@ class CachedMediaPreviewSource(
                 val (completed, bytes) = networkPermits.withPermit {
                     var decoded: ByteArray? = null
                     val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                        decoded = extractor.imageBytes(file, targetWidth)
+                        decoded = extractor.imageBytes(file, NETWORK_TARGET_WIDTH)
                         true
                     } ?: false
                     done to decoded
@@ -360,7 +360,7 @@ class CachedMediaPreviewSource(
         private const val LOCAL_CONCURRENCY = 2
 
         /** 同时进行的网络提取数；超出的由 [networkPermits] 排队。 */
-        private const val NETWORK_CONCURRENCY = 3
+        private const val NETWORK_CONCURRENCY = 2
 
         /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
@@ -398,11 +398,11 @@ class CachedMediaPreviewSource(
 
 /**
  * 缩略图缓存键：位置、大小、修改时间、抽帧策略版本与目标宽度。
- * 音频封面与视频帧都按有效目标宽度缩放，因此宽度同样参与音频缓存键。
+ * 音频封面与视频帧都按实际目标宽度缩放，因此宽度同样参与音频缓存键。
  * 修改时间缺失时用有效期代替修改时间；有效期变化必须视为另一份缓存。
  */
 internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String {
-    val base = "${file.location}|${file.size}|v${policy.version}|w${effectiveTargetWidth(policy.targetWidth)}"
+    val base = "${file.location}|${file.size}|v${policy.version}|w${previewTargetWidth(file, policy)}"
     return if (file.lastModified > 0) {
         "$base|m${file.lastModified}"
     } else {

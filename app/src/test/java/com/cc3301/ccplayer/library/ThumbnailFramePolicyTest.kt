@@ -24,25 +24,34 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络视频最多抽两帧且从三分之一处开始`() {
-        val positions = framePositions(90_000, NETWORK_FRAME_COUNT)
-
-        assertEquals(2, positions.size)
-        assertEquals(30_000_000L, positions[0].micros)
-        assertEquals(60_000_000L, positions[1].micros)
-        assertTrue(positions[0].fallback)
+    fun `网络只取一帧且位置为 max 百分之一时长与 1 秒`() {
+        assertEquals(1_000_000L, networkFramePosition(90_000).micros)
+        assertEquals(3_000_000L, networkFramePosition(300_000).micros)
     }
 
     @Test
-    fun `时长未知时从片头开始取固定候选且最后一个兜底`() {
+    fun `网络时长未知时取 1 秒且不取 0 秒`() {
+        assertEquals(1_000_000L, networkFramePosition(null).micros)
+        assertEquals(1_000_000L, networkFramePosition(0).micros)
+        assertEquals(1_000_000L, networkFramePosition(-1).micros)
+    }
+
+    @Test
+    fun `时长未知时本地从片头开始取固定候选且最后一个兜底`() {
         val local = framePositions(0, LOCAL_FRAME_COUNT)
 
         assertEquals(listOf(0L, 1_000_000L, 3_000_000L), local.map { it.micros })
         assertEquals(listOf(false, false, true), local.map { it.fallback })
+    }
 
-        val network = framePositions(0, NETWORK_FRAME_COUNT)
-        assertEquals(listOf(0L, 1_000_000L), network.map { it.micros })
-        assertTrue(network.last().fallback)
+    @Test
+    fun `网络目标宽度为 320，本地跟随策略宽度`() {
+        val network = MediaFile(name = "电影.mkv", location = "smb://nas/电影.mkv", source = MediaSource.Network)
+        val local = MediaFile(name = "电影.mkv", location = "content://media/电影.mkv")
+
+        assertEquals(320, previewTargetWidth(network, ThumbnailPolicy(targetWidth = 512)))
+        assertEquals(512, previewTargetWidth(local, ThumbnailPolicy(targetWidth = 512)))
+        assertEquals(400, previewTargetWidth(local, ThumbnailPolicy(targetWidth = 400)))
     }
 
     @Test
