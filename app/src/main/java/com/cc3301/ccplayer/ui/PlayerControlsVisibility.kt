@@ -6,8 +6,14 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
+/** 播放页控制层与解锁按钮的无操作自动隐藏时长，毫秒。 */
+const val PLAYER_AUTO_HIDE_MILLIS = 5_000L
+
 /** 控制层无操作自动隐藏的时长，毫秒。 */
-const val CONTROLS_AUTO_HIDE_MILLIS = 3_000L
+const val CONTROLS_AUTO_HIDE_MILLIS = PLAYER_AUTO_HIDE_MILLIS
+
+/** 控制层显示与隐藏的淡入淡出时长，毫秒。 */
+const val CONTROLS_FADE_MILLIS = 200L
 
 /**
  * 播放页控制层的显隐与自动隐藏计时。

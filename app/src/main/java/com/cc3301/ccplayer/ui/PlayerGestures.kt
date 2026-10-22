@@ -169,6 +169,7 @@ enum class PlayerAction {
     More,
     Playlist,
     Subtitles,
+    Rotate,
 }
 
 /**
@@ -191,5 +192,19 @@ fun actionAllowed(
         action == PlayerAction.Back ||
             action == PlayerAction.Previous ||
             action == PlayerAction.Next
+    else -> true
+}
+
+/**
+ * 控件外观是否保持可用：切集与加载只拦截点击，不降低其它控件的亮度。
+ * 只有上一集/下一集在没有相邻条目时显示为禁用（ADR-0025）。
+ */
+fun actionLooksEnabled(
+    action: PlayerAction,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+): Boolean = when (action) {
+    PlayerAction.Previous -> canGoPrevious
+    PlayerAction.Next -> canGoNext
     else -> true
 }

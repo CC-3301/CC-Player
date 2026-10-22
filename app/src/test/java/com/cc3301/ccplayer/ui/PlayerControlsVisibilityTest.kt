@@ -14,15 +14,20 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
-    fun `三秒无操作后隐藏控制层`() {
-        now = 2_999L
+    fun `五秒无操作后隐藏控制层`() {
+        now = 4_999L
         controls.hideIfExpired()
         assertEquals(true, controls.visible)
 
-        now = 3_000L
+        now = 5_000L
         controls.hideIfExpired()
 
         assertEquals(false, controls.visible)
+    }
+
+    @Test
+    fun `控制层淡入淡出为 200 毫秒`() {
+        assertEquals(200L, CONTROLS_FADE_MILLIS)
     }
 
     @Test
@@ -39,18 +44,18 @@ class PlayerControlsVisibilityTest {
         now = 2_000L
         controls.onInteraction()
 
-        now = 4_999L
+        now = 6_999L
         controls.hideIfExpired()
         assertEquals(true, controls.visible)
 
-        now = 5_000L
+        now = 7_000L
         controls.hideIfExpired()
         assertEquals(false, controls.visible)
     }
 
     @Test
     fun `隐藏后操作重新显示控制层`() {
-        now = 3_000L
+        now = 5_000L
         controls.hideIfExpired()
         assertEquals(false, controls.visible)
 
@@ -61,16 +66,16 @@ class PlayerControlsVisibilityTest {
 
     @Test
     fun `剩余时间按最近操作计算`() {
-        assertEquals(3_000L, controls.millisUntilAutoHide())
+        assertEquals(5_000L, controls.millisUntilAutoHide())
 
         now = 1_000L
-        assertEquals(2_000L, controls.millisUntilAutoHide())
+        assertEquals(4_000L, controls.millisUntilAutoHide())
 
         controls.onInteraction()
-        assertEquals(3_000L, controls.millisUntilAutoHide())
+        assertEquals(5_000L, controls.millisUntilAutoHide())
 
         now = 3_500L
-        assertEquals(500L, controls.millisUntilAutoHide())
+        assertEquals(2_500L, controls.millisUntilAutoHide())
     }
 
     @Test
@@ -82,7 +87,7 @@ class PlayerControlsVisibilityTest {
 
     @Test
     fun `隐藏后不再计算自动隐藏时间`() {
-        now = 3_000L
+        now = 5_000L
         controls.hideIfExpired()
 
         assertEquals(-1L, controls.millisUntilAutoHide())
@@ -104,11 +109,11 @@ class PlayerControlsVisibilityTest {
         now = 10_000L
         controls.updatePanelOpen(false)
 
-        now = 12_999L
+        now = 14_999L
         controls.hideIfExpired()
         assertEquals(true, controls.visible)
 
-        now = 13_000L
+        now = 15_000L
         controls.hideIfExpired()
         assertEquals(false, controls.visible)
     }

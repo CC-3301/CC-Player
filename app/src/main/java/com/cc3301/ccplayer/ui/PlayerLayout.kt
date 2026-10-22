@@ -42,16 +42,25 @@ val PlayerSideTouchTarget = 48.dp
 val PlayerSideIconSize = 26.dp
 
 /** 进度条整行触控高度。 */
-val PlayerSeekTouchHeight = 48.dp
+val PlayerSeekTouchHeight = 36.dp
 
-/** 进度条左右时间区的固定宽度。 */
-val PlayerSeekTimeWidth = 64.dp
+/** 进度条时间标签距屏幕左右边缘的距离。 */
+val PlayerSeekHorizontalInset = 16.dp
+
+/** 进度条时间标签与轨道之间的间距。 */
+val PlayerSeekTimeGap = 16.dp
 
 /** 进度条圆形滑块直径。 */
 val PlayerSeekThumbSize = 16.dp
 
 /** 进度条视觉轨道线宽。 */
-val PlayerSeekTrackHeight = 3.dp
+val PlayerSeekTrackHeight = 2.dp
+
+/** 播放列表条目距屏幕左右边缘的距离。 */
+val PlayerPlaylistHorizontalInset = 16.dp
+
+/** 播放列表编号与标题之间的间距。 */
+val PlayerPlaylistIndexGap = 16.dp
 
 /** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
 val PlayerTransportButtonSize = 48.dp

@@ -4,6 +4,7 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 字幕菜单构成：内嵌轨道 + 可匹配外挂 + 关闭，当前生效项标出来。 */
@@ -66,6 +67,12 @@ class SubtitleMenuTest {
     fun `内嵌轨道没有语言与标题时用轨道号`() {
         assertEquals("7", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = null, isDefault = false)))
         assertEquals("简体", subtitleTrackName(SubtitleTrack(id = 7, language = null, title = "简体", isDefault = false)))
+    }
+
+    @Test
+    fun `字幕按钮常显与是否有字幕轨无关`() {
+        assertTrue(subtitleButtonVisible(subtitleTrackCount = 0, externalSubtitleCount = 0))
+        assertTrue(subtitleButtonVisible(subtitleTrackCount = 2, externalSubtitleCount = 1))
     }
 
     private fun document(name: String): MediaFile = MediaFile(name = name, location = "root/$name")

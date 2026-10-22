@@ -27,17 +27,17 @@ class SeekBarStateTest {
 
     @Test
     fun `轨道端点扣除时间区与滑块半径`() {
-        // 64dp 时间区、8dp 间距、16dp 滑块在 2x 密度下的像素值。
+        // 64dp 时间区、16dp 间距、16dp 滑块在 2x 密度下的像素值。
         val bounds = seekBarTrackBounds(
             widthPx = 1_000f,
             leftTimeWidthPx = 128f,
             rightTimeWidthPx = 128f,
-            spacingPx = 16f,
+            spacingPx = 32f,
             thumbRadiusPx = 8f,
         )
 
-        assertEquals(152f, bounds.start, 0.0001f)
-        assertEquals(848f, bounds.end, 0.0001f)
+        assertEquals(168f, bounds.start, 0.0001f)
+        assertEquals(832f, bounds.end, 0.0001f)
     }
 
     @Test
@@ -46,7 +46,7 @@ class SeekBarStateTest {
             widthPx = 100f,
             leftTimeWidthPx = 128f,
             rightTimeWidthPx = 128f,
-            spacingPx = 16f,
+            spacingPx = 32f,
             thumbRadiusPx = 8f,
         )
 

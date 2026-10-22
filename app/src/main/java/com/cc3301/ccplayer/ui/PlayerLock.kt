@@ -6,7 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /** 解锁按钮出现后自动隐藏的时长，毫秒。 */
-const val UNLOCK_AUTO_HIDE_MILLIS = 3_000L
+const val UNLOCK_AUTO_HIDE_MILLIS = PLAYER_AUTO_HIDE_MILLIS
 
 /**
  * 播放页锁定状态：锁定时手势与控制条一并失效，只留左上角解锁按钮。

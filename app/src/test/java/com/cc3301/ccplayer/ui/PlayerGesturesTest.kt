@@ -159,6 +159,59 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `切集期间上下一集可点且外观正常`() {
+        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
+            assertEquals(action.name, true, actionAllowed(action, switching = true, initialLoading = false, restoring = false))
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+            )
+        }
+    }
+
+    @Test
+    fun `切集期间其它动作被拦截但外观不禁用`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Seek,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionAllowed(action, switching = true, initialLoading = false, restoring = false),
+            )
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+            )
+        }
+    }
+
+    @Test
+    fun `首次加载期间返回与其它动作外观保持正常`() {
+        listOf(PlayerAction.Back, PlayerAction.PlayPause, PlayerAction.Seek, PlayerAction.More).forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+            )
+        }
+    }
+
+    @Test
+    fun `上下一集不可用时外观禁用`() {
+        assertEquals(false, actionLooksEnabled(PlayerAction.Previous, canGoPrevious = false, canGoNext = true))
+        assertEquals(false, actionLooksEnabled(PlayerAction.Next, canGoPrevious = true, canGoNext = false))
+        assertEquals(true, actionLooksEnabled(PlayerAction.Previous, canGoPrevious = true, canGoNext = false))
+    }
+
+    @Test
     fun `首次加载完成后所有操作恢复`() {
         PlayerAction.entries.forEach { action ->
             assertEquals(

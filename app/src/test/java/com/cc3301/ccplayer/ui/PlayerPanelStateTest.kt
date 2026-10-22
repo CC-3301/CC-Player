@@ -129,6 +129,14 @@ class PlayerPanelStateTest {
     }
 
     @Test
+    fun `播放列表编号固定两位`() {
+        assertEquals("01", playlistItemIndexLabel(0))
+        assertEquals("09", playlistItemIndexLabel(8))
+        assertEquals("10", playlistItemIndexLabel(9))
+        assertEquals("99", playlistItemIndexLabel(98))
+    }
+
+    @Test
     fun `首项滚动量为零`() {
         assertEquals(
             0,
