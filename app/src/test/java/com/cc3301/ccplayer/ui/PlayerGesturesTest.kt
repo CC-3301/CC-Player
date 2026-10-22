@@ -226,6 +226,65 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `首次加载时其余控件也按不可用外观显示`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = false,
+                    initialLoading = true,
+                    restoring = false,
+                ),
+            )
+        }
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Back,
+                canGoPrevious = true,
+                canGoNext = true,
+                switching = false,
+                initialLoading = true,
+                restoring = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `恢复期间其余控件外观保持正常`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = true,
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `上下一集不可用时外观禁用`() {
         assertEquals(
             false,

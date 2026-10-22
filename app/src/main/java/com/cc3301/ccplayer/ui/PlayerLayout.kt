@@ -127,6 +127,13 @@ const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 data class SeekBarTrackBounds(val start: Float, val end: Float)
 
 /**
+ * 拖动期间两侧时间标签共用的冻结宽度：取两者较大值。
+ * 拖动中的预览时间不超过总时长，因此不会因跨位数被裁切，轨道也不会随标签变宽而移动。
+ */
+fun seekBarDragTimeWidth(leftTimeWidthPx: Float, rightTimeWidthPx: Float): Float =
+    maxOf(leftTimeWidthPx, rightTimeWidthPx)
+
+/**
  * 计算进度条视觉轨道范围：两侧时间区、间距与滑块半径都从整行宽度中扣除。
  * 空间不足时两端退到同一位置，交由 [seekBarMillisAt] 判为不可拖动。
  */

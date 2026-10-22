@@ -476,6 +476,8 @@ fun PlayerScreen(
         val barsVisible = inputAllowed(PlayerInput.ControlBar, locked) &&
             backEntryVisible(controlsVisible, initialLoading) &&
             panels.controlBarsVisible
+        val canGoPrevious = currentIndex > 0
+        val canGoNext = currentIndex in 0 until playlist.lastIndex
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
         AnimatedVisibility(
             visible = barsVisible,
@@ -488,7 +490,23 @@ fun PlayerScreen(
                 moreVisible = moreVisible,
                 interactive = barsVisible,
                 rotateEnabled = actionAllowed(PlayerAction.Rotate, switching, initialLoading, restoring),
+                rotateAppearanceEnabled = actionLooksEnabled(
+                    PlayerAction.Rotate,
+                    canGoPrevious = canGoPrevious,
+                    canGoNext = canGoNext,
+                    switching = switching,
+                    initialLoading = initialLoading,
+                    restoring = restoring,
+                ),
                 moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
+                moreAppearanceEnabled = actionLooksEnabled(
+                    PlayerAction.More,
+                    canGoPrevious = canGoPrevious,
+                    canGoNext = canGoNext,
+                    switching = switching,
+                    initialLoading = initialLoading,
+                    restoring = restoring,
+                ),
                 onBack = onClose,
                 onRotate = {
                     controls.onInteraction()
@@ -552,7 +570,7 @@ fun PlayerScreen(
                 onSelectSubtitle = onSelectSubtitle,
             )
         }
-        if (moreVisible && !locked) {
+        if (moreVisible && barsVisible) {
             // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
             val closeHint = stringResource(R.string.player_more_close)
             Box(modifier = Modifier.fillMaxSize()) {
@@ -936,7 +954,9 @@ private fun PlayerTopBar(
     moreVisible: Boolean,
     interactive: Boolean,
     rotateEnabled: Boolean,
+    rotateAppearanceEnabled: Boolean,
     moreEnabled: Boolean,
+    moreAppearanceEnabled: Boolean,
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
@@ -946,7 +966,7 @@ private fun PlayerTopBar(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerTopBarGradient)
-            .then(if (interactive) Modifier.blockPlayerGestures() else Modifier)
+            .blockPlayerGestures()
             .safeDrawingPadding(),
     ) {
         Row(
@@ -976,7 +996,7 @@ private fun PlayerTopBar(
                 Icon(
                     painter = painterResource(R.drawable.ic_player_screen_rotation),
                     contentDescription = stringResource(R.string.player_rotate),
-                    tint = AppColors.Foreground,
+                    tint = if (rotateAppearanceEnabled) AppColors.Foreground else DisabledToolColor,
                 )
             }
             IconButton(
@@ -986,7 +1006,7 @@ private fun PlayerTopBar(
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
                     contentDescription = stringResource(R.string.player_more),
-                    tint = playerToolColor(moreVisible),
+                    tint = if (moreAppearanceEnabled) playerToolColor(moreVisible) else DisabledToolColor,
                 )
             }
         }
@@ -1047,7 +1067,7 @@ private fun Controls(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerBottomBarGradient)
-            .then(if (interactive) Modifier.blockPlayerGestures() else Modifier)
+            .blockPlayerGestures()
             .safeDrawingPadding()
             .padding(top = 24.dp, bottom = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
@@ -1124,6 +1144,14 @@ private fun PlayerIconBar(
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
                 enabled = interactive && actionAllowed(PlayerAction.Lock, switching, initialLoading, restoring),
+                appearanceEnabled = actionLooksEnabled(
+                    PlayerAction.Lock,
+                    canGoPrevious = canGoPrevious,
+                    canGoNext = canGoNext,
+                    switching = switching,
+                    initialLoading = initialLoading,
+                    restoring = restoring,
+                ),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .size(metrics.sideButtonSize),
@@ -1159,6 +1187,14 @@ private fun PlayerIconBar(
                     onClick = onTogglePlayPause,
                     enabled = interactive &&
                         actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
+                    appearanceEnabled = actionLooksEnabled(
+                        PlayerAction.PlayPause,
+                        canGoPrevious = canGoPrevious,
+                        canGoNext = canGoNext,
+                        switching = switching,
+                        initialLoading = initialLoading,
+                        restoring = restoring,
+                    ),
                     modifier = Modifier.size(metrics.playPauseSize),
                     iconSize = PlayerPlayPauseIconSize,
                 )
@@ -1188,6 +1224,14 @@ private fun PlayerIconBar(
                     onClick = onToggleSubtitles,
                     enabled = interactive &&
                         actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
+                    appearanceEnabled = actionLooksEnabled(
+                        PlayerAction.Subtitles,
+                        canGoPrevious = canGoPrevious,
+                        canGoNext = canGoNext,
+                        switching = switching,
+                        initialLoading = initialLoading,
+                        restoring = restoring,
+                    ),
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
@@ -1199,6 +1243,14 @@ private fun PlayerIconBar(
                     onClick = onTogglePlaylist,
                     enabled = interactive &&
                         actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
+                    appearanceEnabled = actionLooksEnabled(
+                        PlayerAction.Playlist,
+                        canGoPrevious = canGoPrevious,
+                        canGoNext = canGoNext,
+                        switching = switching,
+                        initialLoading = initialLoading,
+                        restoring = restoring,
+                    ),
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
             }
@@ -1274,6 +1326,7 @@ private fun SeekBar(
     var pendingSliderMillis by remember(mediaKey) { mutableStateOf<Long?>(null) }
     var leftTimeWidthPx by remember { mutableStateOf(0f) }
     var rightTimeWidthPx by remember { mutableStateOf(0f) }
+    var dragTimeWidthPx by remember(mediaKey, durationMillis) { mutableStateOf<Float?>(null) }
     val previewForDisplay = dragMillis ?: previewMillis ?: heldMillis
     val progress = seekBarProgressMillis(positionMillis, durationMillis, previewForDisplay)
     val unknownText = stringResource(R.string.player_time_unknown)
@@ -1334,8 +1387,9 @@ private fun SeekBar(
     val latestLeftTimeWidthPx = rememberUpdatedState(leftTimeWidthPx)
     val latestRightTimeWidthPx = rememberUpdatedState(rightTimeWidthPx)
     val density = LocalDensity.current
-    val spacingPx = with(density) { PlayerSeekTimeGap.toPx() }
-    val thumbRadiusPx = with(density) { PlayerSeekThumbSize.toPx() / 2f }
+    val latestSpacingPx = rememberUpdatedState(with(density) { PlayerSeekTimeGap.toPx() })
+    val latestThumbRadiusPx = rememberUpdatedState(with(density) { PlayerSeekThumbSize.toPx() / 2f })
+    val frozenTimeWidth = dragTimeWidthPx?.let { with(density) { it.toDp() } }
 
     Box(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -1352,6 +1406,7 @@ private fun SeekBar(
                 maxLines = 1,
                 textAlign = TextAlign.Start,
                 modifier = Modifier
+                    .then(if (frozenTimeWidth != null) Modifier.width(frozenTimeWidth) else Modifier)
                     .onSizeChanged { leftTimeWidthPx = it.width.toFloat() },
             )
             Slider(
@@ -1420,6 +1475,7 @@ private fun SeekBar(
                 maxLines = 1,
                 textAlign = TextAlign.End,
                 modifier = Modifier
+                    .then(if (frozenTimeWidth != null) Modifier.width(frozenTimeWidth) else Modifier)
                     .onSizeChanged { rightTimeWidthPx = it.width.toFloat() },
             )
         }
@@ -1432,12 +1488,25 @@ private fun SeekBar(
                     .pointerInput(sliderEnabled, maximum) {
                         awaitEachGesture {
                             val down = awaitFirstDown()
-                            val bounds = seekBarTrackBounds(
-                                widthPx = size.width.toFloat(),
+                            val frozenTimeWidthPx = seekBarDragTimeWidth(
                                 leftTimeWidthPx = latestLeftTimeWidthPx.value,
                                 rightTimeWidthPx = latestRightTimeWidthPx.value,
-                                spacingPx = spacingPx,
-                                thumbRadiusPx = thumbRadiusPx,
+                            )
+                            if (frozenTimeWidthPx > 0f) dragTimeWidthPx = frozenTimeWidthPx
+                            val bounds = seekBarTrackBounds(
+                                widthPx = size.width.toFloat(),
+                                leftTimeWidthPx = if (frozenTimeWidthPx > 0f) {
+                                    frozenTimeWidthPx
+                                } else {
+                                    latestLeftTimeWidthPx.value
+                                },
+                                rightTimeWidthPx = if (frozenTimeWidthPx > 0f) {
+                                    frozenTimeWidthPx
+                                } else {
+                                    latestRightTimeWidthPx.value
+                                },
+                                spacingPx = latestSpacingPx.value,
+                                thumbRadiusPx = latestThumbRadiusPx.value,
                             )
                             var target = seekBarMillisAt(
                                 x = down.position.x,
@@ -1482,6 +1551,7 @@ private fun SeekBar(
                                 }
                             } finally {
                                 dragMillis = null
+                                dragTimeWidthPx = null
                             }
                             if (completed) {
                                 latestCommitAt.value(target, seekBase)
@@ -1849,13 +1919,13 @@ private fun PlaylistDrawer(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .padding(horizontal = PlayerPlaylistHorizontalInset)
                             .height(PlayerPlaylistItemHeight)
                             .background(
                                 color = if (active) AppColors.Accent.copy(alpha = 0.16f) else Color.Transparent,
                                 shape = RoundedCornerShape(AppRadius.Sm),
                             )
-                            .noRippleClickable { onSelect(media) }
-                            .padding(horizontal = PlayerPlaylistHorizontalInset),
+                            .noRippleClickable { onSelect(media) },
                     ) {
                         Text(
                             text = playlistItemIndexLabel(index),

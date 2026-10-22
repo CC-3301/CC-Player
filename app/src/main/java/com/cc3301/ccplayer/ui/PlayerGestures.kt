@@ -196,8 +196,8 @@ fun actionAllowed(
 }
 
 /**
- * 控件外观是否保持可用：切集与加载只拦截点击，不降低其它控件的亮度。
- * 上一集/下一集在没有相邻条目或加载门禁拦截时显示为禁用（ADR-0025）。
+ * 控件外观是否保持可用：切集与恢复只拦截点击，不降低其它控件的亮度；
+ * 首次加载仍按不可用外观置灰（返回入口除外）。上一集/下一集还要看相邻条目。
  */
 fun actionLooksEnabled(
     action: PlayerAction,
@@ -206,12 +206,15 @@ fun actionLooksEnabled(
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
-): Boolean = when (action) {
-    PlayerAction.Previous -> canGoPrevious &&
-        actionAllowed(action, switching, initialLoading, restoring)
+): Boolean {
+    if (initialLoading) return action == PlayerAction.Back
+    return when (action) {
+        PlayerAction.Previous -> canGoPrevious &&
+            actionAllowed(action, switching, initialLoading, restoring)
 
-    PlayerAction.Next -> canGoNext &&
-        actionAllowed(action, switching, initialLoading, restoring)
+        PlayerAction.Next -> canGoNext &&
+            actionAllowed(action, switching, initialLoading, restoring)
 
-    else -> true
+        else -> true
+    }
 }

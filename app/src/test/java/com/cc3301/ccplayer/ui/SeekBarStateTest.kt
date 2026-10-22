@@ -53,6 +53,17 @@ class SeekBarStateTest {
     }
 
     @Test
+    fun `拖动期间时间标签取两侧较大宽度冻结轨道`() {
+        val frozen = seekBarDragTimeWidth(leftTimeWidthPx = 76f, rightTimeWidthPx = 92f)
+        val bounds = seekBarTrackBounds(1_000f, frozen, frozen, 32f, 8f)
+
+        assertEquals(92f, frozen, 0.0001f)
+        assertEquals(92f, seekBarDragTimeWidth(92f, 76f), 0.0001f)
+        assertEquals(132f, bounds.start, 0.0001f)
+        assertEquals(868f, bounds.end, 0.0001f)
+    }
+
+    @Test
     fun `极小宽度下轨道退化为不可拖动`() {
         val bounds = seekBarTrackBounds(
             widthPx = 100f,
