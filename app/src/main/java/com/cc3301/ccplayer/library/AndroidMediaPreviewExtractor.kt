@@ -99,7 +99,7 @@ private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
         return try {
             retriever.setDataSource(dataSource)
             when (kind) {
-                MediaKind.Video -> videoFrameBytes(retriever, NETWORK_FRAME_COUNT, targetWidth)
+                MediaKind.Video -> networkVideoFrameBytes(retriever, targetWidth)
                 MediaKind.Audio -> coverBytes(retriever, targetWidth)
             }
         } finally {
@@ -123,16 +123,46 @@ private class RangeMediaDataSource(private val source: ByteSource) : MediaDataSo
 }
 
 /** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
-private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray? {
+private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray {
     // 时长读不到时改用固定候选位置，不因此丢弃已经能解出的帧。
-    val duration = try {
-        durationMillis(retriever)
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (unreadable: Exception) {
-        null
-    } ?: 0
-    val decoded = decodedFrames(framePositions(duration, frameCount)) { position ->
+    val duration = readDurationOrNull(retriever) ?: 0
+    return frameBytes(retriever, framePositions(duration, frameCount), targetWidth)
+}
+
+/** 网络只取一帧：位置为 max(1% 时长, 1 秒)；解不出或纯色时保持占位图。 */
+private fun networkVideoFrameBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? {
+    val frame = extractNetworkFrame(
+        durationMillis = readDurationOrNull(retriever),
+        decode = { position ->
+            retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?.let { bitmap -> scaleFrame(bitmap, targetWidth) }
+        },
+        isSolid = ::isSolidFrame,
+        release = Bitmap::recycle,
+    ) ?: return null
+    return try {
+        requireCompressedFrame(compressFrame(frame))
+    } finally {
+        frame.recycle()
+    }
+}
+
+/** 读取时长；读不到时返回 null，由调用方决定兜底位置。 */
+private fun readDurationOrNull(retriever: MediaMetadataRetriever): Long? = try {
+    durationMillis(retriever)
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (unreadable: Exception) {
+    null
+}
+
+/** 解码候选帧、跳过纯色帧并压缩所选帧；解不出任何帧属于抽取失败。 */
+private fun frameBytes(
+    retriever: MediaMetadataRetriever,
+    positions: List<FramePosition>,
+    targetWidth: Int,
+): ByteArray {
+    val decoded = decodedFrames(positions) { position ->
         retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             ?.let { frame -> scaleFrame(frame, targetWidth) }
     }

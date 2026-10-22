@@ -41,16 +41,13 @@ data class MediaPreviewExtraction(val imageBytes: ByteArray?, val duration: Prev
 interface MediaPreviewExtractor {
 
     /** 取预览图字节：视频按策略抽帧，音频是文件内嵌封面；没有可用图时返回 null，读取失败抛出异常。 */
-    suspend fun imageBytes(file: MediaFile, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): ByteArray?
+    suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray?
 
     /** 取时长（毫秒）；元数据里没有时长时返回 null，读取失败抛出异常。 */
     suspend fun durationMillis(file: MediaFile): Long?
 
     /** 在同一次读取会话里取图与时长；时长读取失败不影响已解出的图片。 */
-    suspend fun imageAndDuration(
-        file: MediaFile,
-        targetWidth: Int = THUMBNAIL_TARGET_WIDTH,
-    ): MediaPreviewExtraction {
+    suspend fun imageAndDuration(file: MediaFile, targetWidth: Int): MediaPreviewExtraction {
         val image = imageBytes(file, targetWidth)
         val duration = try {
             when (val millis = durationMillis(file)) {
@@ -102,25 +99,26 @@ class CachedMediaPreviewSource(
     /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
-    /** 实际交给抽取器的目标宽度；策略值先钳到 320–512。 */
-    private val targetWidth = effectiveTargetWidth(policy.targetWidth)
-
     override suspend fun preview(file: MediaFile): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
-        val key = thumbnailCacheKey(file, policy)
+        val targetWidth = previewTargetWidth(file, policy)
+        val key = thumbnailCacheKey(file, policy, targetWidth)
         return when (file.source) {
-            MediaSource.Local -> localPreview(file, key)
-            MediaSource.Network -> MediaPreview(image = networkImage(file, key), durationMillis = null)
+            MediaSource.Local -> localPreview(file, key, targetWidth)
+            MediaSource.Network -> MediaPreview(
+                image = networkImage(file, key, targetWidth),
+                durationMillis = null,
+            )
         }
     }
 
-    private suspend fun localPreview(file: MediaFile, key: String): MediaPreview {
+    private suspend fun localPreview(file: MediaFile, key: String, targetWidth: Int): MediaPreview {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             key = key,
             maxAgeMillis = maxAge,
             onCacheHit = { cached -> durationOnCacheHit(file, key, cached) },
-            load = { extractLocal(file, key) },
+            load = { extractLocal(file, key, targetWidth) },
         )
         return MediaPreview(loaded.image, loaded.durationMillis)
     }
@@ -150,7 +148,7 @@ class CachedMediaPreviewSource(
     }
 
     /** 一次读取会话取图与时长；无图条目也记录时长，避免下次重开文件。 */
-    private suspend fun extractLocal(file: MediaFile, key: String): LoadedPreview {
+    private suspend fun extractLocal(file: MediaFile, key: String, targetWidth: Int): LoadedPreview {
         val extracted = localPermits.withPermit { extractor.imageAndDuration(file, targetWidth) }
         // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
         currentCoroutineContext().ensureActive()
@@ -221,7 +219,7 @@ class CachedMediaPreviewSource(
         }
     }
 
-    private suspend fun networkImage(file: MediaFile, key: String): File? {
+    private suspend fun networkImage(file: MediaFile, key: String, targetWidth: Int): File? {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             key = key,
@@ -240,7 +238,11 @@ class CachedMediaPreviewSource(
                 // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
                 currentCoroutineContext().ensureActive()
                 if (!completed) throw IllegalStateException("网络预览超时")
-                LoadedPreview(bytes?.let { cache.save(key, it) }, durationMillis = null)
+                // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
+                LoadedPreview(
+                    bytes?.let { cache.save(key, it, durationKnown = false) },
+                    durationMillis = null,
+                )
             },
         )
         return loaded.image
@@ -360,7 +362,7 @@ class CachedMediaPreviewSource(
         private const val LOCAL_CONCURRENCY = 2
 
         /** 同时进行的网络提取数；超出的由 [networkPermits] 排队。 */
-        private const val NETWORK_CONCURRENCY = 3
+        private const val NETWORK_CONCURRENCY = 2
 
         /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
@@ -398,11 +400,15 @@ class CachedMediaPreviewSource(
 
 /**
  * 缩略图缓存键：位置、大小、修改时间、抽帧策略版本与目标宽度。
- * 音频封面与视频帧都按有效目标宽度缩放，因此宽度同样参与音频缓存键。
+ * 音频封面与视频帧都按实际目标宽度缩放，因此宽度同样参与音频缓存键。
  * 修改时间缺失时用有效期代替修改时间；有效期变化必须视为另一份缓存。
  */
-internal fun thumbnailCacheKey(file: MediaFile, policy: ThumbnailPolicy): String {
-    val base = "${file.location}|${file.size}|v${policy.version}|w${effectiveTargetWidth(policy.targetWidth)}"
+internal fun thumbnailCacheKey(
+    file: MediaFile,
+    policy: ThumbnailPolicy,
+    targetWidth: Int,
+): String {
+    val base = "${file.location}|${file.size}|v${policy.version}|w$targetWidth"
     return if (file.lastModified > 0) {
         "$base|m${file.lastModified}"
     } else {

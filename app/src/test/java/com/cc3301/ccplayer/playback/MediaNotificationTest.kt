@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.playback
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.ThumbnailCache
 import com.cc3301.ccplayer.library.ThumbnailPolicy
+import com.cc3301.ccplayer.library.previewTargetWidth
 import com.cc3301.ccplayer.library.thumbnailCacheKey
 import java.io.File
 import java.nio.file.Files
@@ -21,6 +22,9 @@ class MediaNotificationTest {
 
     private val directory: File = Files.createTempDirectory("notification-cover").toFile()
     private val cache = ThumbnailCache(directory = directory, maxBytes = 64)
+
+    private fun cacheKey(media: MediaFile, policy: ThumbnailPolicy = ThumbnailPolicy()) =
+        thumbnailCacheKey(media, policy, previewTargetWidth(media, policy))
 
     @After
     fun deleteDirectory() {
@@ -68,7 +72,7 @@ class MediaNotificationTest {
     @Test
     fun `cover uses the cached thumbnail when present`() = runBlocking {
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv", lastModified = 100)
-        val saved = cache.save(thumbnailCacheKey(media, ThumbnailPolicy()), byteArrayOf(1, 2, 3))
+        val saved = cache.save(cacheKey(media), byteArrayOf(1, 2, 3))
         val covers = NotificationCoverCache(cache)
 
         val content = content(state = PlaybackState.Playing, media = media, coverFile = covers.file(media))
@@ -91,7 +95,7 @@ class MediaNotificationTest {
         val covers = NotificationCoverCache(cache)
 
         assertNull(covers.file(media))
-        val saved = cache.save(thumbnailCacheKey(media, ThumbnailPolicy()), byteArrayOf(4, 5, 6))
+        val saved = cache.save(cacheKey(media), byteArrayOf(4, 5, 6))
 
         assertEquals(saved, covers.file(media))
     }
@@ -102,10 +106,10 @@ class MediaNotificationTest {
         val policy = ThumbnailPolicy(missingModifiedValidityMillis = 1_000)
         val expiringCache = ThumbnailCache(directory = directory, maxBytes = 64, clock = { now })
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv")
-        expiringCache.save(thumbnailCacheKey(media, policy), byteArrayOf(7, 8, 9))
+        expiringCache.save(cacheKey(media, policy), byteArrayOf(7, 8, 9))
         val covers = NotificationCoverCache(expiringCache, policy)
 
-        assertEquals(expiringCache.file(thumbnailCacheKey(media, policy)), covers.file(media))
+        assertEquals(expiringCache.file(cacheKey(media, policy)), covers.file(media))
 
         now += 2_000L
         assertNull(covers.file(media))

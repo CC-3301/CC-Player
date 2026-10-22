@@ -44,7 +44,8 @@ class PreviewPrefetcherTest {
 
         advanceTimeBy(100)
         runCurrent()
-        assertEquals(listOf(1, 2, 6, 7), source.previewed.map { entry -> entries.indexOf(entry) }.sorted())
+        // 同一窗口的预取在延迟到点后按索引顺序发起；验证窗口时序，不是可见列表顺序。
+        assertEquals(listOf(1, 2, 6, 7), source.previewed.map { entry -> entries.indexOf(entry) })
     }
 
     @Test
@@ -93,8 +94,8 @@ class PreviewPrefetcherTest {
         advanceTimeBy(100)
         runCurrent()
 
-        // 5 已进入可见区，保留在途请求，因此同样出现在结果中。
-        assertEquals(listOf(3, 4, 5, 7, 8), source.previewed.map { entry -> entries.indexOf(entry) }.sorted())
+        // 验证在途优先与窗口时序：旧窗口的 4、5 保留在先，新窗口的 3、7、8 随后发起。
+        assertEquals(listOf(4, 5, 3, 7, 8), source.previewed.map { entry -> entries.indexOf(entry) })
     }
 }
 
