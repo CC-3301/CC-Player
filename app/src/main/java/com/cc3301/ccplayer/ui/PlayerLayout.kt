@@ -167,6 +167,29 @@ fun seekBarMillisAt(
 }
 
 /**
+ * 按下首帧的目标时间：按冻结前的左右标签宽度映射。
+ * 左右标签宽度不等时，冻结会移动轨道端点；首帧必须先按用户实际按下的旧轨道计算，避免跳位。
+ */
+fun seekBarDownMillis(
+    x: Float,
+    widthPx: Float,
+    leftTimeWidthPx: Float,
+    rightTimeWidthPx: Float,
+    spacingPx: Float,
+    thumbRadiusPx: Float,
+    durationMillis: Long,
+): Long? {
+    val bounds = seekBarTrackBounds(
+        widthPx = widthPx,
+        leftTimeWidthPx = leftTimeWidthPx,
+        rightTimeWidthPx = rightTimeWidthPx,
+        spacingPx = spacingPx,
+        thumbRadiusPx = thumbRadiusPx,
+    )
+    return seekBarMillisAt(x, bounds.start, bounds.end, durationMillis)
+}
+
+/**
  * 末次拖动预览是否继续保留：未切媒体、未超时，且播放位置尚未到达目标。
  * 按 [baseMillis]（拖动起点）判断方向；位置越过目标时立即停止保留。
  */

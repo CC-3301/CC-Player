@@ -1488,9 +1488,21 @@ private fun SeekBar(
                     .pointerInput(sliderEnabled, maximum) {
                         awaitEachGesture {
                             val down = awaitFirstDown()
+                            val downLeftTimeWidthPx = latestLeftTimeWidthPx.value
+                            val downRightTimeWidthPx = latestRightTimeWidthPx.value
+                            // 首帧按冻结前的轨道映射，避免左右标签不等时按下瞬间跳位。
+                            var target = seekBarDownMillis(
+                                x = down.position.x,
+                                widthPx = size.width.toFloat(),
+                                leftTimeWidthPx = downLeftTimeWidthPx,
+                                rightTimeWidthPx = downRightTimeWidthPx,
+                                spacingPx = latestSpacingPx.value,
+                                thumbRadiusPx = latestThumbRadiusPx.value,
+                                durationMillis = maximum,
+                            ) ?: return@awaitEachGesture
                             val frozenTimeWidthPx = seekBarDragTimeWidth(
-                                leftTimeWidthPx = latestLeftTimeWidthPx.value,
-                                rightTimeWidthPx = latestRightTimeWidthPx.value,
+                                leftTimeWidthPx = downLeftTimeWidthPx,
+                                rightTimeWidthPx = downRightTimeWidthPx,
                             )
                             if (frozenTimeWidthPx > 0f) dragTimeWidthPx = frozenTimeWidthPx
                             val bounds = seekBarTrackBounds(
@@ -1498,22 +1510,16 @@ private fun SeekBar(
                                 leftTimeWidthPx = if (frozenTimeWidthPx > 0f) {
                                     frozenTimeWidthPx
                                 } else {
-                                    latestLeftTimeWidthPx.value
+                                    downLeftTimeWidthPx
                                 },
                                 rightTimeWidthPx = if (frozenTimeWidthPx > 0f) {
                                     frozenTimeWidthPx
                                 } else {
-                                    latestRightTimeWidthPx.value
+                                    downRightTimeWidthPx
                                 },
                                 spacingPx = latestSpacingPx.value,
                                 thumbRadiusPx = latestThumbRadiusPx.value,
                             )
-                            var target = seekBarMillisAt(
-                                x = down.position.x,
-                                trackStart = bounds.start,
-                                trackEnd = bounds.end,
-                                durationMillis = maximum,
-                            ) ?: return@awaitEachGesture
                             val seekBase = latestPositionMillis.value
                             down.consume()
                             dragMillis = target

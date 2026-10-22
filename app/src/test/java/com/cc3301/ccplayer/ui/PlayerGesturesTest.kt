@@ -229,10 +229,12 @@ class PlayerGesturesTest {
     fun `首次加载时其余控件也按不可用外观显示`() {
         listOf(
             PlayerAction.PlayPause,
+            PlayerAction.Seek,
             PlayerAction.Lock,
             PlayerAction.More,
             PlayerAction.Playlist,
             PlayerAction.Subtitles,
+            PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(
                 action.name,
@@ -264,10 +266,12 @@ class PlayerGesturesTest {
     fun `恢复期间其余控件外观保持正常`() {
         listOf(
             PlayerAction.PlayPause,
+            PlayerAction.Seek,
             PlayerAction.Lock,
             PlayerAction.More,
             PlayerAction.Playlist,
             PlayerAction.Subtitles,
+            PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(
                 action.name,

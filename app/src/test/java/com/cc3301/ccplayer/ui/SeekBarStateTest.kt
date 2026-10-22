@@ -53,6 +53,26 @@ class SeekBarStateTest {
     }
 
     @Test
+    fun `左右标签宽度不等时按下首帧不跳位`() {
+        val width = 1_000f
+        val leftWidth = 76f
+        val rightWidth = 92f
+        val spacing = 32f
+        val thumbRadius = 8f
+        val oldBounds = seekBarTrackBounds(width, leftWidth, rightWidth, spacing, thumbRadius)
+        val pressX = (oldBounds.start + oldBounds.end) / 2f
+
+        assertEquals(
+            300_000L,
+            seekBarDownMillis(pressX, width, leftWidth, rightWidth, spacing, thumbRadius, 600_000L),
+        )
+
+        // 冻结后轨道左端右移；若用冻结轨道映射按下点会得到不同结果，说明首帧必须先按旧轨道计算。
+        val frozenBounds = seekBarTrackBounds(width, 92f, 92f, spacing, thumbRadius)
+        assertEquals(293_478L, seekBarMillisAt(pressX, frozenBounds.start, frozenBounds.end, 600_000L))
+    }
+
+    @Test
     fun `拖动期间时间标签取两侧较大宽度冻结轨道`() {
         val frozen = seekBarDragTimeWidth(leftTimeWidthPx = 76f, rightTimeWidthPx = 92f)
         val bounds = seekBarTrackBounds(1_000f, frozen, frozen, 32f, 8f)
