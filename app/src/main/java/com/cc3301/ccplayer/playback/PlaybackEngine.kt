@@ -73,6 +73,9 @@ interface PlaybackEngine {
 
     fun detachSurface()
 
+    /** 非 seek 刷新：要求播放核心重新向当前 Surface 输出画面，播放位置不变。 */
+    fun refreshSurface()
+
     fun setSurfaceSize(width: Int, height: Int)
 
     /** 释放引擎持有的全部原生资源。 */
@@ -101,7 +104,10 @@ interface PlaybackEngine {
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()
 
-        /** 重新挂上 Surface 后已输出画面（播放态）；[surfaceGeneration] 标识本次挂载。 */
+        /**
+         * 新视频帧已真正输出到 Surface：新加载的目标或重新挂载 Surface 后的首次出帧。
+         * [surfaceGeneration] 标识本次挂载；切集就绪以这个信号为准，离屏抓帧不算。
+         */
         fun onFramePresented(surfaceGeneration: Int)
 
         /** 重新挂上 Surface 后视频输出已重配（暂停态）；由控制层抓帧确认后再撤帧。 */

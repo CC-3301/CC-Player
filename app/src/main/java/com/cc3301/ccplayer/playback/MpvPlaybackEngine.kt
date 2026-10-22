@@ -31,6 +31,10 @@ class MpvPlaybackEngine(
     @Volatile
     private var awaitingSurfaceFrame = false
 
+    /** 新加载的文件尚未输出首帧到 Surface。 */
+    @Volatile
+    private var awaitingLoadFrame = false
+
     @Volatile
     private var surfaceGenerationCounter = 0
 
@@ -73,6 +77,7 @@ class MpvPlaybackEngine(
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
+        awaitingLoadFrame = true
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
         if (startPositionMillis > 0) {
@@ -99,6 +104,7 @@ class MpvPlaybackEngine(
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
         loadCoordinator.stop()
         hasVideoTrack = false
+        awaitingLoadFrame = false
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -190,6 +196,18 @@ class MpvPlaybackEngine(
         videoOutputStopped = true
     }
 
+    /** 重新接一次同一块 Surface 并重设视频输出，逼播放核心再出一帧；不改变播放位置。 */
+    override fun refreshSurface() {
+        val surface = attachedSurface ?: return
+        if (videoOutputStopped) return
+        awaitingSurfaceFrame = true
+        surfaceGenerationCounter++
+        MPVLib.detachSurface()
+        MPVLib.attachSurface(surface)
+        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        MPVLib.setOptionString("force-window", "yes")
+    }
+
     override fun setSurfaceSize(width: Int, height: Int) {
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }
@@ -220,6 +238,7 @@ class MpvPlaybackEngine(
                 if (loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
                     reportReady(needsFrameConfirmation = true)
                 }
+                notifyLoadFrame()
                 notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
@@ -228,6 +247,7 @@ class MpvPlaybackEngine(
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (loadCoordinator.isFileLoaded) {
                 reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+                notifyLoadFrame()
                 notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
@@ -245,15 +265,21 @@ class MpvPlaybackEngine(
 
     private fun isPaused(): Boolean = MPVLib.getPropertyBoolean(PAUSE_PROPERTY) == true
 
-    /** 替换、自然结束与失败由 [MpvFileEvents] 判定。 */
+    /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
-        val atEndByPosition = durationSeconds > 0 &&
-            positionSeconds >= durationSeconds - EOF_TOLERANCE_SECONDS
-        when (loadCoordinator.onEndFile(atEndByPosition)) {
+        when (loadCoordinator.onEndFile()) {
             MpvFileEvents.End.Replaced -> Unit
-            MpvFileEvents.End.Ended -> listener?.onPlaybackEnded()
             MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
         }
+    }
+
+    /** 新加载的文件首次输出视频帧：切集与恢复以这个信号为准。 */
+    private fun notifyLoadFrame() {
+        if (!awaitingLoadFrame) return
+        if (attachedSurface == null || videoOutputStopped) return
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+        awaitingLoadFrame = false
+        listener?.onFramePresented(surfaceGenerationCounter)
     }
 
     /**
@@ -313,7 +339,9 @@ class MpvPlaybackEngine(
     override fun eventProperty(property: String, value: Boolean) {
         when (property) {
             PAUSE_PROPERTY -> listener?.onPauseChanged(value)
-            EOF_REACHED_PROPERTY -> loadCoordinator.onEofChanged(value)
+            EOF_REACHED_PROPERTY -> if (loadCoordinator.onEofChanged(value)) {
+                listener?.onPlaybackEnded()
+            }
         }
     }
 
@@ -371,9 +399,6 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
-
-        /** 位置与时长差在这个范围内就算自然播完，兜底 eof-reached 未上报的情况。 */
-        const val EOF_TOLERANCE_SECONDS = 1.0
     }
 }
 

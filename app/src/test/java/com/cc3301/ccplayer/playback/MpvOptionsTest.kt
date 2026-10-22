@@ -28,6 +28,11 @@ class MpvOptionsTest {
         assertEquals("no", options["config"])
     }
 
+    @Test
+    fun `the finished file stays open on its last frame`() {
+        assertEquals("yes", options["keep-open"])
+    }
+
     private companion object {
         const val CACHE_DIR = "/data/user/0/com.cc3301.ccplayer/cache"
     }

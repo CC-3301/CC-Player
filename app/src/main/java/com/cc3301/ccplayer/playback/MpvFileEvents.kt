@@ -6,7 +6,8 @@ package com.cc3301.ccplayer.playback
  * mpv 的事件不带文件标识：`loadfile replace` 会给被替换的旧文件发 END_FILE；
  * 新加载被中止时（例如切集中返回取消）也会给在途文件发 END_FILE；
  * 加载失败则只有 END_FILE、没有 FILE_LOADED。这里用“待吞的结束事件计数”
- * 把旧代际的结束事件先消耗掉，再用当前代际是否已 FILE_LOADED 判断自然结束或失败。
+ * 把旧代际的结束事件先消耗掉，再用当前代际是否已 FILE_LOADED 判断是否失败。
+ * 自然播完不使用 END_FILE，只由 `eof-reached` 属性单独上报。
  *
  * 控制层线程会调用 start/stop，mpv 事件线程会调用其余方法，所有方法都在同一把锁内。
  */
@@ -22,8 +23,8 @@ internal class MpvFileEvents {
      */
     private var pendingEnds = 0
 
-    /** 当前文件是否已到末尾（只接受当前代际的属性事件）。 */
-    private var eof = false
+    /** 本轮加载是否已上报过自然播完；eof-reached 重复变 true 时不再重复上报。 */
+    private var ended = false
 
     /** 显式 stop 之后、下一次 start 之前，所有 END_FILE 都不算播放结果。 */
     private var stopping = false
@@ -47,7 +48,7 @@ internal class MpvFileEvents {
         stopping = false
         if (state != State.Idle) pendingEnds++
         state = State.Loading
-        eof = false
+        ended = false
     }
 
     /**
@@ -58,7 +59,7 @@ internal class MpvFileEvents {
     fun onStop() {
         if (state != State.Idle) pendingEnds++
         state = State.Idle
-        eof = false
+        ended = false
         stopping = true
     }
 
@@ -70,20 +71,30 @@ internal class MpvFileEvents {
     fun onFileLoaded(isTarget: Boolean): Boolean {
         if (stopping || !isTarget) return false
         state = State.Loaded
-        eof = false
+        ended = false
         discardBarrier = false
         return true
     }
 
-    /** 记录 eof-reached 属性；旧代际的迟到事件不采纳。 */
+    /**
+     * 记录 eof-reached 属性；旧代际的迟到事件不采纳。
+     * 返回 true 表示这次变化就是本轮的自然播完，应立刻触发自动下一集。
+     */
     @Synchronized
-    fun onEofChanged(value: Boolean) {
-        if (state == State.Loaded) eof = value
+    fun onEofChanged(value: Boolean): Boolean {
+        if (state != State.Loaded) return false
+        if (!value) {
+            ended = false
+            return false
+        }
+        if (ended) return false
+        ended = true
+        return true
     }
 
-    /** 结束事件是否算自然播完；位置到达结尾时兜底 eof 属性未上报。 */
+    /** END_FILE 只用来区分替换与失败；自然播完已由 [onEofChanged] 上报。 */
     @Synchronized
-    fun onEndFile(atEndByPosition: Boolean): End {
+    fun onEndFile(): End {
         // 丢弃死代际后，迟到的结束事件不能作用到恢复加载。
         if (discardBarrier) return End.Replaced
         if (pendingEnds > 0) {
@@ -92,13 +103,14 @@ internal class MpvFileEvents {
         }
         if (stopping) {
             state = State.Idle
-            eof = false
+            ended = false
             return End.Replaced
         }
-        val natural = state == State.Loaded && (eof || atEndByPosition)
+        // 播完后 keep-open 仍停在末帧；后续 END_FILE 只是卸载，不是失败。
+        val alreadyEnded = ended
         state = State.Idle
-        eof = false
-        return if (natural) End.Ended else End.Failed
+        ended = false
+        return if (alreadyEnded) End.Replaced else End.Failed
     }
 
     /**
@@ -109,7 +121,7 @@ internal class MpvFileEvents {
     fun onDiscardInFlight() {
         state = State.Idle
         pendingEnds = 0
-        eof = false
+        ended = false
         stopping = false
         discardBarrier = true
     }
@@ -119,12 +131,12 @@ internal class MpvFileEvents {
     fun reset() {
         state = State.Idle
         pendingEnds = 0
-        eof = false
+        ended = false
         stopping = false
         discardBarrier = false
     }
 
-    enum class End { Replaced, Ended, Failed }
+    enum class End { Replaced, Failed }
 }
 
 /** 一次 loadfile 的目标与代际；URL 与序号总是成对使用。 */
@@ -340,8 +352,8 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onEndFile(atEndByPosition: Boolean): MpvFileEvents.End {
-        val end = fileEvents.onEndFile(atEndByPosition)
+    fun onEndFile(): MpvFileEvents.End {
+        val end = fileEvents.onEndFile()
         loads.onEndFile(end == MpvFileEvents.End.Replaced)
         return end
     }
@@ -354,10 +366,9 @@ internal class MpvLoadCoordinator(
         readySignals.onSeekEvent()
     }
 
+    /** 返回 true 表示自然播完，应立刻触发自动下一集。 */
     @Synchronized
-    fun onEofChanged(value: Boolean) {
-        fileEvents.onEofChanged(value)
-    }
+    fun onEofChanged(value: Boolean): Boolean = fileEvents.onEofChanged(value)
 
     /** 代际校验与占槽在同一临界区；旧代际 ready 不占当前代际的槽。 */
     @Synchronized

@@ -184,6 +184,87 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `后台播放开启时回前台继续播放且不重新加载或跳位置`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
+
+        // 退后台：播放继续，画面停止渲染。
+        policy.setAppInForeground(false)
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        policy.setAppInForeground(true)
+
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(30_000L, controller.progress.value.positionMillis)
+
+        // 回前台重新出帧后不需要再显示缓存帧。
+        engine.reportFramePresented()
+        assertNull(controller.backgroundRestoreFrame.value)
+    }
+
+    @Test
+    fun `后台播放关闭时回前台显示暂停帧并保持暂停`() = runTest {
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val controller = playingController()
+        val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
+        policy.setBackgroundPlaybackEnabled(false)
+
+        // 退后台：立即暂停，再抓一帧留给回前台。
+        policy.setAppInForeground(false)
+        engine.reportPauseChanged(true)
+        capture(controller)
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        policy.setAppInForeground(true)
+
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `Surface 重挂后没有新帧时只刷新一次且位置不变`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(12_000, 600_000)
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        runCurrent()
+
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        assertEquals(12_000L, controller.progress.value.positionMillis)
+
+        // 只允许一次：之后仍无新帧也不再刷新。
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 5)
+        runCurrent()
+        assertEquals(1, engine.refreshSurfaceCalls)
+    }
+
+    @Test
+    fun `Surface 重挂后收到新帧就不再刷新`() = runTest {
+        val controller = playingController()
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 2)
+        runCurrent()
+
+        assertEquals(0, engine.refreshSurfaceCalls)
+    }
+
+    @Test
     fun `关闭后台播放时退到后台先暂停再缓存当前帧`() = runTest {
         val frame = testBitmap()
         engine.frameToGrab = PlaybackEngine.Frame(frame)

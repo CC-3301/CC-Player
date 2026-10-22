@@ -239,8 +239,12 @@ class PlaybackController(
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
-    /** 暂停态重配后的抓帧确认；抓不到就按间隔重试，直到就绪或被看门狗判失败。 */
-    private var frameProbeJob: Job? = null
+    /** 已收到暂停态就绪信号，正在等新视频帧真正输出到 Surface。 */
+    private var awaitingPresentedFrame = false
+
+    /** Surface 重挂后等待新帧的一次性刷新；收到帧或超时后结束。 */
+    private var surfaceRefreshJob: Job? = null
+    private var surfaceRefreshAttempted = false
 
     /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
     private var loadStartPositionMillis = 0L
@@ -346,15 +350,45 @@ class PlaybackController(
      * Surface 重新可用时补一次就绪检查，确保后台完成的加载不会被重新拉回等待。
      */
     fun setRenderSurfaceAvailable(available: Boolean) {
+        val wasAvailable = _renderSurfaceAvailable.value
         _renderSurfaceAvailable.value = available
         if (available) {
             // 新的前后台周期开始：作废尚未完成的抓帧，并允许下一次退后台重新抓。
             backgroundCaptureToken++
             backgroundCaptureAttempted = false
             backgroundCaptureJob = null
+            if (!wasAvailable) beginSurfaceRefresh()
+        } else {
+            cancelSurfaceRefresh()
+            surfaceRefreshAttempted = false
         }
         finishLoadWithoutSurface()
         evaluateDeferredReady()
+    }
+
+    /**
+     * Surface 重挂后等新帧；超时仍没有帧就触发一次非 seek 刷新。
+     * 收到任何出帧信号都会取消这次等待。
+     */
+    private fun beginSurfaceRefresh() {
+        cancelSurfaceRefresh()
+        surfaceRefreshAttempted = false
+        if (!active) return
+        val generation = engine.surfaceGeneration
+        surfaceRefreshJob = scope.launch {
+            delay(SURFACE_REFRESH_DELAY_MILLIS)
+            if (!active) return@launch
+            if (!_renderSurfaceAvailable.value) return@launch
+            if (generation != engine.surfaceGeneration) return@launch
+            if (surfaceRefreshAttempted) return@launch
+            surfaceRefreshAttempted = true
+            engine.refreshSurface()
+        }
+    }
+
+    private fun cancelSurfaceRefresh() {
+        surfaceRefreshJob?.cancel()
+        surfaceRefreshJob = null
     }
 
     /**
@@ -483,6 +517,8 @@ class PlaybackController(
         pausedAtEpisodeEnd = false
         savedPositionMillis = 0
         restoreAtEndOfEpisode = false
+        // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
+        paused = false
         updateState(PlaybackState.Loading)
     }
 
@@ -731,7 +767,7 @@ class PlaybackController(
         handleReadySignal(phase, needsFrameConfirmation)
     }
 
-    /** 就绪判定：无需确认的首帧可直接算数；其余按有无画面决定抓帧或按文件完成。 */
+    /** 就绪判定：无需确认的首帧可直接算数；其余等新视频帧真正输出到 Surface。 */
     private fun handleReadySignal(phase: LoadPhase, needsFrameConfirmation: Boolean) {
         if (!needsFrameConfirmation) {
             finishReady(phase)
@@ -742,28 +778,8 @@ class PlaybackController(
             finishReady(phase)
             return
         }
-        probeFrameThenFinish(phase)
-    }
-
-    /**
-     * 暂停态或重配后抓帧确认。抓不到只表示还不能撤冻结层，
-     * 之后按间隔重试；抓帧在后台线程执行，不设独立失败超时，失败只看 60 秒无事件看门狗。
-     */
-    private fun probeFrameThenFinish(phase: LoadPhase) {
-        if (loadPhase != phase || !_renderSurfaceAvailable.value) return
-        frameProbeJob?.cancel()
-        frameProbeJob = scope.launch {
-            while (true) {
-                if (loadPhase != phase || !_renderSurfaceAvailable.value) return@launch
-                val frame = withContext(frameProbeDispatcher) { engine.grabFrame() }
-                if (loadPhase != phase) return@launch
-                if (frame != null) {
-                    finishReady(phase)
-                    return@launch
-                }
-                delay(FRAME_PROBE_RETRY_MILLIS)
-            }
-        }
+        // 暂停态信号不能证明画面已上屏；冻结画面保留到 Surface 真正出帧。
+        awaitingPresentedFrame = true
     }
 
     /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
@@ -786,8 +802,7 @@ class PlaybackController(
     }
 
     private fun finishReady(phase: LoadPhase) {
-        frameProbeJob?.cancel()
-        frameProbeJob = null
+        awaitingPresentedFrame = false
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         when (phase) {
@@ -803,13 +818,19 @@ class PlaybackController(
         if (loadPhase != LoadPhase.None) beginLoadWatchdog()
     }
 
-    /** 播放态重新输出画面，后台恢复帧不再需要遮挡。 */
+    /** 新视频帧已真正输出到 Surface：补上等待中的切集/恢复就绪，并撤掉后台缓存帧。 */
     override fun onFramePresented(surfaceGeneration: Int) {
+        cancelSurfaceRefresh()
         clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
+        if (awaitingPresentedFrame) {
+            awaitingPresentedFrame = false
+            finishReady(loadPhase)
+        }
     }
 
     /** 暂停态视频输出重配：抓帧确认后再撤帧，避免重配早于首帧上屏时露黑底。 */
     override fun onSurfaceReconfigured(surfaceGeneration: Int) {
+        cancelSurfaceRefresh()
         if (!_renderSurfaceAvailable.value) return
         if (_backgroundRestoreFrame.value == null) return
         if (surfaceGeneration <= capturedSurfaceGeneration) return
@@ -997,9 +1018,8 @@ class PlaybackController(
                     switchOriginDurationMillis > 0 &&
                     switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
                 )
-        // 清掉被取消目标的续播 seek 与抓帧确认残留。
-        frameProbeJob?.cancel()
-        frameProbeJob = null
+        // 清掉被取消目标的续播 seek 与出帧等待残留。
+        awaitingPresentedFrame = false
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
@@ -1175,8 +1195,8 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         endBufferingIndicator()
         endLoadWatchdog()
-        frameProbeJob?.cancel()
-        frameProbeJob = null
+        awaitingPresentedFrame = false
+        cancelSurfaceRefresh()
         _switching.value = false
         _restoring.value = false
         restartFromStartAfterRestore = false
@@ -1199,8 +1219,7 @@ class PlaybackController(
     /** 开始一轮加载：续播位置未查明前不允许判定就绪，seek 序号从零比较。 */
     private fun beginLoadTracking() {
         loadGeneration++
-        frameProbeJob?.cancel()
-        frameProbeJob = null
+        awaitingPresentedFrame = false
         loadStartPositionMillis = 0
         loadDurationMillis = 0
         seekPendingForReady = false
@@ -1364,6 +1383,9 @@ class PlaybackController(
 
         /** 暂停态抓帧失败后的重试间隔；没有失败次数上限，失败由无事件看门狗判定。 */
         const val FRAME_PROBE_RETRY_MILLIS = 100L
+
+        /** Surface 重挂后等新帧的时长；仍没有帧就触发一次非 seek 刷新。 */
+        const val SURFACE_REFRESH_DELAY_MILLIS = 500L
 
         /** 暂停态回前台后的抓帧确认上限；超过后停止抓帧并保留缓存帧。 */
         const val BACKGROUND_FRAME_PROBE_MAX_ATTEMPTS = 20

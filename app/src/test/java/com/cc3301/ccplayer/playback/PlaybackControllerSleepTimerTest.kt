@@ -308,7 +308,7 @@ class PlaybackControllerSleepTimerTest {
     }
 
     @Test
-    fun `定时到点后新起播的文件仍然暂停`() = runTest {
+    fun `定时到点后手动切集仍然自动播放`() = runTest {
         val controller = controller()
         open(controller, "ep1.mkv", "ep2.mkv", current = "ep1.mkv")
         engine.reportMediaLoaded()
@@ -318,7 +318,7 @@ class PlaybackControllerSleepTimerTest {
         controller.next()
         engine.reportMediaLoaded()
 
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
