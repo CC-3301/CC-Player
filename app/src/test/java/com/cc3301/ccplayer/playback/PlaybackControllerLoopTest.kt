@@ -80,7 +80,6 @@ class PlaybackControllerLoopTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertTrue(controller.switching.value)
         assertEquals(true, engine.startedPaused.last())
-        assertEquals(1, engine.grabFrameCalls)
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
@@ -221,6 +220,19 @@ class PlaybackControllerLoopTest {
 
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
         assertEquals(PlaybackState.Idle, controller.state.value)
+    }
+
+    @Test
+    fun `a keep-open pause before eof still auto plays the next episode`() {
+        open("ep1.mkv", "ep2.mkv", current = "ep1.mkv")
+        engine.reportMediaLoaded()
+
+        // keep-open 在片尾会先置暂停；暂停回声不能吞掉随后的 eof。
+        engine.reportPauseChanged(true)
+        engine.reportPlaybackEnded()
+
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(PlaybackState.Loading, controller.state.value)
     }
 
     @Test

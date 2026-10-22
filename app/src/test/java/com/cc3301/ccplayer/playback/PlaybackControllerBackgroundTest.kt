@@ -36,18 +36,19 @@ class PlaybackControllerBackgroundTest {
         capture(controller)
 
         assertSame(frame, controller.backgroundRestoreFrame.value)
-        assertEquals(1, engine.grabFrameCalls)
     }
 
     @Test
     fun `同一后台周期不重复抓帧`() = runTest {
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        val first = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(first)
         val controller = pausedController()
 
         capture(controller)
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
         capture(controller)
 
-        assertEquals(1, engine.grabFrameCalls)
+        assertSame(first, controller.backgroundRestoreFrame.value)
     }
 
     @Test
@@ -56,17 +57,17 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertEquals(0, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
     }
 
     @Test
     fun `没有会话时不截帧`() = runTest {
         engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        val controller = controller()
 
-        capture(controller())
+        capture(controller)
 
-        assertEquals(0, engine.grabFrameCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
     }
 
     @Test
@@ -79,7 +80,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertEquals(0, engine.grabFrameCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
     }
 
     @Test
@@ -89,7 +90,6 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertEquals(1, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
     }
 
@@ -101,11 +101,9 @@ class PlaybackControllerBackgroundTest {
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         assertTrue(controller.holdBlack.value)
-        val grabsBefore = engine.grabFrameCalls
 
         capture(controller)
 
-        assertEquals(grabsBefore, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
     }
 
@@ -142,36 +140,31 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停态重配后抓帧确认才撤掉缓存帧`() = runTest {
+    fun `暂停态回前台重挂后没有位置前进就保留缓存帧`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
-        engine.frameToGrab = null
+
         reattach(controller)
-
-        engine.reportSurfaceReconfigured()
-
-        // 重配早于首帧上屏时保留缓存帧。
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        advanceTimeBy(5_000)
         runCurrent()
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        // 暂停态没有播放推进，重挂 Surface 本身不能证明新画面已输出。
+        assertSame(frame, controller.backgroundRestoreFrame.value)
     }
 
     @Test
-    fun `暂停态抓帧确认失败时保留缓存帧`() = runTest {
+    fun `恢复播放并出帧后才撤掉缓存帧`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
-        engine.frameToGrab = null
         reattach(controller)
+        controller.resume()
+        engine.reportPauseChanged(false)
 
-        engine.reportSurfaceReconfigured()
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS * 3)
-        runCurrent()
+        engine.reportPositionChanged(1_000, 600_000)
+        engine.reportFramePresented()
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
@@ -188,6 +181,7 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         engine.reportPositionChanged(30_000, 600_000)
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
+        val generationBefore = engine.surfaceGeneration
 
         // 退后台：播放继续，画面停止渲染。
         policy.setAppInForeground(false)
@@ -196,14 +190,19 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
+        assertTrue(engine.surfaceGeneration > generationBefore)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(30_000L, controller.progress.value.positionMillis)
 
-        // 回前台重新出帧后不需要再显示缓存帧。
+        // 回前台走重挂后的出帧路径：位置前进过一次，刷新不再需要。
+        engine.reportPositionChanged(31_000, 600_000)
         engine.reportFramePresented()
         assertNull(controller.backgroundRestoreFrame.value)
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 2)
+        runCurrent()
+        assertEquals(0, engine.refreshSurfaceCalls)
     }
 
     @Test
@@ -213,6 +212,7 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
         policy.setBackgroundPlaybackEnabled(false)
+        val generationBefore = engine.surfaceGeneration
 
         // 退后台：立即暂停，再抓一帧留给回前台。
         policy.setAppInForeground(false)
@@ -223,6 +223,7 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
+        assertTrue(engine.surfaceGeneration > generationBefore)
         assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
@@ -287,7 +288,6 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(false)
         capture(controller)
 
-        assertEquals(0, engine.grabFrameCalls)
         assertNull(controller.backgroundRestoreFrame.value)
     }
 
@@ -330,24 +330,6 @@ class PlaybackControllerBackgroundTest {
         controller.pauseForBackground()
 
         assertTrue(controller.holdBlack.value)
-    }
-
-    @Test
-    fun `暂停态抓帧确认有重试上限`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        engine.frameToGrab = null
-        reattach(controller)
-        engine.reportSurfaceReconfigured()
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS * (PlaybackController.BACKGROUND_FRAME_PROBE_MAX_ATTEMPTS + 2))
-        runCurrent()
-        val callsAfterLimit = engine.grabFrameCalls
-
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS * 5)
-        runCurrent()
-
-        assertEquals(callsAfterLimit, engine.grabFrameCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
     }
 
     @Test

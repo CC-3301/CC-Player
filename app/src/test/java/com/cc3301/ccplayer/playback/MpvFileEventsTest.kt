@@ -32,13 +32,24 @@ class MpvFileEventsTest {
     }
 
     @Test
-    fun `an end after the reported eof is not a result`() {
+    fun `an end after the reported eof settles the loaded file`() {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
         events.onEofChanged(true)
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
         assertFalse(events.isLoaded)
+    }
+
+    @Test
+    fun `an eof reset before an unload still settles as the natural end`() {
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+        events.onEofChanged(true)
+        // 卸载时属性可能先回到 false，但播完已经上报过。
+        events.onEofChanged(false)
+
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -106,7 +117,7 @@ class MpvFileEventsTest {
         // 被中止的目标之后，恢复文件正常打开并自然播完。
         assertTrue(events.onFileLoaded(isTarget = true))
         assertTrue(events.onEofChanged(true))
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -193,7 +204,7 @@ class MpvFileEventsTest {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
         assertTrue(events.onEofChanged(true))
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -394,7 +405,30 @@ class MpvFileEventsTest {
         assertEquals(restored, coordinator.onFileLoaded("root/ep1.mkv"))
         assertEquals(restored, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
         // 恢复文件自己的自然结束由 eof-reached 上报一次。
-        assertTrue(coordinator.onEofChanged(true))
+        assertEquals(restored.token, coordinator.onEofChanged(true))
+    }
+
+    @Test
+    fun `an end after eof settles the loaded generation`() {
+        val coordinator = MpvLoadCoordinator()
+        val spec = coordinator.start("root/ep1.mkv")
+        assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+
+        assertEquals(MpvFileEvents.End.Ended, coordinator.onEndFile())
+        assertEquals(null, coordinator.currentLoadedToken())
+        assertEquals(null, coordinator.acceptReady(needsFrameConfirmation = false))
+    }
+
+    @Test
+    fun `a keep-open natural end reports eof without an END_FILE`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        assertEquals("root/ep1.mkv", coordinator.onFileLoaded("root/ep1.mkv")?.url)
+
+        assertEquals(1, coordinator.onEofChanged(true))
+        // 没有 END_FILE，代际仍可继续；下一次加载正常接管。
+        assertEquals(2, coordinator.start("root/ep2.mkv").token)
     }
 
     @Test

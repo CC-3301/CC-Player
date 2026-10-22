@@ -27,13 +27,17 @@ class MpvPlaybackEngine(
     @Volatile
     private var attachedSurface: Surface? = null
 
-    /** 退后台后重新挂上 Surface，等待视频输出再次出帧。 */
+    /** 退后台后重新挂上 Surface，等待播放位置再次前进以证明画面已输出。 */
     @Volatile
     private var awaitingSurfaceFrame = false
 
-    /** 新加载的文件尚未输出首帧到 Surface。 */
+    /** 新加载的文件尚未看到播放位置前进。 */
     @Volatile
     private var awaitingLoadFrame = false
+
+    /** 上一次已上报的播放位置；位置真正前进才说明画面/声音输出在推进。 */
+    @Volatile
+    private var lastPositionMillis = 0L
 
     @Volatile
     private var surfaceGenerationCounter = 0
@@ -78,6 +82,7 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         awaitingLoadFrame = true
+        lastPositionMillis = startPositionMillis
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
         if (startPositionMillis > 0) {
@@ -119,6 +124,8 @@ class MpvPlaybackEngine(
      */
     override fun seekTo(positionMillis: Long): Int {
         positionSeconds = positionMillis / 1000.0
+        // 跳转本身不是播放推进；之后的正常前进才算新画面已输出。
+        lastPositionMillis = positionMillis
         val serial = loadCoordinator.onSeekIssued()
         MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
         return serial
@@ -200,11 +207,13 @@ class MpvPlaybackEngine(
     override fun refreshSurface() {
         val surface = attachedSurface ?: return
         if (videoOutputStopped) return
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
         awaitingSurfaceFrame = true
         surfaceGenerationCounter++
+        MPVLib.setPropertyString("vo", "null")
         MPVLib.detachSurface()
-        MPVLib.attachSurface(surface)
         MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        MPVLib.attachSurface(surface)
         MPVLib.setOptionString("force-window", "yes")
     }
 
@@ -232,14 +241,12 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> loadCoordinator.onSeekEvent()
-            // 播放中优先等 PLAYBACK_RESTART（首帧已上屏）；暂停中只有 VIDEO_RECONFIG，
-            // 它可能早于首帧上屏，需要控制层抓帧确认。
+            // 播放中优先等 PLAYBACK_RESTART；暂停中只有 VIDEO_RECONFIG，
+            // 它可能早于首帧上屏，控制层要等位置真正前进后才算就绪。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
                 if (loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
                     reportReady(needsFrameConfirmation = true)
                 }
-                notifyLoadFrame()
-                notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
                 if (loadCoordinator.isFileLoaded && !hasVideoTrack) reportReady()
@@ -247,8 +254,6 @@ class MpvPlaybackEngine(
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (loadCoordinator.isFileLoaded) {
                 reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
-                notifyLoadFrame()
-                notifySurfaceFrame()
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
@@ -268,39 +273,27 @@ class MpvPlaybackEngine(
     /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
         when (loadCoordinator.onEndFile()) {
-            MpvFileEvents.End.Replaced -> Unit
+            MpvFileEvents.End.Replaced, MpvFileEvents.End.Ended -> Unit
             MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
         }
     }
 
-    /** 新加载的文件首次输出视频帧：切集与恢复以这个信号为准。 */
-    private fun notifyLoadFrame() {
-        if (!awaitingLoadFrame) return
-        if (attachedSurface == null || videoOutputStopped) return
-        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
-        awaitingLoadFrame = false
-        listener?.onFramePresented(surfaceGenerationCounter)
-    }
-
     /**
-     * 重新挂上 Surface 后的首次视频输出：播放态直接通知画面已输出；
-     * 暂停态重配不代表首帧已上屏，交给控制层抓帧确认。
+     * 播放位置前进且 Surface 已挂时，才算新画面真正输出。
+     * 暂停态没有位置前进，不会上报，冻结画面与后台缓存帧得以保留。
      */
-    private fun notifySurfaceFrame() {
-        if (!awaitingSurfaceFrame) return
+    private fun notifyProgressFrame() {
+        if (isPaused()) return
         if (attachedSurface == null || videoOutputStopped) return
-        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+        if (!awaitingLoadFrame && !awaitingSurfaceFrame) return
+        val token = loadCoordinator.currentLoadedToken() ?: return
+        awaitingLoadFrame = false
         awaitingSurfaceFrame = false
-        val generation = surfaceGenerationCounter
-        if (isPaused()) {
-            listener?.onSurfaceReconfigured(generation)
-        } else {
-            listener?.onFramePresented(generation)
-        }
+        listener?.onFramePresented(surfaceGenerationCounter, token)
     }
 
     /**
-     * 同一 seek 序号内，需抓帧确认与无需确认两类 ready 各只上报一次；
+     * 同一 seek 序号内，需等待真正出帧与无需确认两类 ready 各只上报一次；
      * seek 之后序号变化，两类信号都能再次上报。
      */
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
@@ -327,7 +320,16 @@ class MpvPlaybackEngine(
 
     override fun eventProperty(property: String, value: Double) {
         when (property) {
-            TIME_POS_PROPERTY -> positionSeconds = value
+            TIME_POS_PROPERTY -> {
+                positionSeconds = value
+                val millis = toMillis(value)
+                if (millis > lastPositionMillis) {
+                    lastPositionMillis = millis
+                    notifyProgressFrame()
+                } else {
+                    lastPositionMillis = millis
+                }
+            }
             DURATION_PROPERTY -> durationSeconds = value
             else -> return
         }
@@ -339,8 +341,12 @@ class MpvPlaybackEngine(
     override fun eventProperty(property: String, value: Boolean) {
         when (property) {
             PAUSE_PROPERTY -> listener?.onPauseChanged(value)
-            EOF_REACHED_PROPERTY -> if (loadCoordinator.onEofChanged(value)) {
-                listener?.onPlaybackEnded()
+            EOF_REACHED_PROPERTY -> if (value) {
+                // 迟到的旧文件 eof 可能在新文件加载后才送达：以当前属性值为准。
+                if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) != true) return
+                loadCoordinator.onEofChanged(true)?.let { listener?.onPlaybackEnded(it) }
+            } else {
+                loadCoordinator.onEofChanged(false)
             }
         }
     }

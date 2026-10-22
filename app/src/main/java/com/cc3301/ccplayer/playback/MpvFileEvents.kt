@@ -83,10 +83,7 @@ internal class MpvFileEvents {
     @Synchronized
     fun onEofChanged(value: Boolean): Boolean {
         if (state != State.Loaded) return false
-        if (!value) {
-            ended = false
-            return false
-        }
+        if (!value) return false
         if (ended) return false
         ended = true
         return true
@@ -110,7 +107,7 @@ internal class MpvFileEvents {
         val alreadyEnded = ended
         state = State.Idle
         ended = false
-        return if (alreadyEnded) End.Replaced else End.Failed
+        return if (alreadyEnded) End.Ended else End.Failed
     }
 
     /**
@@ -136,7 +133,7 @@ internal class MpvFileEvents {
         discardBarrier = false
     }
 
-    enum class End { Replaced, Failed }
+    enum class End { Replaced, Ended, Failed }
 }
 
 /** 一次 loadfile 的目标与代际；URL 与序号总是成对使用。 */
@@ -246,7 +243,7 @@ internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
  *
  * seek 命令下发时先登记序号，但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”。
  * 这样即使旧文件的 restart/reconfig 在 seek 命令之后才被处理，它仍带旧序号，不会被误认。
- * 同一序号内，需抓帧确认与无需确认的 ready 各只上报一次。
+ * 同一序号内，需等待真正出帧与无需确认的 ready 各只上报一次。
  * 控制层线程与 mpv 事件线程都会调用，方法同步。
  */
 internal class MpvReadySignals {
@@ -354,7 +351,9 @@ internal class MpvLoadCoordinator(
     @Synchronized
     fun onEndFile(): MpvFileEvents.End {
         val end = fileEvents.onEndFile()
-        loads.onEndFile(end == MpvFileEvents.End.Replaced)
+        // 被替换的结束属于结束队列；当前文件的自然卸载与失败都要清掉当前代际，
+        // 否则迟到的 ready 仍会被当成这轮加载的有效信号。
+        loads.onEndFile(isReplaced = end == MpvFileEvents.End.Replaced)
         return end
     }
 
@@ -366,9 +365,16 @@ internal class MpvLoadCoordinator(
         readySignals.onSeekEvent()
     }
 
-    /** 返回 true 表示自然播完，应立刻触发自动下一集。 */
+    /** 自然播完时返回产生它的加载令牌；旧代际或重复上报返回 null。 */
     @Synchronized
-    fun onEofChanged(value: Boolean): Boolean = fileEvents.onEofChanged(value)
+    fun onEofChanged(value: Boolean): Int? {
+        if (!fileEvents.onEofChanged(value)) return null
+        return loads.currentLoaded()?.token
+    }
+
+    /** 当前已加载的加载令牌；用于给出帧信号带上代际。 */
+    @Synchronized
+    fun currentLoadedToken(): Int? = loads.currentLoaded()?.token
 
     /** 代际校验与占槽在同一临界区；旧代际 ready 不占当前代际的槽。 */
     @Synchronized

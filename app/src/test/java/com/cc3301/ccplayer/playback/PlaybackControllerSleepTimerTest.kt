@@ -216,6 +216,23 @@ class PlaybackControllerSleepTimerTest {
     }
 
     @Test
+    fun `播完本集在 keep-open 暂停回声之后仍然暂停`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv", "ep2.mkv", current = "ep1.mkv")
+        controller.startSleepTimer(SleepTimerOption.EndOfEpisode)
+        engine.reportMediaLoaded()
+
+        // keep-open 先置暂停，随后的 eof 仍要按“播完本集”暂停。
+        engine.reportPauseChanged(true)
+        engine.reportPlaybackEnded()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        assertEquals(SleepTimerState.Off, controller.sleepTimerState.value)
+    }
+
+    @Test
     fun `播完本集到点后定时回到关`() = runTest {
         val controller = controller()
         open(controller, "ep1.mkv", "ep2.mkv", current = "ep1.mkv")
