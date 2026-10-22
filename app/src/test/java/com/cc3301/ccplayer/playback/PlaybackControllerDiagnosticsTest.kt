@@ -6,18 +6,24 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerDiagnosticsTest {
 
+    private val engine = FakePlaybackEngine()
+
     @Test
     fun `开启后记录加载与播放状态迁移`() {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher()).apply { enabled = true }
-        val engine = FakePlaybackEngine()
         val media = MediaFile(name = "ep1.mkv", location = "smb://nas/share/ep1.mkv")
         val controller = PlaybackController(
             engine,
@@ -34,5 +40,148 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("加载成功: ep1.mkv"))
         assertTrue(text.contains("播放状态: Idle -> Loading"))
         assertTrue(text.contains("播放状态: Loading -> Playing"))
+    }
+
+    @Test
+    fun `看门狗触发时写日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        open(controller)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertTrue(sink.lines.any { it.contains("加载看门狗触发: ep1.mkv") })
+    }
+
+    @Test
+    fun `看门狗日志在文件名为空时回退索引`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        controller.openPlaylist(
+            listOf(MediaFile(name = "", location = "root/ep0.mkv")),
+            MediaFile(name = "", location = "root/ep0.mkv"),
+        )
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertTrue(sink.lines.any { it.contains("加载看门狗触发: 索引 0") })
+    }
+
+    @Test
+    fun `关闭时不写看门狗日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = false)
+        val controller = controller(diagnostics)
+        open(controller)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertTrue(sink.lines.isEmpty())
+    }
+
+    @Test
+    fun `Surface 重挂与刷新结果写日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("Surface 分离"))
+        assertTrue(text.contains("Surface 重挂: 等待新帧"))
+        assertTrue(text.contains("Surface 恢复: 已触发非 seek 刷新"))
+    }
+
+    @Test
+    fun `刷新未执行时记录结果`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+        engine.refreshSurfaceResult = false
+
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        runCurrent()
+
+        assertTrue(sink.lines.any { it.contains("Surface 恢复: 刷新未执行") })
+    }
+
+    @Test
+    fun `没有活动会话时重挂不写等待新帧`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        runCurrent()
+
+        assertFalse(sink.lines.any { it.contains("Surface 重挂: 等待新帧") })
+    }
+
+    @Test
+    fun `Surface 重挂后收到新帧记录恢复结果`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        engine.reportFramePresented()
+        runCurrent()
+
+        assertTrue(sink.lines.any { it.contains("Surface 恢复: 新帧已上屏") })
+    }
+
+    @Test
+    fun `关闭时不写 Surface 日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = false)
+        val controller = playingController(diagnostics)
+
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        runCurrent()
+
+        assertTrue(sink.lines.isEmpty())
+    }
+
+    private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =
+        Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { this.enabled = enabled }
+
+    private fun TestScope.controller(diagnostics: Diagnostics): PlaybackController =
+        PlaybackController(
+            engine,
+            FakePlaybackProgressRepository(),
+            backgroundScope,
+            diagnostics = diagnostics,
+        )
+
+    private fun open(controller: PlaybackController) {
+        val media = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        controller.openPlaylist(listOf(media), media)
+    }
+
+    private fun TestScope.playingController(diagnostics: Diagnostics): PlaybackController {
+        val controller = controller(diagnostics)
+        open(controller)
+        engine.reportMediaLoaded()
+        return controller
     }
 }

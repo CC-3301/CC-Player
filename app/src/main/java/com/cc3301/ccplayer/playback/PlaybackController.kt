@@ -357,6 +357,7 @@ class PlaybackController(
             backgroundCaptureJob = null
             if (!wasAvailable) beginSurfaceRefresh()
         } else {
+            if (wasAvailable) diagnostics.log("Surface 分离")
             cancelSurfaceRefresh()
             surfaceRefreshAttempted = false
         }
@@ -372,6 +373,7 @@ class PlaybackController(
         cancelSurfaceRefresh()
         surfaceRefreshAttempted = false
         if (!active) return
+        diagnostics.log("Surface 重挂: 等待新帧")
         val generation = engine.surfaceGeneration
         surfaceRefreshJob = scope.launch {
             try {
@@ -381,7 +383,13 @@ class PlaybackController(
                 if (generation != engine.surfaceGeneration) return@launch
                 if (surfaceRefreshAttempted) return@launch
                 // 未加载、无视频轨或输出已停时不消耗这次刷新。
-                if (engine.refreshSurface()) surfaceRefreshAttempted = true
+                val refreshed = engine.refreshSurface()
+                if (refreshed) {
+                    surfaceRefreshAttempted = true
+                    diagnostics.log("Surface 恢复: 已触发非 seek 刷新")
+                } else {
+                    diagnostics.log("Surface 恢复: 刷新未执行")
+                }
             } finally {
                 val runningJob = coroutineContext[Job]
                 if (surfaceRefreshJob === runningJob) surfaceRefreshJob = null
@@ -857,7 +865,9 @@ class PlaybackController(
     override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
         if (!active) return
         if (loadToken != expectedLoadToken) return
+        val wasWaitingForSurface = surfaceRefreshJob != null
         cancelSurfaceRefresh()
+        if (wasWaitingForSurface) diagnostics.log("Surface 恢复: 新帧已上屏")
         clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
         if (awaitingPresentedFrame) {
             awaitingPresentedFrame = false
@@ -1182,7 +1192,12 @@ class PlaybackController(
         loadWatchdogJob?.cancel()
         loadWatchdogJob = scope.launch {
             delay(LOAD_WATCHDOG_MILLIS)
-            if (loadPhase != LoadPhase.None) handleLoadFailure(fromWatchdog = true)
+            if (loadPhase != LoadPhase.None) {
+                val target = _playlist.value.getOrNull(loadTargetIndex)
+                val label = target?.name?.takeIf { it.isNotBlank() } ?: "索引 $loadTargetIndex"
+                diagnostics.log { "加载看门狗触发: $label" }
+                handleLoadFailure(fromWatchdog = true)
+            }
         }
     }
 
