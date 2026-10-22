@@ -176,7 +176,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         )
     }
 
-    /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标首帧就绪。 */
+    /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标画面就绪。 */
     private var freezeFrame by mutableStateOf<Bitmap?>(null)
 
     /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */

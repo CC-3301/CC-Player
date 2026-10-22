@@ -310,7 +310,7 @@ fun PlayerScreen(
         controls.updatePanelOpen(panelOpen)
     }
     LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
-        // 加载全程不自动隐藏，避免切集超过 3 秒时控制条消失。
+        // 加载全程不自动隐藏，避免切集期间控制条消失。
         val holdVisible = switching || initialLoading
         while (controls.visible && !controls.panelOpen) {
             val remaining = controls.millisUntilAutoHide(holdVisible)

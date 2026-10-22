@@ -440,7 +440,7 @@ class PlaybackController(
     }
 
     /**
-     * 切集：立即暂停原视频保留当前画面，再加载目标；首帧就绪后替换。
+     * 切集：立即暂停原视频保留当前画面，再加载目标；目标画面就绪后替换。
      * 进度保持在原视频上，直到目标就绪。
      */
     private fun startSwitch(index: Int, media: MediaFile, originAtEnd: Boolean = false) {
