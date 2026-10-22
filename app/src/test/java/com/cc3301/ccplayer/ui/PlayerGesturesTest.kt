@@ -165,7 +165,14 @@ class PlayerGesturesTest {
             assertEquals(
                 action.name,
                 true,
-                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = false,
+                ),
             )
         }
     }
@@ -188,27 +195,71 @@ class PlayerGesturesTest {
             assertEquals(
                 action.name,
                 true,
-                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = false,
+                ),
             )
         }
     }
 
     @Test
-    fun `首次加载期间返回与其它动作外观保持正常`() {
-        listOf(PlayerAction.Back, PlayerAction.PlayPause, PlayerAction.Seek, PlayerAction.More).forEach { action ->
+    fun `首次加载时上下一集显示为不可用`() {
+        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
             assertEquals(
                 action.name,
-                true,
-                actionLooksEnabled(action, canGoPrevious = true, canGoNext = true),
+                false,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = false,
+                    initialLoading = true,
+                    restoring = false,
+                ),
             )
         }
     }
 
     @Test
     fun `上下一集不可用时外观禁用`() {
-        assertEquals(false, actionLooksEnabled(PlayerAction.Previous, canGoPrevious = false, canGoNext = true))
-        assertEquals(false, actionLooksEnabled(PlayerAction.Next, canGoPrevious = true, canGoNext = false))
-        assertEquals(true, actionLooksEnabled(PlayerAction.Previous, canGoPrevious = true, canGoNext = false))
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = false,
+                canGoNext = true,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Next,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
     }
 
     @Test

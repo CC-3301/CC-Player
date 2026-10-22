@@ -129,11 +129,12 @@ class PlayerPanelStateTest {
     }
 
     @Test
-    fun `播放列表编号固定两位`() {
+    fun `播放列表编号至少两位`() {
         assertEquals("01", playlistItemIndexLabel(0))
         assertEquals("09", playlistItemIndexLabel(8))
         assertEquals("10", playlistItemIndexLabel(9))
         assertEquals("99", playlistItemIndexLabel(98))
+        assertEquals("100", playlistItemIndexLabel(99))
     }
 
     @Test

@@ -27,7 +27,7 @@ class SeekBarStateTest {
 
     @Test
     fun `轨道端点扣除时间区与滑块半径`() {
-        // 64dp 时间区、16dp 间距、16dp 滑块在 2x 密度下的像素值。
+        // 两侧时间标签各 128px、16dp 间距、16dp 滑块在 2x 密度下的像素值。
         val bounds = seekBarTrackBounds(
             widthPx = 1_000f,
             leftTimeWidthPx = 128f,
@@ -38,6 +38,18 @@ class SeekBarStateTest {
 
         assertEquals(168f, bounds.start, 0.0001f)
         assertEquals(832f, bounds.end, 0.0001f)
+    }
+
+    @Test
+    fun `时间标签跨位数后轨道端点仍映射到起止时间`() {
+        val narrow = seekBarTrackBounds(1_000f, 76f, 76f, 32f, 8f)
+        val wide = seekBarTrackBounds(1_000f, 92f, 92f, 32f, 8f)
+
+        listOf(narrow, wide).forEach { bounds ->
+            assertEquals(0L, seekBarMillisAt(bounds.start, bounds.start, bounds.end, 600_000L))
+            assertEquals(600_000L, seekBarMillisAt(bounds.end, bounds.start, bounds.end, 600_000L))
+        }
+        assertEquals(16f, wide.start - narrow.start, 0.0001f)
     }
 
     @Test

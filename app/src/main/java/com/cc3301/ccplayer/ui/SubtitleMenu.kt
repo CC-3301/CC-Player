@@ -60,9 +60,6 @@ fun subtitleMenuItems(
     add(SubtitleMenuItem.Off(active = selection == SubtitleSelection.Off))
 }
 
-/** 字幕按钮常显，不随是否有字幕轨或外挂字幕隐藏（ADR-0025）。 */
-fun subtitleButtonVisible(subtitleTrackCount: Int, externalSubtitleCount: Int): Boolean = true
-
 /** 内嵌轨道的显示名：语言与标题都在时并列，都没有时用轨道号。 */
 fun subtitleTrackName(track: SubtitleTrack): String =
     listOfNotNull(track.language, track.title).joinToString(" ").ifEmpty { track.id.toString() }

@@ -473,137 +473,137 @@ fun PlayerScreen(
                     .semantics { contentDescription = lockedHint },
             )
         }
-        if (inputAllowed(PlayerInput.ControlBar, locked)) {
-            // 首次加载禁用画面手势，控制层即使已隐藏也必须保留返回入口。
-            // 播放列表抽屉打开时隐藏顶栏、底栏与其它面板，画面留给左侧。
-            val barsVisible = (backEntryVisible(controlsVisible, initialLoading)) && panels.controlBarsVisible
-            AnimatedVisibility(
-                visible = barsVisible,
-                enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-                exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
-                modifier = Modifier.align(Alignment.TopStart),
-            ) {
-                PlayerTopBar(
-                    title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
-                    moreVisible = moreVisible,
-                    rotateEnabled = actionAllowed(PlayerAction.Rotate, switching, initialLoading, restoring),
-                    moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
-                    onBack = onClose,
-                    onRotate = {
-                        controls.onInteraction()
-                        onToggleRotation()
-                    },
-                    onToggleMore = {
-                        controls.onInteraction()
-                        panels.toggle(PlayerPanel.More)
-                    },
-                )
-            }
-            AnimatedVisibility(
-                visible = barsVisible,
-                enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-                exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
-                modifier = Modifier.align(Alignment.BottomCenter),
-            ) {
-                Controls(
-                    state = state,
-                    progress = progress,
-                    seekPreviewMillis = seekPreviewMillis,
-                    playlist = playlist,
-                    currentIndex = currentIndex,
-                    subtitleTracks = subtitleTracks,
-                    externalSubtitles = externalSubtitles,
-                    subtitleSelection = subtitleSelection,
-                    subtitleMenuVisible = subtitleMenuVisible,
-                    switching = switching,
-                    initialLoading = initialLoading,
-                    restoring = restoring,
-                    onTogglePlayPause = {
-                        controls.onInteraction()
-                        onTogglePlayPause()
-                    },
-                    onPrevious = {
-                        controls.onInteraction()
-                        onPrevious()
-                    },
-                    onNext = {
-                        controls.onInteraction()
-                        onNext()
-                    },
-                    onSeekPreview = {
-                        controls.onInteraction()
-                        onSeekPreview(it)
-                    },
-                    onSeekCommit = {
-                        controls.onInteraction()
-                        onSeekCommit()
-                    },
-                    onTogglePlaylist = {
-                        controls.onInteraction()
-                        panels.toggle(PlayerPanel.Playlist)
-                    },
-                    onToggleSubtitleMenu = {
-                        controls.onInteraction()
-                        panels.toggle(PlayerPanel.Subtitles)
-                    },
-                    onLock = { lock.tapLockButton() },
-                    onSelectSubtitle = onSelectSubtitle,
-                )
-            }
-            if (moreVisible) {
-                // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
-                val closeHint = stringResource(R.string.player_more_close)
-                Box(modifier = Modifier.fillMaxSize()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .noRippleClickable { panels.dismissOutside() }
-                            .semantics {
-                                contentDescription = closeHint
-                                role = Role.Button
-                            },
-                    )
-                    MorePanel(
-                        decodeMode = decodeMode,
-                        loopMode = loopMode,
-                        orientationMode = orientationMode,
-                        autoPlayNext = autoPlayNext,
-                        sleepTimerState = sleepTimerState,
-                        selectedSleepTimerOption = sleepTimerOption,
-                        onSelectDecodeMode = onSelectDecodeMode,
-                        onSelectLoopMode = onSelectLoopMode,
-                        onSelectOrientationMode = onSelectOrientationMode,
-                        onToggleAutoPlayNext = onToggleAutoPlayNext,
-                        onSelectSleepTimer = { option ->
-                            onSelectSleepTimer(option)
-                            panels.close()
-                        },
-                        onCancelSleepTimer = {
-                            onCancelSleepTimer()
-                            panels.close()
-                        },
-                        panelWidth = morePanelWidth,
-                        panelMaxHeight = morePanelMaxHeight,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .safeDrawingPadding()
-                            .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
-                    )
-                }
-            }
-        } else {
-            if (lock.unlockVisible) {
-                UnlockButton(
-                    onTap = {
-                        lock.tapLockButton()
-                        controls.onInteraction()
-                    },
+        val barsVisible = inputAllowed(PlayerInput.ControlBar, locked) &&
+            backEntryVisible(controlsVisible, initialLoading) &&
+            panels.controlBarsVisible
+        // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
+        AnimatedVisibility(
+            visible = barsVisible,
+            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
+            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            modifier = Modifier.align(Alignment.TopStart),
+        ) {
+            PlayerTopBar(
+                title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
+                moreVisible = moreVisible,
+                interactive = barsVisible,
+                rotateEnabled = actionAllowed(PlayerAction.Rotate, switching, initialLoading, restoring),
+                moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
+                onBack = onClose,
+                onRotate = {
+                    controls.onInteraction()
+                    onToggleRotation()
+                },
+                onToggleMore = {
+                    controls.onInteraction()
+                    panels.toggle(PlayerPanel.More)
+                },
+            )
+        }
+        AnimatedVisibility(
+            visible = barsVisible,
+            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
+            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            Controls(
+                state = state,
+                progress = progress,
+                seekPreviewMillis = seekPreviewMillis,
+                playlist = playlist,
+                currentIndex = currentIndex,
+                subtitleTracks = subtitleTracks,
+                externalSubtitles = externalSubtitles,
+                subtitleSelection = subtitleSelection,
+                subtitleMenuVisible = subtitleMenuVisible,
+                switching = switching,
+                initialLoading = initialLoading,
+                restoring = restoring,
+                interactive = barsVisible,
+                onTogglePlayPause = {
+                    controls.onInteraction()
+                    onTogglePlayPause()
+                },
+                onPrevious = {
+                    controls.onInteraction()
+                    onPrevious()
+                },
+                onNext = {
+                    controls.onInteraction()
+                    onNext()
+                },
+                onSeekPreview = {
+                    controls.onInteraction()
+                    onSeekPreview(it)
+                },
+                onSeekCommit = {
+                    controls.onInteraction()
+                    onSeekCommit()
+                },
+                onTogglePlaylist = {
+                    controls.onInteraction()
+                    panels.toggle(PlayerPanel.Playlist)
+                },
+                onToggleSubtitleMenu = {
+                    controls.onInteraction()
+                    panels.toggle(PlayerPanel.Subtitles)
+                },
+                onLock = { lock.tapLockButton() },
+                onSelectSubtitle = onSelectSubtitle,
+            )
+        }
+        if (moreVisible && !locked) {
+            // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
+            val closeHint = stringResource(R.string.player_more_close)
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
+                        .fillMaxSize()
+                        .noRippleClickable { panels.dismissOutside() }
+                        .semantics {
+                            contentDescription = closeHint
+                            role = Role.Button
+                        },
+                )
+                MorePanel(
+                    decodeMode = decodeMode,
+                    loopMode = loopMode,
+                    orientationMode = orientationMode,
+                    autoPlayNext = autoPlayNext,
+                    sleepTimerState = sleepTimerState,
+                    selectedSleepTimerOption = sleepTimerOption,
+                    onSelectDecodeMode = onSelectDecodeMode,
+                    onSelectLoopMode = onSelectLoopMode,
+                    onSelectOrientationMode = onSelectOrientationMode,
+                    onToggleAutoPlayNext = onToggleAutoPlayNext,
+                    onSelectSleepTimer = { option ->
+                        onSelectSleepTimer(option)
+                        panels.close()
+                    },
+                    onCancelSleepTimer = {
+                        onCancelSleepTimer()
+                        panels.close()
+                    },
+                    panelWidth = morePanelWidth,
+                    panelMaxHeight = morePanelMaxHeight,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
                         .safeDrawingPadding()
-                        .padding(AppSpacing.Lg),
+                        .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
                 )
             }
+        }
+        if (lock.unlockVisible) {
+            UnlockButton(
+                onTap = {
+                    lock.tapLockButton()
+                    controls.onInteraction()
+                },
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .safeDrawingPadding()
+                    .padding(AppSpacing.Lg),
+            )
         }
         // 左半屏是关闭抽屉的点击区；抽屉从右侧滑出，只盖住右半屏。
         if (playlistVisible) {
@@ -934,6 +934,7 @@ private fun signedDuration(millis: Long): String =
 private fun PlayerTopBar(
     title: String,
     moreVisible: Boolean,
+    interactive: Boolean,
     rotateEnabled: Boolean,
     moreEnabled: Boolean,
     onBack: () -> Unit,
@@ -945,7 +946,7 @@ private fun PlayerTopBar(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerTopBarGradient)
-            .blockPlayerGestures()
+            .then(if (interactive) Modifier.blockPlayerGestures() else Modifier)
             .safeDrawingPadding(),
     ) {
         Row(
@@ -955,7 +956,7 @@ private fun PlayerTopBar(
                 .padding(horizontal = AppSpacing.Xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = onBack, enabled = interactive) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = stringResource(R.string.player_title_back),
@@ -971,7 +972,7 @@ private fun PlayerTopBar(
                     .weight(1f)
                     .padding(end = AppSpacing.Xs),
             )
-            IconButton(onClick = onRotate, enabled = rotateEnabled) {
+            IconButton(onClick = onRotate, enabled = interactive && rotateEnabled) {
                 Icon(
                     painter = painterResource(R.drawable.ic_player_screen_rotation),
                     contentDescription = stringResource(R.string.player_rotate),
@@ -980,7 +981,7 @@ private fun PlayerTopBar(
             }
             IconButton(
                 onClick = onToggleMore,
-                enabled = moreEnabled,
+                enabled = interactive && moreEnabled,
             ) {
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
@@ -1029,6 +1030,7 @@ private fun Controls(
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
+    interactive: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
@@ -1045,7 +1047,7 @@ private fun Controls(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerBottomBarGradient)
-            .blockPlayerGestures()
+            .then(if (interactive) Modifier.blockPlayerGestures() else Modifier)
             .safeDrawingPadding()
             .padding(top = 24.dp, bottom = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
@@ -1054,6 +1056,7 @@ private fun Controls(
             SubtitlePanel(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
                 onSelect = onSelectSubtitle,
+                interactive = interactive,
                 modifier = Modifier.padding(horizontal = AppSpacing.Lg),
             )
         }
@@ -1062,7 +1065,8 @@ private fun Controls(
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
-            enabled = actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
+            enabled = interactive && actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
+            appearanceEnabled = !initialLoading,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
             modifier = Modifier.padding(horizontal = PlayerSeekHorizontalInset),
@@ -1071,10 +1075,10 @@ private fun Controls(
             playing = state == PlaybackState.Playing,
             canGoPrevious = currentIndex > 0,
             canGoNext = currentIndex in 0 until playlist.lastIndex,
-            subtitleVisible = subtitleButtonVisible(subtitleTracks.size, externalSubtitles.size),
             switching = switching,
             initialLoading = initialLoading,
             restoring = restoring,
+            interactive = interactive,
             subtitleMenuVisible = subtitleMenuVisible,
             onTogglePlayPause = onTogglePlayPause,
             onPrevious = onPrevious,
@@ -1092,10 +1096,10 @@ private fun PlayerIconBar(
     playing: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
-    subtitleVisible: Boolean,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
+    interactive: Boolean,
     subtitleMenuVisible: Boolean,
     onTogglePlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -1119,7 +1123,7 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
-                enabled = actionAllowed(PlayerAction.Lock, switching, initialLoading, restoring),
+                enabled = interactive && actionAllowed(PlayerAction.Lock, switching, initialLoading, restoring),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .size(metrics.sideButtonSize),
@@ -1134,11 +1138,15 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
-                    enabled = canGoPrevious && actionAllowed(PlayerAction.Previous, switching, initialLoading, restoring),
+                    enabled = interactive && canGoPrevious &&
+                        actionAllowed(PlayerAction.Previous, switching, initialLoading, restoring),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Previous,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
+                        switching = switching,
+                        initialLoading = initialLoading,
+                        restoring = restoring,
                     ),
                     modifier = Modifier.size(metrics.previousNextSize),
                     iconSize = PlayerTransportIconSize,
@@ -1149,7 +1157,8 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onTogglePlayPause,
-                    enabled = actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
+                    enabled = interactive &&
+                        actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
                     modifier = Modifier.size(metrics.playPauseSize),
                     iconSize = PlayerPlayPauseIconSize,
                 )
@@ -1157,11 +1166,15 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
-                    enabled = canGoNext && actionAllowed(PlayerAction.Next, switching, initialLoading, restoring),
+                    enabled = interactive && canGoNext &&
+                        actionAllowed(PlayerAction.Next, switching, initialLoading, restoring),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Next,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
+                        switching = switching,
+                        initialLoading = initialLoading,
+                        restoring = restoring,
                     ),
                     modifier = Modifier.size(metrics.previousNextSize),
                     iconSize = PlayerTransportIconSize,
@@ -1169,23 +1182,23 @@ private fun PlayerIconBar(
             }
             // 字幕紧挨播放列表放在右下区域；极窄屏改为上下排列，避免与三键重叠。
             val subtitleButton: @Composable () -> Unit = {
-                if (subtitleVisible) {
-                    PlayerIconButton(
-                        icon = R.drawable.ic_player_subtitles,
-                        contentDescription = stringResource(R.string.player_subtitles),
-                        onClick = onToggleSubtitles,
-                        enabled = actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
-                        active = subtitleMenuVisible,
-                        modifier = Modifier.size(metrics.sideButtonSize),
-                    )
-                }
+                PlayerIconButton(
+                    icon = R.drawable.ic_player_subtitles,
+                    contentDescription = stringResource(R.string.player_subtitles),
+                    onClick = onToggleSubtitles,
+                    enabled = interactive &&
+                        actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
+                    active = subtitleMenuVisible,
+                    modifier = Modifier.size(metrics.sideButtonSize),
+                )
             }
             val playlistButton: @Composable () -> Unit = {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
-                    enabled = actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
+                    enabled = interactive &&
+                        actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
                     modifier = Modifier.size(metrics.sideButtonSize),
                 )
             }
@@ -1248,6 +1261,7 @@ private fun SeekBar(
     durationMillis: Long,
     previewMillis: Long?,
     enabled: Boolean = true,
+    appearanceEnabled: Boolean = true,
     onPreview: (Long) -> Unit,
     onCommit: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1302,13 +1316,23 @@ private fun SeekBar(
         disabledActiveTrackColor = DisabledToolColor,
         disabledInactiveTrackColor = DisabledToolColor,
     )
-    val thumbColor = if (labels.seekEnabled) colors.thumbColor else colors.disabledThumbColor
-    val activeTrackColor = if (labels.seekEnabled) colors.activeTrackColor else colors.disabledActiveTrackColor
-    val inactiveTrackColor = if (labels.seekEnabled) colors.inactiveTrackColor else colors.disabledInactiveTrackColor
+    val thumbColor = if (appearanceEnabled && labels.seekEnabled) colors.thumbColor else colors.disabledThumbColor
+    val activeTrackColor = if (appearanceEnabled && labels.seekEnabled) {
+        colors.activeTrackColor
+    } else {
+        colors.disabledActiveTrackColor
+    }
+    val inactiveTrackColor = if (appearanceEnabled && labels.seekEnabled) {
+        colors.inactiveTrackColor
+    } else {
+        colors.disabledInactiveTrackColor
+    }
     val stateText = stringResource(R.string.player_progress_state, labels.current, labels.total)
     val timeStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
-    // 时长未知只禁用 seek；切集与加载只拦截点击，时间与控制条外观保持原亮度。
-    val timeColor = AppColors.Foreground
+    // 切集只拦截拖动，颜色保持可用；首次打开仍按不可用外观置灰。
+    val timeColor = if (appearanceEnabled) AppColors.Foreground else DisabledToolColor
+    val latestLeftTimeWidthPx = rememberUpdatedState(leftTimeWidthPx)
+    val latestRightTimeWidthPx = rememberUpdatedState(rightTimeWidthPx)
     val density = LocalDensity.current
     val spacingPx = with(density) { PlayerSeekTimeGap.toPx() }
     val thumbRadiusPx = with(density) { PlayerSeekThumbSize.toPx() / 2f }
@@ -1404,20 +1428,14 @@ private fun SeekBar(
             Box(
                 modifier = Modifier
                     .matchParentSize()
-                    .pointerInput(
-                        sliderEnabled,
-                        maximum,
-                        leftTimeWidthPx,
-                        rightTimeWidthPx,
-                        spacingPx,
-                        thumbRadiusPx,
-                    ) {
+                    // 时间标签跨位数会改变宽度；不把它放进 key，避免拖动中途重启手势。
+                    .pointerInput(sliderEnabled, maximum) {
                         awaitEachGesture {
                             val down = awaitFirstDown()
                             val bounds = seekBarTrackBounds(
                                 widthPx = size.width.toFloat(),
-                                leftTimeWidthPx = leftTimeWidthPx,
-                                rightTimeWidthPx = rightTimeWidthPx,
+                                leftTimeWidthPx = latestLeftTimeWidthPx.value,
+                                rightTimeWidthPx = latestRightTimeWidthPx.value,
                                 spacingPx = spacingPx,
                                 thumbRadiusPx = thumbRadiusPx,
                             )
@@ -1786,7 +1804,7 @@ private fun PlaylistDrawer(
         Text(
             text = stringResource(R.string.player_playlist_count, playlist.size),
             style = MaterialTheme.typography.titleSmall,
-            color = AppColors.Muted,
+            color = Color.White,
             modifier = Modifier.padding(
                 start = AppSpacing.Lg,
                 end = AppSpacing.Lg,
@@ -1820,8 +1838,6 @@ private fun PlaylistDrawer(
             LazyColumn(
                 state = listState,
                 contentPadding = PaddingValues(
-                    start = PlayerPlaylistHorizontalInset,
-                    end = PlayerPlaylistHorizontalInset,
                     top = verticalPadding,
                     bottom = verticalPadding,
                 ),
@@ -1831,7 +1847,6 @@ private fun PlaylistDrawer(
                     val active = index == currentIndex
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(PlayerPlaylistIndexGap),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(PlayerPlaylistItemHeight)
@@ -1839,11 +1854,12 @@ private fun PlaylistDrawer(
                                 color = if (active) AppColors.Accent.copy(alpha = 0.16f) else Color.Transparent,
                                 shape = RoundedCornerShape(AppRadius.Sm),
                             )
-                            .noRippleClickable { onSelect(media) },
+                            .noRippleClickable { onSelect(media) }
+                            .padding(horizontal = PlayerPlaylistHorizontalInset),
                     ) {
                         Text(
                             text = playlistItemIndexLabel(index),
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
                             color = Color.White,
                             maxLines = 1,
                         )
@@ -1853,7 +1869,9 @@ private fun PlaylistDrawer(
                             color = Color.White,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = PlayerPlaylistIndexGap),
                         )
                         if (active) {
                             Text(
@@ -1861,7 +1879,9 @@ private fun PlaylistDrawer(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = AppColors.Accent,
                                 textAlign = TextAlign.Center,
-                                modifier = Modifier.width(16.dp),
+                                modifier = Modifier
+                                    .padding(start = AppSpacing.Sm)
+                                    .width(16.dp),
                             )
                         }
                     }
@@ -1876,6 +1896,7 @@ private fun PlaylistDrawer(
 private fun SubtitlePanel(
     menu: List<SubtitleMenuItem>,
     onSelect: (SubtitleMenuItem) -> Unit,
+    interactive: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1894,7 +1915,7 @@ private fun SubtitlePanel(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .noRippleClickable { onSelect(item) }
+                        .noRippleClickable({ onSelect(item) }, enabled = interactive)
                         .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
                 )
             }

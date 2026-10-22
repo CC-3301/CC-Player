@@ -1,33 +1,9 @@
 package com.cc3301.ccplayer.ui
 
-import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class PlayerLayoutTest {
-
-    @Test
-    fun `进度条时间贴屏幕左右各 16dp`() {
-        assertEquals(16.dp, PlayerSeekHorizontalInset)
-    }
-
-    @Test
-    fun `进度条时间与轨道间距 16dp`() {
-        assertEquals(16.dp, PlayerSeekTimeGap)
-    }
-
-    @Test
-    fun `进度条触控高度 36dp、视觉轨道 2dp、滑块 16dp`() {
-        assertEquals(36.dp, PlayerSeekTouchHeight)
-        assertEquals(2.dp, PlayerSeekTrackHeight)
-        assertEquals(16.dp, PlayerSeekThumbSize)
-    }
-
-    @Test
-    fun `播放列表编号距屏幕左侧 16dp、编号到标题 16dp`() {
-        assertEquals(16.dp, PlayerPlaylistHorizontalInset)
-        assertEquals(16.dp, PlayerPlaylistIndexGap)
-    }
 
     @Test
     fun `比例未知时铺满容器`() {
