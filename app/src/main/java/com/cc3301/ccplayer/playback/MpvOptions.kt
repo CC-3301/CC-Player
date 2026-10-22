@@ -18,7 +18,7 @@ object MpvOptions {
         "config" to "no",
         "terminal" to "no",
         "idle" to "once",
-        "keep-open" to "no",
+        "keep-open" to "yes",
         "force-window" to "no",
         "vo" to VIDEO_OUTPUT,
         "hwdec" to HWDEC,

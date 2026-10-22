@@ -6,7 +6,8 @@ package com.cc3301.ccplayer.playback
  * mpv 的事件不带文件标识：`loadfile replace` 会给被替换的旧文件发 END_FILE；
  * 新加载被中止时（例如切集中返回取消）也会给在途文件发 END_FILE；
  * 加载失败则只有 END_FILE、没有 FILE_LOADED。这里用“待吞的结束事件计数”
- * 把旧代际的结束事件先消耗掉，再用当前代际是否已 FILE_LOADED 判断自然结束或失败。
+ * 把旧代际的结束事件先消耗掉，再用当前代际是否已 FILE_LOADED 判断是否失败。
+ * 自然播完不使用 END_FILE，只由 `eof-reached` 属性单独上报。
  *
  * 控制层线程会调用 start/stop，mpv 事件线程会调用其余方法，所有方法都在同一把锁内。
  */
@@ -22,8 +23,8 @@ internal class MpvFileEvents {
      */
     private var pendingEnds = 0
 
-    /** 当前文件是否已到末尾（只接受当前代际的属性事件）。 */
-    private var eof = false
+    /** 本轮加载是否已上报过自然播完；eof-reached 重复变 true 时不再重复上报。 */
+    private var ended = false
 
     /** 显式 stop 之后、下一次 start 之前，所有 END_FILE 都不算播放结果。 */
     private var stopping = false
@@ -47,7 +48,7 @@ internal class MpvFileEvents {
         stopping = false
         if (state != State.Idle) pendingEnds++
         state = State.Loading
-        eof = false
+        ended = false
     }
 
     /**
@@ -58,7 +59,7 @@ internal class MpvFileEvents {
     fun onStop() {
         if (state != State.Idle) pendingEnds++
         state = State.Idle
-        eof = false
+        ended = false
         stopping = true
     }
 
@@ -70,20 +71,36 @@ internal class MpvFileEvents {
     fun onFileLoaded(isTarget: Boolean): Boolean {
         if (stopping || !isTarget) return false
         state = State.Loaded
-        eof = false
+        ended = false
         discardBarrier = false
         return true
     }
 
-    /** 记录 eof-reached 属性；旧代际的迟到事件不采纳。 */
+    /**
+     * 记录 eof-reached 属性；旧代际的迟到事件不采纳。
+     * 返回 true 表示这次变化就是本轮的自然播完，应立刻触发自动下一集。
+     */
     @Synchronized
-    fun onEofChanged(value: Boolean) {
-        if (state == State.Loaded) eof = value
+    fun onEofChanged(value: Boolean): Boolean {
+        if (state != State.Loaded) return false
+        if (!value) return false
+        if (ended) return false
+        ended = true
+        return true
     }
 
-    /** 结束事件是否算自然播完；位置到达结尾时兜底 eof 属性未上报。 */
+    /**
+     * 真正离开 EOF：seek 发起后允许同一代际再次上报自然播完。
+     * 单纯 eof=false 可能只是卸载前的属性回落，不能重置。
+     */
     @Synchronized
-    fun onEndFile(atEndByPosition: Boolean): End {
+    fun onSeekIssued() {
+        if (state == State.Loaded) ended = false
+    }
+
+    /** END_FILE 只用来区分替换与失败；自然播完已由 [onEofChanged] 上报。 */
+    @Synchronized
+    fun onEndFile(): End {
         // 丢弃死代际后，迟到的结束事件不能作用到恢复加载。
         if (discardBarrier) return End.Replaced
         if (pendingEnds > 0) {
@@ -92,13 +109,14 @@ internal class MpvFileEvents {
         }
         if (stopping) {
             state = State.Idle
-            eof = false
+            ended = false
             return End.Replaced
         }
-        val natural = state == State.Loaded && (eof || atEndByPosition)
+        // 播完后 keep-open 仍停在末帧；后续 END_FILE 只是卸载，不是失败。
+        val alreadyEnded = ended
         state = State.Idle
-        eof = false
-        return if (natural) End.Ended else End.Failed
+        ended = false
+        return if (alreadyEnded) End.Ended else End.Failed
     }
 
     /**
@@ -109,7 +127,7 @@ internal class MpvFileEvents {
     fun onDiscardInFlight() {
         state = State.Idle
         pendingEnds = 0
-        eof = false
+        ended = false
         stopping = false
         discardBarrier = true
     }
@@ -119,7 +137,7 @@ internal class MpvFileEvents {
     fun reset() {
         state = State.Idle
         pendingEnds = 0
-        eof = false
+        ended = false
         stopping = false
         discardBarrier = false
     }
@@ -234,7 +252,7 @@ internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
  *
  * seek 命令下发时先登记序号，但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”。
  * 这样即使旧文件的 restart/reconfig 在 seek 命令之后才被处理，它仍带旧序号，不会被误认。
- * 同一序号内，需抓帧确认与无需确认的 ready 各只上报一次。
+ * 同一序号内，需等待真正出帧与无需确认的 ready 各只上报一次。
  * 控制层线程与 mpv 事件线程都会调用，方法同步。
  */
 internal class MpvReadySignals {
@@ -340,24 +358,36 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onEndFile(atEndByPosition: Boolean): MpvFileEvents.End {
-        val end = fileEvents.onEndFile(atEndByPosition)
-        loads.onEndFile(end == MpvFileEvents.End.Replaced)
+    fun onEndFile(): MpvFileEvents.End {
+        val end = fileEvents.onEndFile()
+        // 被替换的结束属于结束队列；当前文件的自然卸载与失败都要清掉当前代际，
+        // 否则迟到的 ready 仍会被当成这轮加载的有效信号。
+        loads.onEndFile(isReplaced = end == MpvFileEvents.End.Replaced)
         return end
     }
 
     @Synchronized
-    fun onSeekIssued(): Int = readySignals.onSeekIssued()
+    fun onSeekIssued(): Int {
+        // seek 发起表示真正离开片尾，允同一代际再次上报播完。
+        fileEvents.onSeekIssued()
+        return readySignals.onSeekIssued()
+    }
 
     @Synchronized
     fun onSeekEvent() {
         readySignals.onSeekEvent()
     }
 
+    /** 自然播完时返回产生它的加载令牌；旧代际或重复上报返回 null。 */
     @Synchronized
-    fun onEofChanged(value: Boolean) {
-        fileEvents.onEofChanged(value)
+    fun onEofChanged(value: Boolean): Int? {
+        if (!fileEvents.onEofChanged(value)) return null
+        return loads.currentLoaded()?.token
     }
+
+    /** 当前已加载的加载令牌；用于给出帧信号带上代际。 */
+    @Synchronized
+    fun currentLoadedToken(): Int? = loads.currentLoaded()?.token
 
     /** 代际校验与占槽在同一临界区；旧代际 ready 不占当前代际的槽。 */
     @Synchronized

@@ -8,19 +8,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 引擎事件到“替换 / 自然结束 / 失败”的映射，以及被中止的在途加载。
+ * 引擎事件到“替换 / 失败”的映射，以及 eof-reached 作为唯一自然播完信号。
  */
 class MpvFileEventsTest {
 
     private val events = MpvFileEvents()
 
     @Test
-    fun `a clean session ends naturally at eof`() {
+    fun `a clean session reports the natural end once at eof`() {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
-        events.onEofChanged(true)
 
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = false))
+        assertTrue(events.onEofChanged(true))
+        assertFalse(events.onEofChanged(true))
     }
 
     @Test
@@ -28,15 +28,41 @@ class MpvFileEventsTest {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
 
-        assertEquals(MpvFileEvents.End.Failed, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Failed, events.onEndFile())
     }
 
     @Test
-    fun `a missing eof property falls back to the end position`() {
+    fun `a seek after eof allows the next natural end to report again`() {
+        val coordinator = MpvLoadCoordinator()
+        val spec = coordinator.start("root/ep1.mkv")
+        assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+        assertEquals(null, coordinator.onEofChanged(true))
+
+        // 拖回片尾外再播到结尾：同一代际要能再次上报播完。
+        coordinator.onSeekIssued()
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+    }
+
+    @Test
+    fun `an end after the reported eof settles the loaded file`() {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
+        events.onEofChanged(true)
 
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
+        assertFalse(events.isLoaded)
+    }
+
+    @Test
+    fun `an eof reset before an unload still settles as the natural end`() {
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+        events.onEofChanged(true)
+        // 卸载时属性可能先回到 false，但播完已经上报过。
+        events.onEofChanged(false)
+
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -45,9 +71,9 @@ class MpvFileEventsTest {
         assertTrue(events.onFileLoaded(isTarget = true))
         events.onStart()
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = true))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         assertTrue(events.onFileLoaded(isTarget = true))
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertTrue(events.onEofChanged(true))
     }
 
     @Test
@@ -56,8 +82,8 @@ class MpvFileEventsTest {
         assertTrue(events.onFileLoaded(isTarget = true))
         events.onStart()
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
-        assertEquals(MpvFileEvents.End.Failed, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Failed, events.onEndFile())
     }
 
     @Test
@@ -75,10 +101,19 @@ class MpvFileEventsTest {
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
         events.onStart()
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
-        events.onEofChanged(true)
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertFalse(events.onEofChanged(true))
 
-        assertEquals(MpvFileEvents.End.Failed, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Failed, events.onEndFile())
+    }
+
+    @Test
+    fun `eof after an explicit stop is ignored`() {
+        events.onStart()
+        assertTrue(events.onFileLoaded(isTarget = true))
+        events.onStop()
+
+        assertFalse(events.onEofChanged(true))
     }
 
     @Test
@@ -88,13 +123,14 @@ class MpvFileEventsTest {
 
         // 切集开始：旧文件会被替换。
         events.onStart()
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         // 目标还在加载时取消：恢复原视频的 loadfile 取代了在途目标。
         events.onStart()
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
-        // 被中止的目标之后，恢复文件正常打开并结束。
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        // 被中止的目标之后，恢复文件正常打开并自然播完。
         assertTrue(events.onFileLoaded(isTarget = true))
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertTrue(events.onEofChanged(true))
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -106,10 +142,10 @@ class MpvFileEventsTest {
         // 恢复命令先到，旧文件与在途目标的结束事件都还没到。
         events.onStart()
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = true))
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = true))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         assertTrue(events.onFileLoaded(isTarget = true))
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertTrue(events.onEofChanged(true))
     }
 
     @Test
@@ -118,10 +154,10 @@ class MpvFileEventsTest {
         assertTrue(events.onFileLoaded(isTarget = true))
         events.onStop()
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = true))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertTrue(events.onEofChanged(true))
     }
 
     @Test
@@ -130,7 +166,7 @@ class MpvFileEventsTest {
         events.onStop()
         events.onStart()
 
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         assertTrue(events.onFileLoaded(isTarget = true))
     }
 
@@ -146,10 +182,10 @@ class MpvFileEventsTest {
         events.onStart()
 
         // 旧文件与在途目标各产生一次 END_FILE，都不能当成失败。
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
         assertTrue(events.onFileLoaded(isTarget = true))
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = true))
+        assertTrue(events.onEofChanged(true))
     }
 
     @Test
@@ -159,7 +195,7 @@ class MpvFileEventsTest {
 
         assertFalse(events.onFileLoaded(isTarget = true))
         assertFalse(events.isLoaded)
-        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, events.onEndFile())
 
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
@@ -172,7 +208,7 @@ class MpvFileEventsTest {
             pool.execute { events.onStart() }
             pool.execute { events.onFileLoaded(isTarget = true) }
             pool.execute { events.onEofChanged(true) }
-            pool.execute { events.onEndFile(atEndByPosition = false) }
+            pool.execute { events.onEndFile() }
         }
         pool.shutdown()
         assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
@@ -180,8 +216,8 @@ class MpvFileEventsTest {
         events.reset()
         events.onStart()
         assertTrue(events.onFileLoaded(isTarget = true))
-        events.onEofChanged(true)
-        assertEquals(MpvFileEvents.End.Ended, events.onEndFile(atEndByPosition = false))
+        assertTrue(events.onEofChanged(true))
+        assertEquals(MpvFileEvents.End.Ended, events.onEndFile())
     }
 
     @Test
@@ -258,7 +294,7 @@ class MpvFileEventsTest {
         events.reset()
 
         assertFalse(events.isLoaded)
-        assertEquals(MpvFileEvents.End.Failed, events.onEndFile(atEndByPosition = true))
+        assertEquals(MpvFileEvents.End.Failed, events.onEndFile())
     }
 
     @Test
@@ -378,14 +414,37 @@ class MpvFileEventsTest {
 
         val restored = coordinator.start("root/ep1.mkv")
         // 死代际迟到的 END_FILE 先到：被丢弃，不伤恢复加载；结束计数已收尾。
-        assertEquals(
-            MpvFileEvents.End.Replaced,
-            coordinator.onEndFile(atEndByPosition = false),
-        )
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
         assertEquals(restored, coordinator.onFileLoaded("root/ep1.mkv"))
         assertEquals(restored, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
-        // 恢复文件自己的自然结束仍按 Ended 上报。
-        assertEquals(MpvFileEvents.End.Ended, coordinator.onEndFile(atEndByPosition = true))
+        // 恢复文件自己的自然结束由 eof-reached 上报一次。
+        assertEquals(restored.token, coordinator.onEofChanged(true))
+    }
+
+    @Test
+    fun `an end after eof settles the loaded generation`() {
+        val coordinator = MpvLoadCoordinator()
+        val spec = coordinator.start("root/ep1.mkv")
+        assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
+        assertEquals(spec.token, coordinator.onEofChanged(true))
+
+        assertEquals(MpvFileEvents.End.Ended, coordinator.onEndFile())
+        assertEquals(null, coordinator.currentLoadedToken())
+        assertEquals(null, coordinator.acceptReady(needsFrameConfirmation = false))
+    }
+
+    @Test
+    fun `a keep-open natural end reports eof without an END_FILE`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        assertEquals("root/ep1.mkv", coordinator.onFileLoaded("root/ep1.mkv")?.url)
+
+        assertEquals(1, coordinator.onEofChanged(true))
+        // 自然播完本身没有 END_FILE；下一次 loadfile 仍会替换旧文件并产生一次结束事件。
+        val next = coordinator.start("root/ep2.mkv")
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(next, coordinator.onFileLoaded("root/ep2.mkv"))
+        assertEquals(next, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
     }
 
     @Test
@@ -398,7 +457,7 @@ class MpvFileEventsTest {
 
         // 同 URL：path 校验无法区分，靠 stop 留下的待吞结束事件拒绝旧 FILE_LOADED。
         assertEquals(null, coordinator.onFileLoaded("root/ep1.mkv"))
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
         assertEquals(replacement, coordinator.onFileLoaded("root/ep1.mkv"))
     }
 
@@ -410,7 +469,7 @@ class MpvFileEventsTest {
         val replacement = coordinator.start("root/ep1.mkv")
 
         assertEquals(null, coordinator.onFileLoaded("root/ep1.mkv"))
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile(atEndByPosition = false))
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
         assertEquals(replacement, coordinator.onFileLoaded("root/ep1.mkv"))
     }
 
@@ -429,5 +488,28 @@ class MpvFileEventsTest {
 
         assertEquals(current, loads.takeFileLoaded("root/ep3.mkv"))
         assertEquals(current, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
+    }
+
+    @Test
+    fun `the first position after a start only rebuilds the baseline`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+
+        assertFalse(gate.onPosition(0))
+        assertTrue(gate.onPosition(40))
+    }
+
+    @Test
+    fun `a queued old position after a backward seek is not progress`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+        assertFalse(gate.onPosition(1_000))
+
+        gate.onSeek(200)
+
+        // 队列里较大的旧位置先到：只能重建基线，不能当作出帧证据。
+        assertFalse(gate.onPosition(1_000))
+        assertFalse(gate.onPosition(250))
+        assertTrue(gate.onPosition(260))
     }
 }

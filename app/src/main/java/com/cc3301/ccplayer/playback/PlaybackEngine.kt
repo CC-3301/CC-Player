@@ -73,6 +73,9 @@ interface PlaybackEngine {
 
     fun detachSurface()
 
+    /** 非 seek 刷新：要求播放核心重新向当前 Surface 输出画面，播放位置不变。返回是否真正执行。 */
+    fun refreshSurface(): Boolean
+
     fun setSurfaceSize(width: Int, height: Int)
 
     /** 释放引擎持有的全部原生资源。 */
@@ -85,7 +88,7 @@ interface PlaybackEngine {
 
         /**
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
-         * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要用抓帧确认后才算就绪。
+         * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要等到真正出帧后再算就绪。
          * [targetUrl] 是本次加载的目标，控制层据此丢弃取消/恢复之后迟到的 ready。
          * [seekSerial] 是本次信号对应的 seek 序号，控制层只接受续播 seek 之后的信号。
          * [loadToken] 是产生该信号的那次加载，控制层据此丢弃同 URL 重载后的迟到事件。
@@ -101,17 +104,18 @@ interface PlaybackEngine {
         /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
         fun onLoadActivity()
 
-        /** 重新挂上 Surface 后已输出画面（播放态）；[surfaceGeneration] 标识本次挂载。 */
-        fun onFramePresented(surfaceGeneration: Int)
-
-        /** 重新挂上 Surface 后视频输出已重配（暂停态）；由控制层抓帧确认后再撤帧。 */
-        fun onSurfaceReconfigured(surfaceGeneration: Int)
+        /**
+         * 新画面已真正输出到 Surface：加载已就绪后播放位置实际前进，或重新挂载 Surface 后再次前进。
+         * [surfaceGeneration] 标识本次挂载，[loadToken] 标识产生它的加载。
+         * 暂停态没有位置前进，不能凭视频输出重配冒充这个信号。
+         */
+        fun onFramePresented(surfaceGeneration: Int, loadToken: Int)
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)
 
-        /** 当前媒体自然播放结束；被替换或停止产生的结束事件不上报。 */
-        fun onPlaybackEnded()
+        /** 当前媒体自然播放结束；[loadToken] 标识产生它的加载。被替换或停止产生的结束事件不上报。 */
+        fun onPlaybackEnded(loadToken: Int)
 
         /** 媒体打开失败或播放中出错，按切集失败处理。 */
         fun onPlaybackFailed()

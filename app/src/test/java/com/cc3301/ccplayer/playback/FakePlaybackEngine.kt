@@ -18,8 +18,6 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 抓帧返回的画面；测试用不含位图的 Frame 模拟“有帧”。 */
     var frameToGrab: PlaybackEngine.Frame? = null
-    var grabFrameCalls = 0
-        private set
 
     /** 抓帧前执行，用于模拟不可中断的原生调用。 */
     var beforeGrab: (() -> Unit)? = null
@@ -70,7 +68,6 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun grabFrame(): PlaybackEngine.Frame? {
         actions += "grab"
-        grabFrameCalls++
         beforeGrab?.invoke()
         return frameToGrab
     }
@@ -145,6 +142,15 @@ class FakePlaybackEngine : PlaybackEngine {
         attachedSurface = null
     }
 
+    var refreshSurfaceCalls = 0
+        private set
+
+    override fun refreshSurface(): Boolean {
+        actions += "refresh"
+        refreshSurfaceCalls++
+        return true
+    }
+
     override fun setSurfaceSize(width: Int, height: Int) = Unit
 
     override fun release() = Unit
@@ -198,7 +204,7 @@ class FakePlaybackEngine : PlaybackEngine {
         )
     }
 
-    /** 暂停态下的 PLAYBACK_RESTART：同样需要控制层抓帧确认。 */
+    /** 暂停态下的 PLAYBACK_RESTART：不能证明画面已经上屏。 */
     fun reportPausedRestart(
         targetUrl: String? = currentTargetUrl,
         seekSerial: Int = currentSeekSerial,
@@ -216,19 +222,17 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 只上报加载活动，不给 ready/end。 */
     fun reportLoadActivity() = listener?.onLoadActivity()
 
-    /** 播放态重新出帧。 */
-    fun reportFramePresented(generation: Int = surfaceGeneration) =
-        listener?.onFramePresented(generation)
-
-    /** 暂停态视频输出重配，播放核心要求抓帧确认。 */
-    fun reportSurfaceReconfigured(generation: Int = surfaceGeneration) =
-        listener?.onSurfaceReconfigured(generation)
+    /** 真正出帧：加载就绪后播放位置前进。 */
+    fun reportFramePresented(
+        generation: Int = surfaceGeneration,
+        loadToken: Int = currentLoadToken,
+    ) = listener?.onFramePresented(generation, loadToken)
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
-    fun reportPlaybackEnded() {
+    fun reportPlaybackEnded(loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity()
-        listener?.onPlaybackEnded()
+        listener?.onPlaybackEnded(loadToken)
     }
 
     fun reportPlaybackFailed() {

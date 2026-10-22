@@ -96,6 +96,8 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `switching pauses the old video and grabs a frame`() = runTest {
         val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
 
         controller.next()
 
@@ -106,7 +108,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
         assertEquals(1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
-        assertEquals(1, engine.grabFrameCalls)
+        assertSame(frame, controller.freezeFrame.value)
         assertEquals(0, engine.resumeCalls)
         assertTrue(controller.switching.value)
     }
@@ -150,7 +152,63 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a paused switch stays paused after the first frame`() = runTest {
+    fun `retargeting keeps a pause pressed after the switch started`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.pause()
+        controller.next()
+
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `an end from the old generation does not auto play the next episode`() = runTest {
+        val controller = playingController()
+        val oldToken = engine.currentLoadToken
+
+        controller.next()
+        val started = engine.startedUrls.toList()
+        engine.reportPlaybackEnded(loadToken = oldToken)
+
+        assertEquals(started, engine.startedUrls)
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `pausing after the target started settles the switch paused and keeps the freeze`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        assertTrue(controller.switching.value)
+        assertEquals(1, engine.resumeCalls)
+
+        // 就绪后又暂停：不能再等位置前进，直接按已就绪暂停收尾。
+        controller.pause()
+
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(frame, controller.freezeFrame.value)
+
+        // 用户继续播放后真正出帧，冻结画面才撤。
+        controller.resume()
+        engine.reportPauseChanged(false)
+        engine.reportPositionChanged(1_000, 600_000)
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `a paused switch starts playing even when it began paused`() = runTest {
         val controller = playingController()
         controller.pause()
 
@@ -158,8 +216,8 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
-        assertEquals(PlaybackState.Paused, controller.state.value)
-        assertEquals(0, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
     }
 
     @Test
@@ -180,6 +238,8 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `repeated next during a switch advances the target to the final episode`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
 
         controller.next()
         controller.next()
@@ -189,7 +249,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
         // 重定目标不再抓帧，冻结画面沿用第一次切集的结果。
-        assertEquals(1, engine.grabFrameCalls)
+        assertSame(frame, controller.freezeFrame.value)
 
         // 被跳过的第 2 集迟到的就绪不能结束切换。
         engine.reportFirstFrameReady(targetUrl = "root/ep2.mkv")
@@ -240,7 +300,6 @@ class PlaybackControllerSwitchTest {
     fun `automatic next uses the same switch transition as a manual switch`() = runTest {
         val controller = playingController()
         val pauseCallsBefore = engine.pauseCalls
-        val grabCallsBefore = engine.grabFrameCalls
 
         engine.reportPlaybackEnded()
 
@@ -249,7 +308,6 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
         assertEquals(pauseCallsBefore + 1, engine.pauseCalls)
-        assertEquals(grabCallsBefore + 1, engine.grabFrameCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(0, engine.resumeCalls)
         // 自然播完后已无帧可抓：冻结画面为空，界面按黑底等待。
@@ -560,7 +618,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `play during the target load is blocked so the target stays paused`() = runTest {
+    fun `play during the target load is blocked and the switch still auto-plays`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(40_000, 600_000)
         controller.pause()
@@ -573,8 +631,8 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
-        assertEquals(PlaybackState.Paused, controller.state.value)
-        assertEquals(0, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
     }
 
     @Test
@@ -720,7 +778,7 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
     }
 
@@ -763,6 +821,8 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `back cancels the switch and leaves the original video paused`() = runTest {
         val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
         engine.reportPositionChanged(12_000, 600_000)
 
         controller.next()
@@ -777,56 +837,52 @@ class PlaybackControllerSwitchTest {
 
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
-        assertTrue(controller.switching.value)
-
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
-        runCurrent()
         assertFalse(controller.switching.value)
+        // 暂停态没有位置前进，冻结画面留到真正出帧。
+        assertEquals(frame, controller.freezeFrame.value)
+
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `a paused switch needs a grabbed frame after video reconfig`() = runTest {
+    fun `a paused switch keeps the frozen frame until the target frame reaches the surface`() = runTest {
         val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
         controller.pause()
 
         controller.next()
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
+        runCurrent()
 
-        // 只有重配、抓不到帧时不能撤冻结层。
+        // 视频链已重配、离屏也能抓到帧，但画面还没上屏：冻结画面不能撤。
+        assertSame(frame, controller.freezeFrame.value)
         assertTrue(controller.switching.value)
 
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
-        runCurrent()
+        engine.reportFramePresented()
+
+        assertNull(controller.freezeFrame.value)
         assertFalse(controller.switching.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
-    fun `a paused restart also needs a grabbed frame`() = runTest {
+    fun `a paused initial load settles without waiting for a frame`() = runTest {
         val controller = controller()
         open(controller, "ep1.mkv")
         controller.pause()
         engine.reportFileLoaded()
 
-        // 暂停态的 PLAYBACK_RESTART 不能单独证明画面已上屏。
+        // 首次打开没有冻结画面可撤；暂停意图在文件就绪后直接生效。
         engine.reportPausedRestart()
-        assertEquals(PlaybackState.Loading, controller.state.value)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(PlaybackState.Loading, controller.state.value)
-
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
-        runCurrent()
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `a failed frame probe keeps waiting instead of failing the load`() = runTest {
+    fun `a switch keeps waiting for the surface frame until the watchdog`() = runTest {
         val controller = playingController()
         val failures = collectFailures(controller)
 
@@ -834,44 +890,33 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
 
-        // 抓帧探测没有独立短超时：远超旧探测预算后仍停在加载中。
+        // 没有新帧上屏：冻结画面与加载状态一直保留到无事件看门狗。
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertTrue(failures.isEmpty())
 
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
+        engine.reportFramePresented()
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
-    fun `a paused probe retries until a frame appears`() = runTest {
+    fun `a delayed frame on the surface still completes the switch`() = runTest {
         val controller = playingController()
-        controller.pause()
 
         controller.next()
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
         runCurrent()
-        val attempts = engine.grabFrameCalls
-
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(attempts + 1, engine.grabFrameCalls)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(attempts + 2, engine.grabFrameCalls)
         assertTrue(controller.switching.value)
 
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        advanceTimeBy(PlaybackController.FRAME_PROBE_RETRY_MILLIS)
+        engine.reportFramePresented()
         runCurrent()
         assertFalse(controller.switching.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
@@ -885,7 +930,7 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(20_000, 600_000)
         engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
 
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
         assertEquals(600_000L, controller.progress.value.durationMillis)
     }
@@ -954,21 +999,23 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grab before the buffer delay keeps the indicator hidden`() = runTest {
+    fun `a frame on the surface before the buffer delay keeps the indicator hidden`() = runTest {
         val controller = playingController()
         controller.pause()
 
         controller.next()
         advanceTimeBy(900)
         engine.reportFileLoaded()
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
         engine.reportVideoReconfigured()
+        runCurrent()
+        engine.reportFramePresented()
+        runCurrent()
 
         assertFalse(controller.buffering.value)
         advanceTimeBy(1000)
         runCurrent()
         assertFalse(controller.buffering.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
@@ -1053,14 +1100,13 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `the indicator appears when the probe crosses the buffer delay`() = runTest {
+    fun `the indicator appears while the surface frame is still missing`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
         advanceTimeBy(980)
         engine.reportFileLoaded()
-        // 重配已到但抓不到帧：不能取消计时，也不能算就绪。
-        engine.reportVideoReconfigured()
+        // 文件已打开但首帧信号还没到：不能取消计时，也不能算就绪。
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
@@ -1069,9 +1115,8 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.buffering.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        // 抓帧成功才撤掉提示并显示画面。
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
+        // 首帧信号到达后才撤掉提示并显示画面。
+        engine.reportFirstFrameReady()
         runCurrent()
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
@@ -1089,10 +1134,6 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
 
         engine.reportVideoReconfigured()
-        assertTrue(controller.switching.value)
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-        engine.reportVideoReconfigured()
-        runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
