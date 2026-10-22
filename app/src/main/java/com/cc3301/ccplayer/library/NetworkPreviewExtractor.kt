@@ -26,7 +26,7 @@ class NetworkPreviewExtractor(
     private val decoder: NetworkPreviewDecoder,
 ) {
 
-    suspend fun imageBytes(file: MediaFile, targetWidth: Int = NETWORK_TARGET_WIDTH): ByteArray? =
+    suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             val kind = mediaKindOf(file.name) ?: return@withContext null
             val source = reads.openRead(file.location)

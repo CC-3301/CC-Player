@@ -101,6 +101,22 @@ class CachedMediaPreviewSourceTest {
         val entry = cache().entry(thumbnailCacheKey(file, ThumbnailPolicy()))
         assertNotNull(entry)
         assertNull(entry!!.durationMillis)
+        assertTrue(!entry.durationKnown)
+    }
+
+    @Test
+    fun `网络单帧纯色时保持占位图`() = runTest {
+        val solid = SolidNetworkPreviewExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = solid,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+
+        val preview = bounded.preview(network("纯色.mkv"))
+
+        assertNull(preview.image)
+        assertEquals(1, solid.decodes)
+        assertTrue(directory.listFiles().isNullOrEmpty())
     }
 
     @Test
@@ -943,6 +959,20 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `网络可见项按列表顺序发起抽取`() = runTest {
+        val tracker = OrderRecordingExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val files = (0 until 6).map { index -> network("第$index 集.mkv") }
+
+        files.map { file -> async { bounded.preview(file) } }.awaitAll()
+
+        assertEquals(files.map(MediaFile::location), tracker.started)
+    }
+
+    @Test
     fun `子目录没有预览`() = runTest {
         val preview = source.preview(testDirectory("剧集", "root/剧集"))
 
@@ -1058,6 +1088,38 @@ private class RetryAfterFailureExtractor : MediaPreviewExtractor {
         failure?.let { throw it }
         return byteArrayOf(1)
     }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 记录网络抽取的发起顺序，用来验证可见项按列表顺序调度。 */
+private class OrderRecordingExtractor : MediaPreviewExtractor {
+
+    val started = mutableListOf<String>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+        started += file.location
+        yield()
+        return byteArrayOf(1)
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 网络单帧恒为纯色，用来验证不合格时保持占位图。 */
+private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
+
+    var decodes = 0
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+        extractNetworkFrame(
+            durationMillis = 90_000,
+            decode = {
+                decodes++
+                byteArrayOf(1)
+            },
+            isSolid = { true },
+        )
 
     override suspend fun durationMillis(file: MediaFile): Long? = null
 }

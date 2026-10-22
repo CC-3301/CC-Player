@@ -37,6 +37,63 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
+    fun `网络只解码一帧，纯色帧不合格并释放`() {
+        var decodes = 0
+        var asked: Long? = null
+        var released = 0
+
+        val frame = extractNetworkFrame(
+            durationMillis = 90_000,
+            decode = { position ->
+                decodes++
+                asked = position.micros
+                "纯色帧"
+            },
+            isSolid = { true },
+            release = { released++ },
+        )
+
+        assertNull(frame)
+        assertEquals(1, decodes)
+        assertEquals(1_000_000L, asked)
+        assertEquals(1, released)
+    }
+
+    @Test
+    fun `网络单帧非纯色时返回该帧`() {
+        var decodes = 0
+
+        val frame = extractNetworkFrame(
+            durationMillis = 300_000,
+            decode = {
+                decodes++
+                "正常帧"
+            },
+            isSolid = { false },
+        )
+
+        assertEquals("正常帧", frame)
+        assertEquals(1, decodes)
+    }
+
+    @Test
+    fun `网络单帧解不出时保持占位图`() {
+        var decodes = 0
+
+        val frame = extractNetworkFrame<String>(
+            durationMillis = null,
+            decode = {
+                decodes++
+                null
+            },
+            isSolid = { false },
+        )
+
+        assertNull(frame)
+        assertEquals(1, decodes)
+    }
+
+    @Test
     fun `时长未知时本地从片头开始取固定候选且最后一个兜底`() {
         val local = framePositions(0, LOCAL_FRAME_COUNT)
 

@@ -29,7 +29,7 @@ class NetworkPreviewExtractorTest {
             ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
         }
 
-        assertArrayEquals(payload.copyOfRange(0, 8), extractor.imageBytes(movie)!!)
+        assertArrayEquals(payload.copyOfRange(0, 8), extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)!!)
         assertEquals(MediaKind.Video, askedKind)
         assertEquals(listOf(movie.location), reads.opened)
         assertEquals(listOf(0L), source.reads)
@@ -57,7 +57,7 @@ class NetworkPreviewExtractorTest {
             ByteArray(2)
         }
 
-        extractor.imageBytes(movie.copy(name = "歌.mp3"))
+        extractor.imageBytes(movie.copy(name = "歌.mp3"), NETWORK_TARGET_WIDTH)
 
         assertEquals(MediaKind.Audio, askedKind)
         assertTrue(source.closed)
@@ -68,7 +68,7 @@ class NetworkPreviewExtractorTest {
         val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> error("解码失败") }
 
         try {
-            extractor.imageBytes(movie)
+            extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
             fail("应抛出解码异常")
         } catch (expected: IllegalStateException) {
             // 预期失败路径。
@@ -81,7 +81,7 @@ class NetworkPreviewExtractorTest {
         val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _, _ -> ByteArray(1) }
 
         try {
-            extractor.imageBytes(movie)
+            extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
             fail("应抛出打开失败")
         } catch (expected: IllegalStateException) {
             // 预期失败路径。
@@ -92,7 +92,7 @@ class NetworkPreviewExtractorTest {
     fun `非媒体文件不打开句柄`() = runTest {
         val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> ByteArray(1) }
 
-        assertNull(extractor.imageBytes(movie.copy(name = "说明.txt")))
+        assertNull(extractor.imageBytes(movie.copy(name = "说明.txt"), NETWORK_TARGET_WIDTH))
         assertTrue(reads.opened.isEmpty())
     }
 

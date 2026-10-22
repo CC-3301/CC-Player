@@ -8,7 +8,7 @@ internal const val THUMBNAIL_POLICY_VERSION = 3
 /** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
 internal const val THUMBNAIL_TARGET_WIDTH = 512
 
-/** 网络预览目标宽度：网络只按 320 宽出图，减少传输与解码开销。 */
+/** 网络预览目标宽度：网络只按 320 宽输出，减少解码与图像开销。 */
 internal const val NETWORK_TARGET_WIDTH = 320
 
 /** 输出宽度的下限；源图更窄时放大到该宽度。 */
@@ -53,11 +53,7 @@ internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePo
             FramePosition(micros, fallback = index == count - 1)
         }
     }
-    val fractions = when {
-        frameCount == 1 -> listOf(FALLBACK_FRAME_FRACTION)
-        frameCount == 2 -> listOf(FALLBACK_FRAME_FRACTION, 2.0 / 3.0)
-        else -> listOf(0.1, FALLBACK_FRAME_FRACTION, 2.0 / 3.0)
-    }
+    val fractions = listOf(0.1, FALLBACK_FRAME_FRACTION, 2.0 / 3.0).take(frameCount)
     val durationMicros = durationMillis * 1_000
     return fractions.map { fraction ->
         FramePosition(
@@ -73,6 +69,22 @@ internal fun networkFramePosition(durationMillis: Long?): FramePosition {
     val micros = durationMicros?.let { maxOf(it / 100, NETWORK_MIN_FRAME_POSITION_MICROS) }
         ?: NETWORK_MIN_FRAME_POSITION_MICROS
     return FramePosition(micros, fallback = true)
+}
+
+/**
+ * 网络单帧抽取：只解码一个位置；解不出或纯色时返回 null，界面保持占位图。
+ * [release] 在纯色帧被丢弃前调用，用于回收位图。
+ */
+internal fun <T> extractNetworkFrame(
+    durationMillis: Long?,
+    decode: (FramePosition) -> T?,
+    isSolid: (T) -> Boolean,
+    release: (T) -> Unit = {},
+): T? {
+    val frame = decode(networkFramePosition(durationMillis)) ?: return null
+    if (!isSolid(frame)) return frame
+    release(frame)
+    return null
 }
 
 /** 按位置解码候选帧；解不出的位置直接丢弃。 */
