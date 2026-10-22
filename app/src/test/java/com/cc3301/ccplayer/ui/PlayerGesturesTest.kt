@@ -159,6 +159,173 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `切集期间上下一集可点且外观正常`() {
+        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
+            assertEquals(action.name, true, actionAllowed(action, switching = true, initialLoading = false, restoring = false))
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `切集期间其它动作被拦截但外观不禁用`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Seek,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionAllowed(action, switching = true, initialLoading = false, restoring = false),
+            )
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `首次加载时上下一集显示为不可用`() {
+        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = false,
+                    initialLoading = true,
+                    restoring = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `首次加载时其余控件也按不可用外观显示`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Seek,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+            PlayerAction.Rotate,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = false,
+                    initialLoading = true,
+                    restoring = false,
+                ),
+            )
+        }
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Back,
+                canGoPrevious = true,
+                canGoNext = true,
+                switching = false,
+                initialLoading = true,
+                restoring = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `恢复期间其余控件外观保持正常`() {
+        listOf(
+            PlayerAction.PlayPause,
+            PlayerAction.Seek,
+            PlayerAction.Lock,
+            PlayerAction.More,
+            PlayerAction.Playlist,
+            PlayerAction.Subtitles,
+            PlayerAction.Rotate,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = true,
+                    initialLoading = false,
+                    restoring = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `上下一集不可用时外观禁用`() {
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = false,
+                canGoNext = true,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Next,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
+    }
+
+    @Test
     fun `首次加载完成后所有操作恢复`() {
         PlayerAction.entries.forEach { action ->
             assertEquals(

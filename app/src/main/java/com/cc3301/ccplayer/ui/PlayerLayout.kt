@@ -42,16 +42,25 @@ val PlayerSideTouchTarget = 48.dp
 val PlayerSideIconSize = 26.dp
 
 /** 进度条整行触控高度。 */
-val PlayerSeekTouchHeight = 48.dp
+val PlayerSeekTouchHeight = 36.dp
 
-/** 进度条左右时间区的固定宽度。 */
-val PlayerSeekTimeWidth = 64.dp
+/** 进度条时间标签距屏幕左右边缘的距离。 */
+val PlayerSeekHorizontalInset = 16.dp
+
+/** 进度条时间标签与轨道之间的间距。 */
+val PlayerSeekTimeGap = 16.dp
 
 /** 进度条圆形滑块直径。 */
 val PlayerSeekThumbSize = 16.dp
 
 /** 进度条视觉轨道线宽。 */
-val PlayerSeekTrackHeight = 3.dp
+val PlayerSeekTrackHeight = 2.dp
+
+/** 播放列表条目距屏幕左右边缘的距离。 */
+val PlayerPlaylistHorizontalInset = 16.dp
+
+/** 播放列表编号与标题之间的间距。 */
+val PlayerPlaylistIndexGap = 16.dp
 
 /** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
 val PlayerTransportButtonSize = 48.dp
@@ -118,6 +127,13 @@ const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 data class SeekBarTrackBounds(val start: Float, val end: Float)
 
 /**
+ * 拖动期间两侧时间标签共用的冻结宽度：取两者较大值。
+ * 拖动中的预览时间不超过总时长，因此不会因跨位数被裁切，轨道也不会随标签变宽而移动。
+ */
+fun seekBarDragTimeWidth(leftTimeWidthPx: Float, rightTimeWidthPx: Float): Float =
+    maxOf(leftTimeWidthPx, rightTimeWidthPx)
+
+/**
  * 计算进度条视觉轨道范围：两侧时间区、间距与滑块半径都从整行宽度中扣除。
  * 空间不足时两端退到同一位置，交由 [seekBarMillisAt] 判为不可拖动。
  */
@@ -148,6 +164,29 @@ fun seekBarMillisAt(
     if (trackEnd <= trackStart || durationMillis <= 0L) return null
     val fraction = ((x - trackStart) / (trackEnd - trackStart)).coerceIn(0f, 1f)
     return (fraction * durationMillis).roundToLong().coerceIn(0L, durationMillis)
+}
+
+/**
+ * 按下首帧的目标时间：按冻结前的左右标签宽度映射。
+ * 左右标签宽度不等时，冻结会移动轨道端点；首帧必须先按用户实际按下的旧轨道计算，避免跳位。
+ */
+fun seekBarDownMillis(
+    x: Float,
+    widthPx: Float,
+    leftTimeWidthPx: Float,
+    rightTimeWidthPx: Float,
+    spacingPx: Float,
+    thumbRadiusPx: Float,
+    durationMillis: Long,
+): Long? {
+    val bounds = seekBarTrackBounds(
+        widthPx = widthPx,
+        leftTimeWidthPx = leftTimeWidthPx,
+        rightTimeWidthPx = rightTimeWidthPx,
+        spacingPx = spacingPx,
+        thumbRadiusPx = thumbRadiusPx,
+    )
+    return seekBarMillisAt(x, bounds.start, bounds.end, durationMillis)
 }
 
 /**

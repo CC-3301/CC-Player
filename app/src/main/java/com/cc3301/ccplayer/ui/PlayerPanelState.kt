@@ -54,6 +54,9 @@ class PlayerPanelState {
     }
 }
 
+/** 播放列表编号：从 1 开始，至少两位。 */
+fun playlistItemIndexLabel(index: Int): String = (index + 1).toString().padStart(2, '0')
+
 /** 点左半屏关闭抽屉；右半屏归抽屉。 */
 fun playlistDismissTap(tapX: Float, width: Float): Boolean =
     width > 0f && tapX >= 0f && tapX < width / 2f
