@@ -112,7 +112,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val navigation: NavigationViewModel by viewModels { NavigationViewModel.factory() }
 
-    private val mediaPreview: MediaPreviewSource by lazy { CachedMediaPreviewSource.create(applicationContext, createPreviewReads()) }
+    private val mediaPreview: MediaPreviewSource by lazy {
+        CachedMediaPreviewSource.create(applicationContext, createPreviewReads(), diagnostics)
+    }
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
@@ -122,6 +124,20 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         DiagnosticsExporter(
             logDirectory = File(filesDir, Diagnostics.DIRECTORY_NAME),
             outputDirectory = File(cacheDir, Diagnostics.DIRECTORY_NAME),
+            systemInfo = diagnosticsSystemInfo(),
+        )
+    }
+
+    /** 导出文件开头写入的版本与设备信息；取不到版本时标为未知。 */
+    @Suppress("DEPRECATION")
+    private fun diagnosticsSystemInfo(): List<String> {
+        val version = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull() ?: "未知"
+        return listOf(
+            "应用版本: $version",
+            "设备型号: ${Build.MODEL}",
+            "系统版本: Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
         )
     }
 

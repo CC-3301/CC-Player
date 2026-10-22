@@ -145,10 +145,13 @@ class FakePlaybackEngine : PlaybackEngine {
     var refreshSurfaceCalls = 0
         private set
 
+    /** 非 seek 刷新是否真正执行；模拟未加载、无视频轨或输出已停。 */
+    var refreshSurfaceResult = true
+
     override fun refreshSurface(): Boolean {
         actions += "refresh"
         refreshSurfaceCalls++
-        return true
+        return refreshSurfaceResult
     }
 
     override fun setSurfaceSize(width: Int, height: Int) = Unit

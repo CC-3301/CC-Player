@@ -3,9 +3,18 @@ package com.cc3301.ccplayer.streaming
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.io.Closeable
+import java.io.IOException
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URI
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicInteger
 
 class LoopbackStreamServerTest {
 
@@ -107,6 +116,165 @@ class LoopbackStreamServerTest {
 
         assertEquals(true, source.closed)
     }
+
+    @Test
+    fun `读取抛运行时异常后监听仍存活且不复用重建`() {
+        var opens = 0
+        val unstable = server.serve("smb://nas/media/超时.mkv") {
+            opens++
+            FailingByteSource(IllegalStateException("Timeout expired"))
+        }
+
+        val failed = httpRequest(unstable)
+        assertEquals(200, failed.statusCode)
+        assertEquals(0, failed.body.size)
+
+        // 同一个流保留原字节源，失败就再次快速失败；监听线程仍可服务其它流。
+        assertEquals(200, httpRequest(unstable).statusCode)
+        assertEquals(1, opens)
+        assertArrayEquals(payload, httpRequest(url).body)
+    }
+
+    @Test
+    fun `读取抛 Error 后监听仍存活`() {
+        val failing = server.serve("smb://nas/media/读取错误.mkv") {
+            FailingByteSource(AssertionError("读取失败"))
+        }
+
+        assertEquals(200, httpRequest(failing).statusCode)
+        assertArrayEquals(payload, httpRequest(url).body)
+    }
+
+    @Test
+    fun `连接边界直接调用时运行时异常不逃逸`() {
+        listOf(IllegalStateException("Timeout expired"), AssertionError("读取失败"))
+            .forEachIndexed { index, failure ->
+                val target = server.serve("smb://nas/media/边界-$index.mkv") {
+                    FailingByteSource(failure)
+                }
+
+                val response = requestThroughBoundary(target)
+
+                assertEquals(200, response.statusCode)
+                assertEquals(0, response.body.size)
+            }
+    }
+
+    @Test
+    fun `客户端提前断开不失效字节源`() {
+        val big = ByteArray(1 shl 20) { (it % 251).toByte() }
+        var opens = 0
+        var target = ""
+        ServerSocket(0).use { listener ->
+            Socket(InetAddress.getByName("127.0.0.1"), listener.localPort).use { client ->
+                listener.accept().use { connection ->
+                    val aborting = object : ByteSource {
+                        override val size: Long = big.size.toLong()
+
+                        override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                            if (!client.isClosed) {
+                                client.setSoLinger(true, 0)
+                                client.close()
+                            }
+                            if (position >= big.size) return 0
+                            val count = minOf(length.toLong(), big.size - position).toInt()
+                            big.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+                            return count
+                        }
+
+                        override fun close() = Unit
+                    }
+                    target = server.serve("smb://nas/media/断开.mkv") {
+                        opens++
+                        aborting
+                    }
+                    client.getOutputStream().apply {
+                        write("GET ${URI(target).path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".toByteArray())
+                        flush()
+                    }
+
+                    // 写失败只结束本次连接；字节源保持缓存。
+                    server.handle(connection)
+                }
+            }
+        }
+
+        assertArrayEquals(big, httpRequest(target).body)
+        assertEquals(1, opens)
+    }
+
+    @Test
+    fun `接受线程遇 Error 时关闭监听`() {
+        val gate = CountDownLatch(1)
+        val before = acceptThreads()
+        val fresh = LoopbackStreamServer(
+            acceptSocket = {
+                gate.await()
+                throw AssertionError("accept 失败")
+            },
+        )
+        val address = fresh.serve("key") { RecordingByteSource(payload) }
+        val acceptor = (acceptThreads() - before).single()
+        gate.countDown()
+        acceptor.join(2_000)
+
+        assertFalse(acceptor.isAlive)
+        assertThrows(IOException::class.java) { httpRequest(address) }
+    }
+
+    @Test
+    fun `连续接受失败达到上限后关闭监听`() {
+        val gate = CountDownLatch(1)
+        val failures = AtomicInteger()
+        val before = acceptThreads()
+        val fresh = LoopbackStreamServer(
+            acceptSocket = {
+                if (failures.getAndIncrement() == 0) gate.await()
+                throw IllegalStateException("accept 失败")
+            },
+        )
+        val address = fresh.serve("key") { RecordingByteSource(payload) }
+        val acceptor = (acceptThreads() - before).single()
+        gate.countDown()
+        acceptor.join(2_000)
+
+        assertFalse(acceptor.isAlive)
+        assertEquals(LOOPBACK_ACCEPT_FAILURE_LIMIT, failures.get())
+        assertThrows(IOException::class.java) { httpRequest(address) }
+    }
+
+    @Test
+    fun `关闭后接受线程退出`() {
+        val before = acceptThreads()
+        val fresh = LoopbackStreamServer()
+        val acceptor = (acceptThreads() - before).single()
+
+        fresh.close()
+        acceptor.join(2_000)
+
+        assertFalse(acceptor.isAlive)
+    }
+
+    private fun requestThroughBoundary(url: String): HttpResponse {
+        val path = URI(url).path
+        ServerSocket(0).use { listener ->
+            Socket(InetAddress.getByName("127.0.0.1"), listener.localPort).use { client ->
+                listener.accept().use { connection ->
+                    client.getOutputStream().apply {
+                        write("GET $path HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".toByteArray())
+                        flush()
+                    }
+                    server.handle(connection)
+                    return HttpResponse.parse(client.getInputStream().readBytes())
+                }
+            }
+        }
+    }
+
+    private fun acceptThreads(): Set<Thread> =
+        Thread.getAllStackTraces().keys
+            .filter { it.name == "loopback-stream-accept" && it.isAlive }
+            .toSet()
 }
 
 /** 记录是否被关闭的字节源。 */
@@ -126,4 +294,14 @@ class RecordingByteSource(private val bytes: ByteArray) : ByteSource, Closeable 
     override fun close() {
         closed = true
     }
+}
+
+/** 每次读取都抛出指定异常，模拟网络读超时等失败。 */
+class FailingByteSource(private val failure: Throwable) : ByteSource {
+
+    override val size: Long = 1000
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = throw failure
+
+    override fun close() = Unit
 }

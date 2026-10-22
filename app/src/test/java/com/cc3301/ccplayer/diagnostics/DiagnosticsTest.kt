@@ -108,6 +108,54 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun `导出包含应用版本设备型号与系统版本`() {
+        val logDirectory = temporaryFolder.newFolder("system-info")
+        val outputDirectory = temporaryFolder.newFolder("system-info-output")
+        File(logDirectory, "diagnostics.log").writeText("应用启动\n", Charsets.UTF_8)
+        val exporter = DiagnosticsExporter(
+            logDirectory = logDirectory,
+            outputDirectory = outputDirectory,
+            systemInfo = listOf(
+                "应用版本: 0.1.0",
+                "设备型号: Pixel-Test",
+                "系统版本: Android 15 (API 35)",
+            ),
+        )
+
+        val exported = requireNotNull(exporter.export())
+        val text = exported.readText(Charsets.UTF_8)
+
+        assertTrue(text.contains("===== 系统信息 ====="))
+        assertTrue(text.contains("应用版本: 0.1.0"))
+        assertTrue(text.contains("设备型号: Pixel-Test"))
+        assertTrue(text.contains("系统版本: Android 15 (API 35)"))
+        assertTrue(text.contains("应用启动"))
+        assertTrue(text.indexOf("应用版本") < text.indexOf("应用启动"))
+    }
+
+    @Test
+    fun `没有日志时即使有系统信息也不生成导出文件`() {
+        val logDirectory = temporaryFolder.newFolder("no-logs-system-info")
+        val outputDirectory = temporaryFolder.newFolder("no-logs-system-info-output")
+        val exporter = DiagnosticsExporter(
+            logDirectory = logDirectory,
+            outputDirectory = outputDirectory,
+            systemInfo = listOf("应用版本: 0.1.0"),
+        )
+
+        assertNull(exporter.export())
+    }
+
+    @Test
+    fun `只有空白日志时不生成导出文件`() {
+        val logDirectory = temporaryFolder.newFolder("blank-logs")
+        val outputDirectory = temporaryFolder.newFolder("blank-logs-output")
+        File(logDirectory, "diagnostics.log").writeText("  \n\t\n", Charsets.UTF_8)
+
+        assertNull(DiagnosticsExporter(logDirectory, outputDirectory).export())
+    }
+
+    @Test
     fun `导出从旧到新并排列文件`() {
         val logDirectory = temporaryFolder.newFolder("ordered")
         val outputDirectory = temporaryFolder.newFolder("ordered-output")
