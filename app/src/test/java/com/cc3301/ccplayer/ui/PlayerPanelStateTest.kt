@@ -129,6 +129,79 @@ class PlayerPanelStateTest {
     }
 
     @Test
+    fun `面板可见性真值表`() {
+        assertTrue(panelVisible(anyOpen = true, controlsVisible = true, locked = false))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = false, locked = false))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = true, locked = true))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = false, locked = true))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = true, locked = false))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = false, locked = false))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = true, locked = true))
+    }
+
+    @Test
+    fun `控制层隐藏时关闭已打开的面板并恢复手势`() {
+        panels.toggle(PlayerPanel.More)
+        val visibleBeforeHide = panelVisible(panels.anyOpen, controlsVisible = true, locked = false)
+        assertTrue(visibleBeforeHide)
+        assertFalse(gesturesAllowed(locked = false, panelOpen = visibleBeforeHide))
+
+        // 面板尚未清理时，隐藏后的可见性判定已放行手势。
+        val hiddenBeforeCleanup = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+        assertFalse(hiddenBeforeCleanup)
+        assertTrue(gesturesAllowed(locked = false, panelOpen = hiddenBeforeCleanup))
+
+        panels.closeWhenControlsUnavailable(controlsVisible = false, locked = false)
+
+        assertFalse(panels.anyOpen)
+        val hiddenAfterCleanup = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+        assertFalse(hiddenAfterCleanup)
+        assertTrue(gesturesAllowed(locked = false, panelOpen = hiddenAfterCleanup))
+    }
+
+    @Test
+    fun `控制层可见时保持面板打开`() {
+        panels.toggle(PlayerPanel.Subtitles)
+
+        panels.closeWhenControlsUnavailable(controlsVisible = true, locked = false)
+
+        assertTrue(panels.anyOpen)
+        assertTrue(panels.subtitlesOpen)
+        assertTrue(panelVisible(panels.anyOpen, controlsVisible = true, locked = false))
+    }
+
+    @Test
+    fun `锁定时关闭已打开的面板`() {
+        panels.toggle(PlayerPanel.Playlist)
+        assertFalse(panelVisible(panels.anyOpen, controlsVisible = true, locked = true))
+
+        panels.closeWhenControlsUnavailable(controlsVisible = true, locked = true)
+
+        assertFalse(panels.anyOpen)
+    }
+
+    @Test
+    fun `反复隐藏显示控制层后不留下面板状态`() {
+        PlayerPanel.entries.forEach { panel ->
+            repeat(3) {
+                panels.toggle(panel)
+                val visibleWhileShown = panelVisible(panels.anyOpen, controlsVisible = true, locked = false)
+                assertTrue(visibleWhileShown)
+                assertFalse(gesturesAllowed(locked = false, panelOpen = visibleWhileShown))
+
+                panels.closeWhenControlsUnavailable(controlsVisible = true, locked = false)
+                assertTrue(panels.anyOpen)
+
+                panels.closeWhenControlsUnavailable(controlsVisible = false, locked = false)
+                assertFalse(panels.anyOpen)
+                val visibleAfterHide = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+                assertFalse(visibleAfterHide)
+                assertTrue(gesturesAllowed(locked = false, panelOpen = visibleAfterHide))
+            }
+        }
+    }
+
+    @Test
     fun `播放列表编号至少两位`() {
         assertEquals("01", playlistItemIndexLabel(0))
         assertEquals("09", playlistItemIndexLabel(8))

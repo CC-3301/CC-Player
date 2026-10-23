@@ -52,7 +52,24 @@ class PlayerPanelState {
     fun closeWhenBlocked(switching: Boolean, initialLoading: Boolean) {
         if (switching || initialLoading) close()
     }
+
+    /**
+     * 控制层不可用（隐藏或锁定）时关闭当前面板。
+     *
+     * 锁定期间面板不再可见，必须清理状态，否则会继续拦截手势。
+     */
+    fun closeWhenControlsUnavailable(controlsVisible: Boolean, locked: Boolean) {
+        if (!controlsVisible || locked) close()
+    }
 }
+
+/**
+ * 面板是否真正可见：有面板打开，且控制层可见、未锁定。
+ *
+ * 渲染与手势共用此判定，避免不可见面板仍拦截手势。
+ */
+fun panelVisible(anyOpen: Boolean, controlsVisible: Boolean, locked: Boolean): Boolean =
+    anyOpen && controlsVisible && !locked
 
 /** 播放列表编号：从 1 开始，至少两位。 */
 fun playlistItemIndexLabel(index: Int): String = (index + 1).toString().padStart(2, '0')
