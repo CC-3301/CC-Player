@@ -3,8 +3,8 @@ package com.cc3301.ccplayer.playback
 /**
  * libmpv 在 init 之前必须设置好的选项。
  *
- * 日志桥按终端级别请求消息：启用 terminal 并限制到 error，播放失败时才能从
- * `MPVLib.logMessage` 拿到错误文本。
+ * 日志桥由 native 初始化时以 `terminal-default` 级别请求；该级别取 `msg-level`，
+ * 与 terminal 是否开启无关。terminal 关闭，避免 Android 上没有 tty 的终端初始化。
  */
 object MpvOptions {
 
@@ -22,7 +22,7 @@ object MpvOptions {
 
     fun initial(cacheDir: String): Map<String, String> = linkedMapOf(
         "config" to "no",
-        "terminal" to "yes",
+        "terminal" to "no",
         "msg-level" to MSG_LEVEL,
         "idle" to "once",
         "keep-open" to "yes",

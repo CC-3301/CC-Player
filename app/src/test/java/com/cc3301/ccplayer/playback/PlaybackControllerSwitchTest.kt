@@ -950,7 +950,10 @@ class PlaybackControllerSwitchTest {
         assertSame(frame, controller.freezeFrame.value)
         assertTrue(failures.isEmpty())
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        // 60 秒从切集开始算，兜底收尾占用的 2 秒不顺延。
+        advanceTimeBy(
+            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1,
+        )
         runCurrent()
         assertSame(frame, controller.freezeFrame.value)
         assertTrue(failures.isEmpty())
@@ -965,6 +968,97 @@ class PlaybackControllerSwitchTest {
         assertEquals(1, failures.size)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(40_000L, engine.startedPositions.last())
+    }
+
+    @Test
+    fun `pausing and resuming preserves the remaining no-frame window`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 10_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        controller.pause()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        // 恢复只接着剩余窗口计时，不重新给满 60 秒。
+        controller.resume()
+        advanceTimeBy(
+            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 10_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `surface detach pauses the no-frame window and reattach continues it`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        engine.refreshSurfaceResult = false
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 20_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        controller.setRenderSurfaceAvailable(false)
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(
+            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 20_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `stopping or starting a new load cancels the no-frame watchdog`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        // 停止：旧的无帧计时不能把已结束的会话报成失败。
+        controller.stop()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+        assertEquals(PlaybackState.Idle, controller.state.value)
+
+        // 停止后重新打开：上一轮计时同样不能残留。
+        controller.playAt(1)
+        engine.reportMediaLoaded()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS * 2)
+        runCurrent()
+        assertTrue(failures.isEmpty())
     }
 
     @Test

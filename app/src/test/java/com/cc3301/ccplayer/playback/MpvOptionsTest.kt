@@ -34,8 +34,8 @@ class MpvOptionsTest {
     }
 
     @Test
-    fun `error logs are enabled for the playback failure text`() {
-        assertEquals("yes", options["terminal"])
+    fun `error logs reach the log bridge without terminal output`() {
+        assertEquals("no", options["terminal"])
         assertEquals("all=error", options["msg-level"])
     }
 

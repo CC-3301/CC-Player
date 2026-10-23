@@ -245,7 +245,7 @@ class MpvPlaybackEngine(
         }
         when (eventId) {
             // 在事件线程清空上一轮错误日志，避免已排队日志混进新加载。
-            MPVLib.MpvEvent.MPV_EVENT_START_FILE -> errorLog.reset()
+            MPVLib.MpvEvent.MPV_EVENT_START_FILE -> errorLog.onStartFile()
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> loadCoordinator.onSeekEvent()
@@ -280,7 +280,7 @@ class MpvPlaybackEngine(
 
     /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
-        dispatchPlaybackFailure(loadCoordinator.onEndFile(), errorLog::lastErrorText) { text ->
+        dispatchPlaybackFailure(loadCoordinator.onEndFile(), errorLog::onEndFileFailure) { text ->
             listener?.onPlaybackFailed(text)
         }
     }
@@ -438,6 +438,16 @@ internal class MpvErrorCollector(capacity: Int = 3) {
     private val capacity = capacity.coerceAtLeast(2)
 
     private val errors = ArrayDeque<String>()
+
+    /** START_FILE：清掉上一轮加载残留的日志。 */
+    @Synchronized
+    fun onStartFile() {
+        errors.clear()
+    }
+
+    /** END_FILE：读取本轮加载收集到的错误文本。 */
+    @Synchronized
+    fun onEndFileFailure(): String? = lastErrorText()
 
     @Synchronized
     fun reset() {

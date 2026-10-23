@@ -553,6 +553,18 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a new load clears the previous error log before END_FILE reads it`() {
+        val collector = MpvErrorCollector()
+        collector.onLog("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮错误")
+
+        // 事件线程先收到 START_FILE 再收到本轮日志，END_FILE 只能读到本轮文本。
+        collector.onStartFile()
+        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
+
+        assertEquals("ffmpeg: 本轮错误", collector.onEndFileFailure())
+    }
+
+    @Test
     fun `an END_FILE failure forwards the collected error text`() {
         val collector = MpvErrorCollector()
         collector.onLog("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "打开文件失败")

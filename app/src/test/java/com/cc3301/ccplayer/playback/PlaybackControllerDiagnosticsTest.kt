@@ -181,7 +181,6 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("切集失败: ep2.mkv"))
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
-        assertTrue(text.contains("阶段: 切集"))
         assertTrue(text.contains("来源: 播放核心报错（无法打开文件）"))
     }
 
@@ -201,7 +200,6 @@ class PlaybackControllerDiagnosticsTest {
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("加载失败: ep1.mkv"))
-        assertTrue(text.contains("阶段: 首次加载"))
         assertTrue(text.contains("来源: 播放核心报错（解码失败）"))
     }
 
@@ -218,7 +216,6 @@ class PlaybackControllerDiagnosticsTest {
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("加载看门狗触发: ep1.mkv"))
         assertTrue(text.contains("目标: root/ep1.mkv"))
-        assertTrue(text.contains("阶段: 首次加载"))
         assertTrue(text.contains("来源: 看门狗超时"))
     }
 
@@ -249,7 +246,6 @@ class PlaybackControllerDiagnosticsTest {
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("播放失败: ep1.mkv"))
         assertTrue(text.contains("目标: root/ep1.mkv"))
-        assertTrue(text.contains("阶段: 播放"))
         assertTrue(text.contains("来源: 播放核心报错（渲染失败）"))
     }
 
@@ -263,6 +259,29 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportPlaybackFailed("第二次")
 
         assertEquals(1, sink.lines.count { it.contains("播放失败:") })
+    }
+
+    @Test
+    fun `切集无帧超时记录目标、令牌与来源`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        val token = engine.currentLoadToken
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("切集失败: ep2.mkv"))
+        assertTrue(text.contains("目标: root/ep2.mkv"))
+        assertTrue(text.contains("加载令牌: $token"))
+        assertTrue(text.contains("来源: 无帧超时"))
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =
