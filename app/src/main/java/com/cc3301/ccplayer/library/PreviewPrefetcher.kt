@@ -30,6 +30,8 @@ class PreviewPrefetcher(
         } else {
             emptySet()
         }
+        // 先把当前范围交给预览源：排队中的预取取得许可后据此复查，离屏后不再抽取。
+        source.updatePreviewWindow(visibleLocations, wantedLocations)
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
             val (location, job) = iterator.next()
@@ -42,17 +44,18 @@ class PreviewPrefetcher(
             if (jobs.containsKey(entry.location)) continue
             val job = scope.launch {
                 delay(prefetchDelayMillis)
-                source.preview(entry)
+                source.prefetch(entry)
             }
             jobs[entry.location] = job
             job.invokeOnCompletion { jobs.remove(entry.location, job) }
         }
     }
 
-    /** 离开库页面时取消全部预取。 */
+    /** 离开库页面时取消全部预取，并清空源里的范围，避免旧范围继续放行排队请求。 */
     fun cancelAll() {
         jobs.values.forEach(Job::cancel)
         jobs.clear()
+        source.updatePreviewWindow(emptySet(), emptySet())
     }
 
     private companion object {

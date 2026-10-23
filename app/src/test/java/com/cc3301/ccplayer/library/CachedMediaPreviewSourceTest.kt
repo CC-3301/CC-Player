@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.library
 
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -14,6 +15,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -959,6 +961,351 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `范围变化后排队中的预取取得许可时直接放弃`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        // 两个慢请求占满网络许可，后面两个预取只能排队。
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val oldVisible = network("旧1.mkv")
+        val oldPrefetch = network("旧2.mkv")
+        bounded.updatePreviewWindow(
+            visibleLocations = setOf(oldVisible.location),
+            prefetchLocations = setOf(oldPrefetch.location),
+        )
+        val stale = listOf(oldVisible, oldPrefetch).map { file -> async { bounded.prefetch(file) } }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        // 滚到远处：旧范围不再可见也不再预取。
+        bounded.updatePreviewWindow(
+            visibleLocations = setOf("smb://nas/media/新.mkv"),
+            prefetchLocations = emptySet(),
+        )
+        tracker.imageGate?.complete(Unit)
+        val results = stale.awaitAll()
+        blockers.awaitAll()
+
+        // 旧请求取得许可后复查范围，直接放弃，没有进入抽取。
+        assertEquals(2, tracker.started.size)
+        assertTrue(results.all { preview -> preview.image == null && preview.durationMillis == null })
+        assertEquals(2, imageFileCount())
+
+        // 放弃不计失败退避：重新纳入范围后立即抽取。
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(oldVisible.location))
+        assertNotNull(bounded.prefetch(oldVisible).image)
+        assertEquals(3, tracker.started.size)
+        assertEquals(3, imageFileCount())
+    }
+
+    @Test
+    fun `放弃结果不共享，同键可见等待者重新抽取`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val file = network("同键.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+        // 离屏预取作 leader，同键可见请求挂在同一次抽取上等待。
+        val leader = async { bounded.prefetch(file) }
+        runCurrent()
+        val waiter = async { bounded.preview(file) }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        val leaderPreview = leader.await()
+        val waiterPreview = waiter.await()
+        blockers.awaitAll()
+
+        // leader 放弃；等待者重新竞争并真正抽取一次，没有多余落盘。
+        assertNull(leaderPreview.image)
+        assertNotNull(waiterPreview.image)
+        assertEquals(1, tracker.started.count { it == file.location })
+        assertEquals(3, imageFileCount())
+    }
+
+    @Test
+    fun `时长补读放弃不共享，同键可见等待者重新补读`() = runTest {
+        val tracker = GatedExtractor(durationFailure = IllegalStateException("无时长"))
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val file = local("同键时长.mkv")
+        tracker.imageGate = null
+        assertNotNull(bounded.preview(file).image)
+        assertEquals(1, tracker.durationRequests.count { it == file.location })
+
+        tracker.durationFailure = null
+        tracker.durationMillis = 500L
+        tracker.imageGate = CompletableDeferred()
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(local("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(3, tracker.started.size)
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+        val leader = async { bounded.prefetch(file) }
+        runCurrent()
+        val waiter = async { bounded.preview(file) }
+        runCurrent()
+        assertEquals(1, tracker.durationRequests.count { it == file.location })
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        val leaderPreview = leader.await()
+        val waiterPreview = waiter.await()
+        blockers.awaitAll()
+
+        assertNotNull(leaderPreview.image)
+        assertNull(leaderPreview.durationMillis)
+        assertNotNull(waiterPreview.image)
+        assertEquals(500L, waiterPreview.durationMillis)
+        // 预热 1 次 + 等待者 1 次；leader 放弃时没有补读。
+        assertEquals(2, tracker.durationRequests.count { it == file.location })
+        assertEquals(3, imageFileCount())
+    }
+
+    @Test
+    fun `放弃不清除已过期的抽取退避记录`() = runTest {
+        var now = 1_000L
+        val tracker = RetryAfterFailureExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            monotonicClock = { now },
+        )
+        val file = network("退避.mkv")
+
+        assertNull(bounded.preview(file).image)
+        assertEquals(1, tracker.requests)
+
+        // 退避已过期：预取在范围内复查时被放弃，但既有记录不能被清掉。
+        now += 30_000
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, tracker.requests)
+
+        // 下一次真实失败按 attempts=2 退避 60 秒，而不是重新从 30 秒开始。
+        now += 1
+        assertNull(bounded.preview(file).image)
+        assertEquals(2, tracker.requests)
+        now += 59_999
+        assertNull(bounded.preview(file).image)
+        assertEquals(2, tracker.requests)
+        now += 1
+        assertNull(bounded.preview(file).image)
+        assertEquals(3, tracker.requests)
+    }
+
+    @Test
+    fun `可见项先于预取项取得许可`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val visible = network("可见.mkv")
+        val prefetches = listOf(network("预取1.mkv"), network("预取2.mkv"))
+        bounded.updatePreviewWindow(
+            visibleLocations = setOf(visible.location),
+            prefetchLocations = prefetches.mapTo(mutableSetOf(), MediaFile::location),
+        )
+        val prefetched = prefetches.map { file -> async { bounded.prefetch(file) } }
+        runCurrent()
+        val shown = async { bounded.preview(visible) }
+        runCurrent()
+
+        tracker.imageGate?.complete(Unit)
+        shown.await()
+        prefetched.awaitAll()
+        blockers.awaitAll()
+
+        val visibleIndex = tracker.started.indexOf(visible.location)
+        assertTrue(visibleIndex >= 0)
+        assertTrue(visibleIndex < tracker.started.indexOf(prefetches[0].location))
+        assertTrue(visibleIndex < tracker.started.indexOf(prefetches[1].location))
+    }
+
+    @Test
+    fun `可见请求不因范围变化被放弃`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val visible = network("可见.mkv")
+        bounded.updatePreviewWindow(visibleLocations = setOf(visible.location), prefetchLocations = emptySet())
+        val shown = async { bounded.preview(visible) }
+        runCurrent()
+        // 可见卡片不会被重试：范围变化后仍须照常抽取。
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+
+        assertNotNull(shown.await().image)
+        blockers.awaitAll()
+        assertTrue(tracker.started.contains(visible.location))
+    }
+
+    @Test
+    fun `本地预取离开范围后取得许可不抽取`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(local("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val staleFile = local("旧.mkv")
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(staleFile.location),
+        )
+        val stale = async { bounded.prefetch(staleFile) }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        val result = stale.await()
+        blockers.awaitAll()
+
+        assertEquals(2, tracker.started.size)
+        assertNull(result.image)
+        assertEquals(2, imageFileCount())
+    }
+
+    @Test
+    fun `本地预取离开范围后取得许可不补读时长`() = runTest {
+        val tracker = GatedExtractor(durationFailure = IllegalStateException("无时长"))
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val cached = local("旧.mkv")
+        // 先落一张图为缓存，时长读取失败，记录为“时长未知”。
+        tracker.imageGate = null
+        assertNotNull(bounded.preview(cached).image)
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        tracker.imageGate = CompletableDeferred()
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(local("$name.mkv")) }
+        }
+        runCurrent()
+        // 1 次预热抽取 + 2 个占满本地许可的请求。
+        assertEquals(3, tracker.started.size)
+
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(cached.location),
+        )
+        val stale = async { bounded.prefetch(cached) }
+        runCurrent()
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(stale.await().image)
+        blockers.awaitAll()
+
+        // 放弃后没有补读时长，也没有记退避。
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        bounded.updatePreviewWindow(visibleLocations = setOf(cached.location), prefetchLocations = emptySet())
+        assertNotNull(bounded.preview(cached).image)
+        assertEquals(2, tracker.durationRequests.count { it == cached.location })
+    }
+
+    @Test
+    fun `取消排队中的预取后可见请求先于新预取取得许可`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val queuedFile = network("预取.mkv")
+        val laterFile = network("后预取.mkv")
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(queuedFile.location, laterFile.location),
+        )
+        val queued = async { bounded.prefetch(queuedFile) }
+        runCurrent()
+        queued.cancel()
+        queued.join()
+
+        // 新预取先排队，可见项后到；两者都在等待许可，尚未抽取。
+        val later = async { bounded.prefetch(laterFile) }
+        runCurrent()
+        val visible = async { bounded.preview(network("可见.mkv")) }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        later.await()
+        blockers.awaitAll()
+
+        val visibleIndex = tracker.started.indexOf("smb://nas/media/可见.mkv")
+        assertTrue(visibleIndex > 1)
+        assertTrue(visibleIndex < tracker.started.indexOf(laterFile.location))
+        assertTrue(tracker.maxConcurrent <= 2)
+        assertFalse(tracker.started.contains(queuedFile.location))
+    }
+
+    @Test
+    fun `仍在范围内的预取照常抽取`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        val file = network("预取.mkv")
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        val preview = source.prefetch(file)
+
+        assertNotNull(preview.image)
+        assertEquals(listOf(file.location), extractor.imageRequests)
+    }
+
+    @Test
     fun `子目录没有预览`() = runTest {
         val preview = source.preview(testDirectory("剧集", "root/剧集"))
 
@@ -987,6 +1334,37 @@ class CachedMediaPreviewSourceTest {
 
     private fun cacheKey(file: MediaFile, policy: ThumbnailPolicy = ThumbnailPolicy()) =
         thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
+}
+
+/** 抽取开始后等待闸门，用来稳定构造并发名额被占满、后续请求排队的场景。 */
+private class GatedExtractor(
+    var imageGate: CompletableDeferred<Unit>? = CompletableDeferred(),
+    var durationFailure: Exception? = null,
+    var durationMillis: Long? = null,
+) : MediaPreviewExtractor {
+
+    val started = mutableListOf<String>()
+    val durationRequests = mutableListOf<String>()
+    var concurrent = 0
+    var maxConcurrent = 0
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+        started += file.location
+        concurrent++
+        maxConcurrent = maxOf(maxConcurrent, concurrent)
+        try {
+            imageGate?.await()
+        } finally {
+            concurrent--
+        }
+        return byteArrayOf(1)
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? {
+        durationRequests += file.location
+        durationFailure?.let { throw it }
+        return durationMillis
+    }
 }
 
 /** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的并发名额释放。 */
