@@ -523,4 +523,30 @@ class MpvFileEventsTest {
         assertFalse(gate.onPosition(5_000))
         assertTrue(gate.onPosition(5_040))
     }
+
+    @Test
+    fun `mpv error logs keep error lines and reset per load`() {
+        val collector = MpvErrorCollector()
+
+        collector.onLog("ffmpeg", 40, "普通信息")
+        collector.onLog("cplayer", 20, "打开文件失败")
+        collector.onLog("ffmpeg", 20, "  ")
+        collector.onLog("ffmpeg", 30, "警告不算错误")
+        collector.onLog("ffmpeg", 20, "解码失败")
+
+        assertEquals("cplayer: 打开文件失败 | ffmpeg: 解码失败", collector.lastErrorText())
+
+        collector.reset()
+        assertEquals(null, collector.lastErrorText())
+    }
+
+    @Test
+    fun `mpv error logs keep only the latest capacity`() {
+        val collector = MpvErrorCollector(capacity = 2)
+        collector.onLog("a", 20, "1")
+        collector.onLog("a", 20, "2")
+        collector.onLog("a", 20, "3")
+
+        assertEquals("a: 2 | a: 3", collector.lastErrorText())
+    }
 }

@@ -15,9 +15,12 @@ import java.util.Locale
 class MpvPlaybackEngine(
     private val context: Context,
     private val cacheDir: String,
-) : PlaybackEngine, MPVLib.EventObserver {
+) : PlaybackEngine, MPVLib.EventObserver, MPVLib.LogObserver {
 
     private var listener: PlaybackEngine.Listener? = null
+
+    /** 播放核心的错误日志；每次加载开始时清空，失败时随回调带给控制层。 */
+    private val errorLog = MpvErrorCollector()
 
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
     @Volatile
@@ -63,6 +66,7 @@ class MpvPlaybackEngine(
         MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
         MPVLib.addObserver(this)
+        MPVLib.addLogObserver(this)
         MPVLib.observeProperty(PAUSE_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         MPVLib.observeProperty(TIME_POS_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
@@ -77,6 +81,7 @@ class MpvPlaybackEngine(
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
         val spec = loadCoordinator.start(url)
+        errorLog.reset()
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
@@ -223,6 +228,7 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
+        MPVLib.removeLogObserver(this)
         loadCoordinator.reset()
         MPVLib.destroy()
     }
@@ -274,11 +280,7 @@ class MpvPlaybackEngine(
     private fun onEndFile() {
         when (loadCoordinator.onEndFile()) {
             MpvFileEvents.End.Replaced, MpvFileEvents.End.Ended -> Unit
-            MpvFileEvents.End.Failed -> {
-                val errorText = MPVLib.getPropertyString(END_FILE_ERROR_PROPERTY)
-                    ?.takeIf { it.isNotBlank() }
-                listener?.onPlaybackFailed(errorText)
-            }
+            MpvFileEvents.End.Failed -> listener?.onPlaybackFailed(errorLog.lastErrorText())
         }
     }
 
@@ -314,6 +316,11 @@ class MpvPlaybackEngine(
     }
 
     override fun eventProperty(property: String) = Unit
+
+    /** mpv 事件线程转发的日志；只留下错误级别，供 END_FILE 失败时带上文本。 */
+    override fun logMessage(prefix: String, level: Int, text: String) {
+        errorLog.onLog(prefix, level, text)
+    }
 
     override fun eventProperty(property: String, value: Long) {
         when (property) {
@@ -387,8 +394,6 @@ class MpvPlaybackEngine(
         const val HEIGHT_PROPERTY = "height"
         const val EOF_REACHED_PROPERTY = "eof-reached"
         const val PATH_PROPERTY = "path"
-        /** END_FILE 事件附带的错误文本；成功或替换时为空。 */
-        const val END_FILE_ERROR_PROPERTY = "end-file/error"
         const val SID_PROPERTY = "sid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"
@@ -408,6 +413,33 @@ class MpvPlaybackEngine(
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
     }
+}
+
+/**
+ * 收集 mpv 日志中的错误文本。加载开始时清空，END_FILE 失败时取最近几条带给控制层。
+ * mpv 事件线程写、控制层读，访问加锁。
+ */
+internal class MpvErrorCollector(private val capacity: Int = 3) {
+
+    private val errors = ArrayDeque<String>()
+
+    @Synchronized
+    fun reset() {
+        errors.clear()
+    }
+
+    @Synchronized
+    fun onLog(prefix: String, level: Int, text: String) {
+        // 只留 fatal / error；warning 及以下不是失败原因。
+        if (level > MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR) return
+        val message = text.trim()
+        if (message.isEmpty()) return
+        if (errors.size >= capacity) errors.removeFirst()
+        errors.addLast(if (prefix.isBlank()) message else "$prefix: $message")
+    }
+
+    @Synchronized
+    fun lastErrorText(): String? = errors.joinToString(" | ").takeIf { it.isNotBlank() }
 }
 
 /**

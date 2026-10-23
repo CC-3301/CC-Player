@@ -906,6 +906,7 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `a switch settles ready two seconds after file load without a frame signal`() = runTest {
         val controller = playingController()
+        val failures = collectFailures(controller)
 
         controller.next()
         engine.reportFileLoaded()
@@ -922,6 +923,96 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(1, engine.resumeCalls)
+
+        // 兜底先于看门狗，之后不再触发加载失败。
+        advanceTimeBy(
+            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS,
+        )
+        runCurrent()
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `cancelling a switch cancels its readiness fallback`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        controller.cancelSwitch()
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+
+        // 旧的兜底不能结束恢复或重新起播。
+        assertTrue(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `retargeting a switch resets its readiness fallback`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        controller.next()
+
+        // 新目标还没有文件加载信号，旧目标的兜底不能把它收尾。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `surface detach while waiting for the frame settles on file load`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(1_000)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(false)
+
+        // 退后台后没有可渲染画面，以文件加载完成作为就绪。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertFalse(controller.switching.value)
+    }
+
+    @Test
+    fun `the readiness fallback does not settle before the resume lookup finishes`() = runTest {
+        val controller = playingController()
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        progress.holdFinds()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        // 续播位置还没查到：不能收尾。
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        progress.releaseFinds()
+        runCurrent()
+        // 已发出续播 seek：等 seek 之后的画面信号，兜底不能抢先收尾。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test

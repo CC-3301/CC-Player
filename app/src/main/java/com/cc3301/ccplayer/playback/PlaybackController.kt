@@ -247,8 +247,6 @@ class PlaybackController(
     private enum class ReadyState {
         /** 没有等待中的新帧。 */
         Idle,
-        /** 加载已开始，等加载完成或画面信号。 */
-        AwaitingSignal,
         /** 已收到就绪信号并起播，等新帧上屏；2 秒无位置前进按就绪收尾。 */
         AwaitingFrame,
         /** Surface 重挂后等新帧；超时仍没有才允许一次非 seek 刷新。 */
@@ -263,8 +261,11 @@ class PlaybackController(
     /** Surface 重挂后的新帧等待；超时只允许一次非 seek 刷新。 */
     private var surfaceFrameWaitJob: Job? = null
 
-    /** 本次 Surface 重挂是否已成功发起刷新。 */
+    /** 本次 Surface 重挂是否已成功发起刷新；成功后不再刷新。 */
     private var surfaceRefreshAttempted = false
+
+    /** 本次 Surface 重挂已尝试的刷新次数；未真正执行时短延迟重试。 */
+    private var surfaceRefreshAttempts = 0
 
     /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
     private var loadStartPositionMillis = 0L
@@ -382,6 +383,7 @@ class PlaybackController(
             if (wasAvailable) diagnostics.log("Surface 分离")
             cancelSurfaceFrameWait()
             surfaceRefreshAttempted = false
+            surfaceRefreshAttempts = 0
             if (readyState == ReadyState.AwaitingSurfaceFrame) readyState = ReadyState.Idle
         }
         finishLoadWithoutSurface()
@@ -390,18 +392,19 @@ class PlaybackController(
 
     /**
      * Surface 重挂后等新帧。暂停态不会再有位置前进，直接由一次非 seek 刷新证明；
-     * 播放态先等出帧通知，超时仍没有新帧才刷新一次。
+     * 播放态先等出帧通知，超时仍没有新帧才刷新一次。刷新未真正执行时短延迟重试。
      */
     private fun beginSurfaceFrameWait() {
         cancelSurfaceFrameWait()
         surfaceRefreshAttempted = false
+        surfaceRefreshAttempts = 0
         if (!active) return
-        diagnostics.log("Surface 重挂: 等待新帧")
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
         if (loadPhase != LoadPhase.None || readyState == ReadyState.AwaitingFrame) return
         readyState = ReadyState.AwaitingSurfaceFrame
+        diagnostics.log("Surface 重挂: 等待新帧")
         if (paused) {
-            requestSurfaceRefresh()
+            if (!requestSurfaceRefresh()) scheduleSurfaceRefreshRetry()
             return
         }
         surfaceFrameWaitJob = scope.launch {
@@ -409,7 +412,10 @@ class PlaybackController(
                 delay(FRAME_FALLBACK_MILLIS)
                 if (!active || !_renderSurfaceAvailable.value) return@launch
                 if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-                requestSurfaceRefresh()
+                if (!requestSurfaceRefresh()) {
+                    surfaceFrameWaitJob = null
+                    scheduleSurfaceRefreshRetry()
+                }
             } finally {
                 val runningJob = coroutineContext[Job]
                 if (surfaceFrameWaitJob === runningJob) surfaceFrameWaitJob = null
@@ -417,19 +423,47 @@ class PlaybackController(
         }
     }
 
-    /** 只在新帧没出现时执行一次非 seek 刷新；成功即视为新帧已上屏。 */
-    private fun requestSurfaceRefresh() {
-        if (!active || !_renderSurfaceAvailable.value) return
-        if (surfaceRefreshAttempted) return
+    /**
+     * 执行一次非 seek 刷新；成功即视为新帧已上屏。
+     * 返回 false 表示刷新未真正执行，可短延迟重试。
+     */
+    private fun requestSurfaceRefresh(): Boolean {
+        if (!active || !_renderSurfaceAvailable.value) return true
+        if (readyState != ReadyState.AwaitingSurfaceFrame) return true
+        if (surfaceRefreshAttempted) return true
+        if (surfaceRefreshAttempts >= SURFACE_REFRESH_MAX_ATTEMPTS) return true
+        surfaceRefreshAttempts++
         // 未加载、无视频轨或输出已停时不消耗这次刷新。
         if (!engine.refreshSurface()) {
             diagnostics.log("Surface 恢复: 刷新未执行")
-            finishSurfaceFrameWait()
-            return
+            return false
         }
         surfaceRefreshAttempted = true
         diagnostics.log("Surface 恢复: 已触发非 seek 刷新")
         confirmFrame(engine.surfaceGeneration)
+        return true
+    }
+
+    /** 刷新未真正执行时短延迟重试；次数用尽或等待已结束时收尾，保留缓存帧。 */
+    private fun scheduleSurfaceRefreshRetry() {
+        if (surfaceRefreshAttempts >= SURFACE_REFRESH_MAX_ATTEMPTS) {
+            finishSurfaceFrameWait()
+            return
+        }
+        surfaceFrameWaitJob = scope.launch {
+            try {
+                while (active && _renderSurfaceAvailable.value &&
+                    readyState == ReadyState.AwaitingSurfaceFrame
+                ) {
+                    delay(SURFACE_REFRESH_RETRY_MILLIS)
+                    if (requestSurfaceRefresh()) return@launch
+                }
+                if (readyState == ReadyState.AwaitingSurfaceFrame) finishSurfaceFrameWait()
+            } finally {
+                val runningJob = coroutineContext[Job]
+                if (surfaceFrameWaitJob === runningJob) surfaceFrameWaitJob = null
+            }
+        }
     }
 
     private fun cancelSurfaceFrameWait() {
@@ -787,10 +821,7 @@ class PlaybackController(
                 applyStartSubtitles(loadTargetIndex)
                 finishLoadWithoutSurface()
                 // 已收到加载完成：即使画面信号迟迟不来，也在 2 秒后按就绪收尾。
-                if (loadPhase == LoadPhase.Switching && _renderSurfaceAvailable.value && !paused) {
-                    readyState = ReadyState.AwaitingFrame
-                    beginFrameWait()
-                }
+                armSwitchFrameFallback()
             }
             LoadPhase.Restoring -> {
                 applyStartSubtitles(_currentIndex.value)
@@ -871,21 +902,37 @@ class PlaybackController(
 
     /**
      * 切集起播后等位置前进。2 秒内等不到时按就绪收尾，不落到 60 秒看门狗；
-     * 冻结画面不受这次收尾影响，仍等真正的新帧。
+     * 续播查询或 seek 未完成时顺延，冻结画面不受这次收尾影响。
      */
     private fun beginFrameWait() {
         frameWaitJob?.cancel()
         frameWaitJob = scope.launch {
             try {
-                delay(FRAME_FALLBACK_MILLIS)
-                if (!active || readyState != ReadyState.AwaitingFrame) return@launch
-                diagnostics.log { "就绪兜底: ${loadLabel()} 2 秒内没有位置前进" }
-                finishReady(loadPhase)
+                while (true) {
+                    delay(FRAME_FALLBACK_MILLIS)
+                    if (!active || readyState != ReadyState.AwaitingFrame) return@launch
+                    // 续播查询或 seek 未完成时不能收尾：顺延一轮，避免进度回跳。
+                    if (!resumeLookupDone || seekPendingForReady) continue
+                    diagnostics.log { "就绪兜底: ${loadLabel()} 2 秒内没有位置前进" }
+                    finishReady(loadPhase)
+                    return@launch
+                }
             } finally {
                 val runningJob = coroutineContext[Job]
                 if (frameWaitJob === runningJob) frameWaitJob = null
             }
         }
+    }
+
+    /**
+     * 切集目标已加载时启动 2 秒兜底。续播查询或 seek 未完成时由兜底循环顺延，
+     * 不在 seek 前收尾；暂停态也启动，到点按暂停收尾。
+     */
+    private fun armSwitchFrameFallback() {
+        if (loadPhase != LoadPhase.Switching) return
+        if (!mediaLoaded || !_renderSurfaceAvailable.value) return
+        readyState = ReadyState.AwaitingFrame
+        beginFrameWait()
     }
 
     /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
@@ -946,7 +993,7 @@ class PlaybackController(
                 finishSurfaceFrameWait()
                 diagnostics.log("Surface 恢复: 新帧已上屏")
             }
-            ReadyState.Idle, ReadyState.AwaitingSignal -> Unit
+            ReadyState.Idle -> Unit
         }
     }
 
@@ -1332,6 +1379,7 @@ class PlaybackController(
         frameWaitJob = null
         cancelSurfaceFrameWait()
         surfaceRefreshAttempted = false
+        surfaceRefreshAttempts = 0
         switchPlaybackStarted = false
         _switching.value = false
         _restoring.value = false
@@ -1364,14 +1412,15 @@ class PlaybackController(
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
     }
 
-    /** 进入等待加载信号的阶段，并清掉上一轮的新帧等待。 */
+    /** 进入一轮加载，并清掉上一轮的新帧等待。 */
     private fun beginReadyTracking() {
-        readyState = ReadyState.AwaitingSignal
+        readyState = ReadyState.Idle
         targetHasVideo = true
         frameWaitJob?.cancel()
         frameWaitJob = null
         cancelSurfaceFrameWait()
         surfaceRefreshAttempted = false
+        surfaceRefreshAttempts = 0
     }
 
     /**
@@ -1393,6 +1442,8 @@ class PlaybackController(
             // 没有续播 seek 时，查询完成前收到的首帧仍然有效；有 seek 时等 seek 后的新信号。
             if (!seekPendingForReady && deferred != null) handleReadySignal(loadPhase, deferred)
             finishLoadWithoutSurface()
+            // 续播查询完成后按条件重启兜底；有 seek 时由兜底循环顺延。
+            armSwitchFrameFallback()
         }
     }
 
@@ -1525,6 +1576,12 @@ class PlaybackController(
 
         /** 起播后等位置前进的兜底时长；超时按就绪收尾。也用于 Surface 重挂后决定是否刷新。 */
         const val FRAME_FALLBACK_MILLIS = 2_000L
+
+        /** Surface 刷新未真正执行时的重试间隔。 */
+        const val SURFACE_REFRESH_RETRY_MILLIS = 500L
+
+        /** Surface 刷新未真正执行时的最大尝试次数；成功后不再刷新。 */
+        const val SURFACE_REFRESH_MAX_ATTEMPTS = 3
 
         /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
         const val LOAD_WATCHDOG_MILLIS = 60_000L

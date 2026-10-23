@@ -156,17 +156,26 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停态回前台刷新未执行时保留缓存帧`() = runTest {
+    fun `暂停态回前台刷新未执行时保留缓存帧并重试`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
         engine.refreshSurfaceResult = false
 
         reattach(controller)
         runCurrent()
-
         assertEquals(1, engine.refreshSurfaceCalls)
         assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // 刷新未真正执行不消耗次数：短延迟重试，用尽后保留缓存帧。
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(2, engine.refreshSurfaceCalls)
+
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS * 5)
+        runCurrent()
+        assertEquals(PlaybackController.SURFACE_REFRESH_MAX_ATTEMPTS, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
     }
 
     @Test

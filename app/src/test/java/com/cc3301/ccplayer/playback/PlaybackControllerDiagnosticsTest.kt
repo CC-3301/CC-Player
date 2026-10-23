@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -219,6 +220,48 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("目标: root/ep1.mkv"))
         assertTrue(text.contains("阶段: Initial"))
         assertTrue(text.contains("来源: 看门狗超时"))
+    }
+
+    @Test
+    fun `错误文本为空时记录无错误文本`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        engine.reportPlaybackFailed("   ")
+
+        assertTrue(sink.lines.any { it.contains("来源: 播放核心报错（无错误文本）") })
+    }
+
+    @Test
+    fun `播放中失败记录阶段与错误文本`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        engine.reportPlaybackFailed("渲染失败")
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("播放失败: ep1.mkv"))
+        assertTrue(text.contains("阶段: None"))
+        assertTrue(text.contains("来源: 播放核心报错（渲染失败）"))
+    }
+
+    @Test
+    fun `重复失败只记录一次`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        engine.reportPlaybackFailed("第一次")
+        engine.reportPlaybackFailed("第二次")
+
+        assertEquals(1, sink.lines.count { it.contains("播放失败:") })
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =

@@ -151,7 +151,10 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun refreshSurface(): Boolean {
         actions += "refresh"
         refreshSurfaceCalls++
-        return refreshSurfaceResult
+        if (!refreshSurfaceResult) return false
+        // 与真实引擎一致：成功刷新重挂 Surface，代数递增。
+        surfaceGeneration++
+        return true
     }
 
     override fun setSurfaceSize(width: Int, height: Int) = Unit
