@@ -129,31 +129,53 @@ class PlayerPanelStateTest {
     }
 
     @Test
+    fun `面板可见性真值表`() {
+        assertTrue(panelVisible(anyOpen = true, controlsVisible = true, locked = false))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = false, locked = false))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = true, locked = true))
+        assertFalse(panelVisible(anyOpen = true, controlsVisible = false, locked = true))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = true, locked = false))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = false, locked = false))
+        assertFalse(panelVisible(anyOpen = false, controlsVisible = true, locked = true))
+    }
+
+    @Test
     fun `控制层隐藏时关闭已打开的面板并恢复手势`() {
         panels.toggle(PlayerPanel.More)
-        assertFalse(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+        val visibleBeforeHide = panelVisible(panels.anyOpen, controlsVisible = true, locked = false)
+        assertTrue(visibleBeforeHide)
+        assertFalse(gesturesAllowed(locked = false, panelOpen = visibleBeforeHide))
 
-        panels.closeWhenControlsHidden(controlsVisible = false, locked = false)
+        // 面板尚未清理时，隐藏后的可见性判定已放行手势。
+        val hiddenBeforeCleanup = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+        assertFalse(hiddenBeforeCleanup)
+        assertTrue(gesturesAllowed(locked = false, panelOpen = hiddenBeforeCleanup))
+
+        panels.closeWhenControlsUnavailable(controlsVisible = false, locked = false)
 
         assertFalse(panels.anyOpen)
-        assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+        val hiddenAfterCleanup = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+        assertFalse(hiddenAfterCleanup)
+        assertTrue(gesturesAllowed(locked = false, panelOpen = hiddenAfterCleanup))
     }
 
     @Test
     fun `控制层可见时保持面板打开`() {
         panels.toggle(PlayerPanel.Subtitles)
 
-        panels.closeWhenControlsHidden(controlsVisible = true, locked = false)
+        panels.closeWhenControlsUnavailable(controlsVisible = true, locked = false)
 
-        assertTrue(panels.subtitlesOpen)
         assertTrue(panels.anyOpen)
+        assertTrue(panels.subtitlesOpen)
+        assertTrue(panelVisible(panels.anyOpen, controlsVisible = true, locked = false))
     }
 
     @Test
     fun `锁定时关闭已打开的面板`() {
         panels.toggle(PlayerPanel.Playlist)
+        assertFalse(panelVisible(panels.anyOpen, controlsVisible = true, locked = true))
 
-        panels.closeWhenControlsHidden(controlsVisible = true, locked = true)
+        panels.closeWhenControlsUnavailable(controlsVisible = true, locked = true)
 
         assertFalse(panels.anyOpen)
     }
@@ -163,13 +185,18 @@ class PlayerPanelStateTest {
         PlayerPanel.entries.forEach { panel ->
             repeat(3) {
                 panels.toggle(panel)
-                panels.closeWhenControlsHidden(controlsVisible = false, locked = false)
-                assertFalse(panels.anyOpen)
-                assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+                val visibleWhileShown = panelVisible(panels.anyOpen, controlsVisible = true, locked = false)
+                assertTrue(visibleWhileShown)
+                assertFalse(gesturesAllowed(locked = false, panelOpen = visibleWhileShown))
 
-                panels.closeWhenControlsHidden(controlsVisible = true, locked = false)
+                panels.closeWhenControlsUnavailable(controlsVisible = true, locked = false)
+                assertTrue(panels.anyOpen)
+
+                panels.closeWhenControlsUnavailable(controlsVisible = false, locked = false)
                 assertFalse(panels.anyOpen)
-                assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+                val visibleAfterHide = panelVisible(panels.anyOpen, controlsVisible = false, locked = false)
+                assertFalse(visibleAfterHide)
+                assertTrue(gesturesAllowed(locked = false, panelOpen = visibleAfterHide))
             }
         }
     }

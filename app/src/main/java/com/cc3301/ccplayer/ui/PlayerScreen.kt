@@ -305,8 +305,12 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
-    // 只有控制层可见且未锁定时，打开的面板才真正可见；不可见的面板不能拦截手势。
-    val panelOpen = panels.anyOpen && controlsVisible && !locked
+    // 面板可见性统一由此判定；不可见的面板不能拦截手势。
+    val panelVisible = panelVisible(
+        anyOpen = panels.anyOpen,
+        controlsVisible = controlsVisible,
+        locked = locked,
+    )
     val playlistVisible = panels.playlistOpen
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
@@ -318,13 +322,14 @@ fun PlayerScreen(
         panels.closeWhenBlocked(switching, initialLoading)
     }
 
-    LaunchedEffect(panelOpen) {
-        controls.updatePanelOpen(panelOpen)
+    // 自动隐藏计时仍以“有面板打开”为准，与可见性判定分开。
+    LaunchedEffect(panels.anyOpen) {
+        controls.updatePanelOpen(panels.anyOpen)
     }
 
     // 控制层隐藏或锁定时清理面板状态，避免面板不渲染却继续拦截手势。
     LaunchedEffect(controlsVisible, locked) {
-        panels.closeWhenControlsHidden(controlsVisible, locked)
+        panels.closeWhenControlsUnavailable(controlsVisible, locked)
     }
     LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
         // 加载全程不自动隐藏，避免切集期间控制条消失。
@@ -356,8 +361,8 @@ fun PlayerScreen(
     }
 
     // 切集、加载、恢复、面板或锁定状态切换时清空手势反馈，避免盖在缓冲层上。
-    LaunchedEffect(switching, initialLoading, restoring, panelOpen, locked) {
-        if (doubleTapFeedbackBlocked(locked, panelOpen, switching, initialLoading, restoring)) {
+    LaunchedEffect(switching, initialLoading, restoring, panelVisible, locked) {
+        if (doubleTapFeedbackBlocked(locked, panelVisible, switching, initialLoading, restoring)) {
             doubleTapFeedback.reset()
             seekHint = null
             volumeHint = null
@@ -417,7 +422,7 @@ fun PlayerScreen(
         }
         PlayerGestureLayer(
             locked = locked,
-            panelOpen = panelOpen,
+            panelOpen = panelVisible,
             switching = switching,
             initialLoading = initialLoading,
             restoring = restoring,
@@ -549,7 +554,7 @@ fun PlayerScreen(
                 subtitleTracks = subtitleTracks,
                 externalSubtitles = externalSubtitles,
                 subtitleSelection = subtitleSelection,
-                subtitleMenuVisible = subtitleMenuVisible,
+                subtitleMenuVisible = subtitleMenuVisible && panelVisible,
                 switching = switching,
                 initialLoading = initialLoading,
                 restoring = restoring,
@@ -586,7 +591,7 @@ fun PlayerScreen(
                 onSelectSubtitle = onSelectSubtitle,
             )
         }
-        if (moreVisible && !locked) {
+        if (moreVisible && panelVisible) {
             // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
             val closeHint = stringResource(R.string.player_more_close)
             Box(modifier = Modifier.fillMaxSize()) {
@@ -640,7 +645,7 @@ fun PlayerScreen(
             )
         }
         // 左半屏是关闭抽屉的点击区；抽屉从右侧滑出，只盖住右半屏。
-        if (playlistVisible) {
+        if (playlistVisible && panelVisible) {
             val closeHint = stringResource(R.string.player_playlist_close)
             Box(
                 modifier = Modifier
@@ -654,7 +659,7 @@ fun PlayerScreen(
             )
         }
         AnimatedVisibility(
-            visible = playlistVisible,
+            visible = playlistVisible && panelVisible,
             enter = slideInHorizontally(animationSpec = tween(260)) { it },
             exit = slideOutHorizontally(animationSpec = tween(260)) { it },
             modifier = Modifier

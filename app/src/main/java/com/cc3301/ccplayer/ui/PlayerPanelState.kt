@@ -54,14 +54,22 @@ class PlayerPanelState {
     }
 
     /**
-     * 控制层隐藏或锁定时关闭当前面板。
+     * 控制层不可用（隐藏或锁定）时关闭当前面板。
      *
-     * 面板不渲染时必须一并清理状态，否则会继续拦截画面手势（ADR-0025）。
+     * 锁定期间面板不再可见，必须清理状态，否则会继续拦截手势。
      */
-    fun closeWhenControlsHidden(controlsVisible: Boolean, locked: Boolean) {
+    fun closeWhenControlsUnavailable(controlsVisible: Boolean, locked: Boolean) {
         if (!controlsVisible || locked) close()
     }
 }
+
+/**
+ * 面板是否真正可见：有面板打开，且控制层可见、未锁定。
+ *
+ * 渲染与手势共用此判定，避免不可见面板仍拦截手势。
+ */
+fun panelVisible(anyOpen: Boolean, controlsVisible: Boolean, locked: Boolean): Boolean =
+    anyOpen && controlsVisible && !locked
 
 /** 播放列表编号：从 1 开始，至少两位。 */
 fun playlistItemIndexLabel(index: Int): String = (index + 1).toString().padStart(2, '0')
