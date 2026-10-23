@@ -205,6 +205,9 @@ class PlaybackController(
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
+    /** 当前加载目标是否有视频轨；纯音频没有新视频帧，冻结画面按黑底处理。 */
+    private var targetHasVideo = true
+
     /** 本次加载所处的阶段；[LoadPhase.None] 表示没有进行中的加载。 */
     private var loadPhase = LoadPhase.None
 
@@ -237,11 +240,30 @@ class PlaybackController(
     /** 缓冲指示的延迟任务；加载结束时取消。 */
     private var bufferingJob: Job? = null
 
-    /** 已收到暂停态就绪信号，正在等新视频帧真正输出到 Surface。 */
-    private var awaitingPresentedFrame = false
+    /**
+     * 出帧就绪状态机。加载阶段仍由 [LoadPhase] 表示，这里只区分是否还在等新帧证据：
+     * 位置前进通知，或暂停态一次成功的非 seek 刷新。
+     */
+    private enum class ReadyState {
+        /** 没有等待中的新帧。 */
+        Idle,
+        /** 加载已开始，等加载完成或画面信号。 */
+        AwaitingSignal,
+        /** 已收到就绪信号并起播，等新帧上屏；2 秒无位置前进按就绪收尾。 */
+        AwaitingFrame,
+        /** Surface 重挂后等新帧；超时仍没有才允许一次非 seek 刷新。 */
+        AwaitingSurfaceFrame,
+    }
 
-    /** Surface 重挂后等待新帧的一次性刷新；收到帧或超时后结束。 */
-    private var surfaceRefreshJob: Job? = null
+    private var readyState = ReadyState.Idle
+
+    /** 加载就绪后的新帧等待；超时按就绪收尾，冻结画面继续等真正出帧。 */
+    private var frameWaitJob: Job? = null
+
+    /** Surface 重挂后的新帧等待；超时只允许一次非 seek 刷新。 */
+    private var surfaceFrameWaitJob: Job? = null
+
+    /** 本次 Surface 重挂是否已成功发起刷新。 */
     private var surfaceRefreshAttempted = false
 
     /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
@@ -355,51 +377,69 @@ class PlaybackController(
             backgroundCaptureToken++
             backgroundCaptureAttempted = false
             backgroundCaptureJob = null
-            if (!wasAvailable) beginSurfaceRefresh()
+            if (!wasAvailable) beginSurfaceFrameWait()
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
-            cancelSurfaceRefresh()
+            cancelSurfaceFrameWait()
             surfaceRefreshAttempted = false
+            if (readyState == ReadyState.AwaitingSurfaceFrame) readyState = ReadyState.Idle
         }
         finishLoadWithoutSurface()
         evaluateDeferredReady()
     }
 
     /**
-     * Surface 重挂后等新帧；超时仍没有帧就触发一次非 seek 刷新。
-     * 只有真正收到出帧通知才取消这次等待，视频输出重配本身不算。
+     * Surface 重挂后等新帧。暂停态不会再有位置前进，直接由一次非 seek 刷新证明；
+     * 播放态先等出帧通知，超时仍没有新帧才刷新一次。
      */
-    private fun beginSurfaceRefresh() {
-        cancelSurfaceRefresh()
+    private fun beginSurfaceFrameWait() {
+        cancelSurfaceFrameWait()
         surfaceRefreshAttempted = false
         if (!active) return
         diagnostics.log("Surface 重挂: 等待新帧")
-        val generation = engine.surfaceGeneration
-        surfaceRefreshJob = scope.launch {
+        // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
+        if (loadPhase != LoadPhase.None || readyState == ReadyState.AwaitingFrame) return
+        readyState = ReadyState.AwaitingSurfaceFrame
+        if (paused) {
+            requestSurfaceRefresh()
+            return
+        }
+        surfaceFrameWaitJob = scope.launch {
             try {
-                delay(SURFACE_REFRESH_DELAY_MILLIS)
-                if (!active) return@launch
-                if (!_renderSurfaceAvailable.value) return@launch
-                if (generation != engine.surfaceGeneration) return@launch
-                if (surfaceRefreshAttempted) return@launch
-                // 未加载、无视频轨或输出已停时不消耗这次刷新。
-                val refreshed = engine.refreshSurface()
-                if (refreshed) {
-                    surfaceRefreshAttempted = true
-                    diagnostics.log("Surface 恢复: 已触发非 seek 刷新")
-                } else {
-                    diagnostics.log("Surface 恢复: 刷新未执行")
-                }
+                delay(FRAME_FALLBACK_MILLIS)
+                if (!active || !_renderSurfaceAvailable.value) return@launch
+                if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
+                requestSurfaceRefresh()
             } finally {
                 val runningJob = coroutineContext[Job]
-                if (surfaceRefreshJob === runningJob) surfaceRefreshJob = null
+                if (surfaceFrameWaitJob === runningJob) surfaceFrameWaitJob = null
             }
         }
     }
 
-    private fun cancelSurfaceRefresh() {
-        surfaceRefreshJob?.cancel()
-        surfaceRefreshJob = null
+    /** 只在新帧没出现时执行一次非 seek 刷新；成功即视为新帧已上屏。 */
+    private fun requestSurfaceRefresh() {
+        if (!active || !_renderSurfaceAvailable.value) return
+        if (surfaceRefreshAttempted) return
+        // 未加载、无视频轨或输出已停时不消耗这次刷新。
+        if (!engine.refreshSurface()) {
+            diagnostics.log("Surface 恢复: 刷新未执行")
+            finishSurfaceFrameWait()
+            return
+        }
+        surfaceRefreshAttempted = true
+        diagnostics.log("Surface 恢复: 已触发非 seek 刷新")
+        confirmFrame(engine.surfaceGeneration)
+    }
+
+    private fun cancelSurfaceFrameWait() {
+        surfaceFrameWaitJob?.cancel()
+        surfaceFrameWaitJob = null
+    }
+
+    private fun finishSurfaceFrameWait() {
+        cancelSurfaceFrameWait()
+        if (readyState == ReadyState.AwaitingSurfaceFrame) readyState = ReadyState.Idle
     }
 
     /**
@@ -729,12 +769,13 @@ class PlaybackController(
         applySubtitleSelection(SubtitleSelection.Off)
     }
 
-    override fun onMediaLoaded(targetUrl: String?, loadToken: Int) {
+    override fun onMediaLoaded(targetUrl: String?, loadToken: Int, hasVideo: Boolean) {
         if (!active) return
         // 被放弃目标或恢复后迟到的 FILE_LOADED 不能作用于当前加载。
         if (loadToken != expectedLoadToken) return
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         mediaLoaded = true
+        targetHasVideo = hasVideo
         when (loadPhase) {
             LoadPhase.Initial -> {
                 applyResumePosition()
@@ -745,6 +786,11 @@ class PlaybackController(
                 applyResumePosition()
                 applyStartSubtitles(loadTargetIndex)
                 finishLoadWithoutSurface()
+                // 已收到加载完成：即使画面信号迟迟不来，也在 2 秒后按就绪收尾。
+                if (loadPhase == LoadPhase.Switching && _renderSurfaceAvailable.value && !paused) {
+                    readyState = ReadyState.AwaitingFrame
+                    beginFrameWait()
+                }
             }
             LoadPhase.Restoring -> {
                 applyStartSubtitles(_currentIndex.value)
@@ -794,7 +840,7 @@ class PlaybackController(
 
     /**
      * 就绪判定：无需确认的首帧可直接算数；暂停态信号不能证明画面已上屏。
-     * 切集目标此时开始播放，等位置真正前进后才撤冻结画面。
+     * 切集目标此时开始播放，等位置前进或 2 秒兜底收尾；冻结画面留到真正出帧。
      * 恢复与首次打开没有可等待的播放推进，按文件就绪收尾；恢复的冻结画面留到真正出帧。
      */
     private fun handleReadySignal(phase: LoadPhase, needsFrameConfirmation: Boolean) {
@@ -813,13 +859,33 @@ class PlaybackController(
                 finishReady(phase)
                 return
             }
-            // 手动切集完成后自动播放；用播放位置前进证明新画面已在输出。
-            awaitingPresentedFrame = true
+            // 手动切集完成后自动播放；先起播，等播放位置前进或 2 秒兜底再收尾。
+            readyState = ReadyState.AwaitingFrame
             switchPlaybackStarted = true
             engine.resume()
+            beginFrameWait()
             return
         }
         finishReady(phase)
+    }
+
+    /**
+     * 切集起播后等位置前进。2 秒内等不到时按就绪收尾，不落到 60 秒看门狗；
+     * 冻结画面不受这次收尾影响，仍等真正的新帧。
+     */
+    private fun beginFrameWait() {
+        frameWaitJob?.cancel()
+        frameWaitJob = scope.launch {
+            try {
+                delay(FRAME_FALLBACK_MILLIS)
+                if (!active || readyState != ReadyState.AwaitingFrame) return@launch
+                diagnostics.log { "就绪兜底: ${loadLabel()} 2 秒内没有位置前进" }
+                finishReady(loadPhase)
+            } finally {
+                val runningJob = coroutineContext[Job]
+                if (frameWaitJob === runningJob) frameWaitJob = null
+            }
+        }
     }
 
     /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
@@ -842,7 +908,9 @@ class PlaybackController(
     }
 
     private fun finishReady(phase: LoadPhase) {
-        awaitingPresentedFrame = false
+        readyState = ReadyState.Idle
+        frameWaitJob?.cancel()
+        frameWaitJob = null
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         when (phase) {
@@ -859,23 +927,27 @@ class PlaybackController(
     }
 
     /**
-     * 新画面已真正输出到 Surface（加载就绪后播放位置前进）。
-     * 旧代际的信号不能结束当前等待；冻结画面与后台缓存帧只在这里撤掉。
+     * 新画面已真正输出到 Surface（加载就绪后播放位置前进）或暂停态刷新成功。
+     * 只有这里能撤冻结画面与后台缓存帧；加载收尾本身不删冻结画面。
      */
     override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
         if (!active) return
         if (loadToken != expectedLoadToken) return
-        val wasWaitingForSurface = surfaceRefreshJob != null
-        cancelSurfaceRefresh()
-        if (wasWaitingForSurface) diagnostics.log("Surface 恢复: 新帧已上屏")
+        confirmFrame(surfaceGeneration)
+    }
+
+    /** 新帧证据：撤掉对应冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。 */
+    private fun confirmFrame(surfaceGeneration: Int) {
+        if (surfaceGeneration == engine.surfaceGeneration) replaceFreezeFrame(null)
         clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
-        if (awaitingPresentedFrame) {
-            awaitingPresentedFrame = false
-            finishReady(loadPhase)
-            return
+        when (readyState) {
+            ReadyState.AwaitingFrame -> finishReady(loadPhase)
+            ReadyState.AwaitingSurfaceFrame -> {
+                finishSurfaceFrameWait()
+                diagnostics.log("Surface 恢复: 新帧已上屏")
+            }
+            ReadyState.Idle, ReadyState.AwaitingSignal -> Unit
         }
-        // 恢复成功后仍保留的冻结画面，等下一次真正出帧再撤。
-        if (loadPhase == LoadPhase.None) replaceFreezeFrame(null)
     }
 
     /** Surface 可用且通知来自缓存帧之后的代数时才撤帧，迟到的通知不能清掉下一周期刚抓的帧。 */
@@ -901,8 +973,8 @@ class PlaybackController(
         }
     }
 
-    override fun onPlaybackFailed() {
-        handleLoadFailure()
+    override fun onPlaybackFailed(errorText: String?) {
+        handleLoadFailure(errorText = errorText)
     }
 
     override fun onPlaybackEnded(loadToken: Int) {
@@ -1012,8 +1084,9 @@ class PlaybackController(
         _switching.value = false
         switchOriginIndex = NO_MEDIA
         switchOriginEnded = false
-        // 保留暂停时不撤冻结画面：暂停态没有位置前进，等用户继续后真正出帧再撤。
-        if (!paused) replaceFreezeFrame(null)
+        // 冻结画面不在这里撤：只有确认新帧上屏（位置前进或暂停态刷新）后才撤；
+        // 目标没有视频轨时没有新视频帧可等，按黑底处理。
+        if (!targetHasVideo) replaceFreezeFrame(null)
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
         playedDurationMillis = duration
@@ -1052,7 +1125,7 @@ class PlaybackController(
                     switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
                 )
         // 清掉被取消目标的续播 seek 与出帧等待残留。
-        awaitingPresentedFrame = false
+        beginReadyTracking()
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
@@ -1120,20 +1193,23 @@ class PlaybackController(
     private fun readyDuration(): Long =
         if (loadDurationMillis > 0) loadDurationMillis else playedDurationMillis
 
-    /** 加载失败或超时：按阶段收尾，切集中则回退原视频。[fromWatchdog] 表示没有任何加载事件。 */
-    private fun handleLoadFailure(fromWatchdog: Boolean = false) {
+    /**
+     * 加载失败或超时：按阶段收尾，切集中则回退原视频。
+     * [fromWatchdog] 表示没有任何加载事件；[errorText] 是播放核心给出的错误文本。
+     */
+    private fun handleLoadFailure(fromWatchdog: Boolean = false, errorText: String? = null) {
         if (!active) return
         endLoadWatchdog()
         when (loadPhase) {
             LoadPhase.Switching -> {
-                diagnostics.log { "切集失败: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
+                logLoadFailure("切集失败", fromWatchdog, errorText)
                 switchFailureReported = true
                 if (fromWatchdog) engine.discardInFlightLoads()
                 restoreOrigin()
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Initial -> {
-                diagnostics.log { "加载失败: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
+                logLoadFailure("加载失败", fromWatchdog, errorText)
                 resetLoadState()
                 active = false
                 paused = true
@@ -1143,7 +1219,7 @@ class PlaybackController(
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Restoring -> {
-                diagnostics.log { "恢复失败: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
+                logLoadFailure("恢复失败", fromWatchdog, errorText)
                 val reportFailure = !switchFailureReported
                 resetLoadState()
                 active = false
@@ -1157,13 +1233,33 @@ class PlaybackController(
             LoadPhase.None -> {
                 // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
                 if (switchFailureReported) return
-                diagnostics.log { "播放失败: ${currentMedia()?.name ?: ""}" }
+                logLoadFailure("播放失败", fromWatchdog, errorText)
                 active = false
                 paused = true
                 updateState(PlaybackState.Ended)
                 _playbackFailures.tryEmit(Unit)
             }
         }
+    }
+
+    /** 失败日志包含目标、加载令牌、阶段与来源，便于区分看门狗与播放核心主动报错。 */
+    private fun logLoadFailure(label: String, fromWatchdog: Boolean, errorText: String?) {
+        val source = if (fromWatchdog) {
+            "看门狗超时（${LOAD_WATCHDOG_MILLIS / 1_000} 秒无加载事件）"
+        } else {
+            "播放核心报错（${errorText?.takeIf { it.isNotBlank() } ?: "无错误文本"}）"
+        }
+        diagnostics.log {
+            "$label: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | 加载令牌: $expectedLoadToken | " +
+                "阶段: ${loadPhase.name} | 来源: $source"
+        }
+    }
+
+    /** 当前加载目标的可读名称；没有名称时回退下标。 */
+    private fun loadLabel(): String {
+        val name = _playlist.value.getOrNull(loadTargetIndex)?.name
+        if (!name.isNullOrBlank()) return name
+        return if (loadTargetIndex >= 0) "索引 $loadTargetIndex" else "-"
     }
 
     /** 缓冲指示延迟出现；加载在延迟内结束就不会闪一下提示。 */
@@ -1193,9 +1289,10 @@ class PlaybackController(
         loadWatchdogJob = scope.launch {
             delay(LOAD_WATCHDOG_MILLIS)
             if (loadPhase != LoadPhase.None) {
-                val target = _playlist.value.getOrNull(loadTargetIndex)
-                val label = target?.name?.takeIf { it.isNotBlank() } ?: "索引 $loadTargetIndex"
-                diagnostics.log { "加载看门狗触发: $label" }
+                diagnostics.log {
+                    "加载看门狗触发: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | " +
+                        "加载令牌: $expectedLoadToken | 阶段: ${loadPhase.name}"
+                }
                 handleLoadFailure(fromWatchdog = true)
             }
         }
@@ -1230,9 +1327,12 @@ class PlaybackController(
         loadPhase = LoadPhase.None
         endBufferingIndicator()
         endLoadWatchdog()
-        awaitingPresentedFrame = false
+        readyState = ReadyState.Idle
+        frameWaitJob?.cancel()
+        frameWaitJob = null
+        cancelSurfaceFrameWait()
+        surfaceRefreshAttempted = false
         switchPlaybackStarted = false
-        cancelSurfaceRefresh()
         _switching.value = false
         _restoring.value = false
         restartFromStartAfterRestore = false
@@ -1255,13 +1355,23 @@ class PlaybackController(
     /** 开始一轮加载：续播位置未查明前不允许判定就绪，seek 序号从零比较。 */
     private fun beginLoadTracking() {
         loadGeneration++
-        awaitingPresentedFrame = false
+        beginReadyTracking()
         loadStartPositionMillis = 0
         loadDurationMillis = 0
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
+    }
+
+    /** 进入等待加载信号的阶段，并清掉上一轮的新帧等待。 */
+    private fun beginReadyTracking() {
+        readyState = ReadyState.AwaitingSignal
+        targetHasVideo = true
+        frameWaitJob?.cancel()
+        frameWaitJob = null
+        cancelSurfaceFrameWait()
+        surfaceRefreshAttempted = false
     }
 
     /**
@@ -1362,8 +1472,8 @@ class PlaybackController(
         private val target: PlaybackEngine.Listener,
         private val scope: CoroutineScope,
     ) : PlaybackEngine.Listener {
-        override fun onMediaLoaded(targetUrl: String?, loadToken: Int) {
-            scope.launch { target.onMediaLoaded(targetUrl, loadToken) }
+        override fun onMediaLoaded(targetUrl: String?, loadToken: Int, hasVideo: Boolean) {
+            scope.launch { target.onMediaLoaded(targetUrl, loadToken, hasVideo) }
         }
 
         override fun onFirstFrameReady(
@@ -1393,8 +1503,8 @@ class PlaybackController(
             scope.launch { target.onPlaybackEnded(loadToken) }
         }
 
-        override fun onPlaybackFailed() {
-            scope.launch { target.onPlaybackFailed() }
+        override fun onPlaybackFailed(errorText: String?) {
+            scope.launch { target.onPlaybackFailed(errorText) }
         }
 
         override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
@@ -1413,8 +1523,8 @@ class PlaybackController(
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L
 
-        /** Surface 重挂后等新帧的时长；仍没有帧就触发一次非 seek 刷新。 */
-        const val SURFACE_REFRESH_DELAY_MILLIS = 500L
+        /** 起播后等位置前进的兜底时长；超时按就绪收尾。也用于 Surface 重挂后决定是否刷新。 */
+        const val FRAME_FALLBACK_MILLIS = 2_000L
 
         /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
         const val LOAD_WATCHDOG_MILLIS = 60_000L

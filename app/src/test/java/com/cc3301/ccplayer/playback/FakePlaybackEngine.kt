@@ -158,10 +158,13 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun release() = Unit
 
+    /** 当前目标是否有视频轨；纯音频没有可等待的新视频帧。 */
+    var hasVideoTrack: Boolean = true
+
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
     fun reportMediaLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded(targetUrl, loadToken)
+        listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
@@ -174,7 +177,7 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 只上报文件打开，首帧还没就绪。 */
     fun reportFileLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity()
-        listener?.onMediaLoaded(targetUrl, loadToken)
+        listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
     }
 
     /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
@@ -238,9 +241,9 @@ class FakePlaybackEngine : PlaybackEngine {
         listener?.onPlaybackEnded(loadToken)
     }
 
-    fun reportPlaybackFailed() {
+    fun reportPlaybackFailed(errorText: String? = null) {
         listener?.onLoadActivity()
-        listener?.onPlaybackFailed()
+        listener?.onPlaybackFailed(errorText)
     }
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =

@@ -263,7 +263,7 @@ class MpvPlaybackEngine(
         // 先消化旧代际的结束事件并按 mpv 当前路径校验队首，迟到事件不能占掉新加载的代际。
         val spec = loadCoordinator.onFileLoaded(MPVLib.getPropertyString(PATH_PROPERTY)) ?: return
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded(spec.url, spec.token)
+        listener?.onMediaLoaded(spec.url, spec.token, hasVideoTrack)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
@@ -274,7 +274,11 @@ class MpvPlaybackEngine(
     private fun onEndFile() {
         when (loadCoordinator.onEndFile()) {
             MpvFileEvents.End.Replaced, MpvFileEvents.End.Ended -> Unit
-            MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
+            MpvFileEvents.End.Failed -> {
+                val errorText = MPVLib.getPropertyString(END_FILE_ERROR_PROPERTY)
+                    ?.takeIf { it.isNotBlank() }
+                listener?.onPlaybackFailed(errorText)
+            }
         }
     }
 
@@ -383,6 +387,8 @@ class MpvPlaybackEngine(
         const val HEIGHT_PROPERTY = "height"
         const val EOF_REACHED_PROPERTY = "eof-reached"
         const val PATH_PROPERTY = "path"
+        /** END_FILE 事件附带的错误文本；成功或替换时为空。 */
+        const val END_FILE_ERROR_PROPERTY = "end-file/error"
         const val SID_PROPERTY = "sid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"

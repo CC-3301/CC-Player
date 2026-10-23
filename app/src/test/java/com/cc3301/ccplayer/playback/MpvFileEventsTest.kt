@@ -512,4 +512,15 @@ class MpvFileEventsTest {
         assertFalse(gate.onPosition(250))
         assertTrue(gate.onPosition(260))
     }
+
+    @Test
+    fun `a jump larger than two seconds only rebuilds the baseline`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+        assertFalse(gate.onPosition(0))
+
+        // 超过 2000ms 的跳变不能算前进，只重建基线。
+        assertFalse(gate.onPosition(5_000))
+        assertTrue(gate.onPosition(5_040))
+    }
 }

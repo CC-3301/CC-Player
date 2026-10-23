@@ -711,7 +711,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grabbed frame stays frozen until the target is ready`() = runTest {
+    fun `a grabbed frame stays frozen until the target frame reaches the surface`() = runTest {
         val controller = playingController()
         val frame = testBitmap()
         engine.frameToGrab = PlaybackEngine.Frame(frame)
@@ -723,6 +723,28 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
+        // 就绪信号先到也不能撤冻结画面：等新帧真正上屏。
+        assertSame(frame, controller.freezeFrame.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `switching to an audio file does not leave the frozen video frame on screen`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+        assertSame(frame, controller.freezeFrame.value)
+
+        engine.hasVideoTrack = false
+        engine.reportMediaLoaded()
+
+        // 纯音频没有新视频帧可等，冻结画面按黑底处理。
+        assertFalse(controller.switching.value)
         assertNull(controller.freezeFrame.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -882,25 +904,54 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a switch keeps waiting for the surface frame until the watchdog`() = runTest {
+    fun `a switch settles ready two seconds after file load without a frame signal`() = runTest {
         val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+
+        // 加载完成后画面信号一直不来：2 秒后按就绪收尾并开始播放。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        assertTrue(controller.switching.value)
+        assertEquals(0, engine.resumeCalls)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
+    }
+
+    @Test
+    fun `a switch settles ready after two seconds without a presented frame`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
 
-        // 没有新帧上屏：冻结画面与加载状态一直保留到无事件看门狗。
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        // 没有位置前进：2 秒后按就绪收尾，不再等 60 秒看门狗。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertTrue(failures.isEmpty())
 
-        engine.reportFramePresented()
+        advanceTimeBy(1)
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(failures.isEmpty())
+        // 没有新帧证据：冻结画面继续保留。
+        assertSame(frame, controller.freezeFrame.value)
+
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test

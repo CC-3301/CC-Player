@@ -83,8 +83,11 @@ interface PlaybackEngine {
 
     /** 引擎向控制层上报的播放事件。 */
     interface Listener {
-        /** 媒体文件已打开，轨道信息可用；首帧可能还没画出来。[targetUrl] 与 [loadToken] 标识本次加载。 */
-        fun onMediaLoaded(targetUrl: String?, loadToken: Int)
+        /**
+         * 媒体文件已打开，轨道信息可用；首帧可能还没画出来。
+         * [targetUrl] 与 [loadToken] 标识本次加载，[hasVideo] 表示是否有视频轨（纯音频没有新视频帧）。
+         */
+        fun onMediaLoaded(targetUrl: String?, loadToken: Int, hasVideo: Boolean)
 
         /**
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
@@ -117,8 +120,8 @@ interface PlaybackEngine {
         /** 当前媒体自然播放结束；[loadToken] 标识产生它的加载。被替换或停止产生的结束事件不上报。 */
         fun onPlaybackEnded(loadToken: Int)
 
-        /** 媒体打开失败或播放中出错，按切集失败处理。 */
-        fun onPlaybackFailed()
+        /** 媒体打开失败或播放中出错，按切集失败处理；[errorText] 是播放核心给出的错误文本。 */
+        fun onPlaybackFailed(errorText: String?)
 
         /** 播放位置或时长更新，单位毫秒。 */
         fun onPositionChanged(positionMillis: Long, durationMillis: Long)
