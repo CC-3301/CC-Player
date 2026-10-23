@@ -33,6 +33,12 @@ class MpvOptionsTest {
         assertEquals("yes", options["keep-open"])
     }
 
+    @Test
+    fun `the native log bridge is configured for error level without terminal output`() {
+        assertEquals("no", options["terminal"])
+        assertEquals("all=error", options["msg-level"])
+    }
+
     private companion object {
         const val CACHE_DIR = "/data/user/0/com.cc3301.ccplayer/cache"
     }

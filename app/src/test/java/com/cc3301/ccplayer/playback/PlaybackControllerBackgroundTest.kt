@@ -140,16 +140,65 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停态回前台重挂后没有位置前进就保留缓存帧`() = runTest {
+    fun `暂停态回前台由一次非 seek 刷新证明新帧并撤掉缓存帧`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
 
         reattach(controller)
-        advanceTimeBy(5_000)
         runCurrent()
 
-        // 暂停态没有播放推进，重挂 Surface 本身不能证明新画面已输出。
+        // 暂停态没有位置前进：一次成功的非 seek 刷新就是新帧证据。
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `暂停态回前台刷新未执行时保留缓存帧并重试`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.refreshSurfaceResult = false
+
+        reattach(controller)
+        runCurrent()
+        assertEquals(1, engine.refreshSurfaceCalls)
         assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // 刷新未真正执行时计入重试次数：短延迟重试，用尽后保留缓存帧。
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(2, engine.refreshSurfaceCalls)
+
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS * 5)
+        runCurrent()
+        assertEquals(PlaybackController.SURFACE_REFRESH_MAX_ATTEMPTS, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+    }
+
+    @Test
+    fun `暂停态回前台重试成功后才撤缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.refreshSurfaceFailures = 2
+
+        reattach(controller)
+        runCurrent()
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(2, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+
+        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
+        runCurrent()
+        assertEquals(3, engine.refreshSurfaceCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
@@ -200,7 +249,7 @@ class PlaybackControllerBackgroundTest {
         engine.reportPositionChanged(31_000, 600_000)
         engine.reportFramePresented()
         assertNull(controller.backgroundRestoreFrame.value)
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 2)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
         runCurrent()
         assertEquals(0, engine.refreshSurfaceCalls)
     }
@@ -224,7 +273,9 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(true)
 
         assertTrue(engine.surfaceGeneration > generationBefore)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        // 暂停态回前台由一次非 seek 刷新证明新帧，缓存帧随之撤掉；状态保持暂停。
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
@@ -238,7 +289,7 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(false)
         controller.setRenderSurfaceAvailable(true)
 
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
         assertEquals(1, engine.refreshSurfaceCalls)
@@ -247,7 +298,7 @@ class PlaybackControllerBackgroundTest {
         assertEquals(12_000L, controller.progress.value.positionMillis)
 
         // 只允许一次：之后仍无新帧也不再刷新。
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 5)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 5)
         runCurrent()
         assertEquals(1, engine.refreshSurfaceCalls)
     }
@@ -259,7 +310,7 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
 
         engine.reportFramePresented()
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS * 2)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
         runCurrent()
 
         assertEquals(0, engine.refreshSurfaceCalls)
@@ -399,6 +450,7 @@ class PlaybackControllerBackgroundTest {
             progress,
             backgroundScope,
             frameProbeDispatcher = frameProbeDispatcher,
+            nowMillis = { testScheduler.currentTime },
         )
 
     private fun TestScope.playingController(): PlaybackController {

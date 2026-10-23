@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -30,6 +31,7 @@ class PlaybackControllerDiagnosticsTest {
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
+            nowMillis = { 0L },
         )
 
         controller.openPlaylist(listOf(media), media)
@@ -93,7 +95,7 @@ class PlaybackControllerDiagnosticsTest {
         controller.setRenderSurfaceAvailable(false)
         engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
@@ -112,7 +114,7 @@ class PlaybackControllerDiagnosticsTest {
         controller.setRenderSurfaceAvailable(false)
         engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.any { it.contains("Surface 恢复: 刷新未执行") })
@@ -126,7 +128,7 @@ class PlaybackControllerDiagnosticsTest {
 
         controller.setRenderSurfaceAvailable(false)
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
         assertFalse(sink.lines.any { it.contains("Surface 重挂: 等待新帧") })
@@ -156,10 +158,137 @@ class PlaybackControllerDiagnosticsTest {
         controller.setRenderSurfaceAvailable(false)
         engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.isEmpty())
+    }
+
+    @Test
+    fun `切集失败记录播放核心错误文本、目标、令牌与阶段`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        val token = engine.currentLoadToken
+        engine.reportPlaybackFailed("无法打开文件")
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("切集失败: ep2.mkv"))
+        assertTrue(text.contains("目标: root/ep2.mkv"))
+        assertTrue(text.contains("加载令牌: $token"))
+        assertTrue(text.contains("阶段: 切集"))
+        assertTrue(text.contains("来源: 播放核心报错（无法打开文件）"))
+    }
+
+    @Test
+    fun `加载失败记录播放核心错误文本`() {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher()).apply { enabled = true }
+        val controller = PlaybackController(
+            engine,
+            FakePlaybackProgressRepository(),
+            CoroutineScope(UnconfinedTestDispatcher()),
+            diagnostics = diagnostics,
+            nowMillis = { 0L },
+        )
+        open(controller)
+
+        engine.reportPlaybackFailed("解码失败")
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("加载失败: ep1.mkv"))
+        assertTrue(text.contains("阶段: 首次加载"))
+        assertTrue(text.contains("来源: 播放核心报错（解码失败）"))
+    }
+
+    @Test
+    fun `看门狗失败与播放核心报错可区分`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        open(controller)
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("加载看门狗触发: ep1.mkv"))
+        assertTrue(text.contains("目标: root/ep1.mkv"))
+        assertTrue(text.contains("阶段: 首次加载"))
+        assertTrue(text.contains("来源: 看门狗超时"))
+    }
+
+    @Test
+    fun `错误文本为空时记录无错误文本`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        engine.reportPlaybackFailed("   ")
+
+        assertTrue(sink.lines.any { it.contains("来源: 播放核心报错（无错误文本）") })
+    }
+
+    @Test
+    fun `播放中失败记录阶段与错误文本`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        engine.reportPlaybackFailed("渲染失败")
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("播放失败: ep1.mkv"))
+        assertTrue(text.contains("目标: root/ep1.mkv"))
+        assertTrue(text.contains("阶段: 播放"))
+        assertTrue(text.contains("来源: 播放核心报错（渲染失败）"))
+    }
+
+    @Test
+    fun `重复失败只记录一次`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+
+        engine.reportPlaybackFailed("第一次")
+        engine.reportPlaybackFailed("第二次")
+
+        assertEquals(1, sink.lines.count { it.contains("播放失败:") })
+    }
+
+    @Test
+    fun `切集无帧超时记录目标、令牌与来源`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        val token = engine.currentLoadToken
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("切集失败: ep2.mkv"))
+        assertTrue(text.contains("目标: root/ep2.mkv"))
+        assertTrue(text.contains("加载令牌: $token"))
+        assertTrue(text.contains("阶段: 切集"))
+        assertTrue(text.contains("来源: 无帧超时"))
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =
@@ -171,6 +300,7 @@ class PlaybackControllerDiagnosticsTest {
             FakePlaybackProgressRepository(),
             backgroundScope,
             diagnostics = diagnostics,
+            nowMillis = { testScheduler.currentTime },
         )
 
     private fun open(controller: PlaybackController) {

@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import `is`.xyz.mpv.MPVLib
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -407,6 +408,45 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a START_FILE token is taken from the load queue head`() {
+        val coordinator = MpvLoadCoordinator()
+
+        val first = coordinator.start("root/ep1.mkv")
+        assertEquals(first.token, coordinator.pendingLoadToken())
+
+        assertEquals(first, coordinator.onFileLoaded("root/ep1.mkv"))
+        assertEquals(null, coordinator.pendingLoadToken())
+
+        val second = coordinator.start("root/ep2.mkv")
+        assertEquals(second.token, coordinator.pendingLoadToken())
+    }
+
+    @Test
+    fun `the old END_FILE is consumed before the next START_FILE token`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.onFileLoaded("root/ep1.mkv")
+        val second = coordinator.start("root/ep2.mkv")
+
+        // 固定事件顺序：旧文件的 END_FILE 先到并被吞掉，下一个 START_FILE 才归属新加载。
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
+        assertEquals(second.token, coordinator.pendingLoadToken())
+    }
+
+    @Test
+    fun `a stopped queue exposes no START_FILE token`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.stop()
+
+        // stop 清空在途加载后，迟到的 START_FILE 不会拿到旧令牌。
+        assertEquals(null, coordinator.pendingLoadToken())
+
+        val next = coordinator.start("root/ep2.mkv")
+        assertEquals(next.token, coordinator.pendingLoadToken())
+    }
+
+    @Test
     fun `discarding a dead generation lets the restore load own the next FILE_LOADED`() {
         val coordinator = MpvLoadCoordinator()
         coordinator.start("root/ep2.mkv")
@@ -414,7 +454,7 @@ class MpvFileEventsTest {
 
         val restored = coordinator.start("root/ep1.mkv")
         // 死代际迟到的 END_FILE 先到：被丢弃，不伤恢复加载；结束计数已收尾。
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
         assertEquals(restored, coordinator.onFileLoaded("root/ep1.mkv"))
         assertEquals(restored, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
         // 恢复文件自己的自然结束由 eof-reached 上报一次。
@@ -428,7 +468,7 @@ class MpvFileEventsTest {
         assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
         assertEquals(spec.token, coordinator.onEofChanged(true))
 
-        assertEquals(MpvFileEvents.End.Ended, coordinator.onEndFile())
+        assertEquals(MpvFileEvents.End.Ended, coordinator.onEndFile().end)
         assertEquals(null, coordinator.currentLoadedToken())
         assertEquals(null, coordinator.acceptReady(needsFrameConfirmation = false))
     }
@@ -442,7 +482,7 @@ class MpvFileEventsTest {
         assertEquals(1, coordinator.onEofChanged(true))
         // 自然播完本身没有 END_FILE；下一次 loadfile 仍会替换旧文件并产生一次结束事件。
         val next = coordinator.start("root/ep2.mkv")
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
         assertEquals(next, coordinator.onFileLoaded("root/ep2.mkv"))
         assertEquals(next, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
     }
@@ -457,7 +497,7 @@ class MpvFileEventsTest {
 
         // 同 URL：path 校验无法区分，靠 stop 留下的待吞结束事件拒绝旧 FILE_LOADED。
         assertEquals(null, coordinator.onFileLoaded("root/ep1.mkv"))
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
         assertEquals(replacement, coordinator.onFileLoaded("root/ep1.mkv"))
     }
 
@@ -469,7 +509,7 @@ class MpvFileEventsTest {
         val replacement = coordinator.start("root/ep1.mkv")
 
         assertEquals(null, coordinator.onFileLoaded("root/ep1.mkv"))
-        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile())
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
         assertEquals(replacement, coordinator.onFileLoaded("root/ep1.mkv"))
     }
 
@@ -511,5 +551,206 @@ class MpvFileEventsTest {
         assertFalse(gate.onPosition(1_000))
         assertFalse(gate.onPosition(250))
         assertTrue(gate.onPosition(260))
+    }
+
+    @Test
+    fun `a jump larger than two seconds only rebuilds the baseline`() {
+        val gate = PositionProgressGate()
+        gate.onStart(0)
+        assertFalse(gate.onPosition(0))
+
+        // 超过 2000ms 的跳变不能算前进，只重建基线。
+        assertFalse(gate.onPosition(5_000))
+        assertTrue(gate.onPosition(5_040))
+    }
+
+    @Test
+    fun `mpv error logs are attributed to the load token and keep the root cause`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_INFO, "普通信息")
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "打开文件失败")
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "  ")
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN, "警告不算错误")
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "解码失败")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u1", 1)))
+        assertEquals(listOf(1 to "cplayer: 打开文件失败 | ffmpeg: 解码失败"), failures)
+
+        // 读取后只清理该令牌：下一次 END_FILE 不再带出同一文本。
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u1", 1)))
+        assertEquals(listOf(1 to "cplayer: 打开文件失败 | ffmpeg: 解码失败", 1 to null), failures)
+    }
+
+    @Test
+    fun `mpv error logs keep the first error and the latest capacity`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "1")
+        bridge.logMessage("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "2")
+        bridge.logMessage("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "3")
+        bridge.logMessage("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "4")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u1", 1)))
+
+        // 首条根因不能被后续错误挤掉。
+        assertEquals(listOf(1 to "a: 1 | a: 3 | a: 4"), failures)
+    }
+
+    @Test
+    fun `opening errors before START_FILE stay with their own load`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        // 打开阶段失败可能没有 START_FILE：start 之后到达的日志仍归本次加载。
+        bridge.onStartLoad(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "打开失败")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u1", 1)))
+        assertEquals(listOf(1 to "cplayer: 打开失败"), failures)
+    }
+
+    @Test
+    fun `error capacity is per load token`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        listOf("a1", "a2", "a3", "a4").forEach {
+            bridge.logMessage("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, it)
+        }
+        bridge.onStartLoad(2)
+        listOf("b1", "b2", "b3", "b4").forEach {
+            bridge.logMessage("b", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, it)
+        }
+
+        // 旧令牌残留不能挤掉本轮的首条根因。
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to "b: b1 | b: b3 | b: b4"), failures)
+    }
+
+    @Test
+    fun `a null START_FILE token does not attach logs to the previous load`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件错误")
+        // 队列已被 stop 清空：START_FILE 拿不到令牌，之后的日志不能再挂到旧加载。
+        bridge.onStartFile(null)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "停止后日志")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u1", 1)))
+        assertEquals(listOf(1 to "cplayer: 旧文件错误"), failures)
+    }
+
+    @Test
+    fun `a late START_FILE for an older load does not move the failure anchor`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(2)
+        bridge.onStartFile(2)
+        bridge.onStartLoad(3)
+        // 旧 START_FILE 迟到：activeToken 可以切回旧令牌，但兜底锚点必须仍是令牌 3。
+        bridge.onStartFile(2)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "令牌 3 的打开失败")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u3", 3)))
+        assertEquals(listOf(3 to "cplayer: 令牌 3 的打开失败"), failures)
+    }
+
+    @Test
+    fun `a replaced END_FILE drops old unload logs mixed into the new load`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件错误")
+
+        bridge.onStartLoad(2)
+        // start 后、START_FILE 前到达的旧文件卸载日志会按新令牌入桶。
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件卸载错误")
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Replaced, LoadSpec("u1", 1)))
+
+        // 新加载没有 START_FILE 就失败：不能把旧卸载日志当成本轮错误文本。
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to null), failures)
+    }
+
+    @Test
+    fun `a late log from the previous load does not enter the next load's error text`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        // 新加载已下发但本轮 START_FILE 还没到：排队日志暂时挂在本轮，随后由 START_FILE 清掉。
+        bridge.onStartLoad(2)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮迟到错误")
+        bridge.onStartFile(2)
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to "ffmpeg: 本轮错误"), failures)
+    }
+
+    @Test
+    fun `a replaced END_FILE keeps the current load's error text`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件错误")
+        bridge.onStartLoad(2)
+        bridge.onStartFile(2)
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
+
+        // 旧目标被替换的结束只清理旧令牌，不能清掉本轮文本。
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Replaced, LoadSpec("u1", 1)))
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to "ffmpeg: 本轮错误"), failures)
+    }
+
+    @Test
+    fun `START_FILE only clears entries of the same token`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件错误")
+        bridge.onStartLoad(2)
+        bridge.onStartFile(2)
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮旧条目")
+        bridge.onStartFile(2)
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Replaced, LoadSpec("u1", 1)))
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to "ffmpeg: 本轮错误"), failures)
+    }
+
+    @Test
+    fun `an END_FILE without its load is not reported as a failure`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "无法归属的错误")
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, spec = null))
+
+        assertTrue(failures.isEmpty())
     }
 }

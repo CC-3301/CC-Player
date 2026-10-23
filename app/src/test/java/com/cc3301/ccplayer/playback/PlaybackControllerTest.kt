@@ -16,7 +16,13 @@ class PlaybackControllerTest {
 
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
-    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
+    private val dispatcher = UnconfinedTestDispatcher()
+    private val controller = PlaybackController(
+        engine,
+        progress,
+        CoroutineScope(dispatcher),
+        nowMillis = { dispatcher.scheduler.currentTime },
+    )
 
     @Test
     fun `opening a media hands its location to the engine and reports loading`() {

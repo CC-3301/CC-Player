@@ -20,7 +20,13 @@ class MediaSessionActionTest {
 
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
-    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
+    private val dispatcher = UnconfinedTestDispatcher()
+    private val controller = PlaybackController(
+        engine,
+        progress,
+        CoroutineScope(dispatcher),
+        nowMillis = { dispatcher.scheduler.currentTime },
+    )
 
     @Test
     fun `the pause action pauses the session`() {

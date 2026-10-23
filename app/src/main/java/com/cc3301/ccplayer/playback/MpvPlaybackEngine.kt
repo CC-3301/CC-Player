@@ -19,6 +19,11 @@ class MpvPlaybackEngine(
 
     private var listener: PlaybackEngine.Listener? = null
 
+    /** 播放核心的错误日志；条目按加载令牌归属，END_FILE 失败时随该令牌交给控制层。 */
+    private val errorLog = MpvErrorLogBridge { loadToken, text ->
+        listener?.onPlaybackFailed(loadToken, text)
+    }
+
     /** detachSurface 会把视频输出关掉，重新接上 Surface 前要恢复它。 */
     @Volatile
     private var videoOutputStopped = false
@@ -63,6 +68,7 @@ class MpvPlaybackEngine(
         MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
         MPVLib.addObserver(this)
+        MPVLib.addLogObserver(errorLog)
         MPVLib.observeProperty(PAUSE_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
         MPVLib.observeProperty(TIME_POS_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
         MPVLib.observeProperty(DURATION_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_DOUBLE)
@@ -77,6 +83,8 @@ class MpvPlaybackEngine(
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
         val spec = loadCoordinator.start(url)
+        // 成功打开前的日志也要归到本次加载；START_FILE 会清掉这之前混入的上一轮排队日志。
+        errorLog.onStartLoad(spec.token)
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
@@ -223,37 +231,43 @@ class MpvPlaybackEngine(
 
     override fun release() {
         MPVLib.removeObserver(this)
+        MPVLib.removeLogObserver(errorLog)
         loadCoordinator.reset()
         MPVLib.destroy()
     }
 
     override fun event(eventId: Int) {
         when (eventId) {
-            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED,
-            MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG,
-            MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG,
-            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART,
-            MPVLib.MpvEvent.MPV_EVENT_SEEK,
-            MPVLib.MpvEvent.MPV_EVENT_END_FILE,
-            -> listener?.onLoadActivity()
-        }
-        when (eventId) {
+            // START_FILE 按命令顺序归属于队首加载；错误日志也在这里归到同一令牌。
+            MPVLib.MpvEvent.MPV_EVENT_START_FILE -> {
+                val token = loadCoordinator.pendingLoadToken()
+                listener?.onLoadActivity(LoadActivity.StartFile, token)
+                errorLog.onStartFile(token)
+            }
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
-            MPVLib.MpvEvent.MPV_EVENT_SEEK -> loadCoordinator.onSeekEvent()
+            MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
+                listener?.onLoadActivity(LoadActivity.Seek, loadCoordinator.currentLoadedToken())
+                loadCoordinator.onSeekEvent()
+            }
             // 播放中优先等 PLAYBACK_RESTART；暂停中只有 VIDEO_RECONFIG，
             // 它可能早于首帧上屏，控制层要等位置真正前进后才算就绪。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
+                listener?.onLoadActivity(LoadActivity.VideoReconfig, loadCoordinator.currentLoadedToken())
                 if (loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
                     reportReady(needsFrameConfirmation = true)
                 }
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
+                listener?.onLoadActivity(LoadActivity.AudioReconfig, loadCoordinator.currentLoadedToken())
                 if (loadCoordinator.isFileLoaded && !hasVideoTrack) reportReady()
             }
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
-            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> if (loadCoordinator.isFileLoaded) {
-                reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+            MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
+                listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadCoordinator.currentLoadedToken())
+                if (loadCoordinator.isFileLoaded) {
+                    reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
+                }
             }
             MPVLib.MpvEvent.MPV_EVENT_END_FILE -> onEndFile()
         }
@@ -262,8 +276,10 @@ class MpvPlaybackEngine(
     private fun onFileLoaded() {
         // 先消化旧代际的结束事件并按 mpv 当前路径校验队首，迟到事件不能占掉新加载的代际。
         val spec = loadCoordinator.onFileLoaded(MPVLib.getPropertyString(PATH_PROPERTY)) ?: return
+        // 只有接受的 FILE_LOADED 才算本轮加载活动；被拒绝的旧事件不能刷新无帧窗口。
+        listener?.onLoadActivity(LoadActivity.FileLoaded, spec.token)
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
-        listener?.onMediaLoaded(spec.url, spec.token)
+        listener?.onMediaLoaded(spec.url, spec.token, hasVideoTrack)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
         if (!hasVideoTrack) reportReady()
     }
@@ -272,10 +288,9 @@ class MpvPlaybackEngine(
 
     /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
-        when (loadCoordinator.onEndFile()) {
-            MpvFileEvents.End.Replaced, MpvFileEvents.End.Ended -> Unit
-            MpvFileEvents.End.Failed -> listener?.onPlaybackFailed()
-        }
+        val end = loadCoordinator.onEndFile()
+        listener?.onLoadActivity(LoadActivity.EndFile, end.spec?.token)
+        errorLog.onEndFile(end)
     }
 
     /**
@@ -401,6 +416,119 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+    }
+}
+
+/**
+ * 文件事件与日志桥的接线：日志条目按加载令牌独立归属。
+ * start 把打开阶段的日志归到本次加载；START_FILE 清掉同一令牌在真正开始加载前的排队日志，
+ * END_FILE 读取并清理该令牌的文本，替换与播完的结束不会动当前轮的文本。
+ * 单独抽出，便于不依赖 JNI 验证顺序。
+ */
+internal class MpvErrorLogBridge(
+    private val onFailure: (loadToken: Int, errorText: String?) -> Unit,
+) : MPVLib.LogObserver {
+
+    private data class Entry(val sequence: Long, val text: String)
+
+    private val lock = Any()
+
+    /** 每个加载令牌独立缓冲，旧令牌残留不会挤掉本轮首条根因。 */
+    private val errors = mutableMapOf<Int, ArrayDeque<Entry>>()
+    private val capacity = 3
+    private var activeToken: Int? = null
+
+    /** 最近一次 start 的令牌与当时序号；只由 start 前进，用于没有 START_FILE 时的失败兜底。 */
+    private var startedToken: Int? = null
+    private var startedAfterSequence = 0L
+    private var startFileSeen = false
+    private var nextSequence = 0L
+
+    /** 新一次加载：后续日志归到该令牌，只清理该令牌的旧条目。 */
+    fun onStartLoad(loadToken: Int) {
+        synchronized(lock) {
+            activeToken = loadToken
+            startedToken = loadToken
+            startedAfterSequence = nextSequence
+            startFileSeen = false
+            errors.keys.retainAll { it == loadToken }
+            errors.remove(loadToken)
+        }
+    }
+
+    /** mpv 事件线程转发的日志；只留下错误级别并按当前加载令牌归属。 */
+    override fun logMessage(prefix: String, level: Int, text: String) {
+        if (level > MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR) return
+        val message = text.trim()
+        if (message.isEmpty()) return
+        synchronized(lock) {
+            val token = activeToken ?: return
+            val entries = errors.getOrPut(token) { ArrayDeque() }
+            if (entries.size >= capacity) {
+                // 保留首条根因，淘汰紧随其后的旧条目，再放入最新一条。
+                val first = entries.removeFirst()
+                while (entries.size > capacity - 2) entries.removeFirst()
+                entries.addFirst(first)
+            }
+            entries.addLast(Entry(++nextSequence, if (prefix.isBlank()) message else "$prefix: $message"))
+        }
+    }
+
+    /**
+     * START_FILE 归属到队首加载：清掉同一令牌在开始加载前混入的上一轮排队日志。
+     * 锚点只由 start 前进，迟到的旧 START_FILE 只切 activeToken，不回退兜底锚点。
+     * [loadToken] 为 null 表示队列已清空，后续日志不再挂到旧令牌。
+     */
+    fun onStartFile(loadToken: Int?) {
+        synchronized(lock) {
+            activeToken = loadToken
+            if (loadToken == null) return
+            errors.remove(loadToken)
+            // 锚点只允许由 start 前进；没有 start 时用第一次 START_FILE 建锚点。
+            if (startedToken == null) {
+                startedToken = loadToken
+                startedAfterSequence = nextSequence
+            }
+            if (loadToken == startedToken) startFileSeen = true
+        }
+    }
+
+    /** 读取并清理该 END_FILE 所属令牌的文本；只有失败才上报。 */
+    fun onEndFile(end: LoadEnd) {
+        val token = end.spec?.token
+        val text = synchronized(lock) {
+            if (token == null) {
+                // 找不到加载的结束：丢掉非当前加载的残留，避免长期驻留。
+                errors.keys.retainAll { it == startedToken }
+                return@synchronized null
+            }
+            // 旧文件卸载日志可能已按 start 后的新令牌入桶：START_FILE 前把它们清掉，
+            // 否则新加载无 START_FILE 失败时会把旧卸载文本当成本轮错误。
+            if (end.end == MpvFileEvents.End.Replaced && !startFileSeen && token != startedToken) {
+                errors.values.forEach { entries ->
+                    entries.removeAll { it.sequence > startedAfterSequence }
+                }
+            }
+            val entries = errors[token]
+            var value = entries?.joinToString(" | ") { it.text }?.takeIf { it.isNotBlank() }
+            if (value == null && token == startedToken) {
+                // 本令牌没有条目：回退到本次 start 之后尚未消费的条目，覆盖没有 START_FILE 的打开失败。
+                val fallback = errors.values.asSequence()
+                    .flatten()
+                    .filter { it.sequence > startedAfterSequence }
+                    .sortedBy { it.sequence }
+                    .map { it.text }
+                    .toList()
+                value = fallback.joinToString(" | ").takeIf { it.isNotBlank() }
+                if (value != null) {
+                    errors.values.forEach { list -> list.removeAll { it.sequence > startedAfterSequence } }
+                }
+            }
+            errors.remove(token)
+            errors.entries.removeAll { it.value.isEmpty() }
+            value
+        }
+        if (end.end == MpvFileEvents.End.Failed && token != null) onFailure(token, text)
     }
 }
 

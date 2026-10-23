@@ -196,6 +196,10 @@ internal class MpvLoadQueue {
     @Synchronized
     fun currentLoaded(): LoadSpec? = loaded?.takeIf { it === current }
 
+    /** 下一条即将开始加载的文件；START_FILE 按命令顺序归属于队首。 */
+    @Synchronized
+    fun pendingStart(): LoadSpec? = pendingLoads.firstOrNull()
+
     /**
      * 收到 END_FILE：取出产生这次结束的加载，并清掉它在途记录。
      * [isReplaced] 为假表示这是当前代际自己的结束；为真时只有确实登记过的旧文件才能被移出，
@@ -246,6 +250,12 @@ internal class MpvLoadQueue {
 
 /** 一次可上报的 ready 信号：产生它的加载与 seek 序号。 */
 internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
+
+/**
+ * 一次 END_FILE 的判定结果与它归属的加载。
+ * [spec] 为 null 表示队列里已找不到对应加载（丢弃死代际后的迟到结束），此时失败也不上报。
+ */
+internal data class LoadEnd(val end: MpvFileEvents.End, val spec: LoadSpec?)
 
 /**
  * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
@@ -358,13 +368,17 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onEndFile(): MpvFileEvents.End {
+    fun onEndFile(): LoadEnd {
         val end = fileEvents.onEndFile()
         // 被替换的结束属于结束队列；当前文件的自然卸载与失败都要清掉当前代际，
         // 否则迟到的 ready 仍会被当成这轮加载的有效信号。
-        loads.onEndFile(isReplaced = end == MpvFileEvents.End.Replaced)
-        return end
+        val spec = loads.onEndFile(isReplaced = end == MpvFileEvents.End.Replaced)
+        return LoadEnd(end, spec)
     }
+
+    /** 下一条即将开始加载的令牌；START_FILE 的事件不带文件标识，按命令顺序归属队首。 */
+    @Synchronized
+    fun pendingLoadToken(): Int? = loads.pendingStart()?.token
 
     @Synchronized
     fun onSeekIssued(): Int {

@@ -377,7 +377,12 @@ class PlaybackControllerSleepTimerTest {
     }
 
     private fun TestScope.controller(): PlaybackController =
-        PlaybackController(engine, FakePlaybackProgressRepository(), backgroundScope)
+        PlaybackController(
+            engine,
+            FakePlaybackProgressRepository(),
+            backgroundScope,
+            nowMillis = { testScheduler.currentTime },
+        )
 
     private fun TestScope.advance(millis: Long) {
         advanceTimeBy(millis)

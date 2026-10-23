@@ -329,6 +329,8 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(1, engine.resumeCalls)
+        // 真正出帧才算目标画面已上屏，之后不再有无帧失败。
+        engine.reportFramePresented()
 
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
         runCurrent()
@@ -711,7 +713,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grabbed frame stays frozen until the target is ready`() = runTest {
+    fun `a grabbed frame stays frozen until the target frame reaches the surface`() = runTest {
         val controller = playingController()
         val frame = testBitmap()
         engine.frameToGrab = PlaybackEngine.Frame(frame)
@@ -723,6 +725,28 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
+        // 就绪信号先到也不能撤冻结画面：等新帧真正上屏。
+        assertSame(frame, controller.freezeFrame.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `switching to an audio file does not leave the frozen video frame on screen`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+        assertSame(frame, controller.freezeFrame.value)
+
+        engine.hasVideoTrack = false
+        engine.reportMediaLoaded()
+
+        // 纯音频没有新视频帧可等，冻结画面按黑底处理。
+        assertFalse(controller.switching.value)
         assertNull(controller.freezeFrame.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -882,25 +906,393 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a switch keeps waiting for the surface frame until the watchdog`() = runTest {
+    fun `a switch settles ready two seconds after file load without a frame signal`() = runTest {
         val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+
+        // 加载完成后画面信号一直不来：2 秒后按就绪收尾并开始播放。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        assertTrue(controller.switching.value)
+        assertEquals(0, engine.resumeCalls)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
+
+        // 兜底本身不报失败；无帧失败计时仍在跑，由下一条用例验证 60 秒回退。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `a switched target with no frame for sixty seconds restores the original`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(40_000, 600_000)
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        // 状态已就绪，但新帧仍未上屏，冻结画面保留。
+        assertSame(frame, controller.freezeFrame.value)
+        assertTrue(failures.isEmpty())
+
+        // 60 秒从切集开始算，兜底收尾占用的 2 秒不顺延。
+        advanceTimeBy(
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1,
+        )
+        runCurrent()
+        assertSame(frame, controller.freezeFrame.value)
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+
+        // 60 秒仍无新帧：取消切换，回到原片原位置并保持暂停。
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(40_000L, engine.startedPositions.last())
+    }
+
+    @Test
+    fun `pausing and resuming preserves the remaining no-frame window`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 10_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        controller.pause()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        // 恢复只接着剩余窗口计时，不重新给满 60 秒。
+        controller.resume()
+        advanceTimeBy(
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 10_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `a slow seek refreshes the no-frame window before the first frame`() = runTest {
+        val controller = playingController()
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        progress.holdFinds()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(50_000)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        // 续播查询与 seek 在 50 秒后才完成，SEEK 是真实的最后一次加载事件。
+        progress.releaseFinds()
+        runCurrent()
+        engine.reportLoadActivity()
+        advanceTimeBy(15_000)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        // 首帧在 65 秒到达并起播；2 秒后的兜底收尾不能按已过期的窗口判无帧失败。
+        engine.reportVideoReconfigured()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `late load events do not reset the remaining no-frame window`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 30_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        // 恢复与重挂产生的加载事件不能把剩余窗口补满。
+        controller.resume()
+        engine.reportVideoReconfigured()
+        advanceTimeBy(
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 30_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `surface detach pauses the no-frame window and reattach continues it`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        engine.refreshSurfaceResult = false
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 20_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        controller.setRenderSurfaceAvailable(false)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 20_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `stopping or starting a new load cancels the no-frame watchdog`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        // 停止：旧的无帧计时不能把已结束的会话报成失败。
+        controller.stop()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+        assertEquals(PlaybackState.Idle, controller.state.value)
+
+        // 停止后重新打开：上一轮计时同样不能残留。
+        controller.playAt(1)
+        engine.reportMediaLoaded()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS * 2)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `a presented frame cancels the no-frame failure watchdog`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        engine.reportFramePresented()
+
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS * 2)
+        runCurrent()
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `cancelling a switch cancels its readiness fallback`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        controller.cancelSwitch()
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+
+        // 旧的兜底不能结束恢复或重新起播。
+        assertTrue(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `retargeting a switch resets its readiness fallback`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        runCurrent()
+        controller.next()
+
+        // 新目标还没有文件加载信号，旧目标的兜底不能把它收尾。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `surface detach while waiting for the frame settles on file load`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(1_000)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(false)
+
+        // 退后台后没有可渲染画面，以文件加载完成作为就绪。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertFalse(controller.switching.value)
+    }
+
+    @Test
+    fun `the readiness fallback does not settle before the resume lookup finishes`() = runTest {
+        val controller = playingController()
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        progress.holdFinds()
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        // 续播位置还没查到：不能收尾。
+        assertTrue(controller.switching.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        progress.releaseFinds()
+        runCurrent()
+        // 已发出续播 seek：等 seek 之后的画面信号，兜底不能抢先收尾。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a paused target settles ready after two seconds on load completion`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+        controller.pause()
+        engine.reportFileLoaded()
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+
+        // 暂停态已加载的文件也按暂停收尾，冻结画面继续保留。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+        assertSame(frame, controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `the watchdog still fails a switch whose fallback keeps deferring`() = runTest {
+        val controller = playingController()
+        progress.holdFinds()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        // 查询一直不完成，兜底一直顺延；60 秒看门狗仍然是最终失败路径。
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertTrue(controller.switching.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `a switch settles ready after two seconds without a presented frame`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
 
-        // 没有新帧上屏：冻结画面与加载状态一直保留到无事件看门狗。
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        // 没有位置前进：2 秒后按就绪收尾，不再等 60 秒看门狗。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertTrue(failures.isEmpty())
 
-        engine.reportFramePresented()
+        advanceTimeBy(1)
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(failures.isEmpty())
+        // 没有新帧证据：冻结画面继续保留。
+        assertSame(frame, controller.freezeFrame.value)
+
+        engine.reportFramePresented()
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test
@@ -1373,6 +1765,114 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
     }
 
+    @Test
+    fun `a late failure from a cancelled target is dropped`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        val cancelledToken = engine.currentLoadToken
+        assertTrue(controller.cancelSwitch())
+        val restoreToken = engine.currentLoadToken
+
+        // 被取消目标的失败在取消之后才到：不得停掉恢复中的原片，也不得提示失败。
+        engine.reportPlaybackFailed("旧目标失败", loadToken = cancelledToken)
+
+        assertEquals(0, failures.size)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(restoreToken, engine.currentLoadToken)
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv", "root/ep1.mkv"), engine.startedUrls)
+
+        // 当前恢复加载的失败仍然处理。
+        engine.reportPlaybackFailed("恢复失败", loadToken = restoreToken)
+        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `a late failure from a retargeted target is dropped`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val failures = collectFailures(controller)
+
+        controller.next()
+        val abandonedToken = engine.currentLoadToken
+        controller.next()
+        val targetToken = engine.currentLoadToken
+
+        // 已被重定向掉的目标失败：当前切集目标不变，不触发恢复或提示。
+        engine.reportPlaybackFailed("旧目标失败", loadToken = abandonedToken)
+
+        assertEquals(0, failures.size)
+        assertEquals(2, controller.currentIndex.value)
+        assertTrue(controller.switching.value)
+        assertEquals(targetToken, engine.currentLoadToken)
+        assertEquals(
+            listOf("root/ep1.mkv", "root/ep2.mkv", "root/ep3.mkv"),
+            engine.startedUrls,
+        )
+
+        engine.reportPlaybackFailed("目标失败", loadToken = targetToken)
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a resume with no echo does not hide real load activity`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+
+        // 0 次回声：真实加载事件仍按活动处理，刷新无帧窗口。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.FileLoaded, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.VideoReconfig, 7))
+    }
+
+    @Test
+    fun `a single resume echo is ignored but real load activity still refreshes`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        // 真实 SEEK 结束回声期，后续 PLAYBACK_RESTART 按真实事件处理。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
+    @Test
+    fun `multiple resume echoes do not repeatedly refill the window`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        repeat(3) {
+            assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        }
+        // 回声次数有上限：超出后按真实事件刷新窗口，不会无限忽略。
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        // 真实 VIDEO_RECONFIG 仍然刷新。
+        assertFalse(gate.shouldIgnore(LoadActivity.VideoReconfig, 7))
+
+        // 不同加载令牌的 PLAYBACK_RESTART 不是这次 resume 的回声。
+        gate.onResume(8)
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
+    @Test
+    fun `an old-generation event does not end the resume echo period`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        // 旧代际事件不清除回声期。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 6))
+        assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+
+        // 同令牌真实事件才结束回声期。
+        assertFalse(gate.shouldIgnore(LoadActivity.FileLoaded, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
     private fun dispatch(controller: PlaybackController, action: MediaSessionAction) {
         dispatchMediaAction(
             action,
@@ -1389,6 +1889,7 @@ class PlaybackControllerSwitchTest {
             progress,
             backgroundScope,
             frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+            nowMillis = { testScheduler.currentTime },
         )
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
