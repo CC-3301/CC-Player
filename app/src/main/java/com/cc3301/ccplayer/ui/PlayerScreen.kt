@@ -58,23 +58,26 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.ripple.RippleAlpha
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -983,7 +986,11 @@ private fun PlayerTopBar(
                 .padding(horizontal = AppSpacing.Xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack, enabled = interactive) {
+            PlayerIconButtonSurface(
+                onClick = onBack,
+                enabled = interactive,
+                modifier = Modifier.size(PlayerSideTouchTarget),
+            ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = stringResource(R.string.player_title_back),
@@ -999,16 +1006,21 @@ private fun PlayerTopBar(
                     .weight(1f)
                     .padding(end = AppSpacing.Xs),
             )
-            IconButton(onClick = onRotate, enabled = interactive && rotateEnabled) {
+            PlayerIconButtonSurface(
+                onClick = onRotate,
+                enabled = interactive && rotateEnabled,
+                modifier = Modifier.size(PlayerSideTouchTarget),
+            ) {
                 Icon(
                     painter = painterResource(R.drawable.ic_player_screen_rotation),
                     contentDescription = stringResource(R.string.player_rotate),
                     tint = if (rotateAppearanceEnabled) AppColors.Foreground else DisabledToolColor,
                 )
             }
-            IconButton(
+            PlayerIconButtonSurface(
                 onClick = onToggleMore,
                 enabled = interactive && moreEnabled,
+                modifier = Modifier.size(PlayerSideTouchTarget),
             ) {
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
@@ -1034,7 +1046,10 @@ private fun playerOverlayTextStyle(): TextStyle = MaterialTheme.typography.title
 /** 锁定态下唯一可见的控件：点一次立即解锁，无背景与强调色。 */
 @Composable
 private fun UnlockButton(onTap: () -> Unit, modifier: Modifier = Modifier) {
-    IconButton(onClick = onTap, modifier = modifier) {
+    PlayerIconButtonSurface(
+        onClick = onTap,
+        modifier = modifier.size(PlayerSideTouchTarget),
+    ) {
         Icon(
             painter = painterResource(R.drawable.ic_player_lock_open),
             contentDescription = stringResource(R.string.player_unlock),
@@ -1136,10 +1151,7 @@ private fun PlayerIconBar(
     onLock: () -> Unit,
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        // 记住上一次排布，宽度在阈值附近变化时不来回切换布局。
-        var previousRightStacked by remember { mutableStateOf(false) }
-        val metrics = playerIconBarMetrics(maxWidth, previousRightStacked)
-        SideEffect { previousRightStacked = metrics.rightStacked }
+        val metrics = playerIconBarMetrics(maxWidth)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1161,13 +1173,12 @@ private fun PlayerIconBar(
                 ),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .size(metrics.sideButtonSize),
+                    .size(PlayerSideTouchTarget),
             )
             // 上一集在播放键左侧、下一集在右侧，播放键始终居中。
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(metrics.gap),
             ) {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_previous,
@@ -1183,7 +1194,10 @@ private fun PlayerIconBar(
                         initialLoading = initialLoading,
                         restoring = restoring,
                     ),
-                    modifier = Modifier.size(metrics.previousNextSize),
+                    modifier = Modifier.size(
+                        metrics.transportButtonWidth,
+                        metrics.transportHeight,
+                    ),
                     iconSize = PlayerTransportIconSize,
                 )
                 PlayerIconButton(
@@ -1202,7 +1216,10 @@ private fun PlayerIconBar(
                         initialLoading = initialLoading,
                         restoring = restoring,
                     ),
-                    modifier = Modifier.size(metrics.playPauseSize),
+                    modifier = Modifier.size(
+                        metrics.transportButtonWidth,
+                        metrics.transportHeight,
+                    ),
                     iconSize = PlayerPlayPauseIconSize,
                 )
                 PlayerIconButton(
@@ -1219,7 +1236,10 @@ private fun PlayerIconBar(
                         initialLoading = initialLoading,
                         restoring = restoring,
                     ),
-                    modifier = Modifier.size(metrics.previousNextSize),
+                    modifier = Modifier.size(
+                        metrics.transportButtonWidth,
+                        metrics.transportHeight,
+                    ),
                     iconSize = PlayerTransportIconSize,
                 )
             }
@@ -1240,7 +1260,7 @@ private fun PlayerIconBar(
                         restoring = restoring,
                     ),
                     active = subtitleMenuVisible,
-                    modifier = Modifier.size(metrics.sideButtonSize),
+                    modifier = Modifier.size(PlayerSideTouchTarget),
                 )
             }
             val playlistButton: @Composable () -> Unit = {
@@ -1258,7 +1278,7 @@ private fun PlayerIconBar(
                         initialLoading = initialLoading,
                         restoring = restoring,
                     ),
-                    modifier = Modifier.size(metrics.sideButtonSize),
+                    modifier = Modifier.size(PlayerSideTouchTarget),
                 )
             }
             if (metrics.rightStacked) {
@@ -1285,6 +1305,43 @@ private fun PlayerIconBar(
 /** 禁用控件的画布色。 */
 private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
 
+/** 播放页图标按钮的白色方形涟漪：按下约 20% 白，其余状态不显示背景。 */
+@OptIn(ExperimentalMaterial3Api::class)
+private val PlayerIconRippleConfiguration = RippleConfiguration(
+    color = Color.White,
+    rippleAlpha = RippleAlpha(
+        draggedAlpha = 0f,
+        focusedAlpha = 0f,
+        hoveredAlpha = 0f,
+        pressedAlpha = 0.2f,
+    ),
+)
+
+/** 播放页图标按钮的热区：点击范围与涟漪范围都取 [modifier] 的尺寸。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayerIconButtonSurface(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    CompositionLocalProvider(LocalRippleConfiguration provides PlayerIconRippleConfiguration) {
+        Box(
+            modifier = modifier.clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(),
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick,
+            ),
+            contentAlignment = Alignment.Center,
+        ) {
+            content()
+        }
+    }
+}
+
 /** 播放器图标按钮：只有图标；外观是否禁用与点击是否可用分开，展开时改变颜色。 */
 @Composable
 private fun PlayerIconButton(
@@ -1297,7 +1354,11 @@ private fun PlayerIconButton(
     active: Boolean = false,
     iconSize: Dp = PlayerSideIconSize,
 ) {
-    IconButton(onClick = onClick, enabled = enabled, modifier = modifier) {
+    PlayerIconButtonSurface(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+    ) {
         Icon(
             painter = painterResource(icon),
             contentDescription = contentDescription,
