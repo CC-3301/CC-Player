@@ -653,6 +653,41 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a late START_FILE for an older load does not move the failure anchor`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(2)
+        bridge.onStartFile(2)
+        bridge.onStartLoad(3)
+        // 旧 START_FILE 迟到：activeToken 可以切回旧令牌，但兜底锚点必须仍是令牌 3。
+        bridge.onStartFile(2)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "令牌 3 的打开失败")
+
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u3", 3)))
+        assertEquals(listOf(3 to "cplayer: 令牌 3 的打开失败"), failures)
+    }
+
+    @Test
+    fun `a replaced END_FILE drops old unload logs mixed into the new load`() {
+        val failures = mutableListOf<Pair<Int, String?>>()
+        val bridge = MpvErrorLogBridge { token, text -> failures += token to text }
+
+        bridge.onStartLoad(1)
+        bridge.onStartFile(1)
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件错误")
+
+        bridge.onStartLoad(2)
+        // start 后、START_FILE 前到达的旧文件卸载日志会按新令牌入桶。
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "旧文件卸载错误")
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Replaced, LoadSpec("u1", 1)))
+
+        // 新加载没有 START_FILE 就失败：不能把旧卸载日志当成本轮错误文本。
+        bridge.onEndFile(LoadEnd(MpvFileEvents.End.Failed, LoadSpec("u2", 2)))
+        assertEquals(listOf(2 to null), failures)
+    }
+
+    @Test
     fun `a late log from the previous load does not enter the next load's error text`() {
         val failures = mutableListOf<Pair<Int, String?>>()
         val bridge = MpvErrorLogBridge { token, text -> failures += token to text }

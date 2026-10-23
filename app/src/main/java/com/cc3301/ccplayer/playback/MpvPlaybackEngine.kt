@@ -438,9 +438,10 @@ internal class MpvErrorLogBridge(
     private val capacity = 3
     private var activeToken: Int? = null
 
-    /** 最近一次 start 的令牌与当时序号；用于没有 START_FILE 时的失败兜底。 */
+    /** 最近一次 start 的令牌与当时序号；只由 start 前进，用于没有 START_FILE 时的失败兜底。 */
     private var startedToken: Int? = null
     private var startedAfterSequence = 0L
+    private var startFileSeen = false
     private var nextSequence = 0L
 
     /** 新一次加载：后续日志归到该令牌，只清理该令牌的旧条目。 */
@@ -449,6 +450,8 @@ internal class MpvErrorLogBridge(
             activeToken = loadToken
             startedToken = loadToken
             startedAfterSequence = nextSequence
+            startFileSeen = false
+            errors.keys.retainAll { it == loadToken }
             errors.remove(loadToken)
         }
     }
@@ -472,19 +475,21 @@ internal class MpvErrorLogBridge(
     }
 
     /**
-     * START_FILE 归属到队首加载：清掉同一令牌在开始加载前混入的上一轮排队日志，
-     * 并丢弃其它令牌的残留。[loadToken] 为 null 表示队列已清空，后续日志不再挂到旧令牌。
+     * START_FILE 归属到队首加载：清掉同一令牌在开始加载前混入的上一轮排队日志。
+     * 锚点只由 start 前进，迟到的旧 START_FILE 只切 activeToken，不回退兜底锚点。
+     * [loadToken] 为 null 表示队列已清空，后续日志不再挂到旧令牌。
      */
     fun onStartFile(loadToken: Int?) {
         synchronized(lock) {
             activeToken = loadToken
             if (loadToken == null) return
             errors.remove(loadToken)
-            errors.keys.retainAll { it == loadToken }
-            if (startedToken != loadToken) {
+            // 锚点只允许由 start 前进；没有 start 时用第一次 START_FILE 建锚点。
+            if (startedToken == null) {
                 startedToken = loadToken
                 startedAfterSequence = nextSequence
             }
+            if (loadToken == startedToken) startFileSeen = true
         }
     }
 
@@ -492,7 +497,18 @@ internal class MpvErrorLogBridge(
     fun onEndFile(end: LoadEnd) {
         val token = end.spec?.token
         val text = synchronized(lock) {
-            if (token == null) return@synchronized null
+            if (token == null) {
+                // 找不到加载的结束：丢掉非当前加载的残留，避免长期驻留。
+                errors.keys.retainAll { it == startedToken }
+                return@synchronized null
+            }
+            // 旧文件卸载日志可能已按 start 后的新令牌入桶：START_FILE 前把它们清掉，
+            // 否则新加载无 START_FILE 失败时会把旧卸载文本当成本轮错误。
+            if (end.end == MpvFileEvents.End.Replaced && !startFileSeen && token != startedToken) {
+                errors.values.forEach { entries ->
+                    entries.removeAll { it.sequence > startedAfterSequence }
+                }
+            }
             val entries = errors[token]
             var value = entries?.joinToString(" | ") { it.text }?.takeIf { it.isNotBlank() }
             if (value == null && token == startedToken) {
