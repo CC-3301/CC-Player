@@ -1084,7 +1084,7 @@ private fun Controls(
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // 图标条有意全宽贴边：窄屏压缩需要全部可用宽度；进度条与面板仍保留水平内边距。
+    // 图标条有意全宽贴边：三键居中与右侧按钮排布需要全部可用宽度；进度条与面板仍保留水平内边距。
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -1196,7 +1196,7 @@ private fun PlayerIconBar(
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
-                        metrics.transportHeight,
+                        metrics.transportButtonHeight,
                     ),
                     iconSize = PlayerTransportIconSize,
                 )
@@ -1218,7 +1218,7 @@ private fun PlayerIconBar(
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
-                        metrics.transportHeight,
+                        metrics.transportButtonHeight,
                     ),
                     iconSize = PlayerPlayPauseIconSize,
                 )
@@ -1238,7 +1238,7 @@ private fun PlayerIconBar(
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
-                        metrics.transportHeight,
+                        metrics.transportButtonHeight,
                     ),
                     iconSize = PlayerTransportIconSize,
                 )
@@ -1305,13 +1305,13 @@ private fun PlayerIconBar(
 /** 禁用控件的画布色。 */
 private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
 
-/** 播放页图标按钮的白色方形涟漪：按下约 20% 白，其余状态不显示背景。 */
+/** 播放页图标按钮的白色方形涟漪：按下约 20% 白，键盘焦点约 12% 白，悬停与拖动不显示背景。 */
 @OptIn(ExperimentalMaterial3Api::class)
 private val PlayerIconRippleConfiguration = RippleConfiguration(
     color = Color.White,
     rippleAlpha = RippleAlpha(
         draggedAlpha = 0f,
-        focusedAlpha = 0f,
+        focusedAlpha = 0.12f,
         hoveredAlpha = 0f,
         pressedAlpha = 0.2f,
     ),
