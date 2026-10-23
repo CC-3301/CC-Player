@@ -1016,6 +1016,48 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a paused target settles ready after two seconds on load completion`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+        controller.pause()
+        engine.reportFileLoaded()
+
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+
+        // 暂停态已加载的文件也按暂停收尾，冻结画面继续保留。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+        assertSame(frame, controller.freezeFrame.value)
+    }
+
+    @Test
+    fun `the watchdog still fails a switch whose fallback keeps deferring`() = runTest {
+        val controller = playingController()
+        progress.holdFinds()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        // 查询一直不完成，兜底一直顺延；60 秒看门狗仍然是最终失败路径。
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        assertTrue(controller.switching.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
     fun `a switch settles ready after two seconds without a presented frame`() = runTest {
         val controller = playingController()
         val frame = testBitmap()
