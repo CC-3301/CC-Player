@@ -83,7 +83,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -1879,7 +1881,8 @@ private fun PlaylistDrawer(
         modifier = modifier
             .fillMaxSize()
             .background(PlayerPlaylistGradient)
-            // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目左右各留 16dp，左侧不叠加系统 inset。
+            // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目内容左右各留 16dp，
+            // 当前项高亮在抽屉内左右各内缩 4dp；左侧不叠加系统 inset。
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(
                     WindowInsetsSides.Vertical + WindowInsetsSides.End,
@@ -1931,44 +1934,60 @@ private fun PlaylistDrawer(
             ) {
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = PlayerPlaylistHorizontalInset)
                             .height(PlayerPlaylistItemHeight)
-                            .background(
-                                color = if (active) AppColors.Accent.copy(alpha = 0.16f) else Color.Transparent,
-                                shape = RoundedCornerShape(AppRadius.Sm),
-                            )
+                            .drawBehind {
+                                if (active) {
+                                    val bounds = playlistHighlightBounds(
+                                        rowWidthPx = size.width,
+                                        insetPx = PlayerPlaylistHighlightInset.toPx(),
+                                    )
+                                    drawRect(
+                                        color = AppColors.Accent.copy(alpha = 0.16f),
+                                        topLeft = Offset(bounds.start, 0f),
+                                        size = Size(bounds.end - bounds.start, size.height),
+                                    )
+                                }
+                            }
                             .noRippleClickable { onSelect(media) },
                     ) {
-                        Text(
-                            text = playlistItemIndexLabel(index),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
-                            color = Color.White,
-                            maxLines = 1,
-                        )
-                        Text(
-                            text = media.name,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
-                                .weight(1f)
-                                .padding(start = PlayerPlaylistIndexGap),
-                        )
-                        if (active) {
+                                .fillMaxSize()
+                                .padding(horizontal = PlayerPlaylistHorizontalInset),
+                        ) {
                             Text(
-                                text = "▶",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = AppColors.Accent,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier
-                                    .padding(start = AppSpacing.Sm)
-                                    .width(16.dp),
+                                text = playlistItemIndexLabel(index),
+                                style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                                color = if (active) AppColors.Accent else Color.White,
+                                maxLines = 1,
                             )
+                            Text(
+                                text = media.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = PlayerPlaylistIndexGap),
+                            )
+                            if (active) {
+                                Text(
+                                    text = "▶",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontSize = PlayerPlaylistArrowFontSize,
+                                    ),
+                                    color = AppColors.Accent,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .padding(start = AppSpacing.Sm)
+                                        .width(PlayerPlaylistArrowWidth),
+                                )
+                            }
                         }
                     }
                 }

@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToLong
@@ -56,11 +57,31 @@ val PlayerSeekThumbSize = 16.dp
 /** 进度条视觉轨道线宽。 */
 val PlayerSeekTrackHeight = 2.dp
 
-/** 播放列表条目距屏幕左右边缘的距离。 */
+/** 播放列表条目内容距抽屉左右边缘的距离。 */
 val PlayerPlaylistHorizontalInset = 16.dp
+
+/** 播放列表当前项高亮条距抽屉左右边缘的内缩距离。 */
+val PlayerPlaylistHighlightInset = 4.dp
 
 /** 播放列表编号与标题之间的间距。 */
 val PlayerPlaylistIndexGap = 16.dp
+
+/** 播放列表当前项三角图标字号。 */
+val PlayerPlaylistArrowFontSize = 11.5.sp
+
+/** 播放列表当前项三角图标宽度。 */
+val PlayerPlaylistArrowWidth = 16.dp
+
+/** 播放列表当前项高亮的横向像素范围。 */
+data class PlaylistHighlightBounds(val start: Float, val end: Float)
+
+/** 按行宽与内缩像素计算高亮范围；行宽不足时两端重合。 */
+fun playlistHighlightBounds(rowWidthPx: Float, insetPx: Float): PlaylistHighlightBounds {
+    val width = rowWidthPx.coerceAtLeast(0f)
+    val start = insetPx.coerceIn(0f, width / 2f)
+    val end = (width - insetPx).coerceAtLeast(start)
+    return PlaylistHighlightBounds(start, end)
+}
 
 /** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
 val PlayerTransportButtonSize = 48.dp
