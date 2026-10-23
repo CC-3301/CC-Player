@@ -1879,10 +1879,10 @@ private fun PlaylistDrawer(
         modifier = modifier
             .fillMaxSize()
             .background(PlayerPlaylistGradient)
-            // 抽屉贴右半屏，只在上、下、右边缘避让系统 inset；左边缘保持 16dp。
+            // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目左右各留 16dp，左侧不叠加系统 inset。
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(
-                    WindowInsetsSides.Top + WindowInsetsSides.Bottom + WindowInsetsSides.End,
+                    WindowInsetsSides.Vertical + WindowInsetsSides.End,
                 ),
             )
             .blockPlayerGestures(),
