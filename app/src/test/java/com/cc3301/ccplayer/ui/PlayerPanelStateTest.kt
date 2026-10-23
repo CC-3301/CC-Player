@@ -129,6 +129,52 @@ class PlayerPanelStateTest {
     }
 
     @Test
+    fun `控制层隐藏时关闭已打开的面板并恢复手势`() {
+        panels.toggle(PlayerPanel.More)
+        assertFalse(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+
+        panels.closeWhenControlsHidden(controlsVisible = false, locked = false)
+
+        assertFalse(panels.anyOpen)
+        assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+    }
+
+    @Test
+    fun `控制层可见时保持面板打开`() {
+        panels.toggle(PlayerPanel.Subtitles)
+
+        panels.closeWhenControlsHidden(controlsVisible = true, locked = false)
+
+        assertTrue(panels.subtitlesOpen)
+        assertTrue(panels.anyOpen)
+    }
+
+    @Test
+    fun `锁定时关闭已打开的面板`() {
+        panels.toggle(PlayerPanel.Playlist)
+
+        panels.closeWhenControlsHidden(controlsVisible = true, locked = true)
+
+        assertFalse(panels.anyOpen)
+    }
+
+    @Test
+    fun `反复隐藏显示控制层后不留下面板状态`() {
+        PlayerPanel.entries.forEach { panel ->
+            repeat(3) {
+                panels.toggle(panel)
+                panels.closeWhenControlsHidden(controlsVisible = false, locked = false)
+                assertFalse(panels.anyOpen)
+                assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+
+                panels.closeWhenControlsHidden(controlsVisible = true, locked = false)
+                assertFalse(panels.anyOpen)
+                assertTrue(gesturesAllowed(locked = false, panelOpen = panels.anyOpen))
+            }
+        }
+    }
+
+    @Test
     fun `播放列表编号至少两位`() {
         assertEquals("01", playlistItemIndexLabel(0))
         assertEquals("09", playlistItemIndexLabel(8))

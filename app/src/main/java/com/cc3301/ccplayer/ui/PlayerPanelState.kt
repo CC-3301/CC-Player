@@ -52,6 +52,15 @@ class PlayerPanelState {
     fun closeWhenBlocked(switching: Boolean, initialLoading: Boolean) {
         if (switching || initialLoading) close()
     }
+
+    /**
+     * 控制层隐藏或锁定时关闭当前面板。
+     *
+     * 面板不渲染时必须一并清理状态，否则会继续拦截画面手势（ADR-0025）。
+     */
+    fun closeWhenControlsHidden(controlsVisible: Boolean, locked: Boolean) {
+        if (!controlsVisible || locked) close()
+    }
 }
 
 /** 播放列表编号：从 1 开始，至少两位。 */
