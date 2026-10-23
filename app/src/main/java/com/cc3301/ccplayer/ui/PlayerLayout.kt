@@ -83,59 +83,48 @@ fun playlistHighlightBounds(rowWidthPx: Float, insetPx: Float): PlaylistHighligh
     return PlaylistHighlightBounds(start, end)
 }
 
-/** 上一集/下一集按钮与图标尺寸（触控盒 48dp，ADR-0025）。 */
-val PlayerTransportButtonSize = 48.dp
-val PlayerTransportIconSize = 28.dp
+/** 上一集/播放/下一集热区：各 62 × 58dp、总宽 186dp、彼此无间隙（ADR-0025）。 */
+val PlayerTransportButtonWidth = 62.dp
+val PlayerTransportButtonHeight = 58.dp
+val PlayerTransportTotalWidth = PlayerTransportButtonWidth * 3
 
-/** 播放/暂停按钮与图标尺寸（ADR-0025）。 */
-val PlayerPlayPauseButtonSize = 58.dp
-val PlayerPlayPauseNarrowSize = 52.dp
+/** 侧键图标 28dp，播放键图标 34dp（ADR-0025）。 */
+val PlayerTransportIconSize = 28.dp
 val PlayerPlayPauseIconSize = 34.dp
 
-/** 传输三键间距（ADR-0025）；窄屏压缩到 8dp。 */
-val PlayerTransportGap = 16.dp
-val PlayerTransportNarrowGap = 8.dp
-
-/** 图标条支持的最小可用宽度；低于该宽度不再保证三组按钮不重叠。 */
-val PlayerIconBarMinimumWidth =
-    PlayerTransportButtonSize * 2 + PlayerPlayPauseNarrowSize + PlayerTransportNarrowGap * 2 +
-        PlayerSideTouchTarget * 2
+/**
+ * 三键横排阈值：三键居中后两侧余量各为 (可用宽度 - 186) / 2，
+ * 右侧要容纳两个 48dp 侧键，因此至少 378dp；不足时右侧按钮上下排列。
+ */
+val PlayerIconBarHorizontalThreshold = PlayerTransportTotalWidth + PlayerSideTouchTarget * 4
 
 /**
- * 底部图标条布局：宽屏保持 ADR 尺寸；空间不足时略缩播放键与间距；
- * 仍不足时把字幕与播放列表上下排列，保证三组按钮不重叠。
+ * 图标条最小可用宽度 282dp：左侧锁定键 + 186dp 三键 + 右侧上下排列的一个侧键。
+ * 更窄时锁定键会压到三键，当前布局不压缩三键，因此不支持。
+ */
+val PlayerIconBarMinimumWidth = PlayerTransportTotalWidth + PlayerSideTouchTarget * 2
+
+/**
+ * 底部图标条布局：三键固定 62 × 58dp 居中；空间不足时把字幕与播放列表上下排列，
+ * 保证两侧按钮不压到三键。
  *
- * [previousRightStacked] 用于宽度接近阈值时保持原排布，避免在两种布局间抖动。
+ * 360dp 等常见宽度下，三键居中后两侧余量不足以容纳右下两个按钮，右侧上下排列是固定热区的几何结果。
  * 低于 [PlayerIconBarMinimumWidth] 时布局不再保证不重叠。
  */
 data class PlayerIconBarMetrics(
     val availableWidth: Dp,
-    val sideButtonSize: Dp,
-    val previousNextSize: Dp,
-    val playPauseSize: Dp,
-    val gap: Dp,
     val rightStacked: Boolean,
 ) {
-    val transportWidth: Dp = previousNextSize * 2 + playPauseSize + gap * 2
-    val transportStart: Dp = (availableWidth - transportWidth) / 2f
-    val transportEnd: Dp = transportStart + transportWidth
-    val leftGroupEnd: Dp = sideButtonSize
-    val rightGroupWidth: Dp = if (rightStacked) sideButtonSize else sideButtonSize * 2
-    val rightGroupStart: Dp = availableWidth - rightGroupWidth
-    val nextStart: Dp = transportEnd - previousNextSize
-    val nextIconStart: Dp = nextStart + (previousNextSize - PlayerTransportIconSize) / 2f
-    val nextIconEnd: Dp = nextIconStart + PlayerTransportIconSize
+    val transportButtonWidth: Dp = PlayerTransportButtonWidth
+    val transportButtonHeight: Dp = PlayerTransportButtonHeight
+    val transportTotalWidth: Dp = PlayerTransportTotalWidth
 
-    /** 图标条高度：普通排布取三键最大尺寸，上下排列时容纳两个侧键。 */
+    /** 图标条高度：普通排布取三键高度，上下排列时容纳两个侧键。 */
     val barHeight: Dp = if (rightStacked) {
-        maxOf(previousNextSize, playPauseSize, sideButtonSize * 2)
+        maxOf(transportButtonHeight, PlayerSideTouchTarget * 2)
     } else {
-        maxOf(previousNextSize, playPauseSize)
+        maxOf(transportButtonHeight, PlayerSideTouchTarget)
     }
-
-    /** 左右两组与中间三键是否重叠。 */
-    val overlapped: Boolean =
-        leftGroupEnd > transportStart || transportEnd > rightGroupStart
 }
 
 /** 松手后预览保留到播放位置追平的时间容差，毫秒。 */
@@ -235,44 +224,12 @@ fun shouldKeepSeekPreview(
 fun isMultiPointerDrag(primaryId: Long, pressedPointerIds: List<Long>): Boolean =
     pressedPointerIds.any { it != primaryId }
 
-/** 按图标条可用宽度计算三组按钮的尺寸与排布。 */
-fun playerIconBarMetrics(
-    availableWidth: Dp,
-    previousRightStacked: Boolean = false,
-): PlayerIconBarMetrics {
-    val wideTransport = PlayerTransportButtonSize * 2 + PlayerPlayPauseButtonSize + PlayerTransportGap * 2
-    val narrowTransport = PlayerTransportButtonSize * 2 + PlayerPlayPauseNarrowSize + PlayerTransportNarrowGap * 2
-    val horizontalSideWidth = PlayerSideTouchTarget * 2
-    val wideThreshold = wideTransport + horizontalSideWidth * 2
-    val narrowHorizontalThreshold = narrowTransport + horizontalSideWidth * 2
-
-    fun metrics(playPause: Dp, gap: Dp, stacked: Boolean) = PlayerIconBarMetrics(
+/**
+ * 按图标条可用宽度决定右侧字幕与播放列表是否上下排列。
+ * 三键横排需要两侧各 96dp 侧键区；不足时右侧改为上下排列，避免压到下一集。
+ */
+fun playerIconBarMetrics(availableWidth: Dp): PlayerIconBarMetrics =
+    PlayerIconBarMetrics(
         availableWidth = availableWidth,
-        sideButtonSize = PlayerSideTouchTarget,
-        previousNextSize = PlayerTransportButtonSize,
-        playPauseSize = playPause,
-        gap = gap,
-        rightStacked = stacked,
+        rightStacked = availableWidth < PlayerIconBarHorizontalThreshold,
     )
-
-    return when {
-        availableWidth >= wideThreshold -> metrics(
-            PlayerPlayPauseButtonSize,
-            PlayerTransportGap,
-            stacked = false,
-        )
-
-        // 已处于上下排列时保持到宽屏阈值，避免在窄屏横排边界来回切换。
-        availableWidth >= narrowHorizontalThreshold && !previousRightStacked -> metrics(
-            PlayerPlayPauseNarrowSize,
-            PlayerTransportNarrowGap,
-            stacked = false,
-        )
-
-        else -> metrics(
-            PlayerPlayPauseNarrowSize,
-            PlayerTransportNarrowGap,
-            stacked = true,
-        )
-    }
-}
