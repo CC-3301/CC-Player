@@ -28,7 +28,8 @@ interface MediaPreviewSource {
 
     /**
      * 更新当前可见与预取范围。
-     * 排队中的请求取得许可后据此复查：范围已变化且不再包含该位置时直接放弃，不消耗抽取。
+     * 排队中的预取取得许可后据此复查：范围不再包含该位置时直接放弃，不消耗抽取。
+     * 可见请求不做复查，只按优先级取得许可。
      */
     fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
 }
@@ -175,8 +176,8 @@ class CachedMediaPreviewSource(
     ): LoadedPreview {
         if (cached.durationKnown) return LoadedPreview(cached.file, cached.durationMillis)
         val duration = readLocalDuration(file, key, priority)
-            // 已离开范围：不补读、不记退避，图片照常返回。
-            ?: return LoadedPreview(cached.file, durationMillis = null)
+            // 已离开范围：图片可返回，但时长未补读；同键等待者需要重试。
+            ?: return LoadedPreview(cached.file, durationMillis = null, abandoned = true)
         return when (duration) {
             is PreviewDuration.Known -> {
                 writeDurationSafely(key, duration.millis)
@@ -381,9 +382,11 @@ class CachedMediaPreviewSource(
                     LoadedPreview(image = null, durationMillis = null)
                 }
                 if (loaded.abandoned) {
-                    // 放弃不当作成功共享：等待者重新竞争，仍在可见范围的请求可真正抽取。
+                    // 先移出再取消：等待者不会取到已取消的 Deferred 空转。
+                    inFlight.remove(key, mine)
                     mine.cancel(AbandonedPreviewException())
-                    return LoadedPreview(image = null, durationMillis = null)
+                    // 放弃的结果只给本次调用者；等待者重新竞争后可真正抽取或补读时长。
+                    return loaded
                 }
                 mine.complete(loaded)
                 return loaded
@@ -458,7 +461,7 @@ class CachedMediaPreviewSource(
     private data class LoadedPreview(
         val image: File?,
         val durationMillis: Long?,
-        /** 已离开可见与预取范围而放弃抽取；不作为成功结果共享给同键等待者。 */
+        /** 本次结果只给本次调用者，不作为成功结果共享给同键等待者（离屏放弃或时长补读放弃）。 */
         val abandoned: Boolean = false,
     )
 

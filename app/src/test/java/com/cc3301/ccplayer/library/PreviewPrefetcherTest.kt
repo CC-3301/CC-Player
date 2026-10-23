@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.library
 
+import java.nio.file.Files
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.advanceTimeBy
@@ -91,33 +93,47 @@ class PreviewPrefetcherTest {
         // 首帧全部可见，预取集合为空，但范围仍要先下发。
         prefetcher.update(entries, firstVisible = 0, lastVisible = 9, rowSize = 2)
         runCurrent()
-        assertEquals(1, source.windows.size)
-        assertEquals((0..9).map { index -> entries[index].location }.toSet(), source.windows.single().first)
-        assertEquals(emptySet<String>(), source.windows.single().second)
-        assertTrue(source.previewed.isEmpty())
+        val firstWindow = source.events.first() as PreviewEvent.Window
+        assertEquals(entries.map { entry -> entry.location }.toSet(), firstWindow.visible)
+        assertTrue(firstWindow.prefetch.isEmpty())
+        assertTrue(source.events.none { event -> event is PreviewEvent.Preview })
 
         prefetcher.update(entries, firstVisible = 3, lastVisible = 5, rowSize = 2)
         runCurrent()
-        assertEquals(listOf(3, 4, 5), windowIndices(source.windows.last().first, entries))
-        assertEquals(listOf(1, 2, 6, 7), windowIndices(source.windows.last().second, entries))
-        // 范围先于预取发起。
-        assertTrue(source.previewed.isEmpty())
+        val rangeWindow = source.events.filterIsInstance<PreviewEvent.Window>().last()
+        assertEquals(listOf(3, 4, 5), windowIndices(rangeWindow.visible, entries))
+        assertEquals(listOf(1, 2, 6, 7), windowIndices(rangeWindow.prefetch, entries))
+        assertTrue(source.events.none { event -> event is PreviewEvent.Preview })
 
         advanceTimeBy(100)
         runCurrent()
+        val lastWindowIndex = source.events.indexOfLast { event -> event is PreviewEvent.Window }
+        val firstPreviewIndex = source.events.indexOfFirst { event -> event is PreviewEvent.Preview }
+        assertTrue(lastWindowIndex in 0 until firstPreviewIndex)
         assertEquals(listOf(1, 2, 6, 7), source.previewed.map { entry -> entries.indexOf(entry) })
     }
 
     @Test
-    fun `取消全部预取时清空源里的范围`() = runTest {
-        val source = RecordingPreviewSource()
-        val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
+    fun `取消全部预取后不再抽取也不落盘`() = runTest {
+        val directory = Files.createTempDirectory("prefetch-cancel").toFile()
+        try {
+            val extractor = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
+            val source = CachedMediaPreviewSource(
+                extractor = extractor,
+                cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            )
+            val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
 
-        prefetcher.update(entries, firstVisible = 3, lastVisible = 5, rowSize = 2)
-        prefetcher.cancelAll()
+            prefetcher.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+            prefetcher.cancelAll()
+            advanceTimeBy(100)
+            runCurrent()
 
-        assertEquals(emptySet<String>(), source.windows.last().first)
-        assertEquals(emptySet<String>(), source.windows.last().second)
+            assertTrue(extractor.imageRequests.isEmpty())
+            assertTrue(directory.listFiles().isNullOrEmpty())
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
@@ -136,15 +152,22 @@ class PreviewPrefetcherTest {
     }
 }
 
+/** 预览源收到的统一事件序列，用于断言下发范围与发起预取的先后。 */
+private sealed interface PreviewEvent {
+    data class Window(val visible: Set<String>, val prefetch: Set<String>) : PreviewEvent
+    data class Preview(val file: MediaFile) : PreviewEvent
+}
+
 /** 记录预取与取消的假预览源。 */
 private class RecordingPreviewSource : MediaPreviewSource {
 
     val previewed = mutableListOf<MediaFile>()
     val cancelled = mutableListOf<MediaFile>()
-    val windows = mutableListOf<Pair<Set<String>, Set<String>>>()
+    val events = mutableListOf<PreviewEvent>()
 
     override suspend fun preview(file: MediaFile): MediaPreview {
         previewed += file
+        events += PreviewEvent.Preview(file)
         try {
             delay(10_000)
         } catch (cancellation: CancellationException) {
@@ -155,7 +178,7 @@ private class RecordingPreviewSource : MediaPreviewSource {
     }
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) {
-        windows += visibleLocations to prefetchLocations
+        events += PreviewEvent.Window(visibleLocations, prefetchLocations)
     }
 }
 

@@ -30,7 +30,7 @@ class PreviewPrefetcher(
         } else {
             emptySet()
         }
-        // 先把当前范围交给预览源：排队中的请求取得许可后据此复查，离屏后不再抽取。
+        // 先把当前范围交给预览源：排队中的预取取得许可后据此复查，离屏后不再抽取。
         source.updatePreviewWindow(visibleLocations, wantedLocations)
         val iterator = jobs.iterator()
         while (iterator.hasNext()) {
