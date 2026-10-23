@@ -31,6 +31,9 @@ class FakePlaybackEngine : PlaybackEngine {
         private set
     var resumeCalls = 0
         private set
+
+    /** resume 是否模拟真实引擎产生一次加载事件；用于覆盖 0 次、1 次与多次回声。 */
+    var resumeEmitsActivity = true
     var stopCalls = 0
         private set
     var discardInFlightCalls = 0
@@ -80,8 +83,10 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun resume() {
         actions += "resume"
         resumeCalls++
-        // 与真实引擎一致：恢复播放会产生一次加载事件。
-        listener?.onLoadActivity()
+        // 与真实引擎一致：恢复播放会产生一次加载事件；测试可关掉以模拟 0 次事件。
+        if (resumeEmitsActivity) {
+            listener?.onLoadActivity(LoadActivity.PlaybackRestart, currentLoadToken)
+        }
     }
 
     override fun stop() {
@@ -163,7 +168,7 @@ class FakePlaybackEngine : PlaybackEngine {
         if (!refreshSurfaceResult) return false
         // 与真实引擎一致：成功刷新重挂 Surface，代数递增并产生一次加载事件。
         surfaceGeneration++
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.VideoReconfig, currentLoadToken)
         return true
     }
 
@@ -176,7 +181,7 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 模拟一次正常起播：文件已打开且首帧已就绪。 */
     fun reportMediaLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.FileLoaded, loadToken)
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
         listener?.onFirstFrameReady(
@@ -189,7 +194,7 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 只上报文件打开，首帧还没就绪。 */
     fun reportFileLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.FileLoaded, loadToken)
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
     }
 
@@ -199,7 +204,7 @@ class FakePlaybackEngine : PlaybackEngine {
         seekSerial: Int = currentSeekSerial,
         loadToken: Int = currentLoadToken,
     ) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
@@ -214,7 +219,7 @@ class FakePlaybackEngine : PlaybackEngine {
         seekSerial: Int = currentSeekSerial,
         loadToken: Int = currentLoadToken,
     ) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.VideoReconfig, loadToken)
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
@@ -229,7 +234,7 @@ class FakePlaybackEngine : PlaybackEngine {
         seekSerial: Int = currentSeekSerial,
         loadToken: Int = currentLoadToken,
     ) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
@@ -239,7 +244,10 @@ class FakePlaybackEngine : PlaybackEngine {
     }
 
     /** 只上报加载活动，不给 ready/end。 */
-    fun reportLoadActivity() = listener?.onLoadActivity()
+    fun reportLoadActivity(
+        activity: LoadActivity = LoadActivity.Seek,
+        loadToken: Int = currentLoadToken,
+    ) = listener?.onLoadActivity(activity, loadToken)
 
     /** 真正出帧：加载就绪后播放位置前进。 */
     fun reportFramePresented(
@@ -250,13 +258,13 @@ class FakePlaybackEngine : PlaybackEngine {
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 
     fun reportPlaybackEnded(loadToken: Int = currentLoadToken) {
-        listener?.onLoadActivity()
+        listener?.onLoadActivity(LoadActivity.EndFile, loadToken)
         listener?.onPlaybackEnded(loadToken)
     }
 
-    fun reportPlaybackFailed(errorText: String? = null) {
-        listener?.onLoadActivity()
-        listener?.onPlaybackFailed(errorText)
+    fun reportPlaybackFailed(errorText: String? = null, loadToken: Int = currentLoadToken) {
+        listener?.onLoadActivity(LoadActivity.EndFile, loadToken)
+        listener?.onPlaybackFailed(loadToken, errorText)
     }
 
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =

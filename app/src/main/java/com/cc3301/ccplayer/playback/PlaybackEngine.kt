@@ -104,8 +104,12 @@ interface PlaybackEngine {
             loadToken: Int,
         )
 
-        /** 收到任一加载相关事件；用于重置“完全无事件”看门狗。 */
-        fun onLoadActivity()
+        /**
+         * 收到任一加载相关事件；用于重置“完全无事件”看门狗。
+         * [activity] 是事件来源，控制层据此区分真实加载活动与自身 resume 的回声；
+         * [loadToken] 是产生它的加载，未知时为 null。
+         */
+        fun onLoadActivity(activity: LoadActivity, loadToken: Int?)
 
         /**
          * 新画面已真正输出到 Surface：加载已就绪后播放位置实际前进，或重新挂载 Surface 后再次前进。
@@ -120,8 +124,12 @@ interface PlaybackEngine {
         /** 当前媒体自然播放结束；[loadToken] 标识产生它的加载。被替换或停止产生的结束事件不上报。 */
         fun onPlaybackEnded(loadToken: Int)
 
-        /** 媒体打开失败或播放中出错，按切集失败处理；[errorText] 是播放核心给出的错误文本。 */
-        fun onPlaybackFailed(errorText: String?)
+        /**
+         * 媒体打开失败或播放中出错，按切集失败处理。
+         * [loadToken] 标识产生失败的加载，控制层据此丢弃取消或重定向后迟到的旧目标失败；
+         * [errorText] 是播放核心给出的错误文本。
+         */
+        fun onPlaybackFailed(loadToken: Int, errorText: String?)
 
         /** 播放位置或时长更新，单位毫秒。 */
         fun onPositionChanged(positionMillis: Long, durationMillis: Long)
@@ -129,4 +137,15 @@ interface PlaybackEngine {
         /** 画面尺寸变化：宽高比按这对像素值推算；宽或高非正表示当前没有画面。 */
         fun onVideoSizeChanged(width: Int, height: Int)
     }
+}
+
+/** 加载相关事件的来源；控制层只把它当作活动分类，不依赖 mpv 事件编号。 */
+enum class LoadActivity {
+    StartFile,
+    FileLoaded,
+    Seek,
+    VideoReconfig,
+    AudioReconfig,
+    PlaybackRestart,
+    EndFile,
 }

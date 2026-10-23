@@ -279,8 +279,8 @@ class PlaybackController(
     /** 切集无帧失败计时；暂停或 Surface 分离时取消，按当前时间结算剩余。 */
     private var switchFrameWatchdogJob: Job? = null
 
-    /** 控制器自身 resume 会触发加载事件；只忽略这一次，不刷新无帧窗口。 */
-    private var ignoreNextLoadActivity = false
+    /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
+    private val resumeActivityGate = ResumeActivityGate()
 
     /** Surface 重挂后的新帧等待；超时只允许一次非 seek 刷新。 */
     private var surfaceFrameWaitJob: Job? = null
@@ -1010,13 +1010,11 @@ class PlaybackController(
     }
 
     /** 加载相关事件到达：重置“完全无事件”看门狗。 */
-    override fun onLoadActivity() {
+    override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {
         if (loadPhase != LoadPhase.None) beginLoadWatchdog()
-        // 控制器自身 resume 产生的事件不是新的加载；只吞掉紧随其后的一次。
-        if (ignoreNextLoadActivity) {
-            ignoreNextLoadActivity = false
-            return
-        }
+        // 控制器自身 resume 产生的 PLAYBACK_RESTART 不是新的加载：同一令牌的多次回声都不刷新无帧窗口。
+        // 真实 SEEK/FILE_LOADED/VIDEO_RECONFIG 等来源不受影响，仍按最后一次加载事件刷新窗口。
+        if (resumeActivityGate.shouldIgnore(activity, loadToken)) return
         // 目标加载期间的真实加载事件都按“最后一次加载事件”刷新无帧窗口。
         if (loadPhase == LoadPhase.Switching) restartSwitchFrameDeadline()
     }
@@ -1072,7 +1070,9 @@ class PlaybackController(
         }
     }
 
-    override fun onPlaybackFailed(errorText: String?) {
+    override fun onPlaybackFailed(loadToken: Int, errorText: String?) {
+        // 取消或重定向后，旧目标迟到的失败不能改变当前阶段，也不提示。
+        if (loadToken != expectedLoadToken) return
         handleLoadFailure(errorText = errorText)
     }
 
@@ -1226,9 +1226,9 @@ class PlaybackController(
         armSwitchFrameWatchdog()
     }
 
-    /** 控制器自身 resume：忽略它产生的一次加载事件，不刷新无帧窗口。 */
+    /** 控制器自身 resume：只忽略同一加载令牌的 PLAYBACK_RESTART 回声，不刷新无帧窗口。 */
     private fun resumeEngineForSwitch() {
-        ignoreNextLoadActivity = true
+        if (loadPhase == LoadPhase.Switching) resumeActivityGate.onResume(expectedLoadToken)
         engine.resume()
     }
 
@@ -1281,7 +1281,7 @@ class PlaybackController(
     private fun clearSwitchFrameDeadline() {
         switchFrameRemainingMillis = 0
         switchFrameDeadlineMillis = null
-        ignoreNextLoadActivity = false
+        resumeActivityGate.reset()
     }
 
     private fun onSwitchFrameMissing() {
@@ -1729,8 +1729,8 @@ class PlaybackController(
             }
         }
 
-        override fun onLoadActivity() {
-            scope.launch { target.onLoadActivity() }
+        override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {
+            scope.launch { target.onLoadActivity(activity, loadToken) }
         }
 
         override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
@@ -1745,8 +1745,8 @@ class PlaybackController(
             scope.launch { target.onPlaybackEnded(loadToken) }
         }
 
-        override fun onPlaybackFailed(errorText: String?) {
-            scope.launch { target.onPlaybackFailed(errorText) }
+        override fun onPlaybackFailed(loadToken: Int, errorText: String?) {
+            scope.launch { target.onPlaybackFailed(loadToken, errorText) }
         }
 
         override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
@@ -1790,5 +1790,38 @@ class PlaybackController(
 
         /** 定时暂停的分钟换算。 */
         private const val MINUTE_MILLIS = 60_000L
+    }
+}
+
+/**
+ * 区分控制器自身 resume 产生的加载事件回声与真实加载活动。
+ * resume 的回声只表现为同一加载令牌的 PLAYBACK_RESTART，一次 resume 产生多次也不刷新无帧窗口；
+ * 其它来源的事件视为真实活动。START_FILE/FILE_LOADED/SEEK/END_FILE 会结束回声期，
+ * 之后的 PLAYBACK_RESTART 重新按真实事件处理。
+ */
+internal class ResumeActivityGate {
+
+    private var resumeToken: Int? = null
+
+    /** 控制器下发 resume 时绑定本次加载令牌。 */
+    fun onResume(loadToken: Int) {
+        resumeToken = loadToken
+    }
+
+    /** 返回 true 表示该事件是自身 resume 的回声，应忽略；真实活动返回 false。 */
+    fun shouldIgnore(activity: LoadActivity, loadToken: Int?): Boolean {
+        if (activity == LoadActivity.StartFile || activity == LoadActivity.FileLoaded ||
+            activity == LoadActivity.Seek || activity == LoadActivity.EndFile
+        ) {
+            resumeToken = null
+        }
+        return activity == LoadActivity.PlaybackRestart &&
+            loadToken != null &&
+            loadToken == resumeToken
+    }
+
+    /** 切集收尾时清除回声期，避免影响下一次加载。 */
+    fun reset() {
+        resumeToken = null
     }
 }

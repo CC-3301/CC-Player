@@ -1765,6 +1765,98 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
     }
 
+    @Test
+    fun `a late failure from a cancelled target is dropped`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        val cancelledToken = engine.currentLoadToken
+        assertTrue(controller.cancelSwitch())
+        val restoreToken = engine.currentLoadToken
+
+        // 被取消目标的失败在取消之后才到：不得停掉恢复中的原片，也不得提示失败。
+        engine.reportPlaybackFailed("旧目标失败", loadToken = cancelledToken)
+
+        assertEquals(0, failures.size)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(restoreToken, engine.currentLoadToken)
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv", "root/ep1.mkv"), engine.startedUrls)
+
+        // 当前恢复加载的失败仍然处理。
+        engine.reportPlaybackFailed("恢复失败", loadToken = restoreToken)
+        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `a late failure from a retargeted target is dropped`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val failures = collectFailures(controller)
+
+        controller.next()
+        val abandonedToken = engine.currentLoadToken
+        controller.next()
+        val targetToken = engine.currentLoadToken
+
+        // 已被重定向掉的目标失败：当前切集目标不变，不触发恢复或提示。
+        engine.reportPlaybackFailed("旧目标失败", loadToken = abandonedToken)
+
+        assertEquals(0, failures.size)
+        assertEquals(2, controller.currentIndex.value)
+        assertTrue(controller.switching.value)
+        assertEquals(targetToken, engine.currentLoadToken)
+        assertEquals(
+            listOf("root/ep1.mkv", "root/ep2.mkv", "root/ep3.mkv"),
+            engine.startedUrls,
+        )
+
+        engine.reportPlaybackFailed("目标失败", loadToken = targetToken)
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `a resume with no echo does not hide real load activity`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+
+        // 0 次回声：真实加载事件仍按活动处理，刷新无帧窗口。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.FileLoaded, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.VideoReconfig, 7))
+    }
+
+    @Test
+    fun `a single resume echo is ignored but real load activity still refreshes`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        // 真实 SEEK 结束回声期，后续 PLAYBACK_RESTART 按真实事件处理。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 7))
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
+    @Test
+    fun `multiple resume echoes do not repeatedly refill the window`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        repeat(3) {
+            assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        }
+        // 同一次 resume 的多次回声都被吞掉；真实 VIDEO_RECONFIG 仍然刷新。
+        assertFalse(gate.shouldIgnore(LoadActivity.VideoReconfig, 7))
+
+        // 不同加载令牌的 PLAYBACK_RESTART 不是这次 resume 的回声。
+        gate.onResume(8)
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
     private fun dispatch(controller: PlaybackController, action: MediaSessionAction) {
         dispatchMediaAction(
             action,
