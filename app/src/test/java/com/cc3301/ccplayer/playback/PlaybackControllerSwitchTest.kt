@@ -1849,11 +1849,27 @@ class PlaybackControllerSwitchTest {
         repeat(3) {
             assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
         }
-        // 同一次 resume 的多次回声都被吞掉；真实 VIDEO_RECONFIG 仍然刷新。
+        // 回声次数有上限：超出后按真实事件刷新窗口，不会无限忽略。
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+        // 真实 VIDEO_RECONFIG 仍然刷新。
         assertFalse(gate.shouldIgnore(LoadActivity.VideoReconfig, 7))
 
         // 不同加载令牌的 PLAYBACK_RESTART 不是这次 resume 的回声。
         gate.onResume(8)
+        assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+    }
+
+    @Test
+    fun `an old-generation event does not end the resume echo period`() {
+        val gate = ResumeActivityGate()
+
+        gate.onResume(7)
+        // 旧代际事件不清除回声期。
+        assertFalse(gate.shouldIgnore(LoadActivity.Seek, 6))
+        assertTrue(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
+
+        // 同令牌真实事件才结束回声期。
+        assertFalse(gate.shouldIgnore(LoadActivity.FileLoaded, 7))
         assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
     }
 

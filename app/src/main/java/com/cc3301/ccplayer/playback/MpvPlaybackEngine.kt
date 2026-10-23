@@ -83,6 +83,8 @@ class MpvPlaybackEngine(
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
         val spec = loadCoordinator.start(url)
+        // 成功打开前的日志也要归到本次加载；START_FILE 会清掉这之前混入的上一轮排队日志。
+        errorLog.onStartLoad(spec.token)
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
@@ -242,10 +244,7 @@ class MpvPlaybackEngine(
                 listener?.onLoadActivity(LoadActivity.StartFile, token)
                 errorLog.onStartFile(token)
             }
-            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> {
-                listener?.onLoadActivity(LoadActivity.FileLoaded, loadCoordinator.pendingLoadToken())
-                onFileLoaded()
-            }
+            MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
                 listener?.onLoadActivity(LoadActivity.Seek, loadCoordinator.currentLoadedToken())
@@ -277,6 +276,8 @@ class MpvPlaybackEngine(
     private fun onFileLoaded() {
         // 先消化旧代际的结束事件并按 mpv 当前路径校验队首，迟到事件不能占掉新加载的代际。
         val spec = loadCoordinator.onFileLoaded(MPVLib.getPropertyString(PATH_PROPERTY)) ?: return
+        // 只有接受的 FILE_LOADED 才算本轮加载活动；被拒绝的旧事件不能刷新无帧窗口。
+        listener?.onLoadActivity(LoadActivity.FileLoaded, spec.token)
         hasVideoTrack = trackIndexes().any { trackPropertyString(it, TYPE_ENTRY) == VIDEO_TRACK_TYPE }
         listener?.onMediaLoaded(spec.url, spec.token, hasVideoTrack)
         // 纯音频没有首帧可等；有视频时等 VIDEO_RECONFIG 或 PLAYBACK_RESTART。
@@ -419,19 +420,38 @@ class MpvPlaybackEngine(
 }
 
 /**
- * 文件事件与日志桥的接线：日志条目按加载令牌归属。
- * START_FILE 把后续日志归到该文件，只清理同一令牌的旧条目；
- * END_FILE 读取该令牌的文本后只清理该令牌，替换与播完的结束不会动当前轮的文本。
+ * 文件事件与日志桥的接线：日志条目按加载令牌独立归属。
+ * start 把打开阶段的日志归到本次加载；START_FILE 清掉同一令牌在真正开始加载前的排队日志，
+ * END_FILE 读取并清理该令牌的文本，替换与播完的结束不会动当前轮的文本。
  * 单独抽出，便于不依赖 JNI 验证顺序。
  */
 internal class MpvErrorLogBridge(
     private val onFailure: (loadToken: Int, errorText: String?) -> Unit,
 ) : MPVLib.LogObserver {
 
+    private data class Entry(val sequence: Long, val text: String)
+
     private val lock = Any()
-    private val errors = ArrayDeque<Pair<Int, String>>()
+
+    /** 每个加载令牌独立缓冲，旧令牌残留不会挤掉本轮首条根因。 */
+    private val errors = mutableMapOf<Int, ArrayDeque<Entry>>()
     private val capacity = 3
     private var activeToken: Int? = null
+
+    /** 最近一次 start 的令牌与当时序号；用于没有 START_FILE 时的失败兜底。 */
+    private var startedToken: Int? = null
+    private var startedAfterSequence = 0L
+    private var nextSequence = 0L
+
+    /** 新一次加载：后续日志归到该令牌，只清理该令牌的旧条目。 */
+    fun onStartLoad(loadToken: Int) {
+        synchronized(lock) {
+            activeToken = loadToken
+            startedToken = loadToken
+            startedAfterSequence = nextSequence
+            errors.remove(loadToken)
+        }
+    }
 
     /** mpv 事件线程转发的日志；只留下错误级别并按当前加载令牌归属。 */
     override fun logMessage(prefix: String, level: Int, text: String) {
@@ -440,21 +460,31 @@ internal class MpvErrorLogBridge(
         if (message.isEmpty()) return
         synchronized(lock) {
             val token = activeToken ?: return
-            if (errors.size >= capacity) {
+            val entries = errors.getOrPut(token) { ArrayDeque() }
+            if (entries.size >= capacity) {
                 // 保留首条根因，淘汰紧随其后的旧条目，再放入最新一条。
-                val first = errors.removeFirst()
-                while (errors.size > capacity - 2) errors.removeFirst()
-                errors.addFirst(first)
+                val first = entries.removeFirst()
+                while (entries.size > capacity - 2) entries.removeFirst()
+                entries.addFirst(first)
             }
-            errors.addLast(token to if (prefix.isBlank()) message else "$prefix: $message")
+            entries.addLast(Entry(++nextSequence, if (prefix.isBlank()) message else "$prefix: $message"))
         }
     }
 
-    /** START_FILE 归属到队首加载：只清理同一令牌的旧条目，不动上一轮的条目。 */
+    /**
+     * START_FILE 归属到队首加载：清掉同一令牌在开始加载前混入的上一轮排队日志，
+     * 并丢弃其它令牌的残留。[loadToken] 为 null 表示队列已清空，后续日志不再挂到旧令牌。
+     */
     fun onStartFile(loadToken: Int?) {
         synchronized(lock) {
             activeToken = loadToken
-            if (loadToken != null) errors.removeAll { it.first == loadToken }
+            if (loadToken == null) return
+            errors.remove(loadToken)
+            errors.keys.retainAll { it == loadToken }
+            if (startedToken != loadToken) {
+                startedToken = loadToken
+                startedAfterSequence = nextSequence
+            }
         }
     }
 
@@ -462,14 +492,24 @@ internal class MpvErrorLogBridge(
     fun onEndFile(end: LoadEnd) {
         val token = end.spec?.token
         val text = synchronized(lock) {
-            val value = if (token == null) {
-                null
-            } else {
-                errors.filter { it.first == token }.map { it.second }
-                    .joinToString(" | ")
-                    .takeIf { it.isNotBlank() }
+            if (token == null) return@synchronized null
+            val entries = errors[token]
+            var value = entries?.joinToString(" | ") { it.text }?.takeIf { it.isNotBlank() }
+            if (value == null && token == startedToken) {
+                // 本令牌没有条目：回退到本次 start 之后尚未消费的条目，覆盖没有 START_FILE 的打开失败。
+                val fallback = errors.values.asSequence()
+                    .flatten()
+                    .filter { it.sequence > startedAfterSequence }
+                    .sortedBy { it.sequence }
+                    .map { it.text }
+                    .toList()
+                value = fallback.joinToString(" | ").takeIf { it.isNotBlank() }
+                if (value != null) {
+                    errors.values.forEach { list -> list.removeAll { it.sequence > startedAfterSequence } }
+                }
             }
-            if (token != null) errors.removeAll { it.first == token }
+            errors.remove(token)
+            errors.entries.removeAll { it.value.isEmpty() }
             value
         }
         if (end.end == MpvFileEvents.End.Failed && token != null) onFailure(token, text)

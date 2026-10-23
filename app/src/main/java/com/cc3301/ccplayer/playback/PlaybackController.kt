@@ -1011,10 +1011,9 @@ class PlaybackController(
 
     /** 加载相关事件到达：重置“完全无事件”看门狗。 */
     override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {
-        if (loadPhase != LoadPhase.None) beginLoadWatchdog()
-        // 控制器自身 resume 产生的 PLAYBACK_RESTART 不是新的加载：同一令牌的多次回声都不刷新无帧窗口。
-        // 真实 SEEK/FILE_LOADED/VIDEO_RECONFIG 等来源不受影响，仍按最后一次加载事件刷新窗口。
+        // 控制器自身 resume 产生的 PLAYBACK_RESTART 不是新的加载：不重置看门狗，也不刷新无帧窗口。
         if (resumeActivityGate.shouldIgnore(activity, loadToken)) return
+        if (loadPhase != LoadPhase.None) beginLoadWatchdog()
         // 目标加载期间的真实加载事件都按“最后一次加载事件”刷新无帧窗口。
         if (loadPhase == LoadPhase.Switching) restartSwitchFrameDeadline()
     }
@@ -1795,33 +1794,47 @@ class PlaybackController(
 
 /**
  * 区分控制器自身 resume 产生的加载事件回声与真实加载活动。
- * resume 的回声只表现为同一加载令牌的 PLAYBACK_RESTART，一次 resume 产生多次也不刷新无帧窗口；
- * 其它来源的事件视为真实活动。START_FILE/FILE_LOADED/SEEK/END_FILE 会结束回声期，
- * 之后的 PLAYBACK_RESTART 重新按真实事件处理。
+ * resume 的回声只表现为同一加载令牌的 PLAYBACK_RESTART，最多忽略 [MAX_RESUME_ECHOES] 次；
+ * 只有同一令牌的 START_FILE/FILE_LOADED/SEEK/END_FILE 才结束回声期，
+ * 旧代际事件不会提前解除，之后的 PLAYBACK_RESTART 重新按真实事件处理。
  */
 internal class ResumeActivityGate {
 
     private var resumeToken: Int? = null
+    private var remainingEchoes = 0
 
-    /** 控制器下发 resume 时绑定本次加载令牌。 */
+    /** 控制器下发 resume 时绑定本次加载令牌，并重置回声次数上限。 */
     fun onResume(loadToken: Int) {
         resumeToken = loadToken
+        remainingEchoes = MAX_RESUME_ECHOES
     }
 
     /** 返回 true 表示该事件是自身 resume 的回声，应忽略；真实活动返回 false。 */
     fun shouldIgnore(activity: LoadActivity, loadToken: Int?): Boolean {
-        if (activity == LoadActivity.StartFile || activity == LoadActivity.FileLoaded ||
-            activity == LoadActivity.Seek || activity == LoadActivity.EndFile
+        val sameLoad = loadToken != null && loadToken == resumeToken
+        if (activity == LoadActivity.PlaybackRestart) {
+            if (!sameLoad || remainingEchoes <= 0) return false
+            remainingEchoes--
+            return true
+        }
+        // 只有同一加载的真实事件才结束回声期；旧代际事件不能提前解除。
+        if (sameLoad && (activity == LoadActivity.StartFile || activity == LoadActivity.FileLoaded ||
+                activity == LoadActivity.Seek || activity == LoadActivity.EndFile)
         ) {
             resumeToken = null
+            remainingEchoes = 0
         }
-        return activity == LoadActivity.PlaybackRestart &&
-            loadToken != null &&
-            loadToken == resumeToken
+        return false
     }
 
     /** 切集收尾时清除回声期，避免影响下一次加载。 */
     fun reset() {
         resumeToken = null
+        remainingEchoes = 0
+    }
+
+    private companion object {
+        /** 一次 resume 最多吞掉的回声事件数；超出后按真实事件刷新窗口。 */
+        const val MAX_RESUME_ECHOES = 3
     }
 }
