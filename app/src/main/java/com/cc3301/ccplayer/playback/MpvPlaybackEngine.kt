@@ -80,6 +80,8 @@ class MpvPlaybackEngine(
     }
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
+        // 与日志回调共用同一把锁：新加载一开始就换代，不沿用上一轮文本。
+        errorLog.start()
         val spec = loadCoordinator.start(url)
         // 错误日志在事件线程收到 START_FILE 时清空，避免上一轮排队日志混进本轮。
         positionSeconds = 0.0
@@ -457,26 +459,59 @@ internal class MpvErrorCollector(capacity: Int = 3) {
 }
 
 /**
- * 文件事件与日志桥的接线：START_FILE 清空上一轮日志，
- * END_FILE 失败时把本轮错误文本交给出口。单独抽出，便于不依赖 JNI 验证顺序。
+ * 文件事件与日志桥的接线：start 与 START_FILE 在同一把锁下清空上一轮，
+ * 日志条目带加载代际，END_FILE 只读本轮并在读取后 reset。
+ * 单独抽出，便于不依赖 JNI 验证顺序。
  */
 internal class MpvErrorLogBridge(
     private val onFailure: (String?) -> Unit,
 ) : MPVLib.LogObserver {
 
-    private val errors = MpvErrorCollector()
+    private val lock = Any()
+    private val errors = ArrayDeque<Pair<Int, String>>()
+    private val capacity = 3
+    private var generation = 0
 
-    /** mpv 事件线程转发的日志；只留下错误级别，供 END_FILE 失败时带上文本。 */
+    /** 新一次加载开始：同步换代并清空上一轮，避免沿用旧文本。 */
+    fun start() {
+        synchronized(lock) {
+            generation++
+            errors.clear()
+        }
+    }
+
+    /** mpv 事件线程转发的日志；只留下错误级别并标记当前加载代际。 */
     override fun logMessage(prefix: String, level: Int, text: String) {
-        errors.onLog(prefix, level, text)
+        if (level > MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR) return
+        val message = text.trim()
+        if (message.isEmpty()) return
+        synchronized(lock) {
+            if (errors.size >= capacity) {
+                // 保留首条根因，淘汰紧随其后的旧条目，再放入最新一条。
+                val first = errors.removeFirst()
+                while (errors.size > capacity - 2) errors.removeFirst()
+                errors.addFirst(first)
+            }
+            errors.addLast(generation to if (prefix.isBlank()) message else "$prefix: $message")
+        }
     }
 
+    /** START_FILE 也清空一次：旧文件结束到新文件开始之间可能还有排队日志。 */
     fun onStartFile() {
-        errors.reset()
+        synchronized(lock) {
+            errors.clear()
+        }
     }
 
+    /** END_FILE 只读当前代际；无论成功失败，读完即 reset。 */
     fun onEndFile(end: MpvFileEvents.End) {
-        dispatchPlaybackFailure(end, errors::lastErrorText, onFailure)
+        val text = synchronized(lock) {
+            val current = errors.filter { it.first == generation }.map { it.second }
+            val value = current.joinToString(" | ").takeIf { it.isNotBlank() }
+            errors.clear()
+            if (end == MpvFileEvents.End.Failed) value else null
+        }
+        if (end == MpvFileEvents.End.Failed) onFailure(text)
     }
 }
 

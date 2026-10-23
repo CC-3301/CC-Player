@@ -1003,6 +1003,36 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a slow seek refreshes the no-frame window before the first frame`() = runTest {
+        val controller = playingController()
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        progress.holdFinds()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(50_000)
+        runCurrent()
+        assertTrue(controller.switching.value)
+
+        // 续播查询与 seek 在 50 秒后才完成，SEEK 是真实的最后一次加载事件。
+        progress.releaseFinds()
+        runCurrent()
+        engine.reportLoadActivity()
+        advanceTimeBy(15_000)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        // 首帧在 65 秒到达并起播；2 秒后的兜底收尾不能按已过期的窗口判无帧失败。
+        engine.reportVideoReconfigured()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
     fun `late load events do not reset the remaining no-frame window`() = runTest {
         val controller = playingController()
         val frame = testBitmap()

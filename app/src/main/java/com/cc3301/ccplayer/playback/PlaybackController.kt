@@ -250,7 +250,7 @@ class PlaybackController(
     private enum class ReadyState {
         /** 没有等待中的新帧。 */
         Idle,
-        /** 已收到就绪信号并起播，等新帧上屏；2 秒无位置前进按就绪收尾。 */
+        /** 已收到加载完成或就绪信号，等新帧上屏；2 秒无位置前进按就绪收尾。 */
         AwaitingFrame,
         /** Surface 重挂后等新帧；超时仍没有才允许一次非 seek 刷新。 */
         AwaitingSurfaceFrame,
@@ -278,6 +278,9 @@ class PlaybackController(
 
     /** 切集无帧失败计时；暂停或 Surface 分离时取消，按当前时间结算剩余。 */
     private var switchFrameWatchdogJob: Job? = null
+
+    /** 控制器自身 resume 会触发加载事件；只忽略这一次，不刷新无帧窗口。 */
+    private var ignoreNextLoadActivity = false
 
     /** Surface 重挂后的新帧等待；超时只允许一次非 seek 刷新。 */
     private var surfaceFrameWaitJob: Job? = null
@@ -680,7 +683,7 @@ class PlaybackController(
         paused = false
         // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
         if (loadPhase == LoadPhase.Switching) {
-            if (switchPlaybackStarted) engine.resume()
+            if (switchPlaybackStarted) resumeEngineForSwitch()
             // 恢复只接着剩余窗口计时；已有计时任务时保留原 deadline。
             armSwitchFrameWatchdog()
             return
@@ -695,8 +698,12 @@ class PlaybackController(
             playAt(_currentIndex.value)
             return
         }
-        if (switchFramePending) armSwitchFrameWatchdog()
-        engine.resume()
+        if (switchFramePending) {
+            armSwitchFrameWatchdog()
+            resumeEngineForSwitch()
+        } else {
+            engine.resume()
+        }
     }
 
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
@@ -925,7 +932,7 @@ class PlaybackController(
             // 手动切集完成后自动播放；先起播，等播放位置前进或 2 秒兜底再收尾。
             readyState = ReadyState.AwaitingFrame
             switchPlaybackStarted = true
-            engine.resume()
+            resumeEngineForSwitch()
             beginFrameWait()
             return
         }
@@ -1005,20 +1012,19 @@ class PlaybackController(
     /** 加载相关事件到达：重置“完全无事件”看门狗。 */
     override fun onLoadActivity() {
         if (loadPhase != LoadPhase.None) beginLoadWatchdog()
-        // 只有目标仍在加载且尚未就绪时，加载事件才重新起算无帧窗口。
-        // 就绪后的 VIDEO_RECONFIG/PLAYBACK_RESTART 不能把剩余窗口重置为满额。
-        if (loadPhase == LoadPhase.Switching &&
-            readyState != ReadyState.AwaitingFrame &&
-            !paused &&
-            _renderSurfaceAvailable.value
-        ) {
-            restartSwitchFrameDeadline()
+        // 控制器自身 resume 产生的事件不是新的加载；只吞掉紧随其后的一次。
+        if (ignoreNextLoadActivity) {
+            ignoreNextLoadActivity = false
+            return
         }
+        // 目标加载期间的真实加载事件都按“最后一次加载事件”刷新无帧窗口。
+        if (loadPhase == LoadPhase.Switching) restartSwitchFrameDeadline()
     }
 
     /**
      * 新画面已真正输出到 Surface（加载就绪后播放位置前进）或暂停态刷新成功。
-     * 只有这里能撤冻结画面与后台缓存帧；加载收尾本身不删冻结画面。
+     * 新帧确认在这里撤冻结画面与后台缓存帧。例外：切集目标无视频轨时由
+     * [finishSwitch] 按黑底撤帧；片尾恢复由 [finishRestore] 保持或撤掉黑底。
      */
     override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
         if (!active) return
@@ -1194,7 +1200,7 @@ class PlaybackController(
             switchPlaybackStarted = false
             updateState(PlaybackState.Paused)
         } else {
-            if (!switchPlaybackStarted) engine.resume()
+            if (!switchPlaybackStarted) resumeEngineForSwitch()
             switchPlaybackStarted = false
             updateState(PlaybackState.Playing)
         }
@@ -1207,13 +1213,23 @@ class PlaybackController(
         }
     }
 
-    /** 切集开始或收到新的加载事件：无帧窗口重新从完整时长起算。 */
+    /**
+     * 切集开始或收到新的加载事件：只把剩余时长重置为完整窗口并清空绝对 deadline。
+     * 绝对 deadline 只能由 [armSwitchFrameWatchdog] 在可计时时建立，
+     * 暂停或 Surface 分离期间不允许存在 deadline。
+     */
     private fun restartSwitchFrameDeadline() {
         switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
-        switchFrameDeadlineMillis = nowMillis() + NO_FRAME_WINDOW_MILLIS
+        switchFrameDeadlineMillis = null
         switchFrameWatchdogJob?.cancel()
         switchFrameWatchdogJob = null
         armSwitchFrameWatchdog()
+    }
+
+    /** 控制器自身 resume：忽略它产生的一次加载事件，不刷新无帧窗口。 */
+    private fun resumeEngineForSwitch() {
+        ignoreNextLoadActivity = true
+        engine.resume()
     }
 
     /**
@@ -1265,6 +1281,7 @@ class PlaybackController(
     private fun clearSwitchFrameDeadline() {
         switchFrameRemainingMillis = 0
         switchFrameDeadlineMillis = null
+        ignoreNextLoadActivity = false
     }
 
     private fun onSwitchFrameMissing() {

@@ -31,6 +31,7 @@ class PlaybackControllerDiagnosticsTest {
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
+            nowMillis = { 0L },
         )
 
         controller.openPlaylist(listOf(media), media)
@@ -194,6 +195,7 @@ class PlaybackControllerDiagnosticsTest {
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
+            nowMillis = { 0L },
         )
         open(controller)
 

@@ -557,14 +557,29 @@ class MpvFileEventsTest {
         val failures = mutableListOf<String?>()
         val bridge = MpvErrorLogBridge { failures += it }
 
-        // 引擎注册的日志桥先转发上一轮日志，再收到 START_FILE，随后才是本轮日志。
+        // 引擎 start 换代，START_FILE 清空旧文件排队日志，随后才是本轮日志。
+        bridge.start()
         bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮错误")
         bridge.onStartFile()
         bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
 
-        // 替换与自然播完不提示；只有 END_FILE 失败才传出本轮文本。
-        bridge.onEndFile(MpvFileEvents.End.Ended)
-        assertTrue(failures.isEmpty())
+        bridge.onEndFile(MpvFileEvents.End.Failed)
+        assertEquals(listOf<String?>("ffmpeg: 本轮错误"), failures)
+
+        // 读取后 reset：下一次 END_FILE 不再带出同一文本。
+        bridge.onEndFile(MpvFileEvents.End.Failed)
+        assertEquals(listOf<String?>("ffmpeg: 本轮错误", null), failures)
+    }
+
+    @Test
+    fun `start clears the previous load even without a START_FILE event`() {
+        val failures = mutableListOf<String?>()
+        val bridge = MpvErrorLogBridge { failures += it }
+
+        bridge.start()
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮错误")
+        bridge.start()
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
 
         bridge.onEndFile(MpvFileEvents.End.Failed)
         assertEquals(listOf<String?>("ffmpeg: 本轮错误"), failures)
