@@ -56,8 +56,11 @@ val PlayerSeekThumbSize = 16.dp
 /** 进度条视觉轨道线宽。 */
 val PlayerSeekTrackHeight = 2.dp
 
-/** 播放列表条目距屏幕左右边缘的距离。 */
+/** 播放列表条目内容距抽屉左右边缘的距离。 */
 val PlayerPlaylistHorizontalInset = 16.dp
+
+/** 播放列表当前项高亮条距抽屉左右边缘的内缩距离。 */
+val PlayerPlaylistHighlightInset = 4.dp
 
 /** 播放列表编号与标题之间的间距。 */
 val PlayerPlaylistIndexGap = 16.dp

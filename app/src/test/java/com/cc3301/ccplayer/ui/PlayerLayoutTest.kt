@@ -25,6 +25,11 @@ class PlayerLayoutTest {
     }
 
     @Test
+    fun `播放列表当前项高亮左右各内缩 4dp`() {
+        assertEquals(4.dp, PlayerPlaylistHighlightInset)
+    }
+
+    @Test
     fun `比例未知时铺满容器`() {
         val viewport = videoViewport(
             containerWidth = 1000f,

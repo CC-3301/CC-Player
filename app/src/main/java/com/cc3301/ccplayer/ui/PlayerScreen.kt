@@ -1931,44 +1931,53 @@ private fun PlaylistDrawer(
             ) {
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = PlayerPlaylistHorizontalInset)
-                            .height(PlayerPlaylistItemHeight)
-                            .background(
-                                color = if (active) AppColors.Accent.copy(alpha = 0.16f) else Color.Transparent,
-                                shape = RoundedCornerShape(AppRadius.Sm),
-                            )
-                            .noRippleClickable { onSelect(media) },
+                            .height(PlayerPlaylistItemHeight),
                     ) {
-                        Text(
-                            text = playlistItemIndexLabel(index),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
-                            color = Color.White,
-                            maxLines = 1,
-                        )
-                        Text(
-                            text = media.name,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(start = PlayerPlaylistIndexGap),
-                        )
                         if (active) {
-                            Text(
-                                text = "▶",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = AppColors.Accent,
-                                textAlign = TextAlign.Center,
+                            Box(
                                 modifier = Modifier
-                                    .padding(start = AppSpacing.Sm)
-                                    .width(16.dp),
+                                    .fillMaxSize()
+                                    .padding(horizontal = PlayerPlaylistHighlightInset)
+                                    .background(AppColors.Accent.copy(alpha = 0.16f)),
                             )
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = PlayerPlaylistHorizontalInset)
+                                .noRippleClickable { onSelect(media) },
+                        ) {
+                            Text(
+                                text = playlistItemIndexLabel(index),
+                                style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                                color = if (active) AppColors.Accent else Color.White,
+                                maxLines = 1,
+                            )
+                            Text(
+                                text = media.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = PlayerPlaylistIndexGap),
+                            )
+                            if (active) {
+                                Text(
+                                    text = "▶",
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.5.sp),
+                                    color = AppColors.Accent,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .padding(start = AppSpacing.Sm)
+                                        .width(16.dp),
+                                )
+                            }
                         }
                     }
                 }
