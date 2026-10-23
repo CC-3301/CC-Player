@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.playback
 
+import `is`.xyz.mpv.MPVLib
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
@@ -525,14 +526,14 @@ class MpvFileEventsTest {
     }
 
     @Test
-    fun `mpv error logs keep error lines and reset per load`() {
+    fun `mpv error logs keep the root cause and the latest lines`() {
         val collector = MpvErrorCollector()
 
-        collector.onLog("ffmpeg", 40, "普通信息")
-        collector.onLog("cplayer", 20, "打开文件失败")
-        collector.onLog("ffmpeg", 20, "  ")
-        collector.onLog("ffmpeg", 30, "警告不算错误")
-        collector.onLog("ffmpeg", 20, "解码失败")
+        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_INFO, "普通信息")
+        collector.onLog("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "打开文件失败")
+        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "  ")
+        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN, "警告不算错误")
+        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "解码失败")
 
         assertEquals("cplayer: 打开文件失败 | ffmpeg: 解码失败", collector.lastErrorText())
 
@@ -541,12 +542,27 @@ class MpvFileEventsTest {
     }
 
     @Test
-    fun `mpv error logs keep only the latest capacity`() {
+    fun `mpv error logs keep the first error and the latest capacity`() {
         val collector = MpvErrorCollector(capacity = 2)
-        collector.onLog("a", 20, "1")
-        collector.onLog("a", 20, "2")
-        collector.onLog("a", 20, "3")
+        collector.onLog("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "1")
+        collector.onLog("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "2")
+        collector.onLog("a", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "3")
 
-        assertEquals("a: 2 | a: 3", collector.lastErrorText())
+        // 首条根因不能被后续错误挤掉。
+        assertEquals("a: 1 | a: 3", collector.lastErrorText())
+    }
+
+    @Test
+    fun `an END_FILE failure forwards the collected error text`() {
+        val collector = MpvErrorCollector()
+        collector.onLog("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "打开文件失败")
+
+        var received: String? = "unchanged"
+        dispatchPlaybackFailure(MpvFileEvents.End.Failed, collector::lastErrorText) { received = it }
+        assertEquals("cplayer: 打开文件失败", received)
+
+        received = "unchanged"
+        dispatchPlaybackFailure(MpvFileEvents.End.Ended, collector::lastErrorText) { received = it }
+        assertEquals("unchanged", received)
     }
 }

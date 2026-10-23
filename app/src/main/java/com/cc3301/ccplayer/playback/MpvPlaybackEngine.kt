@@ -81,7 +81,7 @@ class MpvPlaybackEngine(
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
         val spec = loadCoordinator.start(url)
-        errorLog.reset()
+        // 错误日志在事件线程收到 START_FILE 时清空，避免上一轮排队日志混进本轮。
         positionSeconds = 0.0
         durationSeconds = 0.0
         hasVideoTrack = false
@@ -244,6 +244,8 @@ class MpvPlaybackEngine(
             -> listener?.onLoadActivity()
         }
         when (eventId) {
+            // 在事件线程清空上一轮错误日志，避免已排队日志混进新加载。
+            MPVLib.MpvEvent.MPV_EVENT_START_FILE -> errorLog.reset()
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> loadCoordinator.onSeekEvent()
@@ -278,9 +280,8 @@ class MpvPlaybackEngine(
 
     /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
-        when (loadCoordinator.onEndFile()) {
-            MpvFileEvents.End.Replaced, MpvFileEvents.End.Ended -> Unit
-            MpvFileEvents.End.Failed -> listener?.onPlaybackFailed(errorLog.lastErrorText())
+        dispatchPlaybackFailure(loadCoordinator.onEndFile(), errorLog::lastErrorText) { text ->
+            listener?.onPlaybackFailed(text)
         }
     }
 
@@ -416,10 +417,25 @@ class MpvPlaybackEngine(
 }
 
 /**
- * 收集 mpv 日志中的错误文本。加载开始时清空，END_FILE 失败时取最近几条带给控制层。
- * mpv 事件线程写、控制层读，访问加锁。
+ * END_FILE 失败时把当前错误日志文本交给控制层；替换与自然播完不通知。
+ * 单独抽出，便于不依赖 JNI 验证 END_FILE -> onPlaybackFailed 的接线。
  */
-internal class MpvErrorCollector(private val capacity: Int = 3) {
+internal fun dispatchPlaybackFailure(
+    end: MpvFileEvents.End,
+    errorText: () -> String?,
+    onFailure: (String?) -> Unit,
+) {
+    if (end != MpvFileEvents.End.Failed) return
+    onFailure(errorText())
+}
+
+/**
+ * 收集 mpv 日志中的错误文本。保留首条根因与最近几条；
+ * mpv 事件线程在 START_FILE 清空，END_FILE 失败时读取，访问加锁。
+ */
+internal class MpvErrorCollector(capacity: Int = 3) {
+
+    private val capacity = capacity.coerceAtLeast(2)
 
     private val errors = ArrayDeque<String>()
 
@@ -434,7 +450,12 @@ internal class MpvErrorCollector(private val capacity: Int = 3) {
         if (level > MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR) return
         val message = text.trim()
         if (message.isEmpty()) return
-        if (errors.size >= capacity) errors.removeFirst()
+        if (errors.size >= capacity) {
+            // 保留首条根因，淘汰紧随其后的旧条目，再放入最新一条。
+            val first = errors.removeFirst()
+            while (errors.size > capacity - 2) errors.removeFirst()
+            errors.addFirst(first)
+        }
         errors.addLast(if (prefix.isBlank()) message else "$prefix: $message")
     }
 

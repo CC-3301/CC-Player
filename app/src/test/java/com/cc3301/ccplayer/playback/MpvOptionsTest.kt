@@ -33,6 +33,12 @@ class MpvOptionsTest {
         assertEquals("yes", options["keep-open"])
     }
 
+    @Test
+    fun `error logs are enabled for the playback failure text`() {
+        assertEquals("yes", options["terminal"])
+        assertEquals("all=error", options["msg-level"])
+    }
+
     private companion object {
         const val CACHE_DIR = "/data/user/0/com.cc3301.ccplayer/cache"
     }

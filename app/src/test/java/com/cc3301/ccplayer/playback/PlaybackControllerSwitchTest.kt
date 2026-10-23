@@ -329,6 +329,8 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(1, engine.resumeCalls)
+        // 真正出帧才算目标画面已上屏，之后不再有无帧失败。
+        engine.reportFramePresented()
 
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
         runCurrent()
@@ -924,11 +926,65 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(1, engine.resumeCalls)
 
-        // 兜底先于看门狗，之后不再触发加载失败。
-        advanceTimeBy(
-            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS,
-        )
+        // 兜底本身不报失败；无帧失败计时仍在跑，由下一条用例验证 60 秒回退。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
         runCurrent()
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun `a switched target with no frame for sixty seconds restores the original`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(40_000, 600_000)
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        // 状态已就绪，但新帧仍未上屏，冻结画面保留。
+        assertSame(frame, controller.freezeFrame.value)
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        runCurrent()
+        assertSame(frame, controller.freezeFrame.value)
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+
+        // 60 秒仍无新帧：取消切换，回到原片原位置并保持暂停。
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(40_000L, engine.startedPositions.last())
+    }
+
+    @Test
+    fun `a presented frame cancels the no-frame failure watchdog`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        engine.reportFramePresented()
+
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS * 2)
+        runCurrent()
+        assertEquals(1, controller.currentIndex.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertTrue(failures.isEmpty())
     }
