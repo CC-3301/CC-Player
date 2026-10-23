@@ -450,6 +450,7 @@ class PlaybackControllerBackgroundTest {
             progress,
             backgroundScope,
             frameProbeDispatcher = frameProbeDispatcher,
+            nowMillis = { testScheduler.currentTime },
         )
 
     private fun TestScope.playingController(): PlaybackController {

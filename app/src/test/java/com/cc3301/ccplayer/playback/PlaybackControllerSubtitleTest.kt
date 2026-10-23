@@ -13,10 +13,12 @@ import org.junit.Test
 class PlaybackControllerSubtitleTest {
 
     private val engine = FakePlaybackEngine()
+    private val dispatcher = UnconfinedTestDispatcher()
     private val controller = PlaybackController(
         engine,
         FakePlaybackProgressRepository(),
-        CoroutineScope(UnconfinedTestDispatcher()),
+        CoroutineScope(dispatcher),
+        nowMillis = { dispatcher.scheduler.currentTime },
     )
 
     private val chinese = SubtitleTrack(id = 3, language = "chs", title = null, isDefault = false)

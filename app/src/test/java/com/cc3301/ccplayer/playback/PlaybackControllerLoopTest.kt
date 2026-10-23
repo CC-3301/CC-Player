@@ -18,7 +18,13 @@ class PlaybackControllerLoopTest {
 
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
-    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
+    private val dispatcher = UnconfinedTestDispatcher()
+    private val controller = PlaybackController(
+        engine,
+        progress,
+        CoroutineScope(dispatcher),
+        nowMillis = { dispatcher.scheduler.currentTime },
+    )
 
     @Test
     fun `auto play next starts on and the loop mode starts at sequential`() {

@@ -34,7 +34,7 @@ class MpvOptionsTest {
     }
 
     @Test
-    fun `error logs reach the log bridge without terminal output`() {
+    fun `the native log bridge is configured for error level without terminal output`() {
         assertEquals("no", options["terminal"])
         assertEquals("all=error", options["msg-level"])
     }

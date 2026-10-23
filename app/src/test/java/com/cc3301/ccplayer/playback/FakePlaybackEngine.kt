@@ -80,6 +80,8 @@ class FakePlaybackEngine : PlaybackEngine {
     override fun resume() {
         actions += "resume"
         resumeCalls++
+        // 与真实引擎一致：恢复播放会产生一次加载事件。
+        listener?.onLoadActivity()
     }
 
     override fun stop() {
@@ -159,8 +161,9 @@ class FakePlaybackEngine : PlaybackEngine {
             return false
         }
         if (!refreshSurfaceResult) return false
-        // 与真实引擎一致：成功刷新重挂 Surface，代数递增。
+        // 与真实引擎一致：成功刷新重挂 Surface，代数递增并产生一次加载事件。
         surfaceGeneration++
+        listener?.onLoadActivity()
         return true
     }
 

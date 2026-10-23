@@ -952,7 +952,7 @@ class PlaybackControllerSwitchTest {
 
         // 60 秒从切集开始算，兜底收尾占用的 2 秒不顺延。
         advanceTimeBy(
-            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1,
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1,
         )
         runCurrent()
         assertSame(frame, controller.freezeFrame.value)
@@ -984,14 +984,42 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
 
         controller.pause()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
 
         // 恢复只接着剩余窗口计时，不重新给满 60 秒。
         controller.resume()
         advanceTimeBy(
-            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 10_000 - 1,
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 10_000 - 1,
+        )
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `late load events do not reset the remaining no-frame window`() = runTest {
+        val controller = playingController()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 30_000)
+        runCurrent()
+        assertFalse(controller.switching.value)
+
+        // 恢复与重挂产生的加载事件不能把剩余窗口补满。
+        controller.resume()
+        engine.reportVideoReconfigured()
+        advanceTimeBy(
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 30_000 - 1,
         )
         runCurrent()
         assertTrue(failures.isEmpty())
@@ -1017,13 +1045,13 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
 
         controller.setRenderSurfaceAvailable(false)
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
 
         controller.setRenderSurfaceAvailable(true)
         advanceTimeBy(
-            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 20_000 - 1,
+            PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 20_000 - 1,
         )
         runCurrent()
         assertTrue(failures.isEmpty())
@@ -1048,7 +1076,7 @@ class PlaybackControllerSwitchTest {
 
         // 停止：旧的无帧计时不能把已结束的会话报成失败。
         controller.stop()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
         assertEquals(PlaybackState.Idle, controller.state.value)
@@ -1056,7 +1084,7 @@ class PlaybackControllerSwitchTest {
         // 停止后重新打开：上一轮计时同样不能残留。
         controller.playAt(1)
         engine.reportMediaLoaded()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS * 2)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS * 2)
         runCurrent()
         assertTrue(failures.isEmpty())
     }
@@ -1076,7 +1104,7 @@ class PlaybackControllerSwitchTest {
 
         engine.reportFramePresented()
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS * 2)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS * 2)
         runCurrent()
         assertEquals(1, controller.currentIndex.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
@@ -1723,6 +1751,7 @@ class PlaybackControllerSwitchTest {
             progress,
             backgroundScope,
             frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+            nowMillis = { testScheduler.currentTime },
         )
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */

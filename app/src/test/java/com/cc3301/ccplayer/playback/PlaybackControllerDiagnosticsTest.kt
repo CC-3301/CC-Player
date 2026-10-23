@@ -181,6 +181,7 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("切集失败: ep2.mkv"))
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
+        assertTrue(text.contains("阶段: 切集"))
         assertTrue(text.contains("来源: 播放核心报错（无法打开文件）"))
     }
 
@@ -200,6 +201,7 @@ class PlaybackControllerDiagnosticsTest {
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("加载失败: ep1.mkv"))
+        assertTrue(text.contains("阶段: 首次加载"))
         assertTrue(text.contains("来源: 播放核心报错（解码失败）"))
     }
 
@@ -216,6 +218,7 @@ class PlaybackControllerDiagnosticsTest {
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("加载看门狗触发: ep1.mkv"))
         assertTrue(text.contains("目标: root/ep1.mkv"))
+        assertTrue(text.contains("阶段: 首次加载"))
         assertTrue(text.contains("来源: 看门狗超时"))
     }
 
@@ -246,6 +249,7 @@ class PlaybackControllerDiagnosticsTest {
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("播放失败: ep1.mkv"))
         assertTrue(text.contains("目标: root/ep1.mkv"))
+        assertTrue(text.contains("阶段: 播放"))
         assertTrue(text.contains("来源: 播放核心报错（渲染失败）"))
     }
 
@@ -274,13 +278,14 @@ class PlaybackControllerDiagnosticsTest {
         controller.next()
         val token = engine.currentLoadToken
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("切集失败: ep2.mkv"))
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
+        assertTrue(text.contains("阶段: 切集"))
         assertTrue(text.contains("来源: 无帧超时"))
     }
 
@@ -293,6 +298,7 @@ class PlaybackControllerDiagnosticsTest {
             FakePlaybackProgressRepository(),
             backgroundScope,
             diagnostics = diagnostics,
+            nowMillis = { testScheduler.currentTime },
         )
 
     private fun open(controller: PlaybackController) {

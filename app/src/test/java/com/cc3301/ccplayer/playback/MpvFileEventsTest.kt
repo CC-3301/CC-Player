@@ -554,14 +554,20 @@ class MpvFileEventsTest {
 
     @Test
     fun `a new load clears the previous error log before END_FILE reads it`() {
-        val collector = MpvErrorCollector()
-        collector.onLog("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮错误")
+        val failures = mutableListOf<String?>()
+        val bridge = MpvErrorLogBridge { failures += it }
 
-        // 事件线程先收到 START_FILE 再收到本轮日志，END_FILE 只能读到本轮文本。
-        collector.onStartFile()
-        collector.onLog("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
+        // 引擎注册的日志桥先转发上一轮日志，再收到 START_FILE，随后才是本轮日志。
+        bridge.logMessage("cplayer", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "上一轮错误")
+        bridge.onStartFile()
+        bridge.logMessage("ffmpeg", MPVLib.MpvLogLevel.MPV_LOG_LEVEL_ERROR, "本轮错误")
 
-        assertEquals("ffmpeg: 本轮错误", collector.onEndFileFailure())
+        // 替换与自然播完不提示；只有 END_FILE 失败才传出本轮文本。
+        bridge.onEndFile(MpvFileEvents.End.Ended)
+        assertTrue(failures.isEmpty())
+
+        bridge.onEndFile(MpvFileEvents.End.Failed)
+        assertEquals(listOf<String?>("ffmpeg: 本轮错误"), failures)
     }
 
     @Test
