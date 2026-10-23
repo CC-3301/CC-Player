@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -25,8 +26,25 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `播放列表当前项高亮左右各内缩 4dp`() {
-        assertEquals(4.dp, PlayerPlaylistHighlightInset)
+    fun `播放列表当前项高亮按行宽左右各内缩 4dp`() {
+        val bounds = playlistHighlightBounds(rowWidthPx = 1000f, insetPx = 4f)
+
+        assertEquals(4f, bounds.start, TOLERANCE)
+        assertEquals(996f, bounds.end, TOLERANCE)
+    }
+
+    @Test
+    fun `行宽不足两侧内缩时高亮两端重合`() {
+        val bounds = playlistHighlightBounds(rowWidthPx = 6f, insetPx = 4f)
+
+        assertEquals(3f, bounds.start, TOLERANCE)
+        assertEquals(3f, bounds.end, TOLERANCE)
+    }
+
+    @Test
+    fun `播放列表三角字号 11_5sp、宽 16dp`() {
+        assertEquals(11.5.sp, PlayerPlaylistArrowFontSize)
+        assertEquals(16.dp, PlayerPlaylistArrowWidth)
     }
 
     @Test
