@@ -84,6 +84,43 @@ class PreviewPrefetcherTest {
     }
 
     @Test
+    fun `预取前先下发可见与预取范围`() = runTest {
+        val source = RecordingPreviewSource()
+        val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
+
+        // 首帧全部可见，预取集合为空，但范围仍要先下发。
+        prefetcher.update(entries, firstVisible = 0, lastVisible = 9, rowSize = 2)
+        runCurrent()
+        assertEquals(1, source.windows.size)
+        assertEquals((0..9).map { index -> entries[index].location }.toSet(), source.windows.single().first)
+        assertEquals(emptySet<String>(), source.windows.single().second)
+        assertTrue(source.previewed.isEmpty())
+
+        prefetcher.update(entries, firstVisible = 3, lastVisible = 5, rowSize = 2)
+        runCurrent()
+        assertEquals(listOf(3, 4, 5), windowIndices(source.windows.last().first, entries))
+        assertEquals(listOf(1, 2, 6, 7), windowIndices(source.windows.last().second, entries))
+        // 范围先于预取发起。
+        assertTrue(source.previewed.isEmpty())
+
+        advanceTimeBy(100)
+        runCurrent()
+        assertEquals(listOf(1, 2, 6, 7), source.previewed.map { entry -> entries.indexOf(entry) })
+    }
+
+    @Test
+    fun `取消全部预取时清空源里的范围`() = runTest {
+        val source = RecordingPreviewSource()
+        val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
+
+        prefetcher.update(entries, firstVisible = 3, lastVisible = 5, rowSize = 2)
+        prefetcher.cancelAll()
+
+        assertEquals(emptySet<String>(), source.windows.last().first)
+        assertEquals(emptySet<String>(), source.windows.last().second)
+    }
+
+    @Test
     fun `快速滑过时取消真正离屏的旧预取`() = runTest {
         val source = RecordingPreviewSource()
         val prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 100)
@@ -104,6 +141,7 @@ private class RecordingPreviewSource : MediaPreviewSource {
 
     val previewed = mutableListOf<MediaFile>()
     val cancelled = mutableListOf<MediaFile>()
+    val windows = mutableListOf<Pair<Set<String>, Set<String>>>()
 
     override suspend fun preview(file: MediaFile): MediaPreview {
         previewed += file
@@ -115,4 +153,12 @@ private class RecordingPreviewSource : MediaPreviewSource {
         }
         return MediaPreview(image = null, durationMillis = null)
     }
+
+    override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) {
+        windows += visibleLocations to prefetchLocations
+    }
 }
+
+/** 把位置集合换成条目索引，便于断言。 */
+private fun windowIndices(locations: Set<String>, entries: List<MediaFile>): List<Int> =
+    locations.map { location -> entries.indexOfFirst { it.location == location } }.sorted()

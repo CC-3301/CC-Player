@@ -124,25 +124,26 @@ class CachedMediaPreviewSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.Prefetch)
 
+    /**
+     * 更新当前可见与预取范围。
+     * 排队中的预取取得许可后据此复查：范围不再包含该位置时直接放弃，不消耗抽取。
+     */
+    @Synchronized
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) {
-        val current = previewWindow
-        if (current.visible == visibleLocations && current.prefetch == prefetchLocations) return
-        previewWindow = PreviewWindow(
-            generation = current.generation + 1,
-            visible = visibleLocations.toSet(),
-            prefetch = prefetchLocations.toSet(),
-        )
+        val visible = visibleLocations.toSet()
+        val prefetch = prefetchLocations.toSet()
+        if (previewWindow.visible == visible && previewWindow.prefetch == prefetch) return
+        previewWindow = PreviewWindow(visible = visible, prefetch = prefetch)
     }
 
     private suspend fun preview(file: MediaFile, priority: PreviewPriority): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
-        val requestGeneration = previewWindow.generation
         val targetWidth = previewTargetWidth(file, policy)
         val key = thumbnailCacheKey(file, policy, targetWidth)
         return when (file.source) {
-            MediaSource.Local -> localPreview(file, key, targetWidth, priority, requestGeneration)
+            MediaSource.Local -> localPreview(file, key, targetWidth, priority)
             MediaSource.Network -> MediaPreview(
-                image = networkImage(file, key, targetWidth, priority, requestGeneration),
+                image = networkImage(file, key, targetWidth, priority),
                 durationMillis = null,
             )
         }
@@ -153,17 +154,14 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
-        requestGeneration: Long,
     ): MediaPreview {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             file = file,
             key = key,
             maxAgeMillis = maxAge,
-            onCacheHit = { cached ->
-                durationOnCacheHit(file, key, cached, priority, requestGeneration)
-            },
-            load = { extractLocal(file, key, targetWidth, priority, requestGeneration) },
+            onCacheHit = { cached -> durationOnCacheHit(file, key, cached, priority) },
+            load = { extractLocal(file, key, targetWidth, priority) },
         )
         return MediaPreview(loaded.image, loaded.durationMillis)
     }
@@ -174,10 +172,12 @@ class CachedMediaPreviewSource(
         key: String,
         cached: CachedThumbnail,
         priority: PreviewPriority,
-        requestGeneration: Long,
     ): LoadedPreview {
         if (cached.durationKnown) return LoadedPreview(cached.file, cached.durationMillis)
-        return when (val duration = readLocalDuration(file, key, priority, requestGeneration)) {
+        val duration = readLocalDuration(file, key, priority)
+            // 已离开范围：不补读、不记退避，图片照常返回。
+            ?: return LoadedPreview(cached.file, durationMillis = null)
+        return when (duration) {
             is PreviewDuration.Known -> {
                 writeDurationSafely(key, duration.millis)
                 LoadedPreview(cached.file, duration.millis)
@@ -200,15 +200,14 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
-        requestGeneration: Long,
     ): LoadedPreview {
         val extracted = localPermits.withPermit(priority) {
-            if (stillInScope(file.location, requestGeneration)) {
+            if (mayExtract(file.location, priority)) {
                 extractor.imageAndDuration(file, targetWidth)
             } else {
                 null
             }
-        } ?: return LoadedPreview(image = null, durationMillis = null)
+        } ?: return LoadedPreview(image = null, durationMillis = null, abandoned = true)
         // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
         currentCoroutineContext().ensureActive()
         val durationKnown = extracted.duration != PreviewDuration.Failed
@@ -237,13 +236,12 @@ class CachedMediaPreviewSource(
         file: MediaFile,
         key: String,
         priority: PreviewPriority,
-        requestGeneration: Long,
-    ): PreviewDuration {
+    ): PreviewDuration? {
         val now = monotonicClock()
         val previous = durationFailures[key]
         if (previous != null && now < previous.retryAtMillis) return PreviewDuration.Failed
         val result = localPermits.withPermit(priority) {
-            if (!stillInScope(file.location, requestGeneration)) {
+            if (!mayExtract(file.location, priority)) {
                 null
             } else {
                 try {
@@ -257,7 +255,7 @@ class CachedMediaPreviewSource(
                     PreviewDuration.Failed
                 }
             }
-        } ?: return PreviewDuration.Failed
+        } ?: return null
         if (result == PreviewDuration.Failed) {
             val attempts = (previous?.attempts ?: 0) + 1
             val failedAt = monotonicClock()
@@ -294,7 +292,6 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
-        requestGeneration: Long,
     ): File? {
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
@@ -305,7 +302,7 @@ class CachedMediaPreviewSource(
             load = {
                 // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
                 val attempt = networkPermits.withPermit(priority) {
-                    if (!stillInScope(file.location, requestGeneration)) {
+                    if (!mayExtract(file.location, priority)) {
                         null
                     } else {
                         var decoded: ByteArray? = null
@@ -318,7 +315,7 @@ class CachedMediaPreviewSource(
                 }
                 if (attempt == null) {
                     // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
-                    LoadedPreview(image = null, durationMillis = null)
+                    LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
                     // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
                     currentCoroutineContext().ensureActive()
@@ -336,13 +333,11 @@ class CachedMediaPreviewSource(
     }
 
     /**
-     * 排队请求取得许可后的复查：范围自请求发起后未变时直接放行；
-     * 范围已变时，只有位置仍在可见或预取范围内才继续抽取。
+     * 排队请求取得许可后的复查：只有预取需要复查，且以当前位置是否仍在可见或预取范围为准。
+     * 可见请求不复查：卡片被放弃后不会以相同键重试，会永久停在占位图。
      */
-    private fun stillInScope(location: String, requestGeneration: Long): Boolean {
-        val current = previewWindow
-        return current.generation == requestGeneration || current.contains(location)
-    }
+    private fun mayExtract(location: String, priority: PreviewPriority): Boolean =
+        priority != PreviewPriority.Prefetch || previewWindow.contains(location)
 
     /** 修改时间缺失时按有效期缓存；有修改时间时由缓存键判断是否过期。 */
     private fun cacheMaxAge(file: MediaFile): Long? = thumbnailCacheMaxAge(file, policy)
@@ -385,6 +380,11 @@ class CachedMediaPreviewSource(
                 } catch (failure: Exception) {
                     LoadedPreview(image = null, durationMillis = null)
                 }
+                if (loaded.abandoned) {
+                    // 放弃不当作成功共享：等待者重新竞争，仍在可见范围的请求可真正抽取。
+                    mine.cancel(AbandonedPreviewException())
+                    return LoadedPreview(image = null, durationMillis = null)
+                }
                 mine.complete(loaded)
                 return loaded
             } catch (cancellation: CancellationException) {
@@ -425,7 +425,8 @@ class CachedMediaPreviewSource(
             )
             return LoadedPreview(image = null, durationMillis = null)
         }
-        extractionFailures.remove(key)
+        // 放弃不算失败，也不清掉既有退避记录。
+        if (!loaded.abandoned) extractionFailures.remove(key)
         return loaded
     }
 
@@ -454,7 +455,12 @@ class CachedMediaPreviewSource(
 
     private data class RetryState(val attempts: Int, val retryAtMillis: Long)
 
-    private data class LoadedPreview(val image: File?, val durationMillis: Long?)
+    private data class LoadedPreview(
+        val image: File?,
+        val durationMillis: Long?,
+        /** 已离开可见与预取范围而放弃抽取；不作为成功结果共享给同键等待者。 */
+        val abandoned: Boolean = false,
+    )
 
     companion object {
         /** 缩略图缓存目录的上限。 */
@@ -527,14 +533,16 @@ internal fun thumbnailCacheKey(
 internal fun thumbnailCacheMaxAge(file: MediaFile, policy: ThumbnailPolicy): Long? =
     if (file.lastModified > 0) null else policy.missingModifiedValidityMillis.coerceAtLeast(1)
 
-/** 当前可见与预取范围快照；[generation] 在范围变化时递增。 */
+/** 当前可见与预取范围快照。 */
 private data class PreviewWindow(
-    val generation: Long = 0,
     val visible: Set<String> = emptySet(),
     val prefetch: Set<String> = emptySet(),
 ) {
     fun contains(location: String): Boolean = location in visible || location in prefetch
 }
+
+/** 预取已离开可见范围；等待同键结果的请求据此重新竞争，而不是接收空结果。 */
+private class AbandonedPreviewException : CancellationException("预览请求已离开可见范围")
 
 /** 取并发许可的优先级：可见项先于预取项。 */
 private enum class PreviewPriority { Visible, Prefetch }

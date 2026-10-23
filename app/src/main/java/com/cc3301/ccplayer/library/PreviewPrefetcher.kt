@@ -51,10 +51,11 @@ class PreviewPrefetcher(
         }
     }
 
-    /** 离开库页面时取消全部预取。 */
+    /** 离开库页面时取消全部预取，并清空源里的范围，避免旧范围继续放行排队请求。 */
     fun cancelAll() {
         jobs.values.forEach(Job::cancel)
         jobs.clear()
+        source.updatePreviewWindow(emptySet(), emptySet())
     }
 
     private companion object {

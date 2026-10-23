@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -988,13 +989,20 @@ class CachedMediaPreviewSourceTest {
             visibleLocations = setOf("smb://nas/media/新.mkv"),
             prefetchLocations = emptySet(),
         )
-        tracker.gate.complete(Unit)
+        tracker.imageGate?.complete(Unit)
         val results = stale.awaitAll()
         blockers.awaitAll()
 
         // 旧请求取得许可后复查范围，直接放弃，没有进入抽取。
         assertEquals(2, tracker.started.size)
         assertTrue(results.all { preview -> preview.image == null && preview.durationMillis == null })
+        assertEquals(2, imageFileCount())
+
+        // 放弃不计失败退避：重新纳入范围后立即抽取。
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(oldVisible.location))
+        assertNotNull(bounded.prefetch(oldVisible).image)
+        assertEquals(3, tracker.started.size)
+        assertEquals(3, imageFileCount())
     }
 
     @Test
@@ -1021,7 +1029,7 @@ class CachedMediaPreviewSourceTest {
         val shown = async { bounded.preview(visible) }
         runCurrent()
 
-        tracker.gate.complete(Unit)
+        tracker.imageGate?.complete(Unit)
         shown.await()
         prefetched.awaitAll()
         blockers.awaitAll()
@@ -1030,6 +1038,149 @@ class CachedMediaPreviewSourceTest {
         assertTrue(visibleIndex >= 0)
         assertTrue(visibleIndex < tracker.started.indexOf(prefetches[0].location))
         assertTrue(visibleIndex < tracker.started.indexOf(prefetches[1].location))
+    }
+
+    @Test
+    fun `可见请求不因范围变化被放弃`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val visible = network("可见.mkv")
+        bounded.updatePreviewWindow(visibleLocations = setOf(visible.location), prefetchLocations = emptySet())
+        val shown = async { bounded.preview(visible) }
+        runCurrent()
+        // 可见卡片不会被重试：范围变化后仍须照常抽取。
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+
+        assertNotNull(shown.await().image)
+        blockers.awaitAll()
+        assertTrue(tracker.started.contains(visible.location))
+    }
+
+    @Test
+    fun `本地预取离开范围后取得许可不抽取`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(local("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val staleFile = local("旧.mkv")
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(staleFile.location),
+        )
+        val stale = async { bounded.prefetch(staleFile) }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        val result = stale.await()
+        blockers.awaitAll()
+
+        assertEquals(2, tracker.started.size)
+        assertNull(result.image)
+        assertEquals(2, imageFileCount())
+    }
+
+    @Test
+    fun `本地预取离开范围后取得许可不补读时长`() = runTest {
+        val tracker = GatedExtractor(durationFailure = IllegalStateException("无时长"))
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val cached = local("旧.mkv")
+        // 先落一张图为缓存，时长读取失败，记录为“时长未知”。
+        tracker.imageGate = null
+        assertNotNull(bounded.preview(cached).image)
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        tracker.imageGate = CompletableDeferred()
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(local("$name.mkv")) }
+        }
+        runCurrent()
+        // 1 次预热抽取 + 2 个占满本地许可的请求。
+        assertEquals(3, tracker.started.size)
+
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(cached.location),
+        )
+        val stale = async { bounded.prefetch(cached) }
+        runCurrent()
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(stale.await().image)
+        blockers.awaitAll()
+
+        // 放弃后没有补读时长，也没有记退避。
+        assertEquals(1, tracker.durationRequests.count { it == cached.location })
+
+        bounded.updatePreviewWindow(visibleLocations = setOf(cached.location), prefetchLocations = emptySet())
+        assertNotNull(bounded.preview(cached).image)
+        assertEquals(2, tracker.durationRequests.count { it == cached.location })
+    }
+
+    @Test
+    fun `取消排队中的预取后可见请求仍立即执行且并发不超过 2`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1", "占位2").map { name ->
+            async { bounded.preview(network("$name.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val queuedFile = network("预取.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(queuedFile.location))
+        val queued = async { bounded.prefetch(queuedFile) }
+        runCurrent()
+        queued.cancel()
+        queued.join()
+
+        val visible = async { bounded.preview(network("可见.mkv")) }
+        runCurrent()
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        blockers.awaitAll()
+
+        assertTrue(tracker.maxConcurrent <= 2)
+        assertTrue(tracker.started.contains("smb://nas/media/可见.mkv"))
+        assertFalse(tracker.started.contains(queuedFile.location))
+    }
+
+    @Test
+    fun `仍在范围内的预取照常抽取`() = runTest {
+        extractor.imageBytes = byteArrayOf(1)
+        val file = network("预取.mkv")
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        val preview = source.prefetch(file)
+
+        assertNotNull(preview.image)
+        assertEquals(listOf(file.location), extractor.imageRequests)
     }
 
     @Test
@@ -1064,18 +1215,33 @@ class CachedMediaPreviewSourceTest {
 }
 
 /** 抽取开始后等待闸门，用来稳定构造并发名额被占满、后续请求排队的场景。 */
-private class GatedExtractor : MediaPreviewExtractor {
+private class GatedExtractor(
+    var imageGate: CompletableDeferred<Unit>? = CompletableDeferred(),
+    var durationFailure: Exception? = null,
+) : MediaPreviewExtractor {
 
     val started = mutableListOf<String>()
-    val gate = CompletableDeferred<Unit>()
+    val durationRequests = mutableListOf<String>()
+    var concurrent = 0
+    var maxConcurrent = 0
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         started += file.location
-        gate.await()
+        concurrent++
+        maxConcurrent = maxOf(maxConcurrent, concurrent)
+        try {
+            imageGate?.await()
+        } finally {
+            concurrent--
+        }
         return byteArrayOf(1)
     }
 
-    override suspend fun durationMillis(file: MediaFile): Long? = null
+    override suspend fun durationMillis(file: MediaFile): Long? {
+        durationRequests += file.location
+        durationFailure?.let { throw it }
+        return null
+    }
 }
 
 /** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的并发名额释放。 */
