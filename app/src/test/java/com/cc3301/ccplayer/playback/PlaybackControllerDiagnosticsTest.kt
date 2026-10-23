@@ -225,6 +225,33 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
+    fun `看门狗与播放核心报错记录可区分的来源与完整定位字段`() = runTest {
+        val watchdogSink = MemoryDiagnosticsSink()
+        val watchdogController = controller(diagnostics(watchdogSink, enabled = true))
+        open(watchdogController)
+        val watchdogToken = engine.currentLoadToken
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+
+        val coreSink = MemoryDiagnosticsSink()
+        val coreController = controller(diagnostics(coreSink, enabled = true))
+        open(coreController)
+        val coreToken = engine.currentLoadToken
+        engine.reportPlaybackFailed("无法打开文件")
+
+        val watchdogLine = watchdogSink.lines.single { it.contains("来源:") }
+        val coreLine = coreSink.lines.single { it.contains("来源:") }
+        assertTrue(watchdogLine.contains("目标: root/ep1.mkv"))
+        assertTrue(watchdogLine.contains("加载令牌: $watchdogToken"))
+        assertTrue(watchdogLine.contains("阶段: 首次加载"))
+        assertTrue(watchdogLine.contains("来源: 看门狗超时（60 秒无加载事件）"))
+        assertTrue(coreLine.contains("目标: root/ep1.mkv"))
+        assertTrue(coreLine.contains("加载令牌: $coreToken"))
+        assertTrue(coreLine.contains("阶段: 首次加载"))
+        assertTrue(coreLine.contains("来源: 播放核心报错（无法打开文件）"))
+    }
+
+    @Test
     fun `错误文本为空时记录无错误文本`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
