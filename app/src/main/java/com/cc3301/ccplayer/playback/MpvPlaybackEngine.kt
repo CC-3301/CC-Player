@@ -3,6 +3,8 @@ package com.cc3301.ccplayer.playback
 import android.content.Context
 import android.graphics.Bitmap
 import android.view.Surface
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
 
@@ -15,6 +17,7 @@ import java.util.Locale
 class MpvPlaybackEngine(
     private val context: Context,
     private val cacheDir: String,
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : PlaybackEngine, MPVLib.EventObserver {
 
     private var listener: PlaybackEngine.Listener? = null
@@ -63,6 +66,13 @@ class MpvPlaybackEngine(
     private var videoWidth = 0
     private var videoHeight = 0
 
+    /** seek 归属状态始终维护；开关只决定是否读属性与拼日志。 */
+    private val seekDiagnostics = MpvSeekDiagnostics(
+        diagnostics = diagnostics,
+        snapshot = ::audioDebugSnapshot,
+        durationSeconds = { durationSeconds },
+    )
+
     fun initialize() {
         MPVLib.create(context.applicationContext)
         MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
@@ -89,6 +99,7 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         awaitingLoadFrame = true
+        seekDiagnostics.reset()
         positionGate.onStart(startPositionMillis)
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -117,6 +128,7 @@ class MpvPlaybackEngine(
         loadCoordinator.stop()
         hasVideoTrack = false
         awaitingLoadFrame = false
+        seekDiagnostics.reset()
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -134,15 +146,39 @@ class MpvPlaybackEngine(
         // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
         positionGate.onSeek(positionMillis)
         val serial = loadCoordinator.onSeekIssued()
-        MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+        seekDiagnostics.issueSeek(positionMillis, serial) {
+            MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+        }
         return serial
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
     override fun fadeInAudio(durationMillis: Long) {
-        val fade = "afade=t=in:st=${formatSeconds(toMillis(positionSeconds))}:d=${formatSeconds(durationMillis)}"
-        MPVLib.command(arrayOf("af", "set", "lavfi=[$fade]"))
+        val startMillis = toMillis(positionSeconds)
+        val fade = "afade=t=in:st=${formatSeconds(startMillis)}:d=${formatSeconds(durationMillis)}"
+        dispatchFadeIn(
+            diagnostics = diagnostics,
+            startMillis = startMillis,
+            durationMillis = durationMillis,
+            command = { MPVLib.command(arrayOf("af", "set", "lavfi=[$fade]")) },
+        ) { audioDebugSnapshot() }
     }
+
+    /** 读取排查丢声所需的播放核心状态；任何属性读取失败都只记为空值。 */
+    private fun audioDebugSnapshot(): AudioDebugSnapshot = AudioDebugSnapshot(
+        paused = readMpvProperty { MPVLib.getPropertyBoolean(PAUSE_PROPERTY) },
+        audioOutput = readMpvProperty { MPVLib.getPropertyString(AO_PROPERTY) },
+        audioPtsSeconds = readMpvProperty { MPVLib.getPropertyDouble(AUDIO_PTS_PROPERTY) }?.finiteOrNull(),
+        timePosSeconds = readMpvProperty { MPVLib.getPropertyDouble(TIME_POS_PROPERTY) }?.finiteOrNull(),
+        eofReached = readMpvProperty { MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) },
+        audioDeviceConfig = readMpvProperty { MPVLib.getPropertyString(AUDIO_DEVICE_PROPERTY) },
+        currentAudioOutput = readMpvProperty { MPVLib.getPropertyString(CURRENT_AO_PROPERTY) },
+        volume = readMpvProperty { MPVLib.getPropertyDouble(VOLUME_PROPERTY) }?.finiteOrNull(),
+        muted = readMpvProperty { MPVLib.getPropertyBoolean(MUTE_PROPERTY) },
+        audioTrack = readMpvProperty { MPVLib.getPropertyString(AID_PROPERTY) },
+    )
+
+    private inline fun <T> readMpvProperty(block: () -> T?): T? = runCatching { block() }.getOrNull()
 
     override fun setDecodeMode(mode: DecodeMode) {
         val hwdec = if (mode == DecodeMode.Hardware) MpvOptions.HWDEC else MpvOptions.HWDEC_SOFTWARE
@@ -247,6 +283,7 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
+                seekDiagnostics.onSeekEvent()
                 listener?.onLoadActivity(LoadActivity.Seek, loadCoordinator.currentLoadedToken())
                 loadCoordinator.onSeekEvent()
             }
@@ -264,6 +301,8 @@ class MpvPlaybackEngine(
             }
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
+                // 音频链在重播后才完成重建，这里补记 seek 后的第二个快照。
+                seekDiagnostics.onPlaybackRestart()
                 listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadCoordinator.currentLoadedToken())
                 if (loadCoordinator.isFileLoaded) {
                     reportReady(needsFrameConfirmation = isPaused() && hasVideoTrack)
@@ -394,6 +433,13 @@ class MpvPlaybackEngine(
         const val HWDEC_PROPERTY = "hwdec"
         const val TIME_POS_PROPERTY = "time-pos"
         const val DURATION_PROPERTY = "duration"
+        const val AO_PROPERTY = "ao"
+        const val AUDIO_PTS_PROPERTY = "audio-pts"
+        const val AUDIO_DEVICE_PROPERTY = "audio-device"
+        const val CURRENT_AO_PROPERTY = "current-ao"
+        const val VOLUME_PROPERTY = "volume"
+        const val MUTE_PROPERTY = "mute"
+        const val AID_PROPERTY = "aid"
         const val WIDTH_PROPERTY = "width"
         const val HEIGHT_PROPERTY = "height"
         const val EOF_REACHED_PROPERTY = "eof-reached"
@@ -585,3 +631,225 @@ internal class PositionProgressGate {
 /** 只有目标与 mpv 当前 path 都存在且一致，才承认这次加载；其余都按旧代际事件丢弃。 */
 internal fun isTargetPath(target: String?, path: String?): Boolean =
     target != null && path == target
+
+/**
+ * seek 归属状态：下发前在锁内登记，SEEK 事件按 FIFO 消费队首。
+ * 归属只由队列决定；诊断开关只决定是否读属性与写日志，不参与状态维护。
+ */
+internal class MpvSeekDiagnostics(
+    private val diagnostics: DiagnosticsLog,
+    private val snapshot: () -> AudioDebugSnapshot,
+    private val durationSeconds: () -> Double,
+) {
+
+    private data class PendingSeek(val targetMillis: Long, val serial: Int)
+
+    private val lock = Any()
+    private val pending = ArrayDeque<PendingSeek>()
+    private var lastIssued: PendingSeek? = null
+    private var restartLoggedForSerial: Int? = null
+
+    fun reset() {
+        synchronized(lock) {
+            pending.clear()
+            lastIssued = null
+            restartLoggedForSerial = null
+        }
+    }
+
+    /** 先登记再执行命令，避免 SEEK 事件先到；命令异常时锁内回滚后原样重抛。 */
+    fun issueSeek(targetMillis: Long, serial: Int, command: () -> Unit) {
+        val seek = PendingSeek(targetMillis, serial)
+        val previous = synchronized(lock) {
+            val previousIssued = lastIssued
+            pending.addLast(seek)
+            lastIssued = seek
+            previousIssued
+        }
+        if (diagnostics.enabled) {
+            runCatching {
+                diagnostics.log {
+                    seekDebugLine("seek 前", targetMillis, serial, currentRemaining(targetMillis), snapshot())
+                }
+            }
+        }
+        try {
+            command()
+        } catch (failure: Throwable) {
+            synchronized(lock) {
+                // 按引用移除：serial 复用时不能误删同值项。
+                val index = pending.indexOfFirst { it === seek }
+                val removed = index >= 0
+                if (removed) pending.removeAt(index)
+                // 已被 SEEK 事件消费时不能回退，否则其 restart 会归到旧目标。
+                if (removed && lastIssued === seek) lastIssued = previous
+            }
+            if (diagnostics.enabled) {
+                runCatching {
+                    diagnostics.log {
+                        "seek 下发失败: 目标=${targetMillis}ms 序号=$serial " +
+                            "错误=${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
+                    }
+                }
+            }
+            throw failure
+        }
+    }
+
+    fun onSeekEvent() {
+        // 与 MpvReadySignals 同规则：每个事件消费队首；剩余排队数写进行内。
+        val consumed = synchronized(lock) {
+            pending.removeFirstOrNull()?.let { it to pending.size }
+        }
+        if (!diagnostics.enabled) return
+        runCatching {
+            diagnostics.log {
+                if (consumed == null) {
+                    "seek 后(SEEK): 无对应目标 ${snapshot().debugText()}"
+                } else {
+                    seekDebugLine(
+                        "seek 后(SEEK)",
+                        consumed.first.targetMillis,
+                        consumed.first.serial,
+                        currentRemaining(consumed.first.targetMillis),
+                        snapshot(),
+                        queuedCount = consumed.second,
+                    )
+                }
+            }
+        }
+    }
+
+    fun onPlaybackRestart() {
+        // 关闭期间不写去重状态，重新开启后仍能记录该序号的 restart 行。
+        if (!diagnostics.enabled) return
+        val seek = synchronized(lock) {
+            val current = lastIssued ?: return
+            if (restartLoggedForSerial == current.serial) return
+            restartLoggedForSerial = current.serial
+            current
+        }
+        runCatching {
+            diagnostics.log {
+                seekDebugLine(
+                    "seek 后(PLAYBACK_RESTART)",
+                    seek.targetMillis,
+                    seek.serial,
+                    currentRemaining(seek.targetMillis),
+                    snapshot(),
+                )
+            }
+        }
+    }
+
+    /** 写入侧按当时 duration 重算，避免时长晚到时永远记成未知。 */
+    private fun currentRemaining(targetMillis: Long): Long? =
+        remainingToEndMillis(targetMillis, durationSeconds())
+}
+
+/** 淡入下发与日志：日志失败不得覆盖命令原异常；关闭时不建日志 lambda、不读属性。 */
+internal inline fun dispatchFadeIn(
+    diagnostics: DiagnosticsLog,
+    startMillis: Long,
+    durationMillis: Long,
+    command: () -> Unit,
+    crossinline snapshot: () -> AudioDebugSnapshot,
+) {
+    var issued = false
+    try {
+        command()
+        issued = true
+    } finally {
+        if (diagnostics.enabled) {
+            runCatching {
+                diagnostics.log { fadeDebugLine(startMillis, durationMillis, issued, snapshot()) }
+            }
+        }
+    }
+}
+
+/** seek 前后的播放核心音频状态；属性不可用时留空。 */
+internal data class AudioDebugSnapshot(
+    val paused: Boolean? = null,
+    val audioOutput: String? = null,
+    val audioPtsSeconds: Double? = null,
+    val timePosSeconds: Double? = null,
+    val eofReached: Boolean? = null,
+    /** `audio-device` 是配置值（默认 auto），不是实际输出设备。 */
+    val audioDeviceConfig: String? = null,
+    /** `current-ao` 是当前实际音频输出链。 */
+    val currentAudioOutput: String? = null,
+    val volume: Double? = null,
+    val muted: Boolean? = null,
+    val audioTrack: String? = null,
+)
+
+internal fun AudioDebugSnapshot.debugText(): String = buildString {
+    append("pause=").append(flagOrDash(paused))
+    append(" ao=").append(textOrDash(audioOutput))
+    append(" audio-pts=").append(secondsOrDash(audioPtsSeconds))
+    append(" time-pos=").append(secondsOrDash(timePosSeconds))
+    append(" eof-reached=").append(flagOrDash(eofReached))
+    append(" 配置设备=").append(textOrDash(audioDeviceConfig))
+    append(" 当前ao=").append(textOrDash(currentAudioOutput))
+    append(" volume=").append(secondsOrDash(volume))
+    append(" muted=").append(flagOrDash(muted))
+    append(" aid=").append(textOrDash(audioTrack))
+}
+
+/** seek 目标、序号与剩余时长；剩余不足 [SEEK_NEAR_END_MILLIS] 视为落在文件末尾附近。 */
+internal fun seekDebugLine(
+    prefix: String,
+    targetMillis: Long,
+    serial: Int,
+    remainingMillis: Long?,
+    snapshot: AudioDebugSnapshot,
+    queuedCount: Int? = null,
+): String = buildString {
+    append(prefix).append(": 目标=").append(targetMillis).append("ms")
+    append(" 序号=").append(serial)
+    append(" 剩余=").append(remainingMillis?.let { "${it}ms" } ?: "-")
+    append(" 近末尾=").append(nearEndFlag(remainingMillis))
+    if (queuedCount != null) append(" 排队数=").append(queuedCount)
+    append(' ').append(snapshot.debugText())
+}
+
+/** 时长未知时不做末尾判断。 */
+internal fun remainingToEndMillis(targetMillis: Long, durationSeconds: Double): Long? {
+    if (!durationSeconds.isFinite() || durationSeconds <= 0) return null
+    return ((durationSeconds * 1000).toLong() - targetMillis).coerceAtLeast(0)
+}
+
+internal fun nearEndFlag(remainingMillis: Long?): String = when {
+    remainingMillis == null -> "-"
+    remainingMillis <= SEEK_NEAR_END_MILLIS -> "yes(≤5s)"
+    else -> "no(>5s)"
+}
+
+/** 记录实际下发的 afade 起点与起始增益；当前音量来自 mpv 的 volume 属性。 */
+internal fun fadeDebugLine(
+    startMillis: Long,
+    durationMillis: Long,
+    issued: Boolean,
+    snapshot: AudioDebugSnapshot,
+): String = "淡入: 下发=${flagOrDash(issued)} 起始位置=${startMillis}ms " +
+    "afade st=${secondsFromMillis(startMillis)}s 起始增益=0.000 时长=${durationMillis}ms " +
+    "当前音量=${secondsOrDash(snapshot.volume)} 静音=${flagOrDash(snapshot.muted)}"
+
+private fun secondsOrDash(value: Double?): String =
+    value?.let { String.format(Locale.US, "%.3f", it) } ?: "-"
+
+private fun secondsFromMillis(millis: Long): String =
+    String.format(Locale.US, "%.3f", millis / 1000.0)
+
+private fun flagOrDash(value: Boolean?): String = when (value) {
+    null -> "-"
+    true -> "yes"
+    false -> "no"
+}
+
+private fun textOrDash(value: String?): String = value?.takeIf { it.isNotBlank() } ?: "-"
+
+private fun Double.finiteOrNull(): Double? = takeIf { it.isFinite() }
+
+private const val SEEK_NEAR_END_MILLIS = 5_000L

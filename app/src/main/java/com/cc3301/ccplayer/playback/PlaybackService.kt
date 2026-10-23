@@ -68,13 +68,14 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath)
+        val diagnostics = (application as CcPlayerApplication).diagnostics
+        playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath, diagnostics)
         playbackController = PlaybackController(
             playbackEngine,
             RoomPlaybackProgressRepository.create(this),
             scope,
             marshalCallbacks = true,
-            diagnostics = (application as CcPlayerApplication).diagnostics,
+            diagnostics = diagnostics,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pauseForBackground,
