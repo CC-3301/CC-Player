@@ -63,7 +63,12 @@ class MpvPlaybackEngine(
 
     @Volatile
     private var durationSeconds = 0.0
+
+    /** mpv 事件线程写，抓帧线程读；冻结画面按这对尺寸裁切。 */
+    @Volatile
     private var videoWidth = 0
+
+    @Volatile
     private var videoHeight = 0
 
     /** seek 归属状态始终维护；开关只决定是否读属性与拼日志。 */

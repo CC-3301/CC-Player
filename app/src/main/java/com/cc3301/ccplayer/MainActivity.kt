@@ -211,6 +211,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标画面就绪。 */
     private var freezeFrame by mutableStateOf<Bitmap?>(null)
 
+    /** 切集抓帧仍在后台执行：原画面还在 Surface 上，不铺黑底。 */
+    private var freezeFramePending by mutableStateOf(false)
+
     /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
     private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
@@ -237,6 +240,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
+                launch { binder.controller.freezeFramePending.collect { freezeFramePending = it } }
                 launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -257,10 +261,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
+            // 连上后强制上报一次可用性，覆盖新控制器默认的“有 Surface”。
             surfaceSession.onEngineAvailable()
-            binder.controller.setRenderSurfaceAvailable(
-                surfaceSession.state != SurfaceSession.State.Detached,
-            )
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
@@ -344,6 +346,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             freezeFrame = freezeFrame,
+                            freezeFramePending = freezeFramePending,
                             backgroundRestoreFrame = backgroundRestoreFrame,
                             holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
@@ -731,6 +734,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         buffering = false
         holdBlack = false
         freezeFrame = null
+        freezeFramePending = false
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off

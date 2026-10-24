@@ -23,10 +23,8 @@ interface PlaybackEngine {
      */
     fun grabFrame(): Frame?
 
-    /** 引擎抓到的一帧画面；[hasFrame] 为显式结果，无帧时为假。 */
-    class Frame(val bitmap: Bitmap?) {
-        val hasFrame: Boolean get() = bitmap != null
-    }
+    /** 引擎抓到的一帧画面；返回 null 表示无帧，位图可为 null 仅供测试替身。 */
+    class Frame(val bitmap: Bitmap?)
 
     fun pause()
 

@@ -20,9 +20,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /**
@@ -86,6 +88,10 @@ class PlaybackController(
     /** 切集期间盖在画面上的冻结帧；没有切集或已就绪时为 null。 */
     private val _freezeFrame = MutableStateFlow<Bitmap?>(null)
     val freezeFrame: StateFlow<Bitmap?> = _freezeFrame.asStateFlow()
+
+    /** 切集抓帧仍在后台执行：此时原画面还在 Surface 上，不能铺黑底。 */
+    private val _freezeFramePending = MutableStateFlow(false)
+    val freezeFramePending: StateFlow<Boolean> = _freezeFramePending.asStateFlow()
 
     /**
      * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
@@ -501,7 +507,8 @@ class PlaybackController(
             surfaceProbeJob = null
             if (!active || !_renderSurfaceAvailable.value) return@launch
             if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-            if (frame?.hasFrame == true) {
+            // 非 null Frame 就表示确实抓到帧；位图本身为空只出现在测试替身里。
+            if (frame != null) {
                 confirmFrame(engine.surfaceGeneration)
             } else {
                 diagnostics.log("Surface 恢复: 抓帧无结果，保留旧画面")
@@ -589,9 +596,7 @@ class PlaybackController(
         val token = ++backgroundCaptureToken
         backgroundCaptureInFlight = true
         val job = scope.launch(frameProbeDispatcher) {
-            val frame = runCatching { engine.grabFrame() }.getOrNull()
-                ?.takeIf { it.hasFrame }
-                ?.bitmap
+            val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
             backgroundCaptureInFlight = false
             if (frame == null || token != backgroundCaptureToken) return@launch
             capturedSurfaceGeneration = generation
@@ -735,16 +740,22 @@ class PlaybackController(
         cancelSwitchCapture()
         val token = switchCaptureToken
         switchStartPending = true
+        _freezeFramePending.value = true
         switchCaptureJob = scope.launch {
-            val frame = withContext(frameProbeDispatcher) {
+            val grab = async(frameProbeDispatcher) {
                 runCatching { engine.grabFrame() }.getOrNull()
+            }
+            val frame = withTimeoutOrNull(SWITCH_GRAB_TIMEOUT_MILLIS) { grab.await() }
+            if (frame == null) {
+                diagnostics.log { "切集抓帧超时或无帧: ${loadTargetUrl ?: "-"}" }
+                grab.cancel()
             }
             if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return@launch
             switchStartPending = false
             switchCaptureJob = null
-            val bitmap = frame?.takeIf { it.hasFrame }?.bitmap
+            _freezeFramePending.value = false
             // 抓帧失败时保留屏幕上原有的画面，不主动换成黑底。
-            if (bitmap != null) replaceFreezeFrame(bitmap)
+            frame?.bitmap?.let { replaceFreezeFrame(it) }
             startSwitchTarget()
         }
     }
@@ -763,6 +774,7 @@ class PlaybackController(
         switchCaptureJob?.cancel()
         switchCaptureJob = null
         switchStartPending = false
+        _freezeFramePending.value = false
     }
 
     fun pause() {
@@ -1887,6 +1899,9 @@ class PlaybackController(
 
         /** 切集后等新帧上屏的总窗口；从切集开始或最后一次加载事件起算。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
+
+        /** 切集抓帧的上限；超时按无帧继续加载，不阻塞 loadfile。 */
+        const val SWITCH_GRAB_TIMEOUT_MILLIS = 2_000L
 
         private const val NO_MEDIA = -1
 

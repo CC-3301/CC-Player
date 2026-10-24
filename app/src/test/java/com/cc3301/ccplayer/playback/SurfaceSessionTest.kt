@@ -11,6 +11,7 @@ import org.junit.Test
 class SurfaceSessionTest {
 
     private val attached = mutableListOf<Surface>()
+    private val operations = mutableListOf<String>()
     private val resized = mutableListOf<Pair<Int, Int>>()
     private val availability = mutableListOf<Boolean>()
     private var detachCalls = 0
@@ -19,10 +20,14 @@ class SurfaceSessionTest {
 
     private fun session(): SurfaceSession = SurfaceSession(
         attach = { surface ->
+            operations += "attach"
             attached += surface
             engineReady
         },
-        detachEngine = { detachCalls++ },
+        detachEngine = {
+            detachCalls++
+            operations += "detach"
+        },
         resize = { width, height -> resized += width to height },
         onAvailabilityChanged = { availability += it },
         isValid = { surfaceValid },
@@ -174,6 +179,61 @@ class SurfaceSessionTest {
         assertSame(surface, attached.last())
         assertTrue(session.hasSurface)
         assertEquals(SurfaceSession.State.Ready, session.state)
+    }
+
+    @Test
+    fun `a new surface replaces a destroyed background mount`() {
+        val session = session()
+        val oldSurface = testSurface()
+        val newSurface = testSurface()
+
+        session.onActivityStarted()
+        session.onSurfaceCreated(oldSurface)
+        session.onActivityStopped()
+        session.onSurfaceDestroyed()
+        session.onActivityStarted()
+        session.onSurfaceCreated(newSurface)
+
+        // 旧 Surface 已销毁但仍挂在引擎上：先分离，再挂新 Surface。
+        assertEquals(listOf("attach", "detach", "attach"), operations)
+        assertSame(newSurface, attached.last())
+        assertEquals(SurfaceSession.State.Ready, session.state)
+    }
+
+    @Test
+    fun `a reused surface identity is remounted after destruction`() {
+        val session = session()
+        val surface = testSurface()
+
+        session.onActivityStarted()
+        session.onSurfaceCreated(surface)
+        session.onActivityStopped()
+        session.onSurfaceDestroyed()
+        session.onActivityStarted()
+        session.onSurfaceCreated(surface)
+
+        // Surface 对象身份可能被复用，销毁过就必须重建挂载。
+        assertEquals(listOf("attach", "detach", "attach"), operations)
+        assertEquals(2, attached.size)
+    }
+
+    @Test
+    fun `background capture detach is not skipped by a new surface`() {
+        val session = session()
+        val oldSurface = testSurface()
+        val newSurface = testSurface()
+
+        session.onActivityStarted()
+        session.onSurfaceCreated(oldSurface)
+        session.onActivityStopped()
+        session.onSurfaceDestroyed()
+        session.onSurfaceCreated(newSurface)
+        // 抓帧结束的分离不能被「已有新 Surface」跳过。
+        session.detach()
+        session.onActivityStarted()
+
+        assertEquals(listOf("attach", "detach", "attach"), operations)
+        assertSame(newSurface, attached.last())
     }
 
     @Test

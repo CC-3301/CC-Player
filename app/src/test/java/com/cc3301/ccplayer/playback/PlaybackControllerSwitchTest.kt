@@ -4,7 +4,10 @@ import android.graphics.Bitmap
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -135,11 +138,58 @@ class PlaybackControllerSwitchTest {
         // 抓帧不占调用线程：loadfile 必须等后台抓帧返回后再下发。
         assertEquals(listOf("pause"), engine.actions.takeLast(1))
         assertNull(controller.freezeFrame.value)
+        assertTrue(controller.freezeFramePending.value)
 
         runCurrent()
 
         assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
         assertSame(frame, controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
+    }
+
+    @Test
+    fun `a stuck grab times out and still loads the target`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv")
+            engine.reportMediaLoaded()
+            engine.beforeGrab = { gate.await() }
+
+            controller.next()
+            assertTrue(controller.freezeFramePending.value)
+            assertEquals(1, engine.startedUrls.size)
+
+            // 抓帧一直不返回：超时后按无帧继续，必须在看门狗之前给出结果。
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertEquals("root/ep2.mkv", engine.startedUrls.last())
+            assertNull(controller.freezeFrame.value)
+            assertFalse(controller.freezeFramePending.value)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
+    }
+
+    @Test
+    fun `a frame without a bitmap does not replace the freeze`() = runTest {
+        val controller = playingController()
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+
+        controller.next()
+
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertNull(controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
     }
 
     @Test

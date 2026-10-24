@@ -24,9 +24,16 @@ class SurfaceSession(
 
     private var surface: Surface? = null
     private var foreground = false
-    private var mounted = false
+
+    /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，后台销毁后仍要等抓帧结束再分离。 */
+    private var mountedSurface: Surface? = null
+
+    /** 已挂载的 Surface 已被销毁；即使对象身份被复用，也必须先分离再重挂。 */
+    private var mountedSurfaceDestroyed = false
     private var surfaceWidth = 0
     private var surfaceHeight = 0
+
+    private val mounted: Boolean get() = mountedSurface != null
 
     /** 是否有可挂载的 Surface；回前台时用它恢复画面。 */
     val hasSurface: Boolean get() = surface?.let(isValid) == true
@@ -56,21 +63,23 @@ class SurfaceSession(
 
     fun onSurfaceDestroyed() {
         surface = null
+        if (mounted) mountedSurfaceDestroyed = true
         // 退后台时先让抓帧跑完，分离由调用方在抓帧结束后触发。
         if (foreground) detachIfMounted()
         publish()
     }
 
-    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去。 */
+    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去并强制上报一次状态。 */
     fun onEngineAvailable() {
         attachCurrent()
-        publish()
+        publish(force = true)
     }
 
     /** 播放服务断开：旧引擎的挂载不再有效，重新连上时补挂。 */
     fun onEngineLost() {
-        mounted = false
-        publish()
+        mountedSurface = null
+        mountedSurfaceDestroyed = false
+        publish(force = true)
     }
 
     /** 后台抓帧结束后分离；重复调用无副作用。 */
@@ -87,27 +96,33 @@ class SurfaceSession(
     }
 
     private fun attachCurrent() {
-        if (!foreground || mounted) return
-        val surface = surface?.takeIf(isValid) ?: return
-        if (!attach(surface)) return
-        mounted = true
+        if (!foreground) return
+        val target = surface?.takeIf(isValid) ?: return
+        // 同一个 Surface 且没有被销毁才是幂等挂载；对象身份不能当作会话 ID。
+        if (mountedSurface === target && !mountedSurfaceDestroyed) return
+        detachIfMounted()
+        if (!attach(target)) return
+        mountedSurface = target
+        mountedSurfaceDestroyed = false
         if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
     }
 
     private fun detachIfMounted() {
         if (!mounted) return
         detachEngine()
-        mounted = false
+        mountedSurface = null
+        mountedSurfaceDestroyed = false
     }
 
-    private fun publish() {
+    private fun publish(force: Boolean = false) {
         val next = when {
             !foreground || !mounted -> State.Detached
-            hasSurface -> State.Ready
+            hasSurface && !mountedSurfaceDestroyed -> State.Ready
             else -> State.Attached
         }
-        if (next == state) return
+        if (!force && next == state) return
         state = next
-        onAvailabilityChanged(next != State.Detached)
+        // 只有真正可渲染的 Ready 才算可用；Attached 表示引擎还挂着但当前 Surface 已无效。
+        onAvailabilityChanged(next == State.Ready)
     }
 }
