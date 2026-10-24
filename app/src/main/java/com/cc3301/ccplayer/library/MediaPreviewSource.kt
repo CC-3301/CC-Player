@@ -110,7 +110,7 @@ class CachedMediaPreviewSource(
     private val monotonicClock: () -> Long = System::nanoTime,
     /** 诊断日志出口；只记文件名与失败类型，不记连接凭据。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    /** 位置所属连接源的标识；并发按连接源分组，默认按位置自身分组。 */
+    /** 位置所属连接源的标识；并发按连接源分组，未注入时按主机与共享分组。 */
     private val sourceKeyOf: suspend (String) -> String = { location -> networkSourceKey(location) },
     /** 书签查找使用的调度器；不放在主线程。 */
     private val sourceKeyDispatcher: CoroutineDispatcher = Dispatchers.IO,
