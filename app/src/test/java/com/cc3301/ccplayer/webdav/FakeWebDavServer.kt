@@ -5,6 +5,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** 收到的一次请求。 */
 class FakeRequest(val method: String, val path: String, private val headers: Map<String, String>) {
@@ -17,7 +19,10 @@ class FakeRequest(val method: String, val path: String, private val headers: Map
  *
  * [ignoreRange] 置真时忽略 Range 头，模拟不支持区间请求的服务器；
  * [withoutLength] 置真时不给内容长度，模拟长度未知的响应；
- * [getStatus] 非 0 时 GET 一律回该状态码且不带内容。
+ * [getStatus] 非 0 时 GET 一律回该状态码且不带内容；
+ * [stallBody] 置真时 GET 只发响应头，正文等到服务器关闭才发，用来模拟阻塞读；
+ * [stallHeadersAfterFirst] 置真时首个 GET 正常应答，后续 GET 等到服务器关闭才发响应头，
+ * 用来模拟发请求后迟迟等不到响应头。
  */
 class FakeWebDavServer(
     private val listing: String = "",
@@ -26,9 +31,16 @@ class FakeWebDavServer(
     private val getStatus: Int = 0,
     private val ignoreRange: Boolean = false,
     private val withoutLength: Boolean = false,
+    private val stallBody: Boolean = false,
+    private val stallHeadersAfterFirst: Boolean = false,
 ) : AutoCloseable {
 
     private val receivedRequests = CopyOnWriteArrayList<FakeRequest>()
+    private val releaseStalledBody = CountDownLatch(1)
+    private val stalledLock = Object()
+    private var stalledRequests = 0
+    private var getRequests = 0
+    private var stalledHeaderRequests = 0
     private val serverSocket = ServerSocket(0, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
 
     init {
@@ -41,7 +53,34 @@ class FakeWebDavServer(
     /** 收到的请求，按到达顺序。 */
     fun received(): List<FakeRequest> = receivedRequests.toList()
 
+    /** 等至少 [count] 个 GET 已发出响应头并停在正文前；超时返回 false。 */
+    fun awaitStalledBody(count: Int, timeoutMillis: Long = 5_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        synchronized(stalledLock) {
+            while (stalledRequests < count) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) return false
+                stalledLock.wait(remaining)
+            }
+            return true
+        }
+    }
+
+    /** 等至少 [count] 个后续 GET 已到服务器并停在响应头前；超时返回 false。 */
+    fun awaitStalledHeaders(count: Int, timeoutMillis: Long = 5_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        synchronized(stalledLock) {
+            while (stalledHeaderRequests < count) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) return false
+                stalledLock.wait(remaining)
+            }
+            return true
+        }
+    }
+
     override fun close() {
+        releaseStalledBody.countDown()
         runCatching { serverSocket.close() }
     }
 
@@ -77,10 +116,29 @@ class FakeWebDavServer(
             when {
                 method == METHOD_PROPFIND -> write(output, propfindStatus, XML_CONTENT_TYPE, listing.toByteArray(), extraHeaders = emptyMap())
                 getStatus != 0 -> write(output, getStatus, OCTET_STREAM_CONTENT_TYPE, ByteArray(0), extraHeaders = emptyMap())
-                else -> writeRange(output, headers["range"])
+                else -> if (!(stallHeadersAfterFirst && awaitHeaderGate())) {
+                    writeRange(output, headers["range"])
+                }
             }
             output.flush()
         }
+    }
+
+    /** 首个 GET 直接放行；后续 GET 登记后等服务器关闭。返回真表示连接已该结束。 */
+    private fun awaitHeaderGate(): Boolean {
+        val shouldStall = synchronized(stalledLock) {
+            getRequests++
+            if (getRequests > 1) {
+                stalledHeaderRequests++
+                stalledLock.notifyAll()
+                true
+            } else {
+                false
+            }
+        }
+        if (!shouldStall) return false
+        releaseStalledBody.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        return true
     }
 
     private fun writeRange(output: java.io.OutputStream, rangeHeader: String?) {
@@ -92,12 +150,13 @@ class FakeWebDavServer(
                 body = bytes,
                 extraHeaders = mapOf("Connection" to "close"),
                 includeLength = false,
+                stall = stallBody,
             )
             return
         }
         val spec = rangeHeader?.removePrefix(BYTES_PREFIX)?.substringBefore(',')?.trim()
         if (ignoreRange || spec == null) {
-            write(output, STATUS_OK, OCTET_STREAM_CONTENT_TYPE, bytes, extraHeaders = emptyMap())
+            write(output, STATUS_OK, OCTET_STREAM_CONTENT_TYPE, bytes, extraHeaders = emptyMap(), stall = stallBody)
             return
         }
         val start = spec.substringBefore('-').toLongOrNull() ?: 0
@@ -109,6 +168,7 @@ class FakeWebDavServer(
             contentType = OCTET_STREAM_CONTENT_TYPE,
             body = slice,
             extraHeaders = mapOf("Content-Range" to "bytes $start-${start + slice.size - 1}/${bytes.size}"),
+            stall = stallBody,
         )
     }
 
@@ -119,6 +179,7 @@ class FakeWebDavServer(
         body: ByteArray,
         extraHeaders: Map<String, String>,
         includeLength: Boolean = true,
+        stall: Boolean = false,
     ) {
         val headers = linkedMapOf("Content-Type" to contentType)
         if (includeLength) headers["Content-Length"] = body.size.toString()
@@ -129,7 +190,16 @@ class FakeWebDavServer(
             append("\r\n")
         }
         output.write(head.toByteArray(Charsets.ISO_8859_1))
-        output.write(body)
+        output.flush()
+        if (stall) {
+            synchronized(stalledLock) {
+                stalledRequests++
+                stalledLock.notifyAll()
+            }
+            releaseStalledBody.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            return
+        }
+        runCatching { output.write(body) }
     }
 
     private fun statusText(status: Int): String = when (status) {
@@ -151,5 +221,6 @@ class FakeWebDavServer(
         const val STATUS_PARTIAL = 206
         const val XML_CONTENT_TYPE = "application/xml"
         const val OCTET_STREAM_CONTENT_TYPE = "application/octet-stream"
+        const val STALL_TIMEOUT_SECONDS = 10L
     }
 }

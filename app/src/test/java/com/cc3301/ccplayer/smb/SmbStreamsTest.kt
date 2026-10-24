@@ -89,5 +89,7 @@ class SmbStreamsTest {
         streams.close()
 
         assertEquals(true, connector.handles.getValue("media/电影.mkv").closed)
+        // 先关连接让阻塞读退出，再尽力关句柄。
+        assertEquals(listOf("connection", "handle"), connector.closeOrder)
     }
 }

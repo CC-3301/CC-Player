@@ -1,8 +1,12 @@
 package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
+import com.cc3301.ccplayer.streaming.NetworkReadPriority
+import com.cc3301.ccplayer.streaming.ReadKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 
 /**
@@ -19,21 +23,35 @@ fun interface NetworkPreviewDecoder {
 /**
  * 网络预览取图：打开随机读句柄后交给 [decoder]，只在需要时读字节范围。
  *
- * 句柄无论解码成功与否都会关闭；打开或解码失败抛出异常，由上层保持占位图并退避重试。
+ * 句柄无论解码成功与否都会关闭；取消或超时时先关闭句柄，让阻塞中的传输读取退出。
+ * 读取按 [readPriority] 让出给播放读取。打开或解码失败抛出异常，由上层保持占位图并退避重试。
  */
 class NetworkPreviewExtractor(
     private val reads: NetworkMediaReads,
+    private val readPriority: NetworkReadPriority = NetworkReadPriority.shared,
     private val decoder: NetworkPreviewDecoder,
 ) {
 
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             val kind = mediaKindOf(file.name) ?: return@withContext null
-            val source = reads.openRead(file.location)
+            val source = readPriority.wrap(reads.openRead(file.location), ReadKind.Thumbnail)
             try {
-                decoder.imageBytes(source, kind, targetWidth)
+                decode(source, kind, targetWidth)
             } finally {
                 runCatching { source.close() }
+            }
+        }
+
+    /** 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。 */
+    private suspend fun decode(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
+        coroutineScope {
+            val decoding = async { decoder.imageBytes(source, kind, targetWidth) }
+            try {
+                decoding.await()
+            } catch (cancellation: CancellationException) {
+                runCatching { source.close() }
+                throw cancellation
             }
         }
 }
