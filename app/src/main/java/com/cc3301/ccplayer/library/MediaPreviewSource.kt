@@ -23,6 +23,12 @@ interface MediaPreviewSource {
     /** 取卡片预览；目录没有预览。可见项请求在取并发许可时优先于预取。 */
     suspend fun preview(file: MediaFile): MediaPreview
 
+    /**
+     * 可见请求：`index` 为条目在列表中的索引。
+     * 并发配额内按索引从前到后取得许可，保证可见项从列表上方开始下发。
+     */
+    suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview = preview(file)
+
     /** 预取请求；先让可见项取许可，取得许可后复查仍在范围内才抽取。 */
     suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
 
@@ -88,8 +94,10 @@ data class ThumbnailPolicy(
  * 媒体预览：先在 [cache] 里找图，没有就让 [extractor] 抽取并落盘。
  *
  * 缓存键包含位置、大小、修改时间、策略版本与目标宽度；修改时间缺失时退化为大小与有效期。
- * 本地与网络并发提取各有上限，同一缓存键的并发请求只抽取一次。
+ * 本地与网络并发提取各有上限；网络按连接源分配，每个源 2 个、全局 4 个。
+ * 同一缓存键的并发请求只抽取一次。
  * 失败或超时保持占位图且不写缓存；失败按键退避，退避到期后下一次请求重试。
+ * 成功封面落盘复用；失败与无图结果只在本次运行内记忆。
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
@@ -103,8 +111,14 @@ class CachedMediaPreviewSource(
     /** 本地同时提取数上限；可见项优先取得许可。 */
     private val localPermits = PrioritySemaphore(LOCAL_CONCURRENCY)
 
-    /** 网络同时提取数上限：一次进入目录时不发起过多网络请求；可见项优先取得许可。 */
-    private val networkPermits = PrioritySemaphore(NETWORK_CONCURRENCY)
+    /** 网络同时提取数：每个连接源 2 个，全局 4 个；可见项优先取得许可。 */
+    private val networkPermits = SourceConcurrencyLimiter(
+        globalCapacity = NETWORK_GLOBAL_CONCURRENCY,
+        sourceCapacity = NETWORK_SOURCE_CONCURRENCY,
+    )
+
+    /** 本次运行已确认无图的缓存键；成功封面落盘，失败与无图不跨启动。 */
+    private val noImageConfirmed = ConcurrentHashMap.newKeySet<String>()
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -120,7 +134,10 @@ class CachedMediaPreviewSource(
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
     override suspend fun preview(file: MediaFile): MediaPreview =
-        preview(file, PreviewPriority.Visible)
+        preview(file, PreviewPriority.visible(Int.MAX_VALUE - 1))
+
+    override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview =
+        preview(file, PreviewPriority.visible(index))
 
     override suspend fun prefetch(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.Prefetch)
@@ -161,6 +178,7 @@ class CachedMediaPreviewSource(
             file = file,
             key = key,
             maxAgeMillis = maxAge,
+            clearNoImageOnCacheMiss = true,
             onCacheHit = { cached -> durationOnCacheHit(file, key, cached, priority) },
             load = { extractLocal(file, key, targetWidth, priority) },
         )
@@ -228,6 +246,9 @@ class CachedMediaPreviewSource(
                 durationMillis = durationMillis,
                 durationKnown = durationKnown,
             )
+            noImageConfirmed.add(key)
+        } else {
+            noImageConfirmed.remove(key)
         }
         return LoadedPreview(image, durationMillis)
     }
@@ -294,15 +315,21 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): File? {
+        // 本次运行已确认无图：不再重复抽取，重启后重新确认。
+        if (key in noImageConfirmed) return null
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             file = file,
             key = key,
             maxAgeMillis = maxAge,
-            onCacheHit = { cached -> LoadedPreview(cached.file, durationMillis = null) },
+            clearNoImageOnCacheMiss = false,
+            onCacheHit = { cached ->
+                noImageConfirmed.remove(key)
+                LoadedPreview(cached.file, durationMillis = null)
+            },
             load = {
                 // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
-                val attempt = networkPermits.withPermit(priority) {
+                val attempt = networkPermits.withPermit(networkSourceKey(file.location), priority) {
                     if (!mayExtract(file.location, priority)) {
                         null
                     } else {
@@ -322,11 +349,15 @@ class CachedMediaPreviewSource(
                     currentCoroutineContext().ensureActive()
                     val (completed, bytes) = attempt
                     if (!completed) throw IllegalStateException("网络预览超时")
-                    // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
-                    LoadedPreview(
-                        bytes?.let { cache.save(key, it, durationKnown = false) },
-                        durationMillis = null,
-                    )
+                    if (bytes == null) {
+                        // 无图只在本次运行内记住；不写缓存，重启后重新确认。
+                        noImageConfirmed.add(key)
+                        LoadedPreview(image = null, durationMillis = null)
+                    } else {
+                        noImageConfirmed.remove(key)
+                        // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
+                        LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
+                    }
                 }
             },
         )
@@ -338,7 +369,7 @@ class CachedMediaPreviewSource(
      * 可见请求不复查：卡片被放弃后不会以相同键重试，会永久停在占位图。
      */
     private fun mayExtract(location: String, priority: PreviewPriority): Boolean =
-        priority != PreviewPriority.Prefetch || previewWindow.contains(location)
+        priority.isVisible || previewWindow.contains(location)
 
     /** 修改时间缺失时按有效期缓存；有修改时间时由缓存键判断是否过期。 */
     private fun cacheMaxAge(file: MediaFile): Long? = thumbnailCacheMaxAge(file, policy)
@@ -352,6 +383,7 @@ class CachedMediaPreviewSource(
         file: MediaFile,
         key: String,
         maxAgeMillis: Long?,
+        clearNoImageOnCacheMiss: Boolean,
         onCacheHit: suspend (CachedThumbnail) -> LoadedPreview,
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
@@ -369,11 +401,16 @@ class CachedMediaPreviewSource(
             try {
                 val loaded = try {
                     val cached = cache.entry(key, maxAgeMillis)
-                    if (cached != null) {
+                    // 上次运行留下的无图记录只用于复用时长；本次运行仍需确认是否有图。
+                    val usable = cached != null && (!cached.noImage || key in noImageConfirmed)
+                    if (usable) {
                         // 已有缓存时抽取失败记录已陈旧，清掉。
                         extractionFailures.remove(key)
-                        onCacheHit(cached)
+                        if (cached?.file != null) noImageConfirmed.remove(key)
+                        onCacheHit(cached!!)
                     } else {
+                        // 本地无图记录有效期到期后重新确认；网络无图不落盘，不在这里清。
+                        if (cached == null && clearNoImageOnCacheMiss) noImageConfirmed.remove(key)
                         loadWithBackoff(file, key, load)
                     }
                 } catch (cancellation: CancellationException) {
@@ -472,8 +509,11 @@ class CachedMediaPreviewSource(
         /** 同时进行的本地提取数；超出的排队。 */
         private const val LOCAL_CONCURRENCY = 2
 
-        /** 同时进行的网络提取数；超出的由 [networkPermits] 排队。 */
-        private const val NETWORK_CONCURRENCY = 2
+        /** 网络全局同时提取数；超出的按优先级排队。 */
+        private const val NETWORK_GLOBAL_CONCURRENCY = 4
+
+        /** 单个网络连接源同时提取数；一个慢源最多占这么多名额。 */
+        private const val NETWORK_SOURCE_CONCURRENCY = 2
 
         /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
@@ -547,11 +587,56 @@ private data class PreviewWindow(
 /** 预取已离开可见范围；等待同键结果的请求据此重新竞争，而不是接收空结果。 */
 private class AbandonedPreviewException : CancellationException("预览请求已离开可见范围")
 
-/** 取并发许可的优先级：可见项先于预取项。 */
-private enum class PreviewPriority { Visible, Prefetch }
+/**
+ * 取并发许可的优先级：可见项先于预取项。
+ * [order] 为可见项在列表中的索引；同级可见请求按索引从小到大取得许可。
+ */
+private data class PreviewPriority(val kind: Kind, val order: Int) {
+
+    enum class Kind { Visible, Prefetch }
+
+    val isVisible: Boolean get() = kind == Kind.Visible
+
+    companion object {
+        fun visible(order: Int) = PreviewPriority(Kind.Visible, order)
+
+        val Prefetch = PreviewPriority(Kind.Prefetch, Int.MAX_VALUE)
+    }
+}
 
 /**
- * 带优先级的并发许可：有许可可用时先交给等待中的可见请求，其次预取请求；同级按等待顺序。
+ * 网络并发许可：每个连接源一份配额，另有一份全局配额。
+ * 先取源内许可再取全局许可，避免同一源互相等待造成死锁；慢源最多占满自己的源内配额。
+ */
+private class SourceConcurrencyLimiter(globalCapacity: Int, private val sourceCapacity: Int) {
+
+    private val global = PrioritySemaphore(globalCapacity)
+    private val perSource = ConcurrentHashMap<String, PrioritySemaphore>()
+
+    suspend fun <T> withPermit(sourceKey: String, priority: PreviewPriority, block: suspend () -> T): T =
+        perSource.getOrPut(sourceKey) { PrioritySemaphore(sourceCapacity) }.withPermit(priority) {
+            global.withPermit(priority, block)
+        }
+}
+
+/**
+ * 网络连接源的键：SMB 按主机与共享，其它协议按协议与主机。
+ * 只用于并发配额分组，位置本身仍是缓存键。
+ */
+internal fun networkSourceKey(location: String): String {
+    val separator = location.indexOf("://")
+    if (separator <= 0) return location
+    val scheme = location.substring(0, separator).lowercase()
+    val rest = location.substring(separator + 3)
+    val authority = rest.substringBefore('/')
+    if (scheme != "smb") return "$scheme://$authority"
+    val share = rest.substringAfter('/', "").substringBefore('/')
+    return if (share.isEmpty()) "$scheme://$authority" else "$scheme://$authority/$share"
+}
+
+/**
+ * 带优先级的并发许可：有许可可用时先交给等待中的可见请求，其次预取请求。
+ * 可见请求按 [PreviewPriority.order] 从小到大取得许可；同级预取按等待顺序。
  * 取消等待会退出队列；已发出的许可在取消竞争中归还，避免名额泄漏。
  */
 private class PrioritySemaphore(private val capacity: Int) {
@@ -594,9 +679,7 @@ private class PrioritySemaphore(private val capacity: Int) {
 
     private suspend fun release() {
         val next = lock.withLock {
-            val index = waiters.indexOfFirst { it.priority == PreviewPriority.Visible }
-                .takeIf { it >= 0 }
-                ?: waiters.indexOfFirst { true }.takeIf { it >= 0 }
+            val index = waiters.indices.minByOrNull { position -> priorityRank(waiters[position]) }
             if (index == null) {
                 available++
                 null
@@ -607,8 +690,18 @@ private class PrioritySemaphore(private val capacity: Int) {
         next?.granted?.complete(Unit)
     }
 
+    /** 可见请求先于预取；可见请求内按列表索引排序，预取保持等待顺序。 */
+    private fun priorityRank(waiter: Waiter): Long = when (waiter.priority.kind) {
+        PreviewPriority.Kind.Visible -> waiter.priority.order.toLong()
+        PreviewPriority.Kind.Prefetch -> PREFETCH_RANK
+    }
+
     private class Waiter(
         val priority: PreviewPriority,
         val granted: CompletableDeferred<Unit>,
     )
+
+    private companion object {
+        const val PREFETCH_RANK = Long.MAX_VALUE
+    }
 }

@@ -23,9 +23,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItems
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.items as listItems
+import androidx.compose.foundation.lazy.itemsIndexed as listItems
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -74,8 +74,8 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreview
 import com.cc3301.ccplayer.library.MediaPreviewSource
-import com.cc3301.ccplayer.library.PreviewPrefetcher
 import com.cc3301.ccplayer.library.SortOrder
+import com.cc3301.ccplayer.library.VisiblePreviewScheduler
 import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.library.relativeDirectoryPath
 import com.cc3301.ccplayer.settings.ViewMode
@@ -116,11 +116,13 @@ fun LibraryScreen(
     val sourceLocation = state.sourceLocation
     val relativePath = relativeDirectoryPath(state.stack)
 
-    // 可见项由各自条目立即请求；前后各一行的条目延迟预取，离开范围就取消。
+    // 可见项由调度器按列表索引顺序下发；前后各一行的条目延迟预取，离开范围就取消。
     val previewScope = rememberCoroutineScope()
-    val prefetcher = remember(mediaPreview, previewScope) { PreviewPrefetcher(mediaPreview, previewScope) }
-    DisposableEffect(prefetcher) {
-        onDispose { prefetcher.cancelAll() }
+    val previewScheduler = remember(mediaPreview, previewScope) {
+        VisiblePreviewScheduler(mediaPreview, previewScope)
+    }
+    DisposableEffect(previewScheduler) {
+        onDispose { previewScheduler.cancelAll() }
     }
     LaunchedEffect(
         state.currentDirectory?.location,
@@ -130,7 +132,6 @@ fun LibraryScreen(
     ) {
         val entries = state.visibleEntries
         val rowSize = if (state.viewMode == ViewMode.List) 1 else state.gridColumns
-        prefetcher.cancelAll()
         snapshotFlow {
             if (state.viewMode == ViewMode.List) {
                 val visible = listState.layoutInfo.visibleItemsInfo
@@ -140,7 +141,7 @@ fun LibraryScreen(
                 if (visible.isEmpty()) null else visible.first().index to visible.last().index
             }
         }.collect { range ->
-            if (range != null) prefetcher.update(entries, range.first, range.second, rowSize)
+            if (range != null) previewScheduler.update(entries, range.first, range.second, rowSize)
         }
     }
 
@@ -235,7 +236,7 @@ fun LibraryScreen(
             )
             else -> EntryArea(
                 state = state,
-                mediaPreview = mediaPreview,
+                previewScheduler = previewScheduler,
                 listState = listState,
                 gridState = gridState,
                 onOpenEntry = onOpenEntry,
@@ -353,7 +354,7 @@ private fun SortMenuButton(
 @Composable
 private fun EntryArea(
     state: LibraryState,
-    mediaPreview: MediaPreviewSource,
+    previewScheduler: VisiblePreviewScheduler,
     listState: LazyListState,
     gridState: LazyGridState,
     onOpenEntry: (MediaFile) -> Unit,
@@ -370,8 +371,13 @@ private fun EntryArea(
                 bottom = 28.dp,
             ),
         ) {
-            listItems(entries, key = { it.location }) { entry ->
-                EntryRow(entry = entry, mediaPreview = mediaPreview, onOpenEntry = onOpenEntry)
+            listItems(entries, key = { _, entry -> entry.location }) { index, entry ->
+                EntryRow(
+                    entry = entry,
+                    index = index,
+                    previewScheduler = previewScheduler,
+                    onOpenEntry = onOpenEntry,
+                )
             }
         }
 
@@ -383,8 +389,13 @@ private fun EntryArea(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            gridItems(entries, key = { it.location }) { entry ->
-                EntryCard(entry = entry, mediaPreview = mediaPreview, onOpenEntry = onOpenEntry)
+            gridItems(entries, key = { _, entry -> entry.location }) { index, entry ->
+                EntryCard(
+                    entry = entry,
+                    index = index,
+                    previewScheduler = previewScheduler,
+                    onOpenEntry = onOpenEntry,
+                )
             }
         }
     }
@@ -392,14 +403,20 @@ private fun EntryArea(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
+private fun EntryRow(
+    entry: MediaFile,
+    index: Int,
+    previewScheduler: VisiblePreviewScheduler,
+    onOpenEntry: (MediaFile) -> Unit,
+) {
     val preview by produceState<MediaPreview?>(
         initialValue = null,
         entry.location,
         entry.size,
         entry.lastModified,
+        index,
     ) {
-        value = mediaPreview.preview(entry)
+        value = previewScheduler.preview(entry, index)
     }
     CompositionLocalProvider(LocalRippleConfiguration provides LibraryEntryRippleConfiguration) {
         Row(
@@ -440,14 +457,20 @@ private fun EntryRow(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenE
 /** 网格卡片：缩略图（或占位图）+ 文件名。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EntryCard(entry: MediaFile, mediaPreview: MediaPreviewSource, onOpenEntry: (MediaFile) -> Unit) {
+private fun EntryCard(
+    entry: MediaFile,
+    index: Int,
+    previewScheduler: VisiblePreviewScheduler,
+    onOpenEntry: (MediaFile) -> Unit,
+) {
     val preview by produceState<MediaPreview?>(
         initialValue = null,
         entry.location,
         entry.size,
         entry.lastModified,
+        index,
     ) {
-        value = mediaPreview.preview(entry)
+        value = previewScheduler.preview(entry, index)
     }
     CompositionLocalProvider(LocalRippleConfiguration provides LibraryEntryRippleConfiguration) {
         Column(

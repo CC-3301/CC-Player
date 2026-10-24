@@ -28,7 +28,7 @@ class AndroidMediaPreviewExtractor(
 ) : MediaPreviewExtractor {
 
     private val networkPreview = networkReads?.let { reads ->
-        NetworkPreviewExtractor(reads, AndroidNetworkPreviewDecoder())
+        NetworkPreviewExtractor(reads, decoder = AndroidNetworkPreviewDecoder())
     }
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = withContext(Dispatchers.IO) {

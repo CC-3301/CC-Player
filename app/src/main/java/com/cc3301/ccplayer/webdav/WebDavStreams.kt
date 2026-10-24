@@ -5,6 +5,8 @@ import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
+import com.cc3301.ccplayer.streaming.NetworkReadPriority
+import com.cc3301.ccplayer.streaming.ReadKind
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -35,7 +37,10 @@ class WebDavStreams(
     /** 代理在自己的线程上取流，这里阻塞等打开完成。 */
     private fun openBlocking(location: String): ByteSource = runBlocking {
         val target = targetOf(location)
-        transport.openRead(target.url, target.username, target.password)
+        NetworkReadPriority.shared.wrap(
+            transport.openRead(target.url, target.username, target.password),
+            ReadKind.Playback,
+        )
     }
 
     private suspend fun targetOf(location: String): WebDavTarget =

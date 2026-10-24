@@ -1,7 +1,13 @@
 package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -97,6 +103,23 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `取消时关闭句柄以中断阻塞读取`() = runBlocking {
+        val blocking = BlockingByteSource()
+        val extractor = NetworkPreviewExtractor({ blocking }) { opened, _, _ ->
+            opened.readAt(0, ByteArray(1), 0, 1)
+            ByteArray(1)
+        }
+
+        val job = launch(Dispatchers.Default) { extractor.imageBytes(movie, NETWORK_TARGET_WIDTH) }
+        assertTrue(blocking.reading.await(2, TimeUnit.SECONDS))
+
+        job.cancel()
+        withTimeout(2_000) { job.join() }
+
+        assertTrue(blocking.closed)
+    }
+
+    @Test
     fun `读取位置越界与末尾返回 -1`() {
         val buffer = ByteArray(8)
 
@@ -140,6 +163,34 @@ private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
 
     override fun close() {
         closed = true
+    }
+}
+
+/** 读取会一直阻塞到句柄关闭，用来验证取消落到传输层。 */
+private class BlockingByteSource : ByteSource {
+
+    private val lock = Object()
+    private var isClosed = false
+
+    val reading = CountDownLatch(1)
+
+    val closed: Boolean get() = synchronized(lock) { isClosed }
+
+    override val size: Long get() = 64
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        reading.countDown()
+        synchronized(lock) {
+            while (!isClosed) lock.wait()
+        }
+        return 0
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            isClosed = true
+            lock.notifyAll()
+        }
     }
 }
 

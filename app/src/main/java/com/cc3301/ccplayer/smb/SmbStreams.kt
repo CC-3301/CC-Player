@@ -5,6 +5,8 @@ import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
+import com.cc3301.ccplayer.streaming.NetworkReadPriority
+import com.cc3301.ccplayer.streaming.ReadKind
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -35,7 +37,10 @@ class SmbStreams(
     private fun openBlocking(location: String): ByteSource = runBlocking {
         val (target, connection) = connectTo(location)
         try {
-            SmbStreamSource(connection, connection.openRead(target.path))
+            NetworkReadPriority.shared.wrap(
+                SmbStreamSource(connection, connection.openRead(target.path)),
+                ReadKind.Playback,
+            )
         } catch (failure: Exception) {
             runCatching { connection.close() }
             throw failure

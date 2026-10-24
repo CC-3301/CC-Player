@@ -961,6 +961,130 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `网络每源并发不超过 2 且全局不超过 4`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val files = listOf(
+            "smb://nas-a/media/第1 集.mkv",
+            "smb://nas-a/media/第2 集.mkv",
+            "smb://nas-a/media/第3 集.mkv",
+            "smb://nas-b/media/第1 集.mkv",
+            "smb://nas-b/media/第2 集.mkv",
+            "smb://nas-b/media/第3 集.mkv",
+        )
+
+        val requests = files.map { location -> async { bounded.preview(fileAt(location)) } }
+        runCurrent()
+
+        assertEquals(4, tracker.started.size)
+        val perSource = tracker.started.groupingBy(::networkSourceKey).eachCount()
+        assertEquals(setOf("smb://nas-a/media", "smb://nas-b/media"), perSource.keys)
+        assertTrue(perSource.values.all { count -> count <= 2 })
+
+        tracker.imageGate?.complete(Unit)
+        requests.awaitAll()
+        assertTrue(tracker.maxConcurrent <= 4)
+    }
+
+    @Test
+    fun `单个慢源不阻塞本地与其它源`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        // 慢源占满自己的 2 个源内名额，但不应占满全局，也不应影响本地。
+        val slow = (1..2).map { index ->
+            async { bounded.preview(fileAt("smb://slow/media/第$index 集.mkv")) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val other = async { bounded.preview(fileAt("smb://fast/media/电影.mkv")) }
+        val localFile = async { bounded.preview(local("本地.mkv")) }
+        runCurrent()
+
+        assertEquals(4, tracker.started.size)
+        assertTrue(tracker.started.contains("smb://fast/media/电影.mkv"))
+        assertTrue(tracker.started.contains("root/本地.mkv"))
+
+        tracker.imageGate?.complete(Unit)
+        (slow + listOf(other, localFile)).awaitAll()
+    }
+
+    @Test
+    fun `网络无图结果仅本次运行内记忆`() = runTest {
+        extractor.imageBytes = null
+        val file = network("无图.mkv")
+
+        assertNull(source.preview(file).image)
+        assertNull(source.preview(file).image)
+        assertEquals(1, extractor.imageRequests.size)
+        assertTrue(directory.listFiles().isNullOrEmpty())
+
+        // 新实例相当于重启：无图结果不被持久化，重新确认。
+        val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
+        val afterRestart = CachedMediaPreviewSource(
+            extractor = restarted,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        assertNotNull(afterRestart.preview(file).image)
+        assertEquals(1, restarted.imageRequests.size)
+    }
+
+    @Test
+    fun `失败结果仅本次运行内记忆，重启后重新确认`() = runTest {
+        extractor.imageFailure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+        val file = network("失败.mkv")
+
+        assertNull(source.preview(file).image)
+        assertTrue(directory.listFiles().isNullOrEmpty())
+
+        val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
+        val afterRestart = CachedMediaPreviewSource(
+            extractor = restarted,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        assertNotNull(afterRestart.preview(file).image)
+    }
+
+    @Test
+    fun `成功封面跨启动复用`() = runTest {
+        extractor.imageBytes = byteArrayOf(1, 2, 3)
+        val file = network("封面.mkv")
+        assertNotNull(source.preview(file).image)
+
+        val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(9))
+        val afterRestart = CachedMediaPreviewSource(
+            extractor = restarted,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), afterRestart.preview(file).image!!.readBytes())
+        assertTrue(restarted.imageRequests.isEmpty())
+    }
+
+    @Test
+    fun `本地无图结果重启后重新确认`() = runTest {
+        extractor.imageBytes = null
+        extractor.durationMillis = 187_000
+        val file = local("歌.mp3", lastModified = 1_000)
+        assertNull(source.preview(file).image)
+
+        val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(4), durationMillis = 187_000)
+        val afterRestart = CachedMediaPreviewSource(
+            extractor = restarted,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+
+        assertNotNull(afterRestart.preview(file).image)
+        assertEquals(1, restarted.imageRequests.size)
+    }
+
+    @Test
     fun `范围变化后排队中的预取取得许可时直接放弃`() = runTest {
         val tracker = GatedExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1329,6 +1453,13 @@ class CachedMediaPreviewSourceTest {
         name = name,
         location = "smb://nas/media/$name",
         lastModified = lastModified,
+        source = MediaSource.Network,
+    )
+
+    private fun fileAt(location: String) = MediaFile(
+        name = location.substringAfterLast('/'),
+        location = location,
+        lastModified = 1_700_000_000_000,
         source = MediaSource.Network,
     )
 

@@ -8,11 +8,13 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** 命中的缓存条目：图片文件（无图条目为 null）、记录的时长，以及时长是否已知。 */
+/** 命中的缓存条目：图片文件（无图条目为 null）、记录的时长、时长是否已知，以及是否标记为无图。 */
 data class CachedThumbnail(
     val file: File?,
     val durationMillis: Long?,
     val durationKnown: Boolean,
+    /** 元数据来自上一次运行的无图记录；本次运行仍需重新确认是否有图。 */
+    val noImage: Boolean = false,
 )
 
 /**
@@ -116,6 +118,7 @@ class ThumbnailCache(
             file = if (hasImage) cached else null,
             durationMillis = metadata?.durationMillis,
             durationKnown = metadata?.durationKnown == true,
+            noImage = !hasImage && metadata?.noImage == true,
         )
     }
 
