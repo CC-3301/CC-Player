@@ -1,8 +1,10 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.cc3301.ccplayer.ui.theme.AppColors
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToLong
@@ -73,28 +75,92 @@ val PlayerSeekTrackHeight = 2.dp
 /** 播放列表条目内容距抽屉左右边缘的距离。 */
 val PlayerPlaylistHorizontalInset = 16.dp
 
-/** 播放列表当前项高亮条距抽屉左右边缘的内缩距离。 */
-val PlayerPlaylistHighlightInset = 4.dp
+/** 播放列表当前项高亮条左边缘距抽屉左边缘的距离；0dp 表示贴边。 */
+val PlayerPlaylistHighlightStartInset = 0.dp
+
+/** 播放列表当前项高亮条右边缘距抽屉右边缘的距离。 */
+val PlayerPlaylistHighlightEndInset = 4.dp
 
 /** 播放列表编号与标题之间的间距。 */
 val PlayerPlaylistIndexGap = 16.dp
 
+/** 播放列表编号颜色。 */
+val PlayerPlaylistIndexColor = Color.White
+
 /** 播放列表当前项三角图标字号。 */
-val PlayerPlaylistArrowFontSize = 11.5.sp
+val PlayerPlaylistArrowFontSize = 17.25.sp
 
 /** 播放列表当前项三角图标宽度。 */
-val PlayerPlaylistArrowWidth = 16.dp
+val PlayerPlaylistArrowWidth = 24.dp
+
+/** 播放列表当前项三角图标颜色。 */
+val PlayerPlaylistArrowColor = AppColors.Accent
 
 /** 播放列表当前项高亮的横向像素范围。 */
 data class PlaylistHighlightBounds(val start: Float, val end: Float)
 
-/** 按行宽与内缩像素计算高亮范围；行宽不足时两端重合。 */
-fun playlistHighlightBounds(rowWidthPx: Float, insetPx: Float): PlaylistHighlightBounds {
+/** 按行宽与左右内缩像素计算高亮范围；行宽不足时两端重合。 */
+fun playlistHighlightBounds(
+    rowWidthPx: Float,
+    startInsetPx: Float,
+    endInsetPx: Float,
+): PlaylistHighlightBounds {
     val width = rowWidthPx.coerceAtLeast(0f)
-    val start = insetPx.coerceIn(0f, width / 2f)
-    val end = (width - insetPx).coerceAtLeast(start)
+    val start = startInsetPx.coerceIn(0f, width / 2f)
+    val end = (width - endInsetPx).coerceAtLeast(start)
     return PlaylistHighlightBounds(start, end)
 }
+
+/** 播放页可按压的区域，用于确定按压反馈的覆盖范围。 */
+enum class PlayerPressTarget {
+    IconButton,
+    MorePanelRow,
+    AutoPlayNextRow,
+    TextButton,
+    PlaylistRow,
+    SubtitleRow,
+    LockLayer,
+    OutsideDismissLayer,
+}
+
+/** 按压反馈只覆盖交互控件；锁屏整屏层与面板外关闭层不显示涟漪。 */
+fun playerPressFeedbackEnabled(target: PlayerPressTarget): Boolean = when (target) {
+    PlayerPressTarget.IconButton,
+    PlayerPressTarget.MorePanelRow,
+    PlayerPressTarget.AutoPlayNextRow,
+    PlayerPressTarget.TextButton,
+    PlayerPressTarget.PlaylistRow,
+    PlayerPressTarget.SubtitleRow,
+    -> true
+
+    PlayerPressTarget.LockLayer,
+    PlayerPressTarget.OutsideDismissLayer,
+    -> false
+}
+
+/** 播放页按压涟漪颜色。 */
+val PlayerPressRippleColor = Color.White
+
+/** 播放页按压涟漪不透明度。 */
+const val PLAYER_PRESS_RIPPLE_ALPHA = 0.2f
+
+/** 缓冲文字描边宽度。 */
+val PlayerBufferingTextStrokeWidth = 2.dp
+
+/** 缓冲文字描边（深色 scrim）不透明度。 */
+const val PLAYER_BUFFERING_TEXT_SCRIM_ALPHA = 0.85f
+
+/** 缓冲文字描边颜色。 */
+val PlayerBufferingTextScrimColor = Color(0xFF020509)
+
+/** 缓冲转圈尺寸。 */
+val PlayerBufferingSpinnerSize = 36.dp
+
+/** 缓冲转圈粗细。 */
+val PlayerBufferingSpinnerStrokeWidth = 3.dp
+
+/** 缓冲转圈颜色。 */
+val PlayerBufferingSpinnerColor = AppColors.Accent
 
 /** 上一集/播放/下一集热区：各 62 × 58dp、总宽 186dp、彼此无间隙（ADR-0025）。 */
 val PlayerTransportButtonWidth = 62.dp

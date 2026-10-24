@@ -12,6 +12,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Indication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -86,6 +88,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -94,6 +97,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -102,6 +106,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -181,25 +186,20 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
     }
 }
 
-/** 无涟漪点击。 */
+/** 播放页点击：按压反馈由目标区域决定，覆盖范围外不显示涟漪。 */
 @Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier =
-    noRippleClickable(onClick, enabled = true)
+private fun Modifier.playerPressClickable(
+    target: PlayerPressTarget,
+    onClick: () -> Unit,
+): Modifier = clickable(
+    interactionSource = remember { MutableInteractionSource() },
+    indication = playerPressIndication(target),
+    onClick = onClick,
+)
 
-/** 无涟漪点击；[enabled] 为假时不响应。 */
-@Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit, enabled: Boolean): Modifier {
-    val interaction = remember { MutableInteractionSource() }
-    return clickable(
-        interactionSource = interaction,
-        indication = null,
-        enabled = enabled,
-        onClick = onClick,
-    )
-}
-
-/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
+/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角；裁剪子内容与涟漪。 */
 private fun Modifier.playerPanel(): Modifier = this
+    .clip(PlayerPanelShape)
     .background(PlayerPanelColor, PlayerPanelShape)
     .border(1.dp, AppColors.Line, PlayerPanelShape)
 
@@ -208,6 +208,7 @@ private fun playerToolColor(active: Boolean): Color =
     if (active) AppColors.Accent else AppColors.Muted
 
 /** 播放器次级文字按钮：统一字号、内边距与禁用态。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayerTextButton(
     text: String,
@@ -217,17 +218,21 @@ private fun PlayerTextButton(
     color: Color = AppColors.Foreground,
     style: TextStyle = MaterialTheme.typography.labelLarge,
 ) {
-    TextButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier,
-        colors = ButtonDefaults.textButtonColors(
-            contentColor = color,
-            disabledContentColor = AppColors.Faint.copy(alpha = 0.45f),
-        ),
-        contentPadding = PaddingValues(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
-        Text(text = text, style = style, maxLines = 1)
+        TextButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier,
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = color,
+                disabledContentColor = AppColors.Faint.copy(alpha = 0.45f),
+            ),
+            contentPadding = PaddingValues(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
+        ) {
+            Text(text = text, style = style, maxLines = 1)
+        }
     }
 }
 
@@ -239,16 +244,27 @@ private fun BufferingIndicator(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         CircularProgressIndicator(
-            color = AppColors.Foreground,
-            strokeWidth = 3.dp,
-            modifier = Modifier.size(36.dp),
+            color = PlayerBufferingSpinnerColor,
+            strokeWidth = PlayerBufferingSpinnerStrokeWidth,
+            modifier = Modifier.size(PlayerBufferingSpinnerSize),
         )
-        Text(
-            text = stringResource(R.string.player_buffering),
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.Foreground,
-            modifier = Modifier.padding(top = AppSpacing.Sm),
-        )
+        val text = stringResource(R.string.player_buffering)
+        val style = MaterialTheme.typography.bodyMedium
+        val strokeWidth = with(LocalDensity.current) { PlayerBufferingTextStrokeWidth.toPx() }
+        Box(modifier = Modifier.padding(top = AppSpacing.Sm)) {
+            // 先画描边层，再画填充层。
+            Text(
+                text = text,
+                style = style.copy(drawStyle = Stroke(width = strokeWidth)),
+                color = PlayerBufferingTextScrimColor.copy(alpha = PLAYER_BUFFERING_TEXT_SCRIM_ALPHA),
+                modifier = Modifier.clearAndSetSemantics {},
+            )
+            Text(
+                text = text,
+                style = style,
+                color = AppColors.Foreground,
+            )
+        }
     }
 }
 
@@ -499,7 +515,7 @@ fun PlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable({ lock.tapScreen() })
+                    .playerPressClickable(PlayerPressTarget.LockLayer) { lock.tapScreen() }
                     .semantics { contentDescription = lockedHint },
             )
         }
@@ -607,7 +623,9 @@ fun PlayerScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .noRippleClickable { panels.dismissOutside() }
+                        .playerPressClickable(PlayerPressTarget.OutsideDismissLayer) {
+                            panels.dismissOutside()
+                        }
                         .semantics {
                             contentDescription = closeHint
                             role = Role.Button
@@ -1325,17 +1343,22 @@ private fun PlayerIconBar(
 /** 禁用控件的画布色。 */
 private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
 
-/** 播放页图标按钮的白色方形涟漪：按下约 20% 白，键盘焦点约 12% 白，悬停与拖动不显示背景。 */
+/** 播放页统一按压反馈的白色涟漪：按下约 20% 白，键盘焦点约 12% 白，悬停与拖动不显示背景。 */
 @OptIn(ExperimentalMaterial3Api::class)
-private val PlayerIconRippleConfiguration = RippleConfiguration(
-    color = Color.White,
+private val PlayerPressRippleConfiguration = RippleConfiguration(
+    color = PlayerPressRippleColor,
     rippleAlpha = RippleAlpha(
         draggedAlpha = 0f,
         focusedAlpha = 0.12f,
         hoveredAlpha = 0f,
-        pressedAlpha = 0.2f,
+        pressedAlpha = PLAYER_PRESS_RIPPLE_ALPHA,
     ),
 )
+
+/** 按目标区域选择点击指示；覆盖范围外不显示涟漪。 */
+@Composable
+private fun playerPressIndication(target: PlayerPressTarget): Indication? =
+    if (playerPressFeedbackEnabled(target)) ripple() else null
 
 /** 播放页图标按钮的热区：点击范围与涟漪范围都取 [modifier] 的尺寸。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1346,11 +1369,13 @@ private fun PlayerIconButtonSurface(
     enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerIconRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
+    ) {
         Box(
             modifier = modifier.clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
+                indication = playerPressIndication(PlayerPressTarget.IconButton),
                 enabled = enabled,
                 role = Role.Button,
                 onClick = onClick,
@@ -1778,6 +1803,7 @@ private fun MorePanel(
 }
 
 /** 面板根行：标题、当前取值与展开箭头。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MoreChoiceRow(
     label: String,
@@ -1788,106 +1814,120 @@ private fun MoreChoiceRow(
     val expandedState = stringResource(
         if (expanded) R.string.player_more_expanded else R.string.player_more_collapsed,
     )
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .noRippleClickable(onClick)
-            .semantics { stateDescription = expandedState }
-            .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = AppColors.Foreground,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.Muted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Icon(
-            imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-            contentDescription = null,
-            tint = AppColors.Faint,
-            modifier = Modifier.size(18.dp),
-        )
-    }
-}
-
-/** 展开后的勾选项。 */
-@Composable
-private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
-    val interaction = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .selectable(
-                selected = checked,
-                onClick = onClick,
-                role = Role.RadioButton,
-                interactionSource = interaction,
-                indication = null,
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
+                .semantics { stateDescription = expandedState }
+                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = AppColors.Foreground,
+                modifier = Modifier.weight(1f),
             )
-            .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = if (checked) AppColors.Accent else AppColors.Foreground,
-            modifier = Modifier.weight(1f),
-        )
-        if (checked) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.Muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             Icon(
-                imageVector = Icons.Filled.Check,
+                imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                 contentDescription = null,
-                tint = AppColors.Accent,
+                tint = AppColors.Faint,
                 modifier = Modifier.size(18.dp),
             )
         }
     }
 }
 
+/** 展开后的勾选项。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .selectable(
+                    selected = checked,
+                    onClick = onClick,
+                    role = Role.RadioButton,
+                    interactionSource = interaction,
+                    indication = playerPressIndication(PlayerPressTarget.MorePanelRow),
+                )
+                .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (checked) AppColors.Accent else AppColors.Foreground,
+                modifier = Modifier.weight(1f),
+            )
+            if (checked) {
+                Icon(
+                    imageVector = Icons.Filled.Check,
+                    contentDescription = null,
+                    tint = AppColors.Accent,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
 /** 自动连播开关行。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(
-                value = checked,
-                onValueChange = { onToggle() },
-                role = Role.Switch,
-                interactionSource = interaction,
-                indication = null,
-            )
-            .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyLarge,
-            color = AppColors.Foreground,
-            modifier = Modifier.weight(1f),
-        )
-        Switch(
-            checked = checked,
-            onCheckedChange = null,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                checkedTrackColor = AppColors.AccentDeep,
-                uncheckedThumbColor = AppColors.SwitchThumb,
-                uncheckedTrackColor = AppColors.SurfaceHighest,
-                uncheckedBorderColor = Color.Transparent,
-            ),
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .toggleable(
+                    value = checked,
+                    onValueChange = { onToggle() },
+                    role = Role.Switch,
+                    interactionSource = interaction,
+                    indication = playerPressIndication(PlayerPressTarget.AutoPlayNextRow),
+                )
+                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = AppColors.Foreground,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(
+                checked = checked,
+                onCheckedChange = null,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                    checkedTrackColor = AppColors.AccentDeep,
+                    uncheckedThumbColor = AppColors.SwitchThumb,
+                    uncheckedTrackColor = AppColors.SurfaceHighest,
+                    uncheckedBorderColor = Color.Transparent,
+                ),
+            )
+        }
     }
 }
 
@@ -1950,6 +1990,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
 }
 
 /** 播放列表抽屉：占右半屏，右侧加深的低透明度黑底，当前项居中。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaylistDrawer(
     playlist: List<MediaFile>,
@@ -1963,7 +2004,7 @@ private fun PlaylistDrawer(
             .fillMaxSize()
             .background(PlayerPlaylistGradient)
             // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目内容左右各留 16dp，
-            // 当前项高亮在抽屉内左右各内缩 4dp；左侧不叠加系统 inset。
+            // 当前项高亮左侧 0dp、右侧 4dp；左侧不叠加系统 inset。
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(
                     WindowInsetsSides.Vertical + WindowInsetsSides.End,
@@ -2015,6 +2056,7 @@ private fun PlaylistDrawer(
             ) {
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
+                    val interaction = remember { MutableInteractionSource() }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2023,7 +2065,8 @@ private fun PlaylistDrawer(
                                 if (active) {
                                     val bounds = playlistHighlightBounds(
                                         rowWidthPx = size.width,
-                                        insetPx = PlayerPlaylistHighlightInset.toPx(),
+                                        startInsetPx = PlayerPlaylistHighlightStartInset.toPx(),
+                                        endInsetPx = PlayerPlaylistHighlightEndInset.toPx(),
                                     )
                                     drawRect(
                                         color = AppColors.Accent.copy(alpha = 0.16f),
@@ -2032,7 +2075,11 @@ private fun PlaylistDrawer(
                                     )
                                 }
                             }
-                            .noRippleClickable { onSelect(media) },
+                            .clickable(
+                                interactionSource = interaction,
+                                indication = null,
+                                onClick = { onSelect(media) },
+                            ),
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -2042,8 +2089,10 @@ private fun PlaylistDrawer(
                         ) {
                             Text(
                                 text = playlistItemIndexLabel(index),
-                                style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
-                                color = if (active) AppColors.Accent else Color.White,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFeatureSettings = "tnum",
+                                ),
+                                color = PlayerPlaylistIndexColor,
                                 maxLines = 1,
                             )
                             Text(
@@ -2062,13 +2111,29 @@ private fun PlaylistDrawer(
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         fontSize = PlayerPlaylistArrowFontSize,
                                     ),
-                                    color = AppColors.Accent,
+                                    color = PlayerPlaylistArrowColor,
                                     textAlign = TextAlign.Center,
                                     modifier = Modifier
                                         .padding(start = AppSpacing.Sm)
                                         .width(PlayerPlaylistArrowWidth),
                                 )
                             }
+                        }
+                        // 整行只有一个点击节点；涟漪由同一交互源驱动，覆盖到高亮条范围。
+                        CompositionLocalProvider(
+                            LocalRippleConfiguration provides PlayerPressRippleConfiguration,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .padding(end = PlayerPlaylistHighlightEndInset)
+                                    .indication(
+                                        interactionSource = interaction,
+                                        indication = playerPressIndication(
+                                            PlayerPressTarget.PlaylistRow,
+                                        ),
+                                    ),
+                            )
                         }
                     }
                 }
@@ -2078,6 +2143,7 @@ private fun PlaylistDrawer(
 }
 
 /** 字幕菜单：内嵌轨道、可匹配外挂、关闭，当前生效项用强调色。 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SubtitlePanel(
     menu: List<SubtitleMenuItem>,
@@ -2085,25 +2151,34 @@ private fun SubtitlePanel(
     interactive: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(max = 240.dp)
-            .playerPanel(),
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
-        LazyColumn(modifier = Modifier.fillMaxWidth()) {
-            items(items = menu) { item ->
-                Text(
-                    text = subtitleItemLabel(item),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (item.active) AppColors.Accent else AppColors.Foreground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .noRippleClickable({ onSelect(item) }, enabled = interactive)
-                        .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
-                )
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .playerPanel(),
+        ) {
+            LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                items(items = menu) { item ->
+                    Text(
+                        text = subtitleItemLabel(item),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = if (item.active) AppColors.Accent else AppColors.Foreground,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = playerPressIndication(PlayerPressTarget.SubtitleRow),
+                                enabled = interactive,
+                                onClick = { onSelect(item) },
+                            )
+                            .padding(horizontal = AppSpacing.Md, vertical = 10.dp),
+                    )
+                }
             }
         }
     }
