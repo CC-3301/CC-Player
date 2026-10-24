@@ -12,8 +12,19 @@ import kotlinx.coroutines.yield
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
  * 可见请求按列表索引从上到下下发。离屏只暂停抽取、保留待调度请求；
- * 条目再次可见时续用同一结果，避免出现永久占位。订阅方取消时才移除请求。
+ * 条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
+ *
+ * 状态不变量：
+ * 1. 每个位置只有一个 [Request]，保存订阅数、attempt 令牌、Job 与 deferred。
+ * 2. 每次下发先递增 [Request.attemptId]，创建 LAZY Job 并登记到 [Request.job]，再启动。
+ * 3. 完成回调必须同时校验 attempt 令牌与 Job 身份；旧 attempt 不得完成 deferred、
+ *    不得移除请求，也不得取消新 Job。
+ * 4. 离屏、空窗口与 [reset] 只作废当前 attempt 并取消 Job，保留请求与 deferred；
+ *    再次可见时重新下发。
+ * 5. 只有最后一个订阅者取消时才完成 deferred 并移除请求。
+ * 6. [cancelAll] 先在锁内快照并作废全部 attempt，再在锁外逐个取消 Job，
+ *    完成回调不会遍历正在被修改的集合。
  */
 class VisiblePreviewScheduler(
     private val source: MediaPreviewSource,
@@ -36,7 +47,7 @@ class VisiblePreviewScheduler(
     /** 离开库页面后不再接受新请求。 */
     private var closed = false
 
-    /** 更新可见与预取范围；离屏请求只暂停抽取，保留订阅等待再次可见。空范围同样生效。 */
+    /** 更新可见与预取范围；离屏请求只作废当前 attempt，保留订阅等待再次可见。空范围同样生效。 */
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val visible = if (firstVisible >= 0 && lastVisible >= firstVisible) {
             (firstVisible..lastVisible).mapNotNullTo(HashSet()) { index -> entries.getOrNull(index)?.location }
@@ -63,11 +74,11 @@ class VisiblePreviewScheduler(
             val existing = requests[entry.location]
             if (existing != null) {
                 existing.index = index
-                existing.waiters++
+                existing.subscribers++
                 existing
             } else {
                 Request(entry, index, CompletableDeferred()).also { created ->
-                    created.waiters = 1
+                    created.subscribers = 1
                     requests[created.file.location] = created
                 }
             }
@@ -81,14 +92,14 @@ class VisiblePreviewScheduler(
             throw cancellation
         } finally {
             synchronized(lock) {
-                request.waiters--
+                request.subscribers--
                 // 只有最后一个订阅者取消时才移除；晚到的新请求不会被旧请求的清理误删。
-                if (cancelled && request.waiters <= 0) removeRequestLocked(request, cancelDeferred = true)
+                if (cancelled && request.subscribers <= 0) removeRequestLocked(request, cancelDeferred = true)
             }
         }
     }
 
-    /** 切换目录或视图时清空窗口并暂停全部在途抽取；订阅保留，后续可见时续订。 */
+    /** 切换目录或视图时清空窗口并作废全部在途 attempt；订阅保留，后续可见时续订。 */
     fun reset() {
         synchronized(lock) {
             closed = false
@@ -101,17 +112,21 @@ class VisiblePreviewScheduler(
 
     /** 离开库页面时取消全部请求与预取，并清空可见范围。 */
     fun cancelAll() {
-        synchronized(lock) {
+        val pending = synchronized(lock) {
             closed = true
-            requests.values.forEach { request ->
-                request.job?.cancel()
-                request.job = null
-                request.deferred.complete(EMPTY_PREVIEW)
-            }
-            requests.clear()
             visibleLocations = emptySet()
             windowKnown = true
             dispatching = false
+            val snapshot = requests.values.map { request ->
+                invalidateAttemptLocked(request) to request
+            }
+            requests.clear()
+            snapshot
+        }
+        // 先快照并作废 attempt，再在锁外取消：完成回调只会校验令牌后返回。
+        pending.forEach { (job, request) ->
+            job?.cancel()
+            if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
         }
         prefetcher.cancelAll()
     }
@@ -126,18 +141,22 @@ class VisiblePreviewScheduler(
         requests.values.forEach(::pauseLocked)
     }
 
+    /** 作废当前 attempt 并取消 Job；请求与 deferred 保留，等再次可见时重新下发。 */
     private fun pauseLocked(request: Request) {
-        request.started = false
-        request.pausedByWindow = true
-        request.job?.cancel()
+        invalidateAttemptLocked(request)?.cancel()
+    }
+
+    /** 作废当前 attempt，返回被取消的 Job；回调随后会因令牌或 Job 身份不符而退出。 */
+    private fun invalidateAttemptLocked(request: Request): Job? {
+        request.attemptId++
+        val job = request.job
         request.job = null
+        return job
     }
 
     private fun removeRequestLocked(request: Request, cancelDeferred: Boolean) {
-        val location = request.file.location
-        if (requests[location] === request) requests.remove(location)
-        request.job?.cancel()
-        request.job = null
+        if (requests[request.file.location] === request) requests.remove(request.file.location)
+        invalidateAttemptLocked(request)?.cancel()
         if (cancelDeferred && !request.deferred.isCompleted) {
             request.deferred.cancel(CancellationException("预览订阅已取消"))
         }
@@ -165,62 +184,76 @@ class VisiblePreviewScheduler(
 
     private suspend fun drain() {
         while (true) {
-            val (request, job) = synchronized(lock) {
+            val attempt = synchronized(lock) {
                 if (!windowKnown || visibleLocations.isEmpty()) return
                 val next = requests.values
-                    .filter { pending -> !pending.started && pending.file.location in visibleLocations }
+                    .filter { request -> request.job == null && request.file.location in visibleLocations }
                     .minByOrNull(Request::index)
                     ?: return
-                next.started = true
-                next.pausedByWindow = false
+                val attemptId = ++next.attemptId
                 // 先建 Job 并登记，再启动：reset/pause 在两步之间也能取消到它。
-                val created = scope.launch(start = CoroutineStart.LAZY) { runRequest(next) }
-                next.job = created
-                next to created
+                val job = scope.launch(start = CoroutineStart.LAZY) { runRequest(next, attemptId) }
+                next.job = job
+                Attempt(next, attemptId, job)
             }
-            job.invokeOnCompletion { finishRequest(request, job) }
-            job.start()
+            attempt.job.invokeOnCompletion { finishAttempt(attempt) }
+            attempt.job.start()
         }
     }
 
-    private suspend fun runRequest(request: Request) {
+    private suspend fun runRequest(request: Request, attemptId: Long) {
         val preview = try {
             source.visiblePreview(request.file, request.index)
         } catch (cancellation: CancellationException) {
             // 窗口暂停或订阅取消时不回填占位图；再次可见会重新下发。
             throw cancellation
         } catch (failure: Throwable) {
-            // Error 也按失败收尾，避免 started 卡住、结果永不完成。
+            // Error 也按失败收尾，避免 attempt 卡住、结果永不完成。
             EMPTY_PREVIEW
         }
         synchronized(lock) {
-            if (!request.pausedByWindow) request.deferred.complete(preview)
+            if (!isCurrentAttemptLocked(request, attemptId)) return
+            // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
+            request.attemptId++
+            request.job = null
+            if (requests[request.file.location] === request) requests.remove(request.file.location)
+            if (!request.deferred.isCompleted) request.deferred.complete(preview)
         }
     }
 
-    /** 正常完成、Error 或取消都从这里收尾；窗口暂停的请求保留，等再次可见续订。 */
-    private fun finishRequest(request: Request, job: Job) {
+    /** 取消或未正常返回的 attempt 在这里收尾；令牌或 Job 身份不符时不得改状态。 */
+    private fun finishAttempt(attempt: Attempt) {
+        val request = attempt.request
         synchronized(lock) {
-            if (request.job === job) request.job = null
-            if (!request.pausedByWindow && !request.deferred.isCompleted) {
-                request.deferred.complete(EMPTY_PREVIEW)
-            }
-            if (request.deferred.isCompleted) removeRequestLocked(request, cancelDeferred = false)
+            if (!isCurrentAttemptLocked(request, attempt.attemptId)) return
+            if (request.job !== attempt.job) return
+            request.attemptId++
+            request.job = null
+            if (requests[request.file.location] === request) requests.remove(request.file.location)
+            if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
         }
     }
+
+    private fun isCurrentAttemptLocked(request: Request, attemptId: Long): Boolean =
+        !request.deferred.isCompleted && request.attemptId == attemptId
 
     private fun hasDispatchableLocked(): Boolean =
         visibleLocations.isNotEmpty() &&
-            requests.values.any { request -> !request.started && request.file.location in visibleLocations }
+            requests.values.any { request -> request.job == null && request.file.location in visibleLocations }
 
     private class Request(
         val file: MediaFile,
         var index: Int,
         val deferred: CompletableDeferred<MediaPreview>,
-        var started: Boolean = false,
-        var pausedByWindow: Boolean = false,
+        var subscribers: Int = 0,
+        var attemptId: Long = 0,
         var job: Job? = null,
-        var waiters: Int = 0,
+    )
+
+    private class Attempt(
+        val request: Request,
+        val attemptId: Long,
+        val job: Job,
     )
 
     private companion object {

@@ -1,13 +1,24 @@
 package com.cc3301.ccplayer.library
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -238,6 +249,72 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
+    fun `离屏取消后快速回屏，旧任务迟到收尾不覆盖新结果`() = runTest {
+        val source = LateCancelSource()
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val request = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        assertEquals(listOf(0), source.started)
+
+        // 离屏：旧 attempt 已作废，但源要等 cancelGate 才真正结束。
+        scheduler.update(entries, firstVisible = 1, lastVisible = 1, rowSize = 1)
+        runCurrent()
+        assertEquals(listOf(0), source.cancelled)
+
+        // 快速回屏：新 attempt 先下发并等待 secondGate。
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        runCurrent()
+        assertEquals(listOf(0, 0), source.started)
+
+        // 旧 attempt 在新 attempt 之后收尾，不得回填占位图或移除新请求。
+        source.cancelGate.complete(Unit)
+        runCurrent()
+        source.secondGate.complete(Unit)
+        runCurrent()
+
+        assertEquals(222L, withTimeout(1_000) { request.await() }.durationMillis)
+    }
+
+    @Test
+    fun `任务完成回调进行中取消全部不抛并发修改`() = runBlocking {
+        val failures = CopyOnWriteArrayList<Throwable>()
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "scheduler-completion").apply {
+                setUncaughtExceptionHandler { _, failure -> failures += failure }
+            }
+        }
+        val dispatcher = executor.asCoroutineDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        try {
+            repeat(200) {
+                val entered = CountDownLatch(entries.size)
+                val gate = CompletableDeferred<Unit>()
+                val source = CompletionGateSource(entered, gate)
+                val scheduler = VisiblePreviewScheduler(
+                    source = source,
+                    scope = scope,
+                    prefetcher = PreviewPrefetcher(source, scope, prefetchDelayMillis = 60_000),
+                )
+                scheduler.update(entries, firstVisible = 0, lastVisible = entries.lastIndex, rowSize = 1)
+                val requests = entries.mapIndexed { index, file ->
+                    scope.launch { scheduler.preview(file, index) }
+                }
+                assertTrue("请求应先全部进入抽取", entered.await(5, TimeUnit.SECONDS))
+
+                // 任务进入完成回调的同时从测试线程取消全部，快照遍历不得被回调修改。
+                gate.complete(Unit)
+                scheduler.cancelAll()
+                requests.forEach { request -> request.join() }
+            }
+        } finally {
+            scope.cancel()
+            executor.shutdownNow()
+        }
+        assertTrue("完成回调并发清理抛异常：$failures", failures.isEmpty())
+    }
+
+    @Test
     fun `取消全部后不再下发新请求`() = runTest {
         val source = SchedulerRecordingSource()
         val scheduler = scheduler(source, backgroundScope)
@@ -250,6 +327,61 @@ class VisiblePreviewSchedulerTest {
         assertNull(request.await().durationMillis)
         assertTrue(source.started.isEmpty())
     }
+}
+
+/** 首次抽取取消后延迟结束，用来构造旧 attempt 迟到收尾。 */
+private class LateCancelSource : MediaPreviewSource {
+
+    val started = mutableListOf<Int>()
+    val cancelled = mutableListOf<Int>()
+    val cancelGate = CompletableDeferred<Unit>()
+    val secondGate = CompletableDeferred<Unit>()
+
+    private val firstGate = CompletableDeferred<Unit>()
+    private var calls = 0
+
+    override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
+
+    override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+        val call = calls++
+        started += index
+        if (call == 0) {
+            try {
+                firstGate.await()
+            } catch (cancellation: CancellationException) {
+                cancelled += index
+                // 取消真正生效前先压住，让旧 attempt 的收尾晚于新 attempt。
+                withContext(NonCancellable) { cancelGate.await() }
+                throw cancellation
+            }
+            return MediaPreview(image = null, durationMillis = 111)
+        }
+        secondGate.await()
+        return MediaPreview(image = null, durationMillis = 222)
+    }
+
+    override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
+
+    override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+}
+
+/** 抽取等闸门放行；用来让任务集中进入完成回调。 */
+private class CompletionGateSource(
+    private val entered: CountDownLatch,
+    private val gate: CompletableDeferred<Unit>,
+) : MediaPreviewSource {
+
+    override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
+
+    override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+        entered.countDown()
+        gate.await()
+        return MediaPreview(image = null, durationMillis = index + 1L)
+    }
+
+    override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
+
+    override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
 }
 
 /** 记录下发与取消的假预览源；[gate] 非空时压住抽取，用来构造滚动与重置。 */
