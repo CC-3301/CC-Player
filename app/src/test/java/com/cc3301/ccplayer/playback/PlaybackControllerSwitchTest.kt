@@ -148,7 +148,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a stuck grab times out and still loads the target`() = runTest {
+    fun `a stuck grab fails the switch before the watchdog without loading the target`() = runTest {
         val gate = CountDownLatch(1)
         val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         try {
@@ -161,23 +161,40 @@ class PlaybackControllerSwitchTest {
             )
             open(controller, "ep1.mkv", "ep2.mkv")
             engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
             engine.beforeGrab = { gate.await() }
 
             controller.next()
             assertTrue(controller.freezeFramePending.value)
             assertEquals(1, engine.startedUrls.size)
 
-            // 抓帧一直不返回：超时后按无帧继续，必须在看门狗之前给出结果。
+            // 抓帧卡在原生命令队列：不下发会被拖住的 loadfile，直接按失败收尾。
             advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
             runCurrent()
 
-            assertEquals("root/ep2.mkv", engine.startedUrls.last())
+            assertEquals(1, engine.startedUrls.size)
+            assertEquals(0, controller.currentIndex.value)
+            assertEquals(PlaybackState.Paused, controller.state.value)
+            assertFalse(controller.switching.value)
             assertNull(controller.freezeFrame.value)
             assertFalse(controller.freezeFramePending.value)
+            assertEquals(1, failures.size)
         } finally {
             gate.countDown()
             executor.close()
         }
+    }
+
+    @Test
+    fun `a grab that returns no frame still loads the target`() = runTest {
+        val controller = playingController()
+        engine.frameToGrab = null
+
+        controller.next()
+
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertNull(controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
     }
 
     @Test

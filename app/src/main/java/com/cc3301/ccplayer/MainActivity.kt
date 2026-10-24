@@ -102,6 +102,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
@@ -261,8 +262,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
-            // 连上后强制上报一次可用性，覆盖新控制器默认的“有 Surface”。
             surfaceSession.onEngineAvailable()
+            // 新控制器默认认为 Surface 可用；连上后同步一次会话的真实状态。
+            binder.controller.setRenderSurfaceAvailable(surfaceSession.available)
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
@@ -665,12 +667,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         backgroundDetachJob?.cancel()
         val capture = binder.controller.beginBackgroundCapture()
         backgroundDetachJob = lifecycleScope.launch {
-            capture?.join()
+            val captured = awaitBackgroundCapture(capture, BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS)
             if (!shouldDetach()) {
                 binder.controller.abandonBackgroundCapture()
                 return@launch
             }
-            if (capture == null) binder.controller.abandonBackgroundCapture()
+            // 超时或没有抓帧任务都放弃本周期结果，照常分离 Surface。
+            if (!captured) binder.controller.abandonBackgroundCapture()
             surfaceSession.detach()
         }
     }
@@ -804,5 +807,18 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private companion object {
         const val NO_MEDIA = -1
+
+        /** 后台抓帧的等待上限；超时放弃结果并照常分离 Surface。 */
+        const val BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS = 2_000L
     }
 }
+
+/**
+ * 等待后台抓帧完成；[capture] 为空表示本周期没有抓帧任务。
+ * 超时返回 false，调用方丢弃迟到的抓帧结果。
+ */
+internal suspend fun awaitBackgroundCapture(capture: Job?, timeoutMillis: Long): Boolean =
+    capture != null && withTimeoutOrNull(timeoutMillis) {
+        capture.join()
+        true
+    } == true

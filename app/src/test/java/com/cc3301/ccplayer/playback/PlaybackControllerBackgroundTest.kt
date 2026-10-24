@@ -86,7 +86,8 @@ class PlaybackControllerBackgroundTest {
 
     @Test
     fun `纯音频抓不到帧时不缓存`() = runTest {
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        // 引擎返回 null 表示抓不到帧；非 null Frame 表示有帧（位图仅为测试替身可空）。
+        engine.frameToGrab = null
         val controller = pausedController()
 
         capture(controller)

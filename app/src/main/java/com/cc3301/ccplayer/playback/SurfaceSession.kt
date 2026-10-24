@@ -69,17 +69,20 @@ class SurfaceSession(
         publish()
     }
 
-    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去并强制上报一次状态。 */
+    /** 当前是否可渲染；服务重连时由调用方同步一次。 */
+    val available: Boolean get() = state == State.Ready
+
+    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去。 */
     fun onEngineAvailable() {
         attachCurrent()
-        publish(force = true)
+        publish()
     }
 
     /** 播放服务断开：旧引擎的挂载不再有效，重新连上时补挂。 */
     fun onEngineLost() {
         mountedSurface = null
         mountedSurfaceDestroyed = false
-        publish(force = true)
+        publish()
     }
 
     /** 后台抓帧结束后分离；重复调用无副作用。 */
@@ -114,13 +117,13 @@ class SurfaceSession(
         mountedSurfaceDestroyed = false
     }
 
-    private fun publish(force: Boolean = false) {
+    private fun publish() {
         val next = when {
             !foreground || !mounted -> State.Detached
             hasSurface && !mountedSurfaceDestroyed -> State.Ready
             else -> State.Attached
         }
-        if (!force && next == state) return
+        if (next == state) return
         state = next
         // 只有真正可渲染的 Ready 才算可用；Attached 表示引擎还挂着但当前 Surface 已无效。
         onAvailabilityChanged(next == State.Ready)

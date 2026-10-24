@@ -178,6 +178,25 @@ class SurfaceSessionTest {
         assertEquals(2, attached.size)
         assertSame(surface, attached.last())
         assertTrue(session.hasSurface)
+        assertTrue(session.available)
+        assertEquals(SurfaceSession.State.Ready, session.state)
+    }
+
+    @Test
+    fun `engine reconnect only publishes real state transitions`() {
+        val session = session()
+        val surface = testSurface()
+
+        session.onActivityStarted()
+        session.onSurfaceCreated(surface)
+        // 已挂载且状态未变：重连不重复发可用回调。
+        session.onEngineAvailable()
+        assertEquals(listOf(true), availability)
+
+        session.onEngineLost()
+        session.onEngineAvailable()
+
+        assertEquals(listOf(true, false, true), availability)
         assertEquals(SurfaceSession.State.Ready, session.state)
     }
 

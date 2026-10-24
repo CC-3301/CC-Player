@@ -252,7 +252,7 @@ class PlaybackController(
 
     /**
      * 出帧就绪状态机。加载阶段仍由 [LoadPhase] 表示，这里只区分是否还在等新帧证据：
-     * 位置前进通知，或暂停态一次成功的非 seek 刷新。
+     * 播放态等位置前进，暂停态等抓帧成功确认。
      */
     private enum class ReadyState {
         /** 没有等待中的新帧。 */
@@ -746,18 +746,66 @@ class PlaybackController(
                 runCatching { engine.grabFrame() }.getOrNull()
             }
             val frame = withTimeoutOrNull(SWITCH_GRAB_TIMEOUT_MILLIS) { grab.await() }
-            if (frame == null) {
-                diagnostics.log { "切集抓帧超时或无帧: ${loadTargetUrl ?: "-"}" }
+            // 抓帧仍在原生调用里：thumbnail 与 loadfile 共用 mpv 核心命令队列，
+            // 继续下发 loadfile 会被卡住的抓帧拖住；直接按切集失败收尾，不下发目标加载。
+            if (frame == null && !grab.isCompleted) {
                 grab.cancel()
+                abortSwitchAfterStuckGrab(token)
+                return@launch
             }
             if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return@launch
             switchStartPending = false
             switchCaptureJob = null
             _freezeFramePending.value = false
-            // 抓帧失败时保留屏幕上原有的画面，不主动换成黑底。
+            // 抓帧无结果时保留屏幕上原有的画面，不主动换成黑底。
             frame?.bitmap?.let { replaceFreezeFrame(it) }
             startSwitchTarget()
         }
+    }
+
+    /**
+     * 抓帧卡在原生调用：不向引擎下发目标加载，原视频保持暂停在原位置与暂停。
+     * 这样失败在 [SWITCH_GRAB_TIMEOUT_MILLIS] 内给出，不落到 60 秒看门狗。
+     */
+    private fun abortSwitchAfterStuckGrab(token: Int) {
+        if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return
+        val originIndex = switchOriginIndex
+        val origin = _playlist.value.getOrNull(originIndex)
+        val originEnded = switchOriginEnded
+        logLoadFailure("切集失败", LoadFailureSource.GrabTimeout, phase = LoadPhase.Switching)
+        switchCaptureToken++
+        switchCaptureJob = null
+        switchStartPending = false
+        _freezeFramePending.value = false
+        loadPhase = LoadPhase.None
+        endBufferingIndicator()
+        endLoadWatchdog()
+        suspendSwitchFrameWatchdog()
+        clearSwitchFrameDeadline()
+        switchFramePending = false
+        switchPlaybackStarted = false
+        switchOriginIndex = NO_MEDIA
+        switchOriginEnded = false
+        restoreAtEndOfEpisode = false
+        _switching.value = false
+        _restoring.value = false
+        paused = true
+        pausedAtEpisodeEnd = originEnded
+        watchedToEnd = originEnded
+        mediaLoaded = true
+        resumeLookupDone = true
+        resumePositionMillis = null
+        if (origin != null) {
+            loadTargetIndex = originIndex
+            loadTargetUrl = origin.playbackLocation
+            _currentIndex.value = originIndex
+            playedPositionMillis = switchOriginPositionMillis
+            playedDurationMillis = switchOriginDurationMillis
+            _progress.value = PlaybackProgress(switchOriginPositionMillis, switchOriginDurationMillis)
+        }
+        updateState(PlaybackState.Paused)
+        switchFailureReported = true
+        _playbackFailures.tryEmit(Unit)
     }
 
     /** 用当前目标向引擎下发 loadfile；抓帧任务与切集重定向共用。 */
@@ -1575,7 +1623,7 @@ class PlaybackController(
     }
 
     /** 失败来源；无帧超时与加载看门狗、播放核心主动报错分开记录。 */
-    private enum class LoadFailureSource { Core, Watchdog, NoFrame }
+    private enum class LoadFailureSource { Core, Watchdog, NoFrame, GrabTimeout }
 
     /** 失败日志包含目标、加载令牌、阶段与来源，便于区分看门狗与播放核心主动报错。 */
     private fun logLoadFailure(
@@ -1589,6 +1637,8 @@ class PlaybackController(
                 "看门狗超时（${LOAD_WATCHDOG_MILLIS / 1_000} 秒无加载事件）"
             LoadFailureSource.NoFrame ->
                 "无帧超时（${NO_FRAME_WINDOW_MILLIS / 1_000} 秒未出帧）"
+            LoadFailureSource.GrabTimeout ->
+                "抓帧超时（${SWITCH_GRAB_TIMEOUT_MILLIS / 1_000} 秒无结果）"
             LoadFailureSource.Core ->
                 "播放核心报错（${errorText?.takeIf { it.isNotBlank() } ?: "无错误文本"}）"
         }
