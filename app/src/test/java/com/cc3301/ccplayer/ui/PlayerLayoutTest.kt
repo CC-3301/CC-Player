@@ -1,8 +1,12 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerLayoutTest {
@@ -26,25 +30,78 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `播放列表当前项高亮按行宽左右各内缩 4dp`() {
-        val bounds = playlistHighlightBounds(rowWidthPx = 1000f, insetPx = 4f)
+    fun `播放列表当前项高亮左贴边、右侧保留 4dp`() {
+        assertEquals(0.dp, PlayerPlaylistHighlightStartInset)
+        assertEquals(4.dp, PlayerPlaylistHighlightEndInset)
 
-        assertEquals(4f, bounds.start, TOLERANCE)
+        val bounds = playlistHighlightBounds(
+            rowWidthPx = 1000f,
+            startInsetPx = 0f,
+            endInsetPx = 4f,
+        )
+
+        assertEquals(0f, bounds.start, TOLERANCE)
         assertEquals(996f, bounds.end, TOLERANCE)
     }
 
     @Test
     fun `行宽不足两侧内缩时高亮两端重合`() {
-        val bounds = playlistHighlightBounds(rowWidthPx = 6f, insetPx = 4f)
+        val bounds = playlistHighlightBounds(
+            rowWidthPx = 6f,
+            startInsetPx = 4f,
+            endInsetPx = 4f,
+        )
 
         assertEquals(3f, bounds.start, TOLERANCE)
         assertEquals(3f, bounds.end, TOLERANCE)
     }
 
     @Test
-    fun `播放列表三角字号 11_5sp、宽 16dp`() {
-        assertEquals(11.5.sp, PlayerPlaylistArrowFontSize)
-        assertEquals(16.dp, PlayerPlaylistArrowWidth)
+    fun `播放列表三角字号 17_25sp、宽 24dp 且保持强调色`() {
+        assertEquals(17.25.sp, PlayerPlaylistArrowFontSize)
+        assertEquals(24.dp, PlayerPlaylistArrowWidth)
+    }
+
+    @Test
+    fun `按压反馈覆盖交互控件、不覆盖整屏手势与拖拽层`() {
+        listOf(
+            PlayerPressTarget.IconButton,
+            PlayerPressTarget.MorePanelRow,
+            PlayerPressTarget.AutoPlayNextRow,
+            PlayerPressTarget.TextButton,
+            PlayerPressTarget.PlaylistRow,
+            PlayerPressTarget.SubtitleRow,
+        ).forEach { target ->
+            assertTrue(target.name, playerPressFeedbackEnabled(target))
+        }
+
+        listOf(
+            PlayerPressTarget.GestureLayer,
+            PlayerPressTarget.LockLayer,
+            PlayerPressTarget.OutsideDismissLayer,
+            PlayerPressTarget.SeekDragLayer,
+        ).forEach { target ->
+            assertFalse(target.name, playerPressFeedbackEnabled(target))
+        }
+    }
+
+    @Test
+    fun `按压涟漪为白色且不透明度 20 个百分点`() {
+        assertEquals(Color.White, PlayerPressRippleColor)
+        assertEquals(0.2f, PLAYER_PRESS_RIPPLE_ALPHA, TOLERANCE)
+    }
+
+    @Test
+    fun `缓冲文字 2dp scrim 85 个百分点描边`() {
+        assertEquals(2.dp, PlayerBufferingTextStrokeWidth)
+        assertEquals(0.85f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)
+    }
+
+    @Test
+    fun `缓冲转圈强调色、36dp、粗细 3dp`() {
+        assertEquals(AppColors.Accent, PlayerBufferingSpinnerColor)
+        assertEquals(36.dp, PlayerBufferingSpinnerSize)
+        assertEquals(3.dp, PlayerBufferingSpinnerStrokeWidth)
     }
 
     @Test
