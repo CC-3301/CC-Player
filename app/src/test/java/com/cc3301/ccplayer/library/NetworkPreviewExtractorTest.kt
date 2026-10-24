@@ -2,11 +2,12 @@ package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -101,7 +102,7 @@ class NetworkPreviewExtractorTest {
         assertTrue(reads.opened.isEmpty())
     }
 
-    @Test(timeout = 5_000)
+    @Test
     fun `取消时关闭句柄以中断阻塞读取`() = runBlocking {
         val blocking = BlockingByteSource()
         val extractor = NetworkPreviewExtractor({ blocking }) { opened, _, _ ->
@@ -110,9 +111,10 @@ class NetworkPreviewExtractorTest {
         }
 
         val job = launch(Dispatchers.Default) { extractor.imageBytes(movie, NETWORK_TARGET_WIDTH) }
-        blocking.reading.await()
+        assertTrue(blocking.reading.await(5, TimeUnit.SECONDS))
 
-        job.cancelAndJoin()
+        job.cancel()
+        withTimeout(5_000) { job.join() }
 
         assertTrue(blocking.closed)
     }

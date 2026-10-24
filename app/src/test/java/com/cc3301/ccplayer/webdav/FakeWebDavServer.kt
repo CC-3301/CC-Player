@@ -34,6 +34,8 @@ class FakeWebDavServer(
 
     private val receivedRequests = CopyOnWriteArrayList<FakeRequest>()
     private val releaseStalledBody = CountDownLatch(1)
+    private val stalledLock = Object()
+    private var stalledRequests = 0
     private val serverSocket = ServerSocket(0, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
 
     init {
@@ -45,6 +47,19 @@ class FakeWebDavServer(
 
     /** 收到的请求，按到达顺序。 */
     fun received(): List<FakeRequest> = receivedRequests.toList()
+
+    /** 等至少 [count] 个 GET 已发出响应头并停在正文前；超时返回 false。 */
+    fun awaitStalledBody(count: Int, timeoutMillis: Long = 5_000): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        synchronized(stalledLock) {
+            while (stalledRequests < count) {
+                val remaining = deadline - System.currentTimeMillis()
+                if (remaining <= 0) return false
+                stalledLock.wait(remaining)
+            }
+            return true
+        }
+    }
 
     override fun close() {
         releaseStalledBody.countDown()
@@ -140,6 +155,10 @@ class FakeWebDavServer(
         output.write(head.toByteArray(Charsets.ISO_8859_1))
         output.flush()
         if (stall) {
+            synchronized(stalledLock) {
+                stalledRequests++
+                stalledLock.notifyAll()
+            }
             releaseStalledBody.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             return
         }

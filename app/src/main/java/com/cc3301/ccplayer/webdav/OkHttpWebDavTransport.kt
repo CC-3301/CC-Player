@@ -190,15 +190,28 @@ private class OkHttpWebDavReadHandle(
         if (closed) throw IOException("读取已取消")
         current?.let { if (position == wanted) return it }
         current?.close()
+        current = null
         if (closed) throw IOException("读取已取消")
         val opened = openFrom(wanted)
+        // 先挂到 current：关闭可能发生在跳读阻塞期间，必须能关到这一次响应。
+        current = opened
+        if (closed) {
+            if (current === opened) current = null
+            opened.close()
+            throw IOException("读取已取消")
+        }
         try {
             skipTo(opened, wanted)
         } catch (failure: Exception) {
+            if (current === opened) current = null
             opened.close()
             throw failure
         }
-        current = opened
+        if (closed) {
+            if (current === opened) current = null
+            opened.close()
+            throw IOException("读取已取消")
+        }
         position = wanted
         return opened
     }
