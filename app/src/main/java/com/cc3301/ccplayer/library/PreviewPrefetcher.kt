@@ -22,7 +22,7 @@ class PreviewPrefetcher(
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val wanted = prefetchEntries(entries, firstVisible, lastVisible, rowSize)
         val wantedLocations = wanted.mapTo(HashSet(), MediaFile::location)
-        // 已进入可见区的条目不再算离屏：保留在途请求，让可见项复用同一次抽取。
+        // 已进入可见区的条目不再算离屏：保留任务记录，可见请求会取消同键预取并重新抽取。
         val visibleLocations = if (firstVisible >= 0 && lastVisible >= firstVisible) {
             (firstVisible..lastVisible).mapNotNullTo(HashSet()) { index ->
                 entries.getOrNull(index)?.location

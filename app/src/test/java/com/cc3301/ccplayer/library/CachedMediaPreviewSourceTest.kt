@@ -30,8 +30,8 @@ class CachedMediaPreviewSourceTest {
     private val directory: File = Files.createTempDirectory("media-preview").toFile()
     private val extractor = FakeMediaPreviewExtractor()
     private val source = CachedMediaPreviewSource(
-            sourceKeyDispatcher = Dispatchers.Unconfined,
-            extractor = extractor,
+        sourceKeyDispatcher = Dispatchers.Unconfined,
+        extractor = extractor,
         cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
     )
 
@@ -1216,9 +1216,43 @@ class CachedMediaPreviewSourceTest {
         assertNotNull(lookupThread)
         assertTrue(lookupThread !== Thread.currentThread())
 
-        now += 31_000
+        now += 30_000
         assertNull(bounded.preview(file).image)
         assertEquals(1, calls.get())
+    }
+
+    @Test
+    fun `连接源标识缓存过期后重新解析`() = runTest {
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        var now = 0L
+        var sourceKey = "bookmark-a"
+        val extractor = FakeMediaPreviewExtractor(imageFailure = IllegalStateException("失败"))
+        val bounded = CachedMediaPreviewSource(
+            sourceKeyDispatcher = Dispatchers.Unconfined,
+            extractor = extractor,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            monotonicClock = { now },
+            sourceKeyOf = {
+                calls.incrementAndGet()
+                sourceKey
+            },
+        )
+        val file = network("缓存键.mkv")
+
+        assertNull(bounded.preview(file).image)
+        assertEquals(1, calls.get())
+
+        // 书签改址，且标识缓存与失败退避都过期：重新解析并使用新键。
+        sourceKey = "bookmark-b"
+        extractor.imageFailure = null
+        extractor.imageBytes = byteArrayOf(1)
+        now += 30_001
+        assertNotNull(bounded.preview(file).image)
+        assertEquals(2, calls.get())
+
+        // 再次命中图片缓存时不再查询连接源。
+        assertNotNull(bounded.preview(file).image)
+        assertEquals(2, calls.get())
     }
 
     @Test

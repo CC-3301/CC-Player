@@ -126,14 +126,14 @@ class CachedMediaPreviewSource(
     )
 
     /** 正在等待或执行抽取的预取，按连接源登记；可见请求只取消同一连接源的预取。 */
-    private val prefetchHolders = ConcurrentHashMap<String, MutableSet<Job>>()
+    private val prefetchHolders = ConcurrentHashMap<String, Set<Job>>()
 
     /** 连接源标识查询结果；书签查找不放在主线程重复执行。 */
-    private val sourceKeyCache = ConcurrentHashMap<String, String>()
+    private val sourceKeyLock = Any()
+    private val sourceKeyCache = LinkedHashMap<String, SourceKeyEntry>()
 
     /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
-    private val noImageLock = Any()
-    private val noImageConfirmed = LinkedHashSet<String>()
+    private val noImage = NoImageMemory()
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -493,43 +493,50 @@ class CachedMediaPreviewSource(
     ): T {
         if (priority.isVisible) return block()
         val job = currentCoroutineContext()[Job] ?: return block()
-        val holders = prefetchHolders.computeIfAbsent(sourceKey) { ConcurrentHashMap.newKeySet() }
-        holders.add(job)
+        // add/remove 都放在 compute 内，避免并发登记被空集合清理误删。
+        prefetchHolders.compute(sourceKey) { _, holders ->
+            (holders ?: emptySet()) + job
+        }
         try {
             return block()
         } finally {
-            holders.remove(job)
-            if (holders.isEmpty()) prefetchHolders.remove(sourceKey, holders)
-        }
-    }
-
-    /** 书签查找放到 IO 并缓存；并发重复查询允许覆盖同一结果。 */
-    private suspend fun sourceKeyFor(location: String): String =
-        sourceKeyCache[location] ?: withContext(sourceKeyDispatcher) { sourceKeyOf(location) }.also { key ->
-            if (sourceKeyCache.size >= MAX_SOURCE_KEY_CACHE) sourceKeyCache.clear()
-            sourceKeyCache[location] = key
-        }
-
-    /** 无图记忆按最近使用排序；命中即刷新，超限淘汰最久未用的一条。 */
-    private fun isNoImageRemembered(key: String): Boolean = synchronized(noImageLock) {
-        if (!noImageConfirmed.remove(key)) return false
-        noImageConfirmed.add(key)
-        true
-    }
-
-    private fun rememberNoImage(key: String) {
-        synchronized(noImageLock) {
-            noImageConfirmed.remove(key)
-            noImageConfirmed.add(key)
-            while (noImageConfirmed.size > MAX_NO_IMAGE_MEMORY) {
-                val oldest = noImageConfirmed.iterator().next()
-                noImageConfirmed.remove(oldest)
+            prefetchHolders.compute(sourceKey) { _, holders ->
+                val remaining = holders?.minus(job).orEmpty()
+                remaining.ifEmpty { null }
             }
         }
     }
 
+    /** 书签查找放到 IO 并缓存；有上限且带有效期，书签改址后能重新解析。 */
+    private suspend fun sourceKeyFor(location: String): String {
+        val now = monotonicClock()
+        cachedSourceKey(location, now)?.let { return it }
+        val key = withContext(sourceKeyDispatcher) { sourceKeyOf(location) }
+        synchronized(sourceKeyLock) {
+            sourceKeyCache[location] = SourceKeyEntry(key, now)
+            while (sourceKeyCache.size > MAX_SOURCE_KEY_CACHE) {
+                val oldest = sourceKeyCache.keys.iterator().next()
+                sourceKeyCache.remove(oldest)
+            }
+        }
+        return key
+    }
+
+    private fun cachedSourceKey(location: String, now: Long): String? = synchronized(sourceKeyLock) {
+        val entry = sourceKeyCache.remove(location) ?: return null
+        if (now - entry.cachedAt > SOURCE_KEY_TTL_MILLIS) return null
+        sourceKeyCache[location] = entry
+        entry.key
+    }
+
+    private fun isNoImageRemembered(key: String): Boolean = noImage.contains(key)
+
+    private fun rememberNoImage(key: String) {
+        noImage.remember(key)
+    }
+
     private fun forgetNoImage(key: String) {
-        synchronized(noImageLock) { noImageConfirmed.remove(key) }
+        noImage.forget(key)
     }
 
     /** 整次抽取失败后按键退避；退避到期才允许下一次真正重试。 */
@@ -596,6 +603,9 @@ class CachedMediaPreviewSource(
         val abandoned: Boolean = false,
     )
 
+    /** 连接源标识及其缓存时刻。 */
+    private data class SourceKeyEntry(val key: String, val cachedAt: Long)
+
     /** 同键在途请求：等待者共享同一次抽取结果；可见请求可取消预取 owner。 */
     private data class InFlight(
         val deferred: CompletableDeferred<LoadedPreview>,
@@ -634,11 +644,11 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
-        /** 本次运行无图记录上限；超出时淘汰最久未用的一条。 */
-        private const val MAX_NO_IMAGE_MEMORY = 512
-
-        /** 连接源标识缓存上限；超出时整体清空后重建。 */
+        /** 连接源标识缓存上限；超出时淘汰最久未用的一条。 */
         private const val MAX_SOURCE_KEY_CACHE = 512
+
+        /** 连接源标识有效期；书签改址或删除后最多这么久重新解析。 */
+        private const val SOURCE_KEY_TTL_MILLIS = 30_000L
 
         /** 本地条目共用的配额键。 */
         private const val LOCAL_SOURCE_KEY = "local"
