@@ -111,7 +111,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         NavigationViewModel.factory(applicationContext, diagnostics)
     }
 
-    private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext, navigation) }
+    private val library: LibraryViewModel by viewModels {
+        LibraryViewModel.factory(applicationContext, navigation, diagnostics)
+    }
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 

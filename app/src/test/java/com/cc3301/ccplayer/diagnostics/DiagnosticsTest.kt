@@ -64,6 +64,17 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun `注销后不再通知观察者`() {
+        var notified = 0
+        val remove = diagnostics.onEnabled { notified += 1 }
+
+        remove()
+        diagnostics.enabled = true
+
+        assertEquals(0, notified)
+    }
+
+    @Test
     fun `未捕获异常堆栈同步写入`() {
         diagnostics.enabled = true
 

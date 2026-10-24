@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.lifecycle.SavedStateHandle
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.DataStoreDirectoryPositionStore
 import com.cc3301.ccplayer.library.DirectoryPosition
 import com.cc3301.ccplayer.library.DirectoryPositionStore
@@ -192,6 +193,7 @@ class LibraryViewModelTest {
         navigation: NavigationViewModel = this.navigation,
         settings: SettingsRepository = this.settings,
         snapshots: NavigationSnapshotStore = this.snapshots,
+        diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     ): LibraryViewModel = LibraryViewModel(
         library = library,
         files = tree,
@@ -201,6 +203,7 @@ class LibraryViewModelTest {
         positions = positionStore,
         navigation = navigation,
         snapshots = snapshots,
+        diagnostics = diagnostics,
     )
 
     @After
@@ -1376,7 +1379,8 @@ class LibraryViewModelTest {
         )
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
         val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
-        val restored = createViewModel(library = gated, navigation = coldNavigation)
+        val recoveryLog = RecordingLibraryDiagnostics()
+        val restored = createViewModel(library = gated, navigation = coldNavigation, diagnostics = recoveryLog)
         advanceUntilIdle()
 
         assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
@@ -1389,6 +1393,7 @@ class LibraryViewModelTest {
         assertEquals(AppScreen.Sources, coldNavigation.state.value.screen)
         assertNull(coldNavigation.state.value.library)
         assertEquals("", restored.state.value.sourceLocation)
+        assertTrue(recoveryLog.messages.any { it.contains("已放弃本次恢复") })
     }
 
     @Test
@@ -1460,13 +1465,15 @@ class LibraryViewModelTest {
         navigation.openSettings()
         tree.markUnreadable(series.location)
 
-        val restoredNavigation = restoredNavigation()
+        val recoveryLog = RecordingLibraryDiagnostics()
+        val restoredNavigation = restoredNavigation(diagnostics = recoveryLog)
         createViewModel(navigation = restoredNavigation)
         advanceUntilIdle()
 
         assertEquals(AppScreen.Settings, restoredNavigation.state.value.screen)
         assertEquals(AppScreen.Home, restoredNavigation.state.value.settingsReturn)
         assertNull(restoredNavigation.state.value.library)
+        assertTrue(recoveryLog.messages.any { it.contains("关闭设置后回首页") })
 
         restoredNavigation.closeSettings()
         assertEquals(AppScreen.Home, restoredNavigation.state.value.screen)
@@ -1481,8 +1488,13 @@ class LibraryViewModelTest {
         advanceUntilIdle()
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
         val restoredNavigation = restoredNavigation()
+        val recoveryLog = RecordingLibraryDiagnostics()
 
-        val restored = createViewModel(library = gated, navigation = restoredNavigation)
+        val restored = createViewModel(
+            library = gated,
+            navigation = restoredNavigation,
+            diagnostics = recoveryLog,
+        )
         advanceUntilIdle()
         assertEquals(AppScreen.Library, restoredNavigation.state.value.screen)
 
@@ -1494,6 +1506,7 @@ class LibraryViewModelTest {
         assertEquals(AppScreen.Sources, restoredNavigation.state.value.screen)
         assertEquals(0, gated.completedLists)
         assertTrue(restored.state.value.entries.isEmpty())
+        assertTrue(recoveryLog.messages.any { it.contains("已放弃本次恢复") })
     }
 
     @Test
@@ -1537,14 +1550,20 @@ class LibraryViewModelTest {
         return SavedStateHandle(restored)
     }
 
-    private fun restoredNavigation(): NavigationViewModel {
+    private fun restoredNavigation(
+        diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    ): NavigationViewModel {
         val restored = savedState.keys().associateWith { key ->
             when (val value = savedState.get<Any?>(key)) {
                 is ArrayList<*> -> ArrayList(value)
                 else -> value
             }
         }
-        return NavigationViewModel(SavedStateHandle(restored), snapshots = snapshots)
+        return NavigationViewModel(
+            SavedStateHandle(restored),
+            snapshots = snapshots,
+            diagnostics = diagnostics,
+        )
     }
 
     private fun openSmbForm(

@@ -14,13 +14,14 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.network.SourceProtocol
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -65,8 +66,11 @@ class NavigationViewModel(
     private val _userNavigationRevision = MutableStateFlow(0)
     val userNavigationRevision: StateFlow<Int> = _userNavigationRevision.asStateFlow()
 
-    /** 构造期恢复失败可能早于诊断启用，先暂存，启用后补写。 */
+    /** 诊断关闭期间暂存恢复失败与快照写入失败日志，启用后补写。 */
     private val pendingDiagnostics = CopyOnWriteArrayList<String>()
+
+    /** 暂存、补写与开关判定共用同一把锁。 */
+    private val diagnosticsLock = Any()
 
     private val _state = MutableStateFlow(restoredState())
     val state: StateFlow<NavigationState> = _state.asStateFlow()
@@ -77,11 +81,15 @@ class NavigationViewModel(
     @Volatile
     private var lastSavedSnapshot: NavigationSnapshot? = null
 
-    /** 诊断生命周期长于 ViewModel，观察者只持弱引用。 */
-    private val selfReference = WeakReference(this)
+    /** ViewModel 清理后仍要把最后状态交给 IO，不使用主线程同步写。 */
+    private val finalSaveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private var removeEnabledListener: (() -> Unit)? = null
 
     init {
-        diagnostics.onEnabled { selfReference.get()?.flushPendingDiagnostics() }
+        // 只让 lambda 捕获弱引用，避免 Diagnostics 长生命周期持有 ViewModel。
+        val reference = WeakReference(this)
+        removeEnabledListener = diagnostics.onEnabled { reference.get()?.flushPendingDiagnostics() }
         viewModelScope.launch {
             snapshotWrites.filterNotNull().collect { state -> saveSnapshot(state) }
         }
@@ -201,7 +209,10 @@ class NavigationViewModel(
     /** 冷启动校验失败：只记录原因，不改变用户当前界面。 */
     fun failColdStart(reason: String) {
         coldStartPending = false
-        logRestoreFailure(reason, returnsHome = _state.value.screen == AppScreen.Home)
+        logRestoreFailure(
+            reason,
+            if (_state.value.screen == AppScreen.Home) "，回首页" else "，已放弃",
+        )
     }
 
     /**
@@ -214,25 +225,27 @@ class NavigationViewModel(
         val sameLibrary = current.library == expected
         when {
             current.screen == AppScreen.Library && sameLibrary -> {
-                logRestoreFailure(reason, returnsHome = true)
+                logRestoreFailure(reason, "，回首页")
                 update { it.copy(screen = AppScreen.Home, library = null) }
             }
             // 停在设置页时清掉来处，关闭设置后回首页而不是带错误页的库页面。
             current.screen == AppScreen.Settings &&
                 current.settingsReturn == AppScreen.Library &&
                 sameLibrary -> {
-                logRestoreFailure(reason, returnsHome = true)
+                logRestoreFailure(reason, "，关闭设置后回首页")
                 update { it.copy(settingsReturn = AppScreen.Home, library = null) }
             }
-            else -> logRestoreFailure(reason, returnsHome = false)
+            else -> logRestoreFailure(reason, "，已放弃")
         }
     }
 
     /** 诊断启用后补写启用前暂存的日志。 */
     private fun flushPendingDiagnostics() {
-        if (!diagnostics.enabled || pendingDiagnostics.isEmpty()) return
-        pendingDiagnostics.toList().forEach { message -> diagnostics.log(message) }
-        pendingDiagnostics.clear()
+        val pending = synchronized(diagnosticsLock) {
+            if (!diagnostics.enabled) return
+            pendingDiagnostics.toList().also { pendingDiagnostics.clear() }
+        }
+        pending.forEach { message -> diagnostics.log(message) }
     }
 
     private fun cancelColdStartRestore() {
@@ -240,18 +253,25 @@ class NavigationViewModel(
         _userNavigationRevision.value += 1
     }
 
-    private fun logRestoreFailure(reason: String, returnsHome: Boolean = true) {
-        val suffix = if (returnsHome) "，回首页" else "，已放弃"
+    private fun logRestoreFailure(reason: String, suffix: String) {
         logDiagnostic("导航恢复失败: $reason$suffix")
     }
 
-    /** 诊断关闭时暂存，开启后由 [flushPendingDiagnostics] 统一补写。 */
+    /**
+     * 诊断关闭时暂存；入队后复查开关，若期间已开启则立即补写，避免日志滞留。
+     * 暂存与补写共用 [diagnosticsLock]。
+     */
     private fun logDiagnostic(message: String) {
-        if (diagnostics.enabled) {
-            diagnostics.log(message)
-        } else if (pendingDiagnostics.size < MAX_PENDING_DIAGNOSTICS) {
-            pendingDiagnostics += message
+        val immediate = synchronized(diagnosticsLock) {
+            if (diagnostics.enabled) return@synchronized message
+            if (pendingDiagnostics.size < MAX_PENDING_DIAGNOSTICS) {
+                pendingDiagnostics += message
+            }
+            if (!diagnostics.enabled) return
+            pendingDiagnostics.remove(message)
+            message
         }
+        diagnostics.log(immediate)
     }
 
     private suspend fun saveSnapshot(state: NavigationState) {
@@ -271,24 +291,13 @@ class NavigationViewModel(
         }
     }
 
-    /** ViewModel 清理前尽力把最后状态同步写入，避免写队列丢失。 */
+    /** 清理时注销诊断观察者，最后快照交给 IO 异步写入，不阻塞主线程。 */
     override fun onCleared() {
-        val latest = snapshotWrites.value?.toSnapshot()
-        if (latest != null && latest != lastSavedSnapshot) {
-            runCatching {
-                runBlocking {
-                    withTimeoutOrNull(CLEAR_SAVE_TIMEOUT_MILLIS) {
-                        try {
-                            snapshots.save(latest)
-                            lastSavedSnapshot = latest
-                        } catch (cancellation: CancellationException) {
-                            throw cancellation
-                        } catch (failure: Exception) {
-                            logDiagnostic("导航快照写入失败: ${failure.javaClass.simpleName}")
-                        }
-                    }
-                }
-            }
+        removeEnabledListener?.invoke()
+        removeEnabledListener = null
+        val latest = snapshotWrites.value
+        if (latest != null && latest.toSnapshot() != lastSavedSnapshot) {
+            finalSaveScope.launch { saveSnapshot(latest) }
         }
         super.onCleared()
     }
@@ -326,7 +335,7 @@ class NavigationViewModel(
         val library = restoredLibrary()
         val invalidLibraryReturn = screen == AppScreen.Settings && settingsReturn == AppScreen.Library && library == null
         if ((screen == AppScreen.Library && library == null) || invalidLibraryReturn) {
-            logRestoreFailure("库页面目录栈为空")
+            logRestoreFailure("库页面目录栈为空", "，回首页")
             return NavigationState(
                 screen = AppScreen.Home,
                 sourcesProtocol = protocol,
@@ -371,7 +380,6 @@ class NavigationViewModel(
 
         private const val MAX_PENDING_DIAGNOSTICS = 8
         private const val SNAPSHOT_SAVE_ATTEMPTS = 2
-        private const val CLEAR_SAVE_TIMEOUT_MILLIS = 500L
 
         internal const val KEY_SCREEN = "navigation_screen"
         internal const val KEY_SOURCES_PROTOCOL = "navigation_sources_protocol"

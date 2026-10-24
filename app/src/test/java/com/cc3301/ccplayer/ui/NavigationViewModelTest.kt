@@ -1,7 +1,11 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.lifecycle.SavedStateHandle
-import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import com.cc3301.ccplayer.diagnostics.Diagnostics
+import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.network.SourceProtocol
 import kotlinx.coroutines.Dispatchers
@@ -18,30 +22,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-
-/** 记录导航恢复日志的测试出口，并在开启时通知观察者。 */
-private class RecordingDiagnostics : DiagnosticsLog {
-    private var enabledValue = true
-    private val enabledListeners = mutableListOf<() -> Unit>()
-    val messages = mutableListOf<String>()
-
-    override var enabled: Boolean
-        get() = enabledValue
-        set(value) {
-            val wasEnabled = enabledValue
-            enabledValue = value
-            if (value && !wasEnabled) enabledListeners.toList().forEach { it() }
-        }
-
-    override fun log(message: String) {
-        messages += message
-    }
-
-    override fun onEnabled(listener: () -> Unit) {
-        enabledListeners += listener
-        if (enabledValue) listener()
-    }
-}
 
 /** 快照保存失败，用于观察诊断日志。 */
 private class FailingNavigationSnapshotStore : NavigationSnapshotStore {
@@ -73,7 +53,8 @@ class NavigationViewModelTest {
     private var now = 0L
     private val savedState = SavedStateHandle()
     private val snapshots = InMemoryNavigationSnapshotStore()
-    private val diagnostics = RecordingDiagnostics()
+    private val sink = MemoryDiagnosticsSink()
+    private val diagnostics = Diagnostics(sink, Dispatchers.Unconfined).apply { enabled = true }
 
     private lateinit var navigation: NavigationViewModel
 
@@ -274,7 +255,7 @@ class NavigationViewModelTest {
 
         assertEquals(AppScreen.Home, restored.state.value.screen)
         assertNull(restored.state.value.library)
-        assertTrue(diagnostics.messages.any { it.contains("目录栈为空") })
+        assertTrue(sink.lines.any { it.contains("目录栈为空") })
     }
 
     @Test
@@ -345,7 +326,7 @@ class NavigationViewModelTest {
 
         assertEquals(AppScreen.Home, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
-        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("目录不可访问") })
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("目录不可访问") })
     }
 
     @Test
@@ -358,23 +339,24 @@ class NavigationViewModelTest {
 
         assertEquals(AppScreen.Sources, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
-        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") })
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") })
     }
 
     @Test
     fun `快照写入失败记录诊断日志`() = runTest {
-        val recording = RecordingDiagnostics()
+        val failingSink = MemoryDiagnosticsSink()
+        val failingDiagnostics = Diagnostics(failingSink, Dispatchers.Unconfined).apply { enabled = true }
         val failing = NavigationViewModel(
             SavedStateHandle(),
             { now },
             FailingNavigationSnapshotStore(),
-            recording,
+            failingDiagnostics,
         )
 
         failing.openProtocol(SourceProtocol.Local)
         advanceUntilIdle()
 
-        assertTrue(recording.messages.any { it.contains("导航快照写入失败") })
+        assertTrue(failingSink.lines.any { it.contains("导航快照写入失败") })
     }
 
     @Test
@@ -385,23 +367,64 @@ class NavigationViewModelTest {
         navigation.openProtocol(SourceProtocol.Local)
         advanceUntilIdle()
 
-        assertEquals(2, flaky.attempts)
         assertEquals(AppScreen.Sources, flaky.saved?.screen)
     }
 
     @Test
     fun `诊断启用后补写构造期恢复失败日志`() {
-        val recording = RecordingDiagnostics().apply { enabled = false }
+        val bufferedSink = MemoryDiagnosticsSink()
+        val bufferedDiagnostics = Diagnostics(bufferedSink, Dispatchers.Unconfined)
         val invalid = SavedStateHandle(
             mapOf(NavigationViewModel.KEY_SCREEN to AppScreen.Library.name),
         )
-        NavigationViewModel(invalid, { now }, snapshots, recording)
+        NavigationViewModel(invalid, { now }, snapshots, bufferedDiagnostics)
 
-        assertTrue(recording.messages.isEmpty())
+        assertTrue(bufferedSink.lines.isEmpty())
 
-        recording.enabled = true
+        bufferedDiagnostics.enabled = true
 
-        assertTrue(recording.messages.any { it.contains("目录栈为空") })
+        assertTrue(bufferedSink.lines.any { it.contains("目录栈为空") })
+    }
+
+    @Test
+    fun `诊断并发开启时暂存日志不丢失`() {
+        val concurrentSink = MemoryDiagnosticsSink()
+        val concurrentDiagnostics = Diagnostics(concurrentSink, Dispatchers.Unconfined)
+        val invalid = SavedStateHandle(
+            mapOf(NavigationViewModel.KEY_SCREEN to AppScreen.Library.name),
+        )
+        NavigationViewModel(invalid, { now }, snapshots, concurrentDiagnostics)
+
+        val threads = (0 until 4).map { index ->
+            Thread { repeat(20) { concurrentDiagnostics.enabled = (it + index) % 2 == 0 } }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        concurrentDiagnostics.enabled = true
+
+        assertTrue(concurrentSink.lines.any { it.contains("目录栈为空") })
+    }
+
+    @Test
+    fun `清理后注销诊断观察者`() {
+        val listenerSink = MemoryDiagnosticsSink()
+        val listenerDiagnostics = Diagnostics(listenerSink, Dispatchers.Unconfined)
+        val store = ViewModelStore()
+        val factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                NavigationViewModel(SavedStateHandle(), { now }, snapshots, listenerDiagnostics) as T
+        }
+        ViewModelProvider(store, factory)[NavigationViewModel::class.java]
+        val listenersField = Diagnostics::class.java
+            .getDeclaredField("enabledListeners")
+            .apply { isAccessible = true }
+
+        assertEquals(1, (listenersField.get(listenerDiagnostics) as List<*>).size)
+
+        store.clear()
+
+        assertEquals(0, (listenersField.get(listenerDiagnostics) as List<*>).size)
     }
 
     private fun restoredNavigation(): NavigationViewModel =

@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
 import com.cc3301.ccplayer.library.DirectoryPosition
 import com.cc3301.ccplayer.library.DirectoryPositionStore
@@ -233,6 +235,7 @@ class LibraryViewModel(
     private val positions: DirectoryPositionStore,
     private val navigation: NavigationViewModel,
     private val snapshots: NavigationSnapshotStore = NoNavigationSnapshotStore,
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(LibraryState())
@@ -257,6 +260,9 @@ class LibraryViewModel(
 
     /** 恢复后的首次目录读取；离开库页面或设置页时取消。 */
     private var restoreLoadJob: Job? = null
+
+    /** 本次恢复已被用户放弃；只记录一次。 */
+    private var restoreAbandonLogged = false
 
     init {
         viewModelScope.launch {
@@ -298,15 +304,14 @@ class LibraryViewModel(
             }
         }
         viewModelScope.launch {
-            navigation.userNavigationRevision.drop(1).collect { restoreJob?.cancel() }
+            navigation.userNavigationRevision.drop(1).collect { abandonNavigationRestore() }
         }
         viewModelScope.launch {
             navigation.state.collect { state ->
-                if (state.screen != AppScreen.Library && state.screen != AppScreen.Settings) {
-                    restoreLoadJob?.cancel()
-                    restoreLoadJob = null
-                    restoringNavigation = false
-                    restoreTarget = null
+                val inLibraryArea = state.screen == AppScreen.Library || state.screen == AppScreen.Settings
+                // 冷启动校验阶段发生在首页，由 userNavigationRevision 负责取消。
+                if (!inLibraryArea && (restoringNavigation || restoreLoadJob != null)) {
+                    abandonNavigationRestore()
                 }
             }
         }
@@ -627,6 +632,7 @@ class LibraryViewModel(
 
     /** 按导航协调器的快照恢复：进程重建直接用当前状态，冷启动读持久快照。 */
     private fun restoreNavigation() {
+        restoreAbandonLogged = false
         restoreJob = viewModelScope.launch {
             when {
                 // 设置页来处是库页面时也先恢复目录栈，返回时直接可用。
@@ -738,11 +744,23 @@ class LibraryViewModel(
 
     /** 用户已开始新的导航：取消恢复校验与派生加载，放弃原恢复目标。 */
     private fun cancelNavigationRestore() {
-        restoringNavigation = false
-        restoreTarget = null
+        abandonNavigationRestore()
+    }
+
+    /** 用户导航导致恢复未完成时，取消任务并记录一次「已放弃本次恢复」。 */
+    private fun abandonNavigationRestore() {
+        val active = restoringNavigation || restoreJob?.isActive == true || restoreLoadJob?.isActive == true
+        if (!active) return
         restoreJob?.cancel()
+        restoreJob = null
         restoreLoadJob?.cancel()
         restoreLoadJob = null
+        restoringNavigation = false
+        restoreTarget = null
+        if (!restoreAbandonLogged) {
+            restoreAbandonLogged = true
+            diagnostics.log { "导航恢复: 已放弃本次恢复" }
+        }
     }
 
     /** 校验结果：重建后的目录栈与当前目录已读出的条目。 */
@@ -758,7 +776,11 @@ class LibraryViewModel(
 
     companion object {
         /** 生产入口：本地 SAF 与各网络协议的文件树（列举目录后清已消失媒体的进度记录）+ DataStore 设置与书签。 */
-        fun factory(context: Context, navigation: NavigationViewModel): ViewModelProvider.Factory = viewModelFactory {
+        fun factory(
+            context: Context,
+            navigation: NavigationViewModel,
+            diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+        ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val appContext = context.applicationContext
                 val sources = NetworkSourceRepository(
@@ -795,6 +817,7 @@ class LibraryViewModel(
                     positions = DataStoreDirectoryPositionStore.create(appContext),
                     navigation = navigation,
                     snapshots = DataStoreNavigationSnapshotStore.create(appContext),
+                    diagnostics = diagnostics,
                 )
             }
         }

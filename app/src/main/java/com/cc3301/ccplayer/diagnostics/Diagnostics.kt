@@ -24,8 +24,8 @@ interface DiagnosticsLog {
         if (enabled) log(message())
     }
 
-    /** 诊断由关闭变为开启时回调一次，用于补写启用前暂存的内容。 */
-    fun onEnabled(listener: () -> Unit) = Unit
+    /** 诊断由关闭变为开启时回调一次；返回注销句柄。 */
+    fun onEnabled(listener: () -> Unit): () -> Unit = {}
 }
 
 /** 不写日志的实现，供不需要诊断的构造使用。 */
@@ -57,9 +57,10 @@ class Diagnostics(
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
 
-    override fun onEnabled(listener: () -> Unit) {
+    override fun onEnabled(listener: () -> Unit): () -> Unit {
         enabledListeners += listener
         if (enabled) runCatching(listener)
+        return { enabledListeners.remove(listener) }
     }
 
     private fun notifyEnabled() {
