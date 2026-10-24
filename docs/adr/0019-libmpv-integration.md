@@ -14,5 +14,7 @@
 - ABI：仅 arm64-v8a
 - 源码：官方 `MPVLib.kt`（MIT）原样复制到 `app/src/main/java/is/xyz/mpv/`；`MpvSurfaceView` 按官方 `BaseMPVView.kt` 的 Surface 挂载顺序改写
 - 渲染入口：`MPVLib.attachSurface(Surface)`，libmpv 的 render API 直接把画面画到视图的 Surface 上，承担官方 `MPVView` 的渲染职责，因此不需要单独移植 `MPVView`
-- Surface 生命周期：退后台时分离并关闭视频输出，回前台重新挂载同一 Surface 并恢复输出；挂载与分离幂等，重复调用不重建渲染上下文
+- Surface 生命周期：以 SurfaceHolder 回调为唯一事实源。Android 不保证 `surfaceDestroyed` 与 `onStop` 的顺序，熄屏可能只有 `onPause` 而没有 Surface 回调，回前台也不保证触发 `surfaceCreated`；Surface 对象身份在 Android N 后可能被复用，不能作为会话 ID。
+- Surface 会话：挂载、分离、尺寸变化与视频输出重建由单一 Surface 会话状态机持有，Activity 生命周期只向它转发事件；挂载与分离幂等，可重复、可乱序。挂载顺序为 `attachSurface` → `force-window=yes` → 恢复 VO；分离顺序为 VO 置空 → `force-window=no` → `detachSurface`，每次真实重挂都重建 VO。
+- 出帧判定：libmpv 没有 API 能证明画面已显示到屏幕，不以「刷新指令成功」作为证据；只接受抓帧成功或播放位置前进。无证据时不撤旧画面。
 - 许可文本：`third_party/mpv-android/LICENSE`
