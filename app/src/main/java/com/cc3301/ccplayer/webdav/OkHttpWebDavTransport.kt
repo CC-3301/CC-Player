@@ -133,14 +133,18 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
 /** 一次带 Range 的 GET 的内容：内容从 [start] 开始。 */
 private class RangedResponse(val start: Long, val stream: InputStream, val response: Response) : Closeable {
 
+    /** 先关响应再关流：响应关闭会取消请求，让阻塞中的读取尽快退出。 */
     override fun close() {
-        runCatching { stream.close() }
         runCatching { response.close() }
+        runCatching { stream.close() }
     }
 }
 
 /**
  * 带 Range 读的句柄：位置连续就沿用已打开的响应流，跳读按新起点重发 GET。
+ *
+ * 关闭不等待读取锁：先置关闭标志并关掉当前响应，让阻塞读退出。
+ * 关闭后任何读取立即失败，也不能再发起新的 GET。
  */
 private class OkHttpWebDavReadHandle(
     override val size: Long,
@@ -148,7 +152,11 @@ private class OkHttpWebDavReadHandle(
     private val openFrom: (Long) -> RangedResponse,
 ) : WebDavReadHandle {
 
+    @Volatile
     private var current: RangedResponse? = first
+
+    @Volatile
+    private var closed = false
 
     /** 已打开的流读到的位置：流从 [RangedResponse.start] 起，读完 [已读数] 后落在这里。 */
     private var position = first.start
@@ -156,26 +164,40 @@ private class OkHttpWebDavReadHandle(
     /** 解码器与关闭可能来自不同线程，读与关闭串行进行。 */
     private val lock = Any()
 
-    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = synchronized(lock) {
-        if (position < 0 || position >= size) return 0
-        val response = responseAt(position)
-        val read = response.stream.read(buffer, offset, length)
-        if (read <= 0) return 0
-        this.position += read
-        return read
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (closed) throw IOException("读取已取消")
+        synchronized(lock) {
+            if (closed) throw IOException("读取已取消")
+            if (position < 0 || position >= size) return 0
+            val response = responseAt(position)
+            val read = response.stream.read(buffer, offset, length)
+            if (closed) throw IOException("读取已取消")
+            if (read <= 0) return 0
+            this.position += read
+            return read
+        }
     }
 
-    override fun close() = synchronized(lock) {
-        current?.close()
+    override fun close() {
+        if (closed) return
+        closed = true
+        val response = current
         current = null
-        position = 0
+        response?.close()
     }
 
     private fun responseAt(wanted: Long): RangedResponse {
+        if (closed) throw IOException("读取已取消")
         current?.let { if (position == wanted) return it }
         current?.close()
+        if (closed) throw IOException("读取已取消")
         val opened = openFrom(wanted)
-        skipTo(opened, wanted)
+        try {
+            skipTo(opened, wanted)
+        } catch (failure: Exception) {
+            opened.close()
+            throw failure
+        }
         current = opened
         position = wanted
         return opened
@@ -186,6 +208,7 @@ private class OkHttpWebDavReadHandle(
         var remaining = wanted - response.start
         val buffer = ByteArray(SKIP_BUFFER_BYTES)
         while (remaining > 0) {
+            if (closed) throw IOException("读取已取消")
             val read = response.stream.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
             if (read <= 0) throw MediaSourceException(MediaFailure.Unknown, "服务器提前结束了响应")
             remaining -= read

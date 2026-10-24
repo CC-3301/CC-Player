@@ -24,6 +24,9 @@ class FakeSmbConnector : SmbConnector {
     /** 已打开的读句柄，按路径。 */
     val handles = mutableMapOf<String, RecordingSmbHandle>()
 
+    /** 连接与句柄的关闭顺序。 */
+    val closeOrder = mutableListOf<String>()
+
     fun addDirectory(share: String, path: String, vararg children: SmbEntry): FakeSmbConnector {
         childrenByPath["$share/$path"] = children.toList()
         return this
@@ -55,7 +58,7 @@ class FakeSmbConnector : SmbConnector {
         failure?.let { throw it }
         logins += username to password
         shares += share
-        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles)
+        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder)
     }
 }
 
@@ -64,20 +67,27 @@ private class FakeSmbConnection(
     private val childrenByPath: Map<String, List<SmbEntry>>,
     private val bytesByPath: Map<String, ByteArray>,
     private val handles: MutableMap<String, RecordingSmbHandle>,
+    private val closeOrder: MutableList<String>,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
 
     override suspend fun openRead(path: String): SmbReadHandle {
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
-        return RecordingSmbHandle(bytes).also { handles["$share/$path"] = it }
+        return RecordingSmbHandle(bytes) { closeOrder += "handle" }
+            .also { handles["$share/$path"] = it }
     }
 
-    override fun close(): Unit = Unit
+    override fun close() {
+        closeOrder += "connection"
+    }
 }
 
 /** 记录是否被关闭的读句柄。 */
-class RecordingSmbHandle(private val bytes: ByteArray) : SmbReadHandle, Closeable {
+class RecordingSmbHandle(
+    private val bytes: ByteArray,
+    private val onClose: () -> Unit = {},
+) : SmbReadHandle, Closeable {
 
     var closed = false
 
@@ -92,6 +102,7 @@ class RecordingSmbHandle(private val bytes: ByteArray) : SmbReadHandle, Closeabl
 
     override fun close() {
         closed = true
+        onClose()
     }
 }
 

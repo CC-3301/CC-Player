@@ -6,6 +6,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1085,6 +1087,28 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `取消在途网络抽取后快速归还许可`() = runTest {
+        val tracker = CancellableExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val first = async { bounded.preview(network("取消1.mkv")) }
+        val second = async { bounded.preview(network("取消2.mkv")) }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        first.cancelAndJoin()
+        runCurrent()
+        val third = async { bounded.preview(network("继续.mkv")) }
+        runCurrent()
+
+        assertEquals(3, tracker.started.size)
+        second.cancelAndJoin()
+        third.cancelAndJoin()
+    }
+
+    @Test
     fun `范围变化后排队中的预取取得许可时直接放弃`() = runTest {
         val tracker = GatedExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1616,6 +1640,19 @@ private class PerKeyFailureExtractor : MediaPreviewExtractor {
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         requests[file.location] = (requests[file.location] ?: 0) + 1
         throw IllegalStateException("抽取失败")
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 抽取一直挂起，取消后才结束，用来验证许可归还。 */
+private class CancellableExtractor : MediaPreviewExtractor {
+
+    val started = mutableListOf<String>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+        started += file.location
+        awaitCancellation()
     }
 
     override suspend fun durationMillis(file: MediaFile): Long? = null

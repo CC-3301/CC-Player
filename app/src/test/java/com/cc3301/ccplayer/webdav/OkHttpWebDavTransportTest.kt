@@ -6,9 +6,14 @@ import kotlinx.coroutines.test.runTest
 import okhttp3.Credentials
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class OkHttpWebDavTransportTest {
 
@@ -163,6 +168,33 @@ class OkHttpWebDavTransportTest {
             val exception = runCatching { transport.openRead("${server.root}/电影.mkv", "cc", "secret") }.exceptionOrNull()
 
             assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
+        }
+    }
+
+    @Test
+    fun `关闭句柄后阻塞读取快速失败且不再发起请求`() = runTest {
+        FakeWebDavServer(bytes = payload, stallBody = true).use { server ->
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret")
+            val failure = AtomicReference<Throwable?>()
+            val reading = Thread {
+                failure.set(runCatching { handle.readAt(0, ByteArray(16), 0, 16) }.exceptionOrNull())
+            }
+            reading.start()
+
+            val startedAt = System.nanoTime()
+            handle.close()
+            reading.join(TimeUnit.SECONDS.toMillis(2))
+
+            assertFalse("关闭后阻塞读取应立即退出", reading.isAlive)
+            assertNotNull("关闭后的读取应失败", failure.get())
+            assertTrue(
+                "关闭不应等待读取超时",
+                System.nanoTime() - startedAt < TimeUnit.SECONDS.toNanos(2),
+            )
+
+            val afterClose = runCatching { handle.readAt(2000, ByteArray(16), 0, 16) }.exceptionOrNull()
+            assertNotNull("关闭后读取必须直接失败", afterClose)
+            assertEquals("关闭后不得再发起 GET", 1, server.received().size)
         }
     }
 

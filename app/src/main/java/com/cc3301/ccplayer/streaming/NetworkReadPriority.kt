@@ -20,22 +20,6 @@ class NetworkReadPriority {
     /** 正在进行的播放读取数；缩略图读取至少要让出这些读取。 */
     private var playbackReads = 0
 
-    /** 正在等待播放读取结束的缩略图读取数。 */
-    private var waitingThumbnailReads = 0
-
-    /** 等待中的缩略图读取数；用于验证取消能唤醒等待。 */
-    internal val waitingThumbnailReadCount: Int
-        get() = lock.withLock { waitingThumbnailReads }
-
-    private inline fun <T> ReentrantLock.withLock(block: () -> T): T {
-        lock()
-        return try {
-            block()
-        } finally {
-            unlock()
-        }
-    }
-
     /** 把 [source] 包装成按 [kind] 排队的字节源。 */
     fun wrap(source: ByteSource, kind: ReadKind): ByteSource = PriorityByteSource(source, this, kind)
 
@@ -62,14 +46,7 @@ class NetworkReadPriority {
     internal fun <T> thumbnail(closed: () -> Boolean, block: () -> T): T {
         lock.lockInterruptibly()
         try {
-            while (playbackReads > 0 && !closed()) {
-                waitingThumbnailReads++
-                try {
-                    playbackIdle.await()
-                } finally {
-                    waitingThumbnailReads--
-                }
-            }
+            while (playbackReads > 0 && !closed()) playbackIdle.await()
         } catch (interrupted: InterruptedException) {
             Thread.currentThread().interrupt()
             throw IOException("缩略图读取被中断", interrupted)

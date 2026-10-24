@@ -10,9 +10,9 @@ class SmbStreamSource(private val connection: SmbConnection, private val handle:
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int =
         handle.readAt(position, buffer, offset, length)
 
-    /** 关掉句柄与它所在的会话。 */
+    /** 先关连接再关句柄：连接关闭会让阻塞中的读尽快退出，句柄关闭只是尽力收尾。 */
     override fun close() {
-        runCatching { handle.close() }
         runCatching { connection.close() }
+        runCatching { handle.close() }
     }
 }

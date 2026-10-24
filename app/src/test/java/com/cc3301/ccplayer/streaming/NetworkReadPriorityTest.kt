@@ -54,8 +54,9 @@ class NetworkReadPriorityTest {
 
         val thumbnailThread = Thread { thumbnail.readAt(0, ByteArray(1), 0, 1) }
         thumbnailThread.start()
-        // 播放读取仍持有优先级时，缩略图读取不能越过它。
-        assertFalse(thumbnailStarted.await(100, TimeUnit.MILLISECONDS))
+        // 缩略图线程应阻塞在条件等待上；此时真正的读取还没发生。
+        awaitWaiting(thumbnailThread)
+        assertFalse(events.contains("缩略图读取"))
 
         releasePlayback.countDown()
         assertTrue(thumbnailStarted.await(2, TimeUnit.SECONDS))
@@ -108,11 +109,7 @@ class NetworkReadPriorityTest {
             }
         }
         thumbnailThread.start()
-        val waitDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (priority.waitingThumbnailReadCount == 0 && System.nanoTime() < waitDeadline) {
-            Thread.yield()
-        }
-        assertEquals(1, priority.waitingThumbnailReadCount)
+        awaitWaiting(thumbnailThread)
 
         thumbnail.close()
         assertTrue(thumbnailFinished.await(2, TimeUnit.SECONDS))
@@ -120,5 +117,14 @@ class NetworkReadPriorityTest {
 
         releasePlayback.countDown()
         playbackThread.join(2_000)
+    }
+
+    /** 等线程进入条件等待；超时未进入则断言失败，而不是用固定的负向等待。 */
+    private fun awaitWaiting(thread: Thread) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (thread.state != Thread.State.WAITING && System.nanoTime() < deadline) {
+            Thread.yield()
+        }
+        assertEquals(Thread.State.WAITING, thread.state)
     }
 }

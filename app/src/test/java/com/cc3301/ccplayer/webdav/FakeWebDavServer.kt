@@ -5,6 +5,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** 收到的一次请求。 */
 class FakeRequest(val method: String, val path: String, private val headers: Map<String, String>) {
@@ -17,7 +19,8 @@ class FakeRequest(val method: String, val path: String, private val headers: Map
  *
  * [ignoreRange] 置真时忽略 Range 头，模拟不支持区间请求的服务器；
  * [withoutLength] 置真时不给内容长度，模拟长度未知的响应；
- * [getStatus] 非 0 时 GET 一律回该状态码且不带内容。
+ * [getStatus] 非 0 时 GET 一律回该状态码且不带内容；
+ * [stallBody] 置真时 GET 只发响应头，正文等到服务器关闭才发，用来模拟阻塞读。
  */
 class FakeWebDavServer(
     private val listing: String = "",
@@ -26,9 +29,11 @@ class FakeWebDavServer(
     private val getStatus: Int = 0,
     private val ignoreRange: Boolean = false,
     private val withoutLength: Boolean = false,
+    private val stallBody: Boolean = false,
 ) : AutoCloseable {
 
     private val receivedRequests = CopyOnWriteArrayList<FakeRequest>()
+    private val releaseStalledBody = CountDownLatch(1)
     private val serverSocket = ServerSocket(0, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
 
     init {
@@ -42,6 +47,7 @@ class FakeWebDavServer(
     fun received(): List<FakeRequest> = receivedRequests.toList()
 
     override fun close() {
+        releaseStalledBody.countDown()
         runCatching { serverSocket.close() }
     }
 
@@ -92,12 +98,13 @@ class FakeWebDavServer(
                 body = bytes,
                 extraHeaders = mapOf("Connection" to "close"),
                 includeLength = false,
+                stall = stallBody,
             )
             return
         }
         val spec = rangeHeader?.removePrefix(BYTES_PREFIX)?.substringBefore(',')?.trim()
         if (ignoreRange || spec == null) {
-            write(output, STATUS_OK, OCTET_STREAM_CONTENT_TYPE, bytes, extraHeaders = emptyMap())
+            write(output, STATUS_OK, OCTET_STREAM_CONTENT_TYPE, bytes, extraHeaders = emptyMap(), stall = stallBody)
             return
         }
         val start = spec.substringBefore('-').toLongOrNull() ?: 0
@@ -109,6 +116,7 @@ class FakeWebDavServer(
             contentType = OCTET_STREAM_CONTENT_TYPE,
             body = slice,
             extraHeaders = mapOf("Content-Range" to "bytes $start-${start + slice.size - 1}/${bytes.size}"),
+            stall = stallBody,
         )
     }
 
@@ -119,6 +127,7 @@ class FakeWebDavServer(
         body: ByteArray,
         extraHeaders: Map<String, String>,
         includeLength: Boolean = true,
+        stall: Boolean = false,
     ) {
         val headers = linkedMapOf("Content-Type" to contentType)
         if (includeLength) headers["Content-Length"] = body.size.toString()
@@ -129,7 +138,12 @@ class FakeWebDavServer(
             append("\r\n")
         }
         output.write(head.toByteArray(Charsets.ISO_8859_1))
-        output.write(body)
+        output.flush()
+        if (stall) {
+            releaseStalledBody.await(STALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            return
+        }
+        runCatching { output.write(body) }
     }
 
     private fun statusText(status: Int): String = when (status) {
@@ -151,5 +165,6 @@ class FakeWebDavServer(
         const val STATUS_PARTIAL = 206
         const val XML_CONTENT_TYPE = "application/xml"
         const val OCTET_STREAM_CONTENT_TYPE = "application/octet-stream"
+        const val STALL_TIMEOUT_SECONDS = 10L
     }
 }
