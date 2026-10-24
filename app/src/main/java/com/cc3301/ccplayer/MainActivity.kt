@@ -659,22 +659,22 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /**
-     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，主线程不做有界等待；
-     * 回到前台后放弃本周期结果，不再分离。
+     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，最多等待
+     * [BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS]；超时放弃结果并照常分离，避免挂住已销毁的 Surface。
+     * 回到前台后同样放弃本周期结果，不再分离。
      */
     private fun detachAfterBackgroundCapture(shouldDetach: () -> Boolean) {
         val binder = playback ?: return
         backgroundDetachJob?.cancel()
         val capture = binder.controller.beginBackgroundCapture()
         backgroundDetachJob = lifecycleScope.launch {
-            val captured = awaitBackgroundCapture(capture, BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS)
-            if (!shouldDetach()) {
-                binder.controller.abandonBackgroundCapture()
-                return@launch
-            }
-            // 超时或没有抓帧任务都放弃本周期结果，照常分离 Surface。
-            if (!captured) binder.controller.abandonBackgroundCapture()
-            surfaceSession.detach()
+            awaitCaptureThenDetach(
+                capture = capture,
+                timeoutMillis = BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS,
+                shouldDetach = shouldDetach,
+                abandonCapture = binder.controller::abandonBackgroundCapture,
+                detachSurface = surfaceSession::detach,
+            )
         }
     }
 
@@ -808,17 +808,31 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private companion object {
         const val NO_MEDIA = -1
 
-        /** 后台抓帧的等待上限；超时放弃结果并照常分离 Surface。 */
+        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由刷新与抓帧恢复。 */
         const val BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS = 2_000L
     }
 }
 
 /**
- * 等待后台抓帧完成；[capture] 为空表示本周期没有抓帧任务。
- * 超时返回 false，调用方丢弃迟到的抓帧结果。
+ * 等待后台抓帧后决定是否分离 Surface：[capture] 为空或超时都放弃本周期结果并照常分离；
+ * 已回到前台时只放弃结果，不分离。
  */
-internal suspend fun awaitBackgroundCapture(capture: Job?, timeoutMillis: Long): Boolean =
-    capture != null && withTimeoutOrNull(timeoutMillis) {
+internal suspend fun awaitCaptureThenDetach(
+    capture: Job?,
+    timeoutMillis: Long,
+    shouldDetach: () -> Boolean,
+    abandonCapture: () -> Unit,
+    detachSurface: () -> Unit,
+) {
+    val captured = capture != null && withTimeoutOrNull(timeoutMillis) {
         capture.join()
         true
     } == true
+    if (!shouldDetach()) {
+        abandonCapture()
+        return
+    }
+    // 超时或没有抓帧任务都放弃本周期结果，照常分离 Surface。
+    if (!captured) abandonCapture()
+    detachSurface()
+}

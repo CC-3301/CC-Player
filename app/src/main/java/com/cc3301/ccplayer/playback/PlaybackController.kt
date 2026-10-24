@@ -235,6 +235,11 @@ class PlaybackController(
     private var switchOriginPositionMillis = 0L
     private var switchOriginDurationMillis = 0L
 
+    /** 切集前原片的字幕状态；失败回滚时恢复界面，不向引擎重发命令。 */
+    private var switchOriginSubtitleTracks: List<SubtitleTrack> = emptyList()
+    private var switchOriginExternalSubtitles: List<MediaFile> = emptyList()
+    private var switchOriginSubtitleSelection: SubtitleSelection = SubtitleSelection.Off
+
     /** 本次切集是否由自然播完触发；片尾恢复以它为权威判据。 */
     private var switchOriginEnded = false
 
@@ -679,6 +684,9 @@ class PlaybackController(
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
         switchOriginEnded = originAtEnd
+        switchOriginSubtitleTracks = _subtitleTracks.value
+        switchOriginExternalSubtitles = _externalSubtitles.value
+        switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
         _holdBlack.value = false
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
@@ -746,9 +754,11 @@ class PlaybackController(
                 runCatching { engine.grabFrame() }.getOrNull()
             }
             val frame = withTimeoutOrNull(SWITCH_GRAB_TIMEOUT_MILLIS) { grab.await() }
+            // 超时返回时抓帧可能恰好完成：已完成就重读结果，有帧仍按有帧处理。
+            val resolved = if (frame == null && grab.isCompleted) grab.await() else frame
             // 抓帧仍在原生调用里：thumbnail 与 loadfile 共用 mpv 核心命令队列，
             // 继续下发 loadfile 会被卡住的抓帧拖住；直接按切集失败收尾，不下发目标加载。
-            if (frame == null && !grab.isCompleted) {
+            if (resolved == null && !grab.isCompleted) {
                 grab.cancel()
                 abortSwitchAfterStuckGrab(token)
                 return@launch
@@ -758,7 +768,7 @@ class PlaybackController(
             switchCaptureJob = null
             _freezeFramePending.value = false
             // 抓帧无结果时保留屏幕上原有的画面，不主动换成黑底。
-            frame?.bitmap?.let { replaceFreezeFrame(it) }
+            resolved?.bitmap?.let { replaceFreezeFrame(it) }
             startSwitchTarget()
         }
     }
@@ -769,43 +779,70 @@ class PlaybackController(
      */
     private fun abortSwitchAfterStuckGrab(token: Int) {
         if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return
-        val originIndex = switchOriginIndex
-        val origin = _playlist.value.getOrNull(originIndex)
+        // 先记录失败日志：日志要指向失败的切集目标，随后状态会回到原片。
+        switchCaptureJob = null
         val originEnded = switchOriginEnded
         logLoadFailure("切集失败", LoadFailureSource.GrabTimeout, phase = LoadPhase.Switching)
-        switchCaptureToken++
-        switchCaptureJob = null
-        switchStartPending = false
-        _freezeFramePending.value = false
+        restoreOriginBaseState() ?: return
         loadPhase = LoadPhase.None
-        endBufferingIndicator()
-        endLoadWatchdog()
-        suspendSwitchFrameWatchdog()
-        clearSwitchFrameDeadline()
-        switchFramePending = false
-        switchPlaybackStarted = false
+        // 原文件仍在引擎里暂停，没有重新加载。
+        mediaLoaded = true
+        watchedToEnd = originEnded
+        pausedAtEpisodeEnd = originEnded
         switchOriginIndex = NO_MEDIA
         switchOriginEnded = false
         restoreAtEndOfEpisode = false
         _switching.value = false
-        _restoring.value = false
-        paused = true
-        pausedAtEpisodeEnd = originEnded
-        watchedToEnd = originEnded
-        mediaLoaded = true
-        resumeLookupDone = true
-        resumePositionMillis = null
-        if (origin != null) {
-            loadTargetIndex = originIndex
-            loadTargetUrl = origin.playbackLocation
-            _currentIndex.value = originIndex
-            playedPositionMillis = switchOriginPositionMillis
-            playedDurationMillis = switchOriginDurationMillis
-            _progress.value = PlaybackProgress(switchOriginPositionMillis, switchOriginDurationMillis)
+        // 片尾失败保持黑底暂停；撤掉冻结帧与后台缓存帧。
+        _holdBlack.value = originEnded
+        if (originEnded) {
+            replaceFreezeFrame(null)
+            replaceBackgroundRestoreFrame(null)
         }
-        updateState(PlaybackState.Paused)
         switchFailureReported = true
         _playbackFailures.tryEmit(Unit)
+    }
+
+    /**
+     * 失败或取消切集后回到原片的共同状态：进度、暂停、字幕与出帧等待。
+     * 只改控制层状态，不向引擎发命令。返回 null 表示原片条目已不存在。
+     */
+    private fun restoreOriginBaseState(): MediaFile? {
+        val originIndex = switchOriginIndex
+        val origin = _playlist.value.getOrNull(originIndex)
+        if (origin == null) {
+            resetLoadState()
+            return null
+        }
+        cancelSwitchCapture()
+        endBufferingIndicator()
+        endLoadWatchdog()
+        beginReadyTracking()
+        switchPlaybackStarted = false
+        restartFromStartAfterRestore = false
+        loadTargetIndex = originIndex
+        loadTargetUrl = origin.playbackLocation
+        _currentIndex.value = originIndex
+        loadStartPositionMillis = switchOriginPositionMillis
+        playedPositionMillis = switchOriginPositionMillis
+        playedDurationMillis = switchOriginDurationMillis
+        _progress.value = PlaybackProgress(switchOriginPositionMillis, switchOriginDurationMillis)
+        savedPositionMillis = switchOriginPositionMillis
+        resumePositionMillis = null
+        resumeLookupDone = true
+        seekPendingForReady = false
+        deferredReadyNeedsFrame = null
+        requiredSeekSerial = 0
+        watchedToEnd = false
+        pausedAtEpisodeEnd = false
+        mediaLoaded = false
+        paused = true
+        _restoring.value = false
+        _subtitleTracks.value = switchOriginSubtitleTracks
+        _externalSubtitles.value = switchOriginExternalSubtitles
+        _subtitleSelection.value = switchOriginSubtitleSelection
+        updateState(PlaybackState.Paused)
+        return origin
     }
 
     /** 用当前目标向引擎下发 loadfile；抓帧任务与切集重定向共用。 */
@@ -1477,21 +1514,7 @@ class PlaybackController(
 
     /** 失败或取消切集：重新打开原视频，停在切集前的位置；冻结画面留到它重新出帧。 */
     private fun restoreOrigin() {
-        val origin = _playlist.value.getOrNull(switchOriginIndex)
-        if (origin == null) {
-            resetLoadState()
-            return
-        }
-        endBufferingIndicator()
-        cancelSwitchCapture()
-        beginLoadWatchdog()
-        loadGeneration++
-        loadPhase = LoadPhase.Restoring
-        _restoring.value = true
-        restartFromStartAfterRestore = false
-        switchPlaybackStarted = false
-        loadTargetIndex = switchOriginIndex
-        loadTargetUrl = origin.playbackLocation
+        val origin = restoreOriginBaseState() ?: return
         // 自然播完以显式标记为准；位置兜底只在抓不到末帧时补充。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
@@ -1499,27 +1522,12 @@ class PlaybackController(
                     switchOriginDurationMillis > 0 &&
                     switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
                 )
-        // 清掉被取消目标的续播 seek 与出帧等待残留。
-        beginReadyTracking()
-        seekPendingForReady = false
-        deferredReadyNeedsFrame = null
-        requiredSeekSerial = 0
-        resumeLookupDone = true
-        loadStartPositionMillis = switchOriginPositionMillis
-        _currentIndex.value = switchOriginIndex
-        playedPositionMillis = switchOriginPositionMillis
-        playedDurationMillis = switchOriginDurationMillis
-        _progress.value = PlaybackProgress(switchOriginPositionMillis, switchOriginDurationMillis)
-        savedPositionMillis = switchOriginPositionMillis
-        resumePositionMillis = null
-        mediaLoaded = false
         watchedToEnd = restoreAtEndOfEpisode
         pausedAtEpisodeEnd = restoreAtEndOfEpisode
-        paused = true
-        _subtitleTracks.value = emptyList()
-        _externalSubtitles.value = emptyList()
-        _subtitleSelection.value = SubtitleSelection.Off
-        updateState(PlaybackState.Paused)
+        loadGeneration++
+        loadPhase = LoadPhase.Restoring
+        _restoring.value = true
+        beginLoadWatchdog()
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
         expectedLoadToken = engine.start(
@@ -1950,7 +1958,7 @@ class PlaybackController(
         /** 切集后等新帧上屏的总窗口；从切集开始或最后一次加载事件起算。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
 
-        /** 切集抓帧的上限；超时按无帧继续加载，不阻塞 loadfile。 */
+        /** 切集抓帧上限：原生已返回时有帧/无帧都继续加载；原生未返回则按切集失败收尾。 */
         const val SWITCH_GRAB_TIMEOUT_MILLIS = 2_000L
 
         private const val NO_MEDIA = -1

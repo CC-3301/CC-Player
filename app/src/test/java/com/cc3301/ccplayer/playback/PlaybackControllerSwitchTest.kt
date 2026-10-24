@@ -210,6 +210,91 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a stuck grab restores the origin subtitle state without engine commands`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+            val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+            val subtitle = MediaFile(name = "ep1.srt", location = "root/ep1.srt")
+            engine.embeddedTracks = listOf(SubtitleTrack(id = 3, language = "chs", title = null, isDefault = true))
+            controller.openPlaylist(
+                listOf(first, second),
+                first,
+                directoryEntries = listOf(first, second, subtitle),
+            )
+            engine.reportMediaLoaded()
+            controller.selectExternalSubtitle(subtitle.location)
+            val tracks = controller.subtitleTracks.value
+            val externals = controller.externalSubtitles.value
+            val selection = controller.subtitleSelection.value
+            val addedSubtitles = engine.addedExternalSubtitles.size
+            val selectedEmbedded = engine.selectedEmbeddedTracks.size
+            val selectedExternal = engine.selectedExternalSubtitles.size
+            engine.beforeGrab = { gate.await() }
+
+            controller.next()
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertEquals(tracks, controller.subtitleTracks.value)
+            assertEquals(externals, controller.externalSubtitles.value)
+            assertEquals(selection, controller.subtitleSelection.value)
+            // 失败回滚不向卡住的引擎下发字幕命令。
+            assertEquals(addedSubtitles, engine.addedExternalSubtitles.size)
+            assertEquals(selectedEmbedded, engine.selectedEmbeddedTracks.size)
+            assertEquals(selectedExternal, engine.selectedExternalSubtitles.size)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
+    }
+
+    @Test
+    fun `a stuck grab at the episode end restores black paused without duplicate failure`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv")
+            engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
+            engine.beforeGrab = { gate.await() }
+
+            // 自然播完触发自动下一集，抓帧卡住。
+            engine.reportPlaybackEnded()
+            assertTrue(controller.freezeFramePending.value)
+
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertTrue(controller.holdBlack.value)
+            assertNull(controller.freezeFrame.value)
+            assertNull(controller.backgroundRestoreFrame.value)
+            assertEquals(PlaybackState.Paused, controller.state.value)
+            assertFalse(controller.switching.value)
+            // 一次切集只提示一次失败。
+            assertEquals(1, failures.size)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
+    }
+
+    @Test
     fun `the target stays paused until its first frame is ready`() = runTest {
         val controller = playingController()
 
