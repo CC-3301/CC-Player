@@ -8,7 +8,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -64,16 +66,66 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `不在可见范围的请求不下发也不消耗抽取`() = runTest {
+    fun `新索引进入可见区后能收到结果`() = runTest {
         val source = SchedulerRecordingSource()
         val scheduler = scheduler(source, backgroundScope)
-        scheduler.update(entries, firstVisible = 5, lastVisible = 6, rowSize = 1)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
 
-        val offscreen = async { scheduler.preview(entries[1], 1) }
+        // 新条目先于窗口更新调用 preview：不能按旧窗口直接判空。
+        val entering = async { scheduler.preview(entries[5], 5) }
+        runCurrent()
+        assertTrue(source.started.isEmpty())
+
+        scheduler.update(entries, firstVisible = 0, lastVisible = 6, rowSize = 1)
         runCurrent()
 
-        assertNull(offscreen.await().image)
-        assertTrue(source.started.isEmpty())
+        assertNotNull(withTimeout(1_000) { entering.await() })
+        assertEquals(listOf(5), source.started)
+    }
+
+    @Test
+    fun `空范围取消在途请求并清空预取窗口`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+        val requests = (0..2).map { index -> async { scheduler.preview(entries[index], index) } }
+        runCurrent()
+
+        scheduler.update(entries, firstVisible = -1, lastVisible = -1, rowSize = 1)
+        runCurrent()
+
+        assertEquals(listOf(0, 1, 2), source.cancelled.sorted())
+        assertTrue(requests.map { it.await() }.all { preview -> preview.image == null })
+        assertTrue(source.windows.getValue("visible").isEmpty())
+        assertTrue(source.windows.getValue("prefetch").isEmpty())
+    }
+
+    @Test
+    fun `切换目录后旧请求取消且新请求可下发`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        val old = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+
+        scheduler.reset()
+        runCurrent()
+        assertTrue(old.await().image == null)
+
+        val freshEntry = MediaFile(
+            name = "新目录.mkv",
+            location = "smb://nas/media/新目录.mkv",
+            source = MediaSource.Network,
+        )
+        val freshList = listOf(freshEntry) + entries
+        scheduler.update(freshList, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val fresh = async { scheduler.preview(freshEntry, 0) }
+        runCurrent()
+        source.gate?.complete(Unit)
+        runCurrent()
+
+        assertNotNull(withTimeout(1_000) { fresh.await() })
+        assertEquals(0, source.started.last())
     }
 
     @Test

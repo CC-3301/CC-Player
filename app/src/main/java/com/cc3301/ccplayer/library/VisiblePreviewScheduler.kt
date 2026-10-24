@@ -34,7 +34,10 @@ class VisiblePreviewScheduler(
 
     private var dispatching = false
 
-    /** 更新可见与预取范围；离屏请求取消，不消耗抽取。 */
+    /** 离开库页面后不再接受新请求。 */
+    private var closed = false
+
+    /** 更新可见与预取范围；离屏请求取消，不消耗抽取。空范围同样生效。 */
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val visible = if (firstVisible >= 0 && lastVisible >= firstVisible) {
             (firstVisible..lastVisible).mapNotNullTo(HashSet()) { index -> entries.getOrNull(index)?.location }
@@ -51,13 +54,13 @@ class VisiblePreviewScheduler(
     }
 
     /**
-     * 订阅一个条目的预览。窗口已就绪且条目不在可见范围时直接返回占位图；
-     * 否则进入可见队列，按索引顺序等待下发。
+     * 订阅一个条目的预览。请求先入队，是否下发由当前窗口决定：
+     * 新入屏条目可能先调用这里、后收到 [update]，因此不能按旧窗口直接拒绝。
      */
     suspend fun preview(entry: MediaFile, index: Int): MediaPreview {
         if (entry.isDirectory) return MediaPreview(image = null, durationMillis = null)
         val request = synchronized(lock) {
-            if (windowKnown && entry.location !in visibleLocations) return EMPTY_PREVIEW
+            if (closed) return EMPTY_PREVIEW
             requests[entry.location]?.also { existing -> existing.index = index }
                 ?: Request(entry, index, CompletableDeferred()).also { created ->
                     requests[created.file.location] = created
@@ -67,17 +70,32 @@ class VisiblePreviewScheduler(
         return request.deferred.await()
     }
 
+    /** 切换目录或视图时清空旧窗口与旧请求，保留调度器可继续使用。 */
+    fun reset() {
+        synchronized(lock) {
+            closed = false
+            cancelAllLocked()
+        }
+        prefetcher.cancelAll()
+    }
+
     /** 离开库页面时取消全部请求与预取，并清空可见范围。 */
     fun cancelAll() {
         synchronized(lock) {
-            jobs.values.forEach(Job::cancel)
-            jobs.clear()
-            requests.values.forEach { request -> request.deferred.complete(EMPTY_PREVIEW) }
-            requests.clear()
-            visibleLocations = emptySet()
-            windowKnown = true
+            closed = true
+            cancelAllLocked()
         }
         prefetcher.cancelAll()
+    }
+
+    private fun cancelAllLocked() {
+        jobs.values.forEach(Job::cancel)
+        jobs.clear()
+        requests.values.forEach { request -> request.deferred.complete(EMPTY_PREVIEW) }
+        requests.clear()
+        visibleLocations = emptySet()
+        windowKnown = true
+        dispatching = false
     }
 
     private fun cancelOutsideLocked(visible: Set<String>) {

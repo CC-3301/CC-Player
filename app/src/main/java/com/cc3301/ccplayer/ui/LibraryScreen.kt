@@ -132,6 +132,8 @@ fun LibraryScreen(
     ) {
         val entries = state.visibleEntries
         val rowSize = if (state.viewMode == ViewMode.List) 1 else state.gridColumns
+        // 目录或视图变化时先清掉旧窗口，避免旧目录的在途请求继续占用抽取。
+        previewScheduler.reset()
         snapshotFlow {
             if (state.viewMode == ViewMode.List) {
                 val visible = listState.layoutInfo.visibleItemsInfo
@@ -141,7 +143,13 @@ fun LibraryScreen(
                 if (visible.isEmpty()) null else visible.first().index to visible.last().index
             }
         }.collect { range ->
-            if (range != null) previewScheduler.update(entries, range.first, range.second, rowSize)
+            // 空范围也要下发：用于取消旧请求与旧预取。
+            previewScheduler.update(
+                entries = entries,
+                firstVisible = range?.first ?: -1,
+                lastVisible = range?.second ?: -1,
+                rowSize = rowSize,
+            )
         }
     }
 
