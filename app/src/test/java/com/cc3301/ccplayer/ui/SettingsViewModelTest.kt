@@ -55,6 +55,7 @@ class SettingsViewModelTest {
         assertTrue(state.backgroundPlayback)
         assertEquals(ResumeMode.LastPosition, state.resumeMode)
         assertTrue(state.autoRestorePosition)
+        assertTrue(state.restoreLastDirectory)
         assertEquals(DecodeMode.Hardware, state.decodeMode)
         assertEquals(OrientationMode.System, state.orientationMode)
         assertFalse(state.diagnosticsEnabled)
@@ -103,6 +104,15 @@ class SettingsViewModelTest {
 
         assertFalse(settings.autoRestorePosition.first())
         assertFalse(viewModel.state.value.autoRestorePosition)
+    }
+
+    @Test
+    fun `启动目录恢复开关改动写回设置并反映到状态`() = runTest {
+        viewModel.setRestoreLastDirectory(false)
+        advanceUntilIdle()
+
+        assertFalse(settings.restoreLastDirectory.first())
+        assertFalse(viewModel.state.value.restoreLastDirectory)
     }
 
     @Test

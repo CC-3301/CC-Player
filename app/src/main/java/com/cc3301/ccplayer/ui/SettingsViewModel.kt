@@ -22,6 +22,7 @@ data class SettingsState(
     val backgroundPlayback: Boolean = SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK,
     val resumeMode: ResumeMode = SettingsRepository.DEFAULT_RESUME_MODE,
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
+    val restoreLastDirectory: Boolean = SettingsRepository.DEFAULT_RESTORE_LAST_DIRECTORY,
     val decodeMode: DecodeMode = SettingsRepository.DEFAULT_DECODE_MODE,
     val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
     val diagnosticsEnabled: Boolean = SettingsRepository.DEFAULT_DIAGNOSTICS_ENABLED,
@@ -46,12 +47,18 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             ) { autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode ->
                 PlaybackSettings(autoPlayNext, resumeMode, autoRestore, decodeMode, orientationMode)
             }
-            combine(playback, settings.backgroundPlayback, settings.diagnosticsEnabled) { playbackSettings, backgroundPlayback, diagnosticsEnabled ->
+            combine(
+                playback,
+                settings.backgroundPlayback,
+                settings.restoreLastDirectory,
+                settings.diagnosticsEnabled,
+            ) { playbackSettings, backgroundPlayback, restoreLastDirectory, diagnosticsEnabled ->
                 SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
                     backgroundPlayback = backgroundPlayback,
                     resumeMode = playbackSettings.resumeMode,
                     autoRestorePosition = playbackSettings.autoRestorePosition,
+                    restoreLastDirectory = restoreLastDirectory,
                     decodeMode = playbackSettings.decodeMode,
                     orientationMode = playbackSettings.orientationMode,
                     diagnosticsEnabled = diagnosticsEnabled,
@@ -74,6 +81,10 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
 
     fun setAutoRestorePosition(enabled: Boolean) {
         viewModelScope.launch { settings.setAutoRestorePosition(enabled) }
+    }
+
+    fun setRestoreLastDirectory(enabled: Boolean) {
+        viewModelScope.launch { settings.setRestoreLastDirectory(enabled) }
     }
 
     fun setDecodeMode(mode: DecodeMode) {

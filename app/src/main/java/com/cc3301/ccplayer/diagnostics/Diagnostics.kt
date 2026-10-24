@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.util.concurrent.CopyOnWriteArrayList
 
 /** 诊断日志出口；生产环境写轮转文件，测试注入内存实现。 */
 interface DiagnosticsSink {
@@ -22,6 +23,9 @@ interface DiagnosticsLog {
     fun log(message: () -> String) {
         if (enabled) log(message())
     }
+
+    /** 诊断由关闭变为开启时回调一次；返回注销句柄。 */
+    fun onEnabled(listener: () -> Unit): () -> Unit = {}
 }
 
 /** 不写日志的实现，供不需要诊断的构造使用。 */
@@ -43,8 +47,25 @@ class Diagnostics(
 
     @Volatile
     override var enabled: Boolean = false
+        set(value) {
+            val wasEnabled = field
+            field = value
+            if (value && !wasEnabled) notifyEnabled()
+        }
+
+    private val enabledListeners = CopyOnWriteArrayList<() -> Unit>()
 
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    override fun onEnabled(listener: () -> Unit): () -> Unit {
+        enabledListeners += listener
+        if (enabled) runCatching(listener)
+        return { enabledListeners.remove(listener) }
+    }
+
+    private fun notifyEnabled() {
+        enabledListeners.toList().forEach { listener -> runCatching { listener() } }
+    }
 
     override fun log(message: String) {
         if (!enabled) return

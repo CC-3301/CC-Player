@@ -159,6 +159,18 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `默认开启启动时回到上次浏览的目录`() = runTest {
+        assertTrue(settings.restoreLastDirectory.first())
+    }
+
+    @Test
+    fun `启动目录恢复开关写入后读回`() = runTest {
+        settings.setRestoreLastDirectory(false)
+
+        assertFalse(settings.restoreLastDirectory.first())
+    }
+
+    @Test
     fun `旧位置记忆开关 false 迁移到新键并删除旧键`() = runTest {
         val storage = FakePreferencesDataStore(preferencesOf(LEGACY_AUTO_SCROLL_KEY to false))
         val repository = SettingsRepository(storage)
