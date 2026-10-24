@@ -19,13 +19,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/** 记录导航恢复日志的测试出口。 */
+/** 记录导航恢复日志的测试出口，并在开启时通知观察者。 */
 private class RecordingDiagnostics : DiagnosticsLog {
-    override var enabled: Boolean = true
+    private var enabledValue = true
+    private val enabledListeners = mutableListOf<() -> Unit>()
     val messages = mutableListOf<String>()
+
+    override var enabled: Boolean
+        get() = enabledValue
+        set(value) {
+            val wasEnabled = enabledValue
+            enabledValue = value
+            if (value && !wasEnabled) enabledListeners.toList().forEach { it() }
+        }
 
     override fun log(message: String) {
         messages += message
+    }
+
+    override fun onEnabled(listener: () -> Unit) {
+        enabledListeners += listener
+        if (enabledValue) listener()
     }
 }
 
@@ -35,6 +49,20 @@ private class FailingNavigationSnapshotStore : NavigationSnapshotStore {
 
     override suspend fun save(snapshot: NavigationSnapshot) {
         throw IllegalStateException("磁盘不可写")
+    }
+}
+
+/** 第一次保存失败、之后成功，用于观察重试。 */
+private class FlakyNavigationSnapshotStore : NavigationSnapshotStore {
+    var attempts = 0
+    var saved: NavigationSnapshot? = null
+
+    override suspend fun load(): NavigationSnapshot? = saved
+
+    override suspend fun save(snapshot: NavigationSnapshot) {
+        attempts += 1
+        if (attempts == 1) throw IllegalStateException("第一次失败")
+        saved = snapshot
     }
 }
 
@@ -350,17 +378,28 @@ class NavigationViewModelTest {
     }
 
     @Test
+    fun `快照写入失败重试一次后成功`() = runTest {
+        val flaky = FlakyNavigationSnapshotStore()
+        val navigation = NavigationViewModel(SavedStateHandle(), { now }, flaky, diagnostics)
+
+        navigation.openProtocol(SourceProtocol.Local)
+        advanceUntilIdle()
+
+        assertEquals(2, flaky.attempts)
+        assertEquals(AppScreen.Sources, flaky.saved?.screen)
+    }
+
+    @Test
     fun `诊断启用后补写构造期恢复失败日志`() {
         val recording = RecordingDiagnostics().apply { enabled = false }
         val invalid = SavedStateHandle(
             mapOf(NavigationViewModel.KEY_SCREEN to AppScreen.Library.name),
         )
-        val restored = NavigationViewModel(invalid, { now }, snapshots, recording)
+        NavigationViewModel(invalid, { now }, snapshots, recording)
 
         assertTrue(recording.messages.isEmpty())
 
         recording.enabled = true
-        restored.flushPendingDiagnostics()
 
         assertTrue(recording.messages.any { it.contains("目录栈为空") })
     }

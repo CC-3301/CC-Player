@@ -79,11 +79,13 @@ private class RecordingVerifier : NetworkSourceVerifier {
 private class GatedMediaLibrary(private val delegate: MediaLibrary) : MediaLibrary {
 
     var gate = CompletableDeferred<Unit>()
+    var completedLists = 0
 
     override suspend fun resolveDirectory(location: String): MediaFile? = delegate.resolveDirectory(location)
 
     override suspend fun list(directory: MediaFile): Result<List<MediaFile>> {
         gate.await()
+        completedLists += 1
         return delegate.list(directory)
     }
 }
@@ -1442,6 +1444,56 @@ class LibraryViewModelTest {
         advanceUntilIdle()
         assertEquals("媒体", restored.state.value.currentDirectory?.name)
         assertEquals(listOf("剧集"), restored.state.value.entries.map { it.name })
+    }
+
+    @Test
+    fun `设置页来处为库页面时恢复失败关闭设置回首页`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        settings.addRoot(localRoot.location)
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.local.single())
+        advanceUntilIdle()
+        viewModel.enter(series)
+        advanceUntilIdle()
+        navigation.openSettings()
+        tree.markUnreadable(series.location)
+
+        val restoredNavigation = restoredNavigation()
+        createViewModel(navigation = restoredNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Settings, restoredNavigation.state.value.screen)
+        assertEquals(AppScreen.Home, restoredNavigation.state.value.settingsReturn)
+        assertNull(restoredNavigation.state.value.library)
+
+        restoredNavigation.closeSettings()
+        assertEquals(AppScreen.Home, restoredNavigation.state.value.screen)
+    }
+
+    @Test
+    fun `用户离开后恢复派生加载被取消`() = runTest {
+        tree.addDirectory(localRoot, testVideo("a.mkv", "content://root/媒体/a.mkv"))
+        settings.addRoot(localRoot.location)
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.local.single())
+        advanceUntilIdle()
+        val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
+        val restoredNavigation = restoredNavigation()
+
+        val restored = createViewModel(library = gated, navigation = restoredNavigation)
+        advanceUntilIdle()
+        assertEquals(AppScreen.Library, restoredNavigation.state.value.screen)
+
+        restoredNavigation.backFromLibrary()
+        advanceUntilIdle()
+        gated.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Sources, restoredNavigation.state.value.screen)
+        assertEquals(0, gated.completedLists)
+        assertTrue(restored.state.value.entries.isEmpty())
     }
 
     @Test

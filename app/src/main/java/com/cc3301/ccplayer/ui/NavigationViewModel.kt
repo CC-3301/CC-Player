@@ -19,6 +19,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import java.lang.ref.WeakReference
+import java.util.concurrent.CopyOnWriteArrayList
 
 /** 应用内的界面层级。 */
 enum class AppScreen { Home, Sources, Library, Settings }
@@ -62,7 +66,7 @@ class NavigationViewModel(
     val userNavigationRevision: StateFlow<Int> = _userNavigationRevision.asStateFlow()
 
     /** 构造期恢复失败可能早于诊断启用，先暂存，启用后补写。 */
-    private val pendingDiagnostics = mutableListOf<String>()
+    private val pendingDiagnostics = CopyOnWriteArrayList<String>()
 
     private val _state = MutableStateFlow(restoredState())
     val state: StateFlow<NavigationState> = _state.asStateFlow()
@@ -70,17 +74,16 @@ class NavigationViewModel(
     /** 导航快照按最新状态合并写入，失败不阻塞导航。 */
     private val snapshotWrites = MutableStateFlow<NavigationState?>(null)
 
+    @Volatile
+    private var lastSavedSnapshot: NavigationSnapshot? = null
+
+    /** 诊断生命周期长于 ViewModel，观察者只持弱引用。 */
+    private val selfReference = WeakReference(this)
+
     init {
+        diagnostics.onEnabled { selfReference.get()?.flushPendingDiagnostics() }
         viewModelScope.launch {
-            snapshotWrites.filterNotNull().collect { state ->
-                try {
-                    snapshots.save(state.toSnapshot())
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (failure: Exception) {
-                    diagnostics.log { "导航快照写入失败: ${failure.javaClass.simpleName}" }
-                }
-            }
+            snapshotWrites.filterNotNull().collect { state -> saveSnapshot(state) }
         }
     }
 
@@ -208,15 +211,25 @@ class NavigationViewModel(
     fun failRestore(expected: LibraryLocation, reason: String) {
         coldStartPending = false
         val current = _state.value
-        val sameTarget = current.screen == AppScreen.Library && current.library == expected
-        logRestoreFailure(reason, returnsHome = sameTarget)
-        if (sameTarget) {
-            update { it.copy(screen = AppScreen.Home, library = null) }
+        val sameLibrary = current.library == expected
+        when {
+            current.screen == AppScreen.Library && sameLibrary -> {
+                logRestoreFailure(reason, returnsHome = true)
+                update { it.copy(screen = AppScreen.Home, library = null) }
+            }
+            // 停在设置页时清掉来处，关闭设置后回首页而不是带错误页的库页面。
+            current.screen == AppScreen.Settings &&
+                current.settingsReturn == AppScreen.Library &&
+                sameLibrary -> {
+                logRestoreFailure(reason, returnsHome = true)
+                update { it.copy(settingsReturn = AppScreen.Home, library = null) }
+            }
+            else -> logRestoreFailure(reason, returnsHome = false)
         }
     }
 
-    /** 诊断启用后补写构造期暂存的恢复日志。 */
-    fun flushPendingDiagnostics() {
+    /** 诊断启用后补写启用前暂存的日志。 */
+    private fun flushPendingDiagnostics() {
         if (!diagnostics.enabled || pendingDiagnostics.isEmpty()) return
         pendingDiagnostics.toList().forEach { message -> diagnostics.log(message) }
         pendingDiagnostics.clear()
@@ -229,12 +242,55 @@ class NavigationViewModel(
 
     private fun logRestoreFailure(reason: String, returnsHome: Boolean = true) {
         val suffix = if (returnsHome) "，回首页" else "，已放弃"
-        val message = "导航恢复失败: $reason$suffix"
+        logDiagnostic("导航恢复失败: $reason$suffix")
+    }
+
+    /** 诊断关闭时暂存，开启后由 [flushPendingDiagnostics] 统一补写。 */
+    private fun logDiagnostic(message: String) {
         if (diagnostics.enabled) {
             diagnostics.log(message)
         } else if (pendingDiagnostics.size < MAX_PENDING_DIAGNOSTICS) {
             pendingDiagnostics += message
         }
+    }
+
+    private suspend fun saveSnapshot(state: NavigationState) {
+        val snapshot = state.toSnapshot()
+        repeat(SNAPSHOT_SAVE_ATTEMPTS) { attempt ->
+            try {
+                snapshots.save(snapshot)
+                lastSavedSnapshot = snapshot
+                return
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                if (attempt == SNAPSHOT_SAVE_ATTEMPTS - 1) {
+                    logDiagnostic("导航快照写入失败: ${failure.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    /** ViewModel 清理前尽力把最后状态同步写入，避免写队列丢失。 */
+    override fun onCleared() {
+        val latest = snapshotWrites.value?.toSnapshot()
+        if (latest != null && latest != lastSavedSnapshot) {
+            runCatching {
+                runBlocking {
+                    withTimeoutOrNull(CLEAR_SAVE_TIMEOUT_MILLIS) {
+                        try {
+                            snapshots.save(latest)
+                            lastSavedSnapshot = latest
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (failure: Exception) {
+                            logDiagnostic("导航快照写入失败: ${failure.javaClass.simpleName}")
+                        }
+                    }
+                }
+            }
+        }
+        super.onCleared()
     }
 
     private fun update(transform: (NavigationState) -> NavigationState) {
@@ -314,6 +370,8 @@ class NavigationViewModel(
         const val EXIT_WINDOW_MILLIS = 2_000L
 
         private const val MAX_PENDING_DIAGNOSTICS = 8
+        private const val SNAPSHOT_SAVE_ATTEMPTS = 2
+        private const val CLEAR_SAVE_TIMEOUT_MILLIS = 500L
 
         internal const val KEY_SCREEN = "navigation_screen"
         internal const val KEY_SOURCES_PROTOCOL = "navigation_sources_protocol"

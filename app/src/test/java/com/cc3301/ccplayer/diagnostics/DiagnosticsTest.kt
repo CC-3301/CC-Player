@@ -43,6 +43,27 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun `开启诊断时通知一次补写观察者`() {
+        var notified = 0
+        diagnostics.onEnabled { notified += 1 }
+
+        diagnostics.enabled = true
+        diagnostics.enabled = true
+
+        assertEquals(1, notified)
+    }
+
+    @Test
+    fun `诊断已开启后注册观察者立即通知`() {
+        diagnostics.enabled = true
+        var notified = 0
+
+        diagnostics.onEnabled { notified += 1 }
+
+        assertEquals(1, notified)
+    }
+
+    @Test
     fun `未捕获异常堆栈同步写入`() {
         diagnostics.enabled = true
 

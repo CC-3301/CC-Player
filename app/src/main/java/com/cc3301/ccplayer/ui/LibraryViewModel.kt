@@ -255,6 +255,9 @@ class LibraryViewModel(
     /** 冷启动校验任务；用户导航时取消。 */
     private var restoreJob: Job? = null
 
+    /** 恢复后的首次目录读取；离开库页面或设置页时取消。 */
+    private var restoreLoadJob: Job? = null
+
     init {
         viewModelScope.launch {
             combine(settings.rootLocations, sources.bookmarks) { local, network -> local to network }
@@ -296,6 +299,16 @@ class LibraryViewModel(
         }
         viewModelScope.launch {
             navigation.userNavigationRevision.drop(1).collect { restoreJob?.cancel() }
+        }
+        viewModelScope.launch {
+            navigation.state.collect { state ->
+                if (state.screen != AppScreen.Library && state.screen != AppScreen.Settings) {
+                    restoreLoadJob?.cancel()
+                    restoreLoadJob = null
+                    restoringNavigation = false
+                    restoreTarget = null
+                }
+            }
         }
         restoreNavigation()
     }
@@ -521,10 +534,10 @@ class LibraryViewModel(
         }
     }
 
-    private fun load(directory: MediaFile, preloadedEntries: List<MediaFile>? = null) {
+    private fun load(directory: MediaFile, preloadedEntries: List<MediaFile>? = null): Job {
         loadJob?.cancel()
         _state.update { it.copy(loading = true, failure = null) }
-        loadJob = viewModelScope.launch {
+        val job = viewModelScope.launch {
             val sourceLocation = _state.value.sourceLocation
             val relativePath = relativeDirectoryPath(_state.value.stack)
             val position = loadPosition(sourceLocation, relativePath)
@@ -537,6 +550,8 @@ class LibraryViewModel(
             }
             finishNavigationRestore()
         }
+        loadJob = job
+        return job
     }
 
     /**
@@ -706,7 +721,7 @@ class LibraryViewModel(
                 restorePositionForced = true,
             )
         }
-        load(library.stack.last(), preloadedEntries)
+        restoreLoadJob = load(library.stack.last(), preloadedEntries)
     }
 
     /** 恢复读取失败时只在仍停留于同一恢复目标时回首页。 */
@@ -715,16 +730,19 @@ class LibraryViewModel(
         val target = restoreTarget
         restoringNavigation = false
         restoreTarget = null
+        restoreLoadJob = null
         if (target != null && _state.value.failure != null) {
             navigation.failRestore(target, "目录不可访问")
         }
     }
 
-    /** 用户已开始新的导航：取消冷启动校验并放弃原恢复目标。 */
+    /** 用户已开始新的导航：取消恢复校验与派生加载，放弃原恢复目标。 */
     private fun cancelNavigationRestore() {
         restoringNavigation = false
         restoreTarget = null
         restoreJob?.cancel()
+        restoreLoadJob?.cancel()
+        restoreLoadJob = null
     }
 
     /** 校验结果：重建后的目录栈与当前目录已读出的条目。 */
