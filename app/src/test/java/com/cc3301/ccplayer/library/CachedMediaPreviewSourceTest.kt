@@ -320,7 +320,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = cache,
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val image = byteArrayOf(1, 2, 3)
         extractor.imageBytes = image
@@ -345,7 +345,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = cache,
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
@@ -382,7 +382,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = cache,
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
@@ -454,7 +454,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = cache,
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         extractor.imageBytes = null
         extractor.durationMillis = 5_000
@@ -515,7 +515,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = tracker,
             cache = cache,
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val file = local("电影.mkv", lastModified = 1_000)
 
@@ -542,7 +542,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = tracker,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val file = network("电影.mkv")
 
@@ -580,7 +580,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = tracker,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val file = network("上限.mkv")
 
@@ -614,7 +614,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = tracker,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val entries = (1..513).map { index ->
             local("第$index 集.mkv", lastModified = index.toLong())
@@ -646,7 +646,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = reading,
                 cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-                monotonicClock = { now },
+                monotonicClockMillis = { now },
             )
             val file = MediaFile(name = "电影.mkv", location = File(filesDirectory, "电影.mkv").path)
 
@@ -1071,6 +1071,48 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `预取解析连接源前已登记，可见请求可取消并取得名额`() = runTest {
+        val tracker = GatedExtractor()
+        val lookupStarted = CompletableDeferred<Unit>()
+        val lookupGate = CompletableDeferred<Unit>()
+        var lookups = 0
+        val bounded = CachedMediaPreviewSource(
+            sourceKeyDispatcher = Dispatchers.Unconfined,
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            sourceKeyOf = {
+                val call = lookups++
+                if (call == 0) {
+                    lookupStarted.complete(Unit)
+                    lookupGate.await()
+                }
+                "bookmark"
+            },
+        )
+        val prefetched = network("预取.mkv")
+        bounded.updatePreviewWindow(emptySet(), setOf(prefetched.location))
+        val prefetch = async { bounded.prefetch(prefetched) }
+        runCurrent()
+
+        // 预取停在解析连接源，尚未取得许可；但已经登记，可见请求能取消它。
+        assertTrue("预取应先停在连接源解析", lookupStarted.isCompleted)
+        assertTrue(tracker.started.isEmpty())
+
+        val visible = network("可见.mkv")
+        val visibleJob = async { bounded.preview(visible) }
+        runCurrent()
+        assertEquals(listOf(visible.location), tracker.started)
+
+        lookupGate.complete(Unit)
+        runCurrent()
+        assertTrue("预取在取得许可前已被取消", runCatching { prefetch.await() }.isFailure)
+        assertEquals("预取不得进入抽取", 1, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visibleJob.await().image)
+    }
+
+    @Test
     fun `可见请求取消在途预取并占用其名额`() = runTest {
         val tracker = GatedExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1202,7 +1244,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.IO,
             extractor = FakeMediaPreviewExtractor(imageFailure = IllegalStateException("失败")),
             cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
             sourceKeyOf = {
                 calls.incrementAndGet()
                 lookupThread = Thread.currentThread()
@@ -1231,7 +1273,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
             sourceKeyOf = {
                 calls.incrementAndGet()
                 sourceKey
@@ -1253,6 +1295,44 @@ class CachedMediaPreviewSourceTest {
         // 再次命中图片缓存时不再查询连接源。
         assertNotNull(bounded.preview(file).image)
         assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `来源标识缓存三十秒内命中，超过后失效`() = runTest {
+        var now = 0L
+        var lookups = 0
+        val bounded = CachedMediaPreviewSource(
+            sourceKeyDispatcher = Dispatchers.Unconfined,
+            extractor = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1)),
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            monotonicClockMillis = { now },
+            sourceKeyOf = {
+                lookups++
+                "bookmark"
+            },
+        )
+
+        assertNotNull(bounded.preview(network("缓存键.mkv", lastModified = 1_000)).image)
+        assertEquals(1, lookups)
+
+        // 同一位置换一份缓存键，确保重新进入网络流程；30 秒内仍复用来源标识。
+        now += 30_000
+        assertNotNull(bounded.preview(network("缓存键.mkv", lastModified = 2_000)).image)
+        assertEquals(1, lookups)
+
+        // 超过有效期后重新解析来源标识。
+        now += 1
+        assertNotNull(bounded.preview(network("缓存键.mkv", lastModified = 3_000)).image)
+        assertEquals(2, lookups)
+    }
+
+    @Test
+    fun `生产时钟与有效期同为毫秒`() {
+        val first = systemMonotonicMillis()
+        Thread.sleep(20)
+        val elapsed = systemMonotonicMillis() - first
+
+        assertTrue("毫秒时钟应只增加几十毫秒，实际增加 $elapsed", elapsed in 1..10_000)
     }
 
     @Test
@@ -1517,7 +1597,7 @@ class CachedMediaPreviewSourceTest {
             sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = tracker,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClock = { now },
+            monotonicClockMillis = { now },
         )
         val file = network("退避.mkv")
 
