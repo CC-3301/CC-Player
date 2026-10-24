@@ -273,6 +273,7 @@ fun PlayerScreen(
     buffering: Boolean,
     initialLoading: Boolean,
     freezeFrame: Bitmap?,
+    freezeFramePending: Boolean,
     backgroundRestoreFrame: Bitmap?,
     holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
@@ -392,8 +393,16 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲、切集无冻结帧，或片尾恢复就绪后保持黑底。
-        if (holdBlack || (buffering && !switching) || (switching && freezeFrame == null)) {
+        // 黑底画在视频视图之后：首次缓冲、切集已明确无帧，或片尾恢复就绪后保持黑底。
+        if (
+            showPlayerBlackLayer(
+                holdBlack = holdBlack,
+                buffering = buffering,
+                switching = switching,
+                hasFreezeFrame = freezeFrame != null,
+                freezeFramePending = freezeFramePending,
+            )
+        ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

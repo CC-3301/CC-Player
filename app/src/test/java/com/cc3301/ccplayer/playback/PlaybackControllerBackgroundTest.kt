@@ -7,6 +7,7 @@ import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
@@ -85,7 +86,8 @@ class PlaybackControllerBackgroundTest {
 
     @Test
     fun `纯音频抓不到帧时不缓存`() = runTest {
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+        // 引擎返回 null 表示抓不到帧；非 null Frame 表示有帧（位图仅为测试替身可空）。
+        engine.frameToGrab = null
         val controller = pausedController()
 
         capture(controller)
@@ -153,6 +155,36 @@ class PlaybackControllerBackgroundTest {
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
         assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `暂停态回前台刷新执行但抓不到帧时保留缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.frameToGrab = null
+
+        reattach(controller)
+        runCurrent()
+
+        // 刷新指令成功不是出帧证据：抓不到帧就不撤缓存画面。
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `播放态刷新指令成功不算出帧证据`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        controller.resume()
+        engine.reportPauseChanged(false)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
     }
 
     @Test
@@ -448,7 +480,7 @@ class PlaybackControllerBackgroundTest {
         PlaybackController(
             engine,
             progress,
-            backgroundScope,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             frameProbeDispatcher = frameProbeDispatcher,
             nowMillis = { testScheduler.currentTime },
         )

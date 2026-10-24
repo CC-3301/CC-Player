@@ -63,7 +63,12 @@ class MpvPlaybackEngine(
 
     @Volatile
     private var durationSeconds = 0.0
+
+    /** mpv 事件线程写，抓帧线程读；冻结画面按这对尺寸裁切。 */
+    @Volatile
     private var videoWidth = 0
+
+    @Volatile
     private var videoHeight = 0
 
     /** seek 归属状态始终维护；开关只决定是否读属性与拼日志。 */
@@ -111,9 +116,21 @@ class MpvPlaybackEngine(
         return spec.token
     }
 
-    /** mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。 */
-    override fun grabFrame(): PlaybackEngine.Frame? =
-        runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull()?.let(PlaybackEngine::Frame)
+    /**
+     * mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。
+     * 接口只给中心正方形，按当前视频宽高比裁出中心区域，冻结画面才不会显示成正方形。
+     */
+    override fun grabFrame(): PlaybackEngine.Frame? {
+        val bitmap = runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull() ?: return null
+        val crop = freezeFrameCrop(bitmap.width, bitmap.height, videoWidth, videoHeight)
+        val cropped = if (crop.width == bitmap.width && crop.height == bitmap.height) {
+            bitmap
+        } else {
+            runCatching { Bitmap.createBitmap(bitmap, crop.x, crop.y, crop.width, crop.height) }
+                .getOrNull() ?: bitmap
+        }
+        return PlaybackEngine.Frame(cropped)
+    }
 
     override fun pause() {
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, true)

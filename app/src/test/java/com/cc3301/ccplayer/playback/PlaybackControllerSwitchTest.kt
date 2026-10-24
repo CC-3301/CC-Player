@@ -4,8 +4,13 @@ import android.graphics.Bitmap
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -111,6 +116,182 @@ class PlaybackControllerSwitchTest {
         assertSame(frame, controller.freezeFrame.value)
         assertEquals(0, engine.resumeCalls)
         assertTrue(controller.switching.value)
+    }
+
+    @Test
+    fun `a switch grabs the frame off the caller before loading the target`() = runTest {
+        val probeDispatcher = StandardTestDispatcher(testScheduler)
+        val controller = PlaybackController(
+            engine,
+            progress,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            frameProbeDispatcher = probeDispatcher,
+            nowMillis = { testScheduler.currentTime },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv")
+        engine.reportMediaLoaded()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+
+        // 抓帧不占调用线程：loadfile 必须等后台抓帧返回后再下发。
+        assertEquals(listOf("pause"), engine.actions.takeLast(1))
+        assertNull(controller.freezeFrame.value)
+        assertTrue(controller.freezeFramePending.value)
+
+        runCurrent()
+
+        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertSame(frame, controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
+    }
+
+    @Test
+    fun `a stuck grab fails the switch before the watchdog without loading the target`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv")
+            engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
+            engine.beforeGrab = { gate.await() }
+
+            controller.next()
+            assertTrue(controller.freezeFramePending.value)
+            assertEquals(1, engine.startedUrls.size)
+
+            // 抓帧卡在原生命令队列：不下发会被拖住的 loadfile，直接按失败收尾。
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertEquals(1, engine.startedUrls.size)
+            assertEquals(0, controller.currentIndex.value)
+            assertEquals(PlaybackState.Paused, controller.state.value)
+            assertFalse(controller.switching.value)
+            assertNull(controller.freezeFrame.value)
+            assertFalse(controller.freezeFramePending.value)
+            assertEquals(1, failures.size)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
+    }
+
+    @Test
+    fun `a grab that returns no frame still loads the target`() = runTest {
+        val controller = playingController()
+        engine.frameToGrab = null
+
+        controller.next()
+
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertNull(controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
+    }
+
+    @Test
+    fun `a frame without a bitmap does not replace the freeze`() = runTest {
+        val controller = playingController()
+        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
+
+        controller.next()
+
+        assertEquals("root/ep2.mkv", engine.startedUrls.last())
+        assertNull(controller.freezeFrame.value)
+        assertFalse(controller.freezeFramePending.value)
+    }
+
+    @Test
+    fun `a stuck grab restores the origin subtitle state without engine commands`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+            val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+            val subtitle = MediaFile(name = "ep1.srt", location = "root/ep1.srt")
+            engine.embeddedTracks = listOf(SubtitleTrack(id = 3, language = "chs", title = null, isDefault = true))
+            controller.openPlaylist(
+                listOf(first, second),
+                first,
+                directoryEntries = listOf(first, second, subtitle),
+            )
+            engine.reportMediaLoaded()
+            controller.selectExternalSubtitle(subtitle.location)
+            val tracks = controller.subtitleTracks.value
+            val externals = controller.externalSubtitles.value
+            val selection = controller.subtitleSelection.value
+            val addedSubtitles = engine.addedExternalSubtitles.size
+            val selectedEmbedded = engine.selectedEmbeddedTracks.size
+            val selectedExternal = engine.selectedExternalSubtitles.size
+            engine.beforeGrab = { gate.await() }
+
+            controller.next()
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertEquals(tracks, controller.subtitleTracks.value)
+            assertEquals(externals, controller.externalSubtitles.value)
+            assertEquals(selection, controller.subtitleSelection.value)
+            // 失败回滚不向卡住的引擎下发字幕命令。
+            assertEquals(addedSubtitles, engine.addedExternalSubtitles.size)
+            assertEquals(selectedEmbedded, engine.selectedEmbeddedTracks.size)
+            assertEquals(selectedExternal, engine.selectedExternalSubtitles.size)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
+    }
+
+    @Test
+    fun `a stuck grab at the episode end restores black paused without duplicate failure`() = runTest {
+        val gate = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                frameProbeDispatcher = executor,
+                nowMillis = { testScheduler.currentTime },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv")
+            engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
+            engine.beforeGrab = { gate.await() }
+
+            // 自然播完触发自动下一集，抓帧卡住。
+            engine.reportPlaybackEnded()
+            assertTrue(controller.freezeFramePending.value)
+
+            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
+            runCurrent()
+
+            assertTrue(controller.holdBlack.value)
+            assertNull(controller.freezeFrame.value)
+            assertNull(controller.backgroundRestoreFrame.value)
+            assertEquals(PlaybackState.Paused, controller.state.value)
+            assertFalse(controller.switching.value)
+            // 一次切集只提示一次失败。
+            assertEquals(1, failures.size)
+        } finally {
+            gate.countDown()
+            executor.close()
+        }
     }
 
     @Test
@@ -1650,8 +1831,11 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertNull(controller.freezeFrame.value)
 
-        // 回前台重挂 Surface 不应重新进入加载。
+        // 回前台重挂 Surface 不应重新进入加载；刷新后出帧才结束无帧窗口。
         controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        engine.reportFramePresented()
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
         runCurrent()
         assertFalse(controller.switching.value)
@@ -1882,12 +2066,12 @@ class PlaybackControllerSwitchTest {
         ) { it.applyTo(controller) }
     }
 
-    /** 抓帧用测试调度器，和虚拟时间一起推进；生产环境由控制器切到后台线程。 */
+    /** 控制层用即时调度，对齐生产的主线程 immediate；抓帧用同一虚拟时钟。 */
     private fun TestScope.controller(): PlaybackController =
         PlaybackController(
             engine,
             progress,
-            backgroundScope,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )

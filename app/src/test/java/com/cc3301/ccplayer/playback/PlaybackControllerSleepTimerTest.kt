@@ -2,8 +2,10 @@ package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -380,7 +382,8 @@ class PlaybackControllerSleepTimerTest {
         PlaybackController(
             engine,
             FakePlaybackProgressRepository(),
-            backgroundScope,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 
