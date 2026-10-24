@@ -88,6 +88,19 @@ private class GatedMediaLibrary(private val delegate: MediaLibrary) : MediaLibra
     }
 }
 
+/** 记录实际列举过的目录，用于确认恢复时不会重复列举当前目录。 */
+private class CountingMediaLibrary(private val delegate: MediaLibrary) : MediaLibrary {
+
+    val listCalls = mutableListOf<String>()
+
+    override suspend fun resolveDirectory(location: String): MediaFile? = delegate.resolveDirectory(location)
+
+    override suspend fun list(directory: MediaFile): Result<List<MediaFile>> {
+        listCalls += directory.location
+        return delegate.list(directory)
+    }
+}
+
 /** 前若干次列举失败，之后交给真实文件树；用于观察恢复读取失败后的重试。 */
 private class FailTimesMediaLibrary(
     private val delegate: MediaLibrary,
@@ -1317,6 +1330,88 @@ class LibraryViewModelTest {
         assertNull(coldNavigation.state.value.library)
         assertEquals("", restored.state.value.sourceLocation)
         assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("目录") })
+    }
+
+    @Test
+    fun `冷启动恢复源协议`() = runTest {
+        tree.addDirectory(webDavRoot)
+        openWebDavForm(address = "https://dav.example.com", path = "/dav/files/cc")
+        advanceUntilIdle()
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.WebDav,
+                settingsReturn = AppScreen.Library,
+                librarySource = webDavRoot.location,
+                libraryStack = listOf(webDavRoot),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Library, coldNavigation.state.value.screen)
+        assertEquals(SourceProtocol.WebDav, coldNavigation.state.value.sourcesProtocol)
+
+        coldNavigation.backFromLibrary()
+        assertEquals(AppScreen.Sources, coldNavigation.state.value.screen)
+        assertEquals(SourceProtocol.WebDav, coldNavigation.state.value.sourcesProtocol)
+    }
+
+    @Test
+    fun `用户离开取消冷启动校验，迟到结果不覆盖当前界面`() = runTest {
+        tree.addDirectory(localRoot)
+        settings.addRoot(localRoot.location)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot),
+            ),
+        )
+        val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+        val restored = createViewModel(library = gated, navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+
+        coldNavigation.openProtocol(SourceProtocol.Local)
+        advanceUntilIdle()
+        gated.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Sources, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertEquals("", restored.state.value.sourceLocation)
+    }
+
+    @Test
+    fun `冷启动校验读到的当前目录直接用于首次加载`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        settings.addRoot(localRoot.location)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot, series),
+            ),
+        )
+        val counting = CountingMediaLibrary(DirectoryMediaLibrary(tree))
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(library = counting, navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(listOf(localRoot.location, series.location), counting.listCalls)
+        assertEquals(listOf("第01集.mkv"), restored.state.value.entries.map { it.name })
     }
 
     @Test

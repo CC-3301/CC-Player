@@ -21,11 +21,20 @@ import org.junit.Test
 
 /** 记录导航恢复日志的测试出口。 */
 private class RecordingDiagnostics : DiagnosticsLog {
-    override val enabled: Boolean = true
+    override var enabled: Boolean = true
     val messages = mutableListOf<String>()
 
     override fun log(message: String) {
         messages += message
+    }
+}
+
+/** 快照保存失败，用于观察诊断日志。 */
+private class FailingNavigationSnapshotStore : NavigationSnapshotStore {
+    override suspend fun load(): NavigationSnapshot? = null
+
+    override suspend fun save(snapshot: NavigationSnapshot) {
+        throw IllegalStateException("磁盘不可写")
     }
 }
 
@@ -247,14 +256,16 @@ class NavigationViewModelTest {
 
     @Test
     fun `冷启动恢复库页面后清掉待恢复标记并写入快照`() = runTest {
-        val applied = navigation.restoreColdStartLibrary(root.location, listOf(root, series))
+        val applied = navigation.restoreColdStartLibrary(root.location, SourceProtocol.Smb, listOf(root, series))
         advanceUntilIdle()
 
         assertTrue(applied)
         assertFalse(navigation.coldStartPending)
         assertEquals(AppScreen.Library, navigation.state.value.screen)
+        assertEquals(SourceProtocol.Smb, navigation.state.value.sourcesProtocol)
         assertEquals(listOf(root, series), navigation.state.value.library?.stack)
         assertEquals(AppScreen.Library, snapshots.load()?.screen)
+        assertEquals(SourceProtocol.Smb, snapshots.load()?.sourcesProtocol)
         assertEquals(listOf(root, series), snapshots.load()?.libraryStack)
     }
 
@@ -262,10 +273,23 @@ class NavigationViewModelTest {
     fun `冷启动用户已离开首页时不再恢复`() {
         navigation.openProtocol(SourceProtocol.Local)
 
-        val applied = navigation.restoreColdStartLibrary(root.location, listOf(root))
+        val applied = navigation.restoreColdStartLibrary(root.location, SourceProtocol.Local, listOf(root))
 
         assertFalse(applied)
         assertEquals(AppScreen.Sources, navigation.state.value.screen)
+        assertNull(navigation.state.value.library)
+    }
+
+    @Test
+    fun `Home 到 Sources 再回 Home 后迟到的冷启动恢复不覆盖`() {
+        navigation.openProtocol(SourceProtocol.Local)
+        navigation.backToHome()
+
+        val applied = navigation.restoreColdStartLibrary(root.location, SourceProtocol.Local, listOf(root))
+
+        assertFalse(applied)
+        assertFalse(navigation.coldStartPending)
+        assertEquals(AppScreen.Home, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
     }
 
@@ -287,12 +311,58 @@ class NavigationViewModelTest {
     @Test
     fun `恢复失败回首页并记录原因`() = runTest {
         navigation.openLibrary(root.location, listOf(root))
+        val target = LibraryLocation(root.location, listOf(root))
 
-        navigation.failRestore("目录不可访问")
+        navigation.failRestore(target, "目录不可访问")
 
         assertEquals(AppScreen.Home, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
         assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("目录不可访问") })
+    }
+
+    @Test
+    fun `用户已离开后恢复失败只记录日志不回首页`() = runTest {
+        navigation.openLibrary(root.location, listOf(root))
+        val target = LibraryLocation(root.location, listOf(root))
+        navigation.backToSources()
+
+        navigation.failRestore(target, "目录不可访问")
+
+        assertEquals(AppScreen.Sources, navigation.state.value.screen)
+        assertNull(navigation.state.value.library)
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") })
+    }
+
+    @Test
+    fun `快照写入失败记录诊断日志`() = runTest {
+        val recording = RecordingDiagnostics()
+        val failing = NavigationViewModel(
+            SavedStateHandle(),
+            { now },
+            FailingNavigationSnapshotStore(),
+            recording,
+        )
+
+        failing.openProtocol(SourceProtocol.Local)
+        advanceUntilIdle()
+
+        assertTrue(recording.messages.any { it.contains("导航快照写入失败") })
+    }
+
+    @Test
+    fun `诊断启用后补写构造期恢复失败日志`() {
+        val recording = RecordingDiagnostics().apply { enabled = false }
+        val invalid = SavedStateHandle(
+            mapOf(NavigationViewModel.KEY_SCREEN to AppScreen.Library.name),
+        )
+        val restored = NavigationViewModel(invalid, { now }, snapshots, recording)
+
+        assertTrue(recording.messages.isEmpty())
+
+        recording.enabled = true
+        restored.flushPendingDiagnostics()
+
+        assertTrue(recording.messages.any { it.contains("目录栈为空") })
     }
 
     private fun restoredNavigation(): NavigationViewModel =

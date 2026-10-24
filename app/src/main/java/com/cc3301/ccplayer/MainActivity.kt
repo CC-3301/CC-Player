@@ -296,6 +296,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 val orientationMode by settings.orientationMode.collectAsState(
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
+                LaunchedEffect(settingsState.diagnosticsEnabled) {
+                    if (settingsState.diagnosticsEnabled) navigation.flushPendingDiagnostics()
+                }
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
                 LaunchedEffect(navState.screen, navState.sourcesProtocol, playerVisible) {
                     diagnostics.log {

@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -248,6 +249,12 @@ class LibraryViewModel(
     /** 正在按导航快照恢复：首次读取失败时回首页，而不是停在库页面的错误页。 */
     private var restoringNavigation = false
 
+    /** 本次恢复的目标；用户离开后不再据此回首页。 */
+    private var restoreTarget: LibraryLocation? = null
+
+    /** 冷启动校验任务；用户导航时取消。 */
+    private var restoreJob: Job? = null
+
     init {
         viewModelScope.launch {
             combine(settings.rootLocations, sources.bookmarks) { local, network -> local to network }
@@ -286,6 +293,9 @@ class LibraryViewModel(
                     )
                 }
             }
+        }
+        viewModelScope.launch {
+            navigation.userNavigationRevision.drop(1).collect { restoreJob?.cancel() }
         }
         restoreNavigation()
     }
@@ -412,7 +422,7 @@ class LibraryViewModel(
 
     /** 进入某个连接源的库页面，根目录为该连接源的根。 */
     fun openSource(source: ConnectionSource) {
-        restoringNavigation = false
+        cancelNavigationRestore()
         val stack = listOf(source.root)
         _state.update {
             it.copy(
@@ -432,6 +442,7 @@ class LibraryViewModel(
     }
 
     fun enter(directory: MediaFile) {
+        cancelNavigationRestore()
         val stack = _state.value.stack + directory
         _state.update {
             it.copy(
@@ -448,6 +459,7 @@ class LibraryViewModel(
     fun navigateUp() {
         val stack = _state.value.stack
         if (stack.size <= 1) return
+        cancelNavigationRestore()
         val parent = stack.dropLast(1).last()
         val updatedStack = stack.dropLast(1)
         _state.update {
@@ -509,14 +521,14 @@ class LibraryViewModel(
         }
     }
 
-    private fun load(directory: MediaFile) {
+    private fun load(directory: MediaFile, preloadedEntries: List<MediaFile>? = null) {
         loadJob?.cancel()
         _state.update { it.copy(loading = true, failure = null) }
         loadJob = viewModelScope.launch {
             val sourceLocation = _state.value.sourceLocation
             val relativePath = relativeDirectoryPath(_state.value.stack)
             val position = loadPosition(sourceLocation, relativePath)
-            val result = library.list(directory)
+            val result = preloadedEntries?.let { Result.success(it) } ?: library.list(directory)
             currentCoroutineContext().ensureActive()
             _state.update {
                 consumeForcedRestore(
@@ -600,7 +612,7 @@ class LibraryViewModel(
 
     /** 按导航协调器的快照恢复：进程重建直接用当前状态，冷启动读持久快照。 */
     private fun restoreNavigation() {
-        viewModelScope.launch {
+        restoreJob = viewModelScope.launch {
             when {
                 // 设置页来处是库页面时也先恢复目录栈，返回时直接可用。
                 navigation.state.value.library != null -> restoreSavedLibrary()
@@ -612,7 +624,7 @@ class LibraryViewModel(
     private fun restoreSavedLibrary() {
         val library = navigation.state.value.library
         if (library == null || library.stack.isEmpty()) {
-            navigation.failRestore("库页面目录栈为空")
+            navigation.failColdStart("库页面目录栈为空")
             return
         }
         applyRestoredLibrary(library)
@@ -639,35 +651,29 @@ class LibraryViewModel(
         }
         val sourceLocation = snapshot.librarySource
         if (sourceLocation.isNullOrBlank() || snapshot.libraryStack.isEmpty()) {
-            navigation.failRestore("库页面目录栈为空")
+            navigation.failColdStart("库页面目录栈为空")
             return
         }
         val source = (sources.local + sources.smb + sources.webDav)
             .firstOrNull { it.location == sourceLocation }
         if (source == null) {
-            failColdStart("连接源不可用")
+            navigation.failColdStart("连接源不可用")
             return
         }
-        val stack = validateStack(source, snapshot.libraryStack)
-        if (stack == null) {
-            failColdStart("目录不可访问")
+        val validated = validateStack(source, snapshot.libraryStack)
+        if (validated == null) {
+            navigation.failColdStart("目录不可访问")
             return
         }
-        if (!navigation.restoreColdStartLibrary(source.location, stack)) return
-        applyRestoredLibrary(LibraryLocation(source.location, stack))
+        if (!navigation.restoreColdStartLibrary(source.location, snapshot.sourcesProtocol, validated.stack)) return
+        applyRestoredLibrary(
+            LibraryLocation(source.location, validated.stack),
+            preloadedEntries = validated.entries,
+        )
     }
 
-    /** 冷启动校验期间用户已离开首页时不再改导航状态。 */
-    private fun failColdStart(reason: String) {
-        if (navigation.state.value.screen != AppScreen.Home) {
-            navigation.discardColdStart()
-        } else {
-            navigation.failRestore(reason)
-        }
-    }
-
-    /** 按快照逐级校验连接源根目录到当前目录，同时用最新读取结果重建目录栈。 */
-    private suspend fun validateStack(source: ConnectionSource, savedStack: List<MediaFile>): List<MediaFile>? {
+    /** 逐级校验并重建目录栈；已读到的当前目录条目留给首次加载复用。 */
+    private suspend fun validateStack(source: ConnectionSource, savedStack: List<MediaFile>): ValidatedLibrary? {
         if (savedStack.firstOrNull()?.location != source.root.location) return null
         val stack = mutableListOf(source.root)
         for (index in 1 until savedStack.size) {
@@ -676,13 +682,17 @@ class LibraryViewModel(
                 ?: return null
             stack += child
         }
-        if (library.list(stack.last()).isFailure) return null
-        return stack
+        val entries = library.list(stack.last()).getOrElse { return null }
+        return ValidatedLibrary(stack = stack, entries = entries)
     }
 
     /** 按快照设置目录栈并读取当前目录；首次读取的浏览位置不受目录位置记忆开关影响。 */
-    private fun applyRestoredLibrary(library: LibraryLocation) {
+    private fun applyRestoredLibrary(
+        library: LibraryLocation,
+        preloadedEntries: List<MediaFile>? = null,
+    ) {
         restoringNavigation = true
+        restoreTarget = library
         _state.update {
             it.copy(
                 sourceLocation = library.sourceLocation,
@@ -696,15 +706,29 @@ class LibraryViewModel(
                 restorePositionForced = true,
             )
         }
-        load(library.stack.last())
+        load(library.stack.last(), preloadedEntries)
     }
 
-    /** 恢复读取失败时由导航协调器统一回首页并记录日志。 */
+    /** 恢复读取失败时只在仍停留于同一恢复目标时回首页。 */
     private fun finishNavigationRestore() {
         if (!restoringNavigation) return
+        val target = restoreTarget
         restoringNavigation = false
-        if (_state.value.failure != null) navigation.failRestore("目录不可访问")
+        restoreTarget = null
+        if (target != null && _state.value.failure != null) {
+            navigation.failRestore(target, "目录不可访问")
+        }
     }
+
+    /** 用户已开始新的导航：取消冷启动校验并放弃原恢复目标。 */
+    private fun cancelNavigationRestore() {
+        restoringNavigation = false
+        restoreTarget = null
+        restoreJob?.cancel()
+    }
+
+    /** 校验结果：重建后的目录栈与当前目录已读出的条目。 */
+    private data class ValidatedLibrary(val stack: List<MediaFile>, val entries: List<MediaFile>)
 
     /** 影响列表展示与滚动的设置项。 */
     private data class ListPreferences(

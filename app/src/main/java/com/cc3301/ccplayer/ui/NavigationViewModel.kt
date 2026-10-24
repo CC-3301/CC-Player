@@ -13,9 +13,11 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.network.SourceProtocol
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 
 /** 应用内的界面层级。 */
@@ -55,19 +57,45 @@ class NavigationViewModel(
     var coldStartPending: Boolean = !savedState.contains(KEY_SCREEN)
         private set
 
+    /** 每次用户导航递增；库页面的冷启动校验据此取消。 */
+    private val _userNavigationRevision = MutableStateFlow(0)
+    val userNavigationRevision: StateFlow<Int> = _userNavigationRevision.asStateFlow()
+
+    /** 构造期恢复失败可能早于诊断启用，先暂存，启用后补写。 */
+    private val pendingDiagnostics = mutableListOf<String>()
+
     private val _state = MutableStateFlow(restoredState())
     val state: StateFlow<NavigationState> = _state.asStateFlow()
+
+    /** 导航快照按最新状态合并写入，失败不阻塞导航。 */
+    private val snapshotWrites = MutableStateFlow<NavigationState?>(null)
+
+    init {
+        viewModelScope.launch {
+            snapshotWrites.filterNotNull().collect { state ->
+                try {
+                    snapshots.save(state.toSnapshot())
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    diagnostics.log { "导航快照写入失败: ${failure.javaClass.simpleName}" }
+                }
+            }
+        }
+    }
 
     private var lastExitHintAt: Long? = null
 
     fun openProtocol(protocol: SourceProtocol) {
         lastExitHintAt = null
+        cancelColdStartRestore()
         update { it.copy(screen = AppScreen.Sources, sourcesProtocol = protocol, library = null) }
     }
 
     /** 进入库页面；目录栈必须非空。 */
     fun openLibrary(sourceLocation: String, stack: List<MediaFile>) {
         if (stack.isEmpty()) return
+        cancelColdStartRestore()
         update {
             it.copy(screen = AppScreen.Library, library = LibraryLocation(sourceLocation, stack))
         }
@@ -76,11 +104,13 @@ class NavigationViewModel(
     /** 库页面进出目录后同步目录栈。 */
     fun updateLibrary(sourceLocation: String, stack: List<MediaFile>) {
         if (_state.value.screen != AppScreen.Library || stack.isEmpty()) return
+        cancelColdStartRestore()
         update { it.copy(library = LibraryLocation(sourceLocation, stack)) }
     }
 
     fun openSettings() {
         lastExitHintAt = null
+        cancelColdStartRestore()
         update {
             if (it.screen == AppScreen.Settings) it else it.copy(settingsReturn = it.screen, screen = AppScreen.Settings)
         }
@@ -88,6 +118,7 @@ class NavigationViewModel(
 
     /** 设置页返回进入前的界面；来处是库页面但目录栈为空时回首页。 */
     fun closeSettings() {
+        cancelColdStartRestore()
         val target = _state.value.settingsReturn
         if (target == AppScreen.Library && _state.value.library?.stack.isNullOrEmpty()) {
             diagnostics.log { "导航: 设置页来处目录栈为空，回首页" }
@@ -98,19 +129,23 @@ class NavigationViewModel(
     }
 
     fun backToSources() {
+        cancelColdStartRestore()
         update { it.copy(screen = AppScreen.Sources, library = null) }
     }
 
     /** 库页面系统返回：目录栈还有上级时交给库状态回退，否则回到源列表。 */
-    fun backFromLibrary(): LibraryBackAction =
-        if ((_state.value.library?.stack?.size ?: 0) > 1) {
+    fun backFromLibrary(): LibraryBackAction {
+        cancelColdStartRestore()
+        return if ((_state.value.library?.stack?.size ?: 0) > 1) {
             LibraryBackAction.NavigateUp
         } else {
             backToSources()
             LibraryBackAction.LeaveLibrary
         }
+    }
 
     fun backToHome() {
+        cancelColdStartRestore()
         update { it.copy(screen = AppScreen.Home, library = null) }
     }
 
@@ -131,14 +166,24 @@ class NavigationViewModel(
      * 冷启动恢复库页面：只在仍停在首页时生效。
      * 返回是否恢复；用户已先导航时丢弃本次恢复。
      */
-    fun restoreColdStartLibrary(sourceLocation: String, stack: List<MediaFile>): Boolean {
+    fun restoreColdStartLibrary(
+        sourceLocation: String,
+        sourcesProtocol: SourceProtocol,
+        stack: List<MediaFile>,
+    ): Boolean {
         if (!coldStartPending) return false
         coldStartPending = false
         if (_state.value.screen != AppScreen.Home || stack.isEmpty()) {
             diagnostics.log { "导航恢复: 当前已离开首页或目录栈为空，忽略冷启动恢复" }
             return false
         }
-        update { it.copy(screen = AppScreen.Library, library = LibraryLocation(sourceLocation, stack)) }
+        update {
+            it.copy(
+                screen = AppScreen.Library,
+                sourcesProtocol = sourcesProtocol,
+                library = LibraryLocation(sourceLocation, stack),
+            )
+        }
         diagnostics.log { "导航恢复: 冷启动恢复库页面" }
         return true
     }
@@ -150,11 +195,46 @@ class NavigationViewModel(
         if (reason != null) diagnostics.log { "导航恢复: $reason，回首页" }
     }
 
-    /** 恢复过程中发现的失效状态：静默回首页并记录原因。 */
-    fun failRestore(reason: String) {
+    /** 冷启动校验失败：只记录原因，不改变用户当前界面。 */
+    fun failColdStart(reason: String) {
         coldStartPending = false
-        diagnostics.log { "导航恢复失败: $reason，回首页" }
-        update { it.copy(screen = AppScreen.Home, library = null) }
+        logRestoreFailure(reason, returnsHome = _state.value.screen == AppScreen.Home)
+    }
+
+    /**
+     * 已进入库页面后的读取失败：仅在仍停留在同一恢复目标时回首页。
+     * 用户已离开时只记录日志并放弃。
+     */
+    fun failRestore(expected: LibraryLocation, reason: String) {
+        coldStartPending = false
+        val current = _state.value
+        val sameTarget = current.screen == AppScreen.Library && current.library == expected
+        logRestoreFailure(reason, returnsHome = sameTarget)
+        if (sameTarget) {
+            update { it.copy(screen = AppScreen.Home, library = null) }
+        }
+    }
+
+    /** 诊断启用后补写构造期暂存的恢复日志。 */
+    fun flushPendingDiagnostics() {
+        if (!diagnostics.enabled || pendingDiagnostics.isEmpty()) return
+        pendingDiagnostics.toList().forEach { message -> diagnostics.log(message) }
+        pendingDiagnostics.clear()
+    }
+
+    private fun cancelColdStartRestore() {
+        coldStartPending = false
+        _userNavigationRevision.value += 1
+    }
+
+    private fun logRestoreFailure(reason: String, returnsHome: Boolean = true) {
+        val suffix = if (returnsHome) "，回首页" else "，已放弃"
+        val message = "导航恢复失败: $reason$suffix"
+        if (diagnostics.enabled) {
+            diagnostics.log(message)
+        } else if (pendingDiagnostics.size < MAX_PENDING_DIAGNOSTICS) {
+            pendingDiagnostics += message
+        }
     }
 
     private fun update(transform: (NavigationState) -> NavigationState) {
@@ -163,7 +243,7 @@ class NavigationViewModel(
         _state.value = updated
         if (updated == previous) return
         persistSavedState(updated)
-        viewModelScope.launch { runCatching { snapshots.save(updated.toSnapshot()) } }
+        snapshotWrites.value = updated
     }
 
     private fun persistSavedState(state: NavigationState) {
@@ -190,7 +270,7 @@ class NavigationViewModel(
         val library = restoredLibrary()
         val invalidLibraryReturn = screen == AppScreen.Settings && settingsReturn == AppScreen.Library && library == null
         if ((screen == AppScreen.Library && library == null) || invalidLibraryReturn) {
-            diagnostics.log { "导航恢复失败: 库页面目录栈为空，回首页" }
+            logRestoreFailure("库页面目录栈为空")
             return NavigationState(
                 screen = AppScreen.Home,
                 sourcesProtocol = protocol,
@@ -232,6 +312,8 @@ class NavigationViewModel(
 
     companion object {
         const val EXIT_WINDOW_MILLIS = 2_000L
+
+        private const val MAX_PENDING_DIAGNOSTICS = 8
 
         internal const val KEY_SCREEN = "navigation_screen"
         internal const val KEY_SOURCES_PROTOCOL = "navigation_sources_protocol"
