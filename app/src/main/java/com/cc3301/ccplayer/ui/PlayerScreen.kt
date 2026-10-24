@@ -21,6 +21,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -218,7 +219,7 @@ private fun PlayerTextButton(
     style: TextStyle = MaterialTheme.typography.labelLarge,
 ) {
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.TextButton),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         TextButton(
             onClick = onClick,
@@ -1354,27 +1355,6 @@ private val PlayerPressRippleConfiguration = RippleConfiguration(
     ),
 )
 
-/** 覆盖范围外的无涟漪配置：颜色与各态透明度均为 0。 */
-@OptIn(ExperimentalMaterial3Api::class)
-private val NoPlayerPressRippleConfiguration = RippleConfiguration(
-    color = Color.Transparent,
-    rippleAlpha = RippleAlpha(
-        draggedAlpha = 0f,
-        focusedAlpha = 0f,
-        hoveredAlpha = 0f,
-        pressedAlpha = 0f,
-    ),
-)
-
-/** 按目标区域选择涟漪配置。 */
-@OptIn(ExperimentalMaterial3Api::class)
-private fun playerPressRippleConfiguration(target: PlayerPressTarget): RippleConfiguration =
-    if (playerPressFeedbackEnabled(target)) {
-        PlayerPressRippleConfiguration
-    } else {
-        NoPlayerPressRippleConfiguration
-    }
-
 /** 按目标区域选择点击指示；覆盖范围外不显示涟漪。 */
 @Composable
 private fun playerPressIndication(target: PlayerPressTarget): Indication? =
@@ -1390,7 +1370,7 @@ private fun PlayerIconButtonSurface(
     content: @Composable () -> Unit,
 ) {
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.IconButton),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         Box(
             modifier = modifier.clickable(
@@ -1835,7 +1815,7 @@ private fun MoreChoiceRow(
         if (expanded) R.string.player_more_expanded else R.string.player_more_collapsed,
     )
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.MorePanelRow),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         Row(
             modifier = Modifier
@@ -1875,7 +1855,7 @@ private fun MoreChoiceRow(
 private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.MorePanelRow),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         Row(
             modifier = Modifier
@@ -1914,9 +1894,7 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
 private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(
-            PlayerPressTarget.AutoPlayNextRow,
-        ),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         Row(
             modifier = Modifier
@@ -2078,6 +2056,7 @@ private fun PlaylistDrawer(
             ) {
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
+                    val interaction = remember { MutableInteractionSource() }
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2097,7 +2076,7 @@ private fun PlaylistDrawer(
                                 }
                             }
                             .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
+                                interactionSource = interaction,
                                 indication = null,
                                 onClick = { onSelect(media) },
                             ),
@@ -2140,24 +2119,20 @@ private fun PlaylistDrawer(
                                 )
                             }
                         }
-                        // 整行响应点击；涟漪单独覆盖到高亮条范围，右边缘与高亮条一致。
+                        // 整行只有一个点击节点；涟漪由同一交互源驱动，覆盖到高亮条范围。
                         CompositionLocalProvider(
-                            LocalRippleConfiguration provides playerPressRippleConfiguration(
-                                PlayerPressTarget.PlaylistRow,
-                            ),
+                            LocalRippleConfiguration provides PlayerPressRippleConfiguration,
                         ) {
                             Box(
                                 modifier = Modifier
                                     .matchParentSize()
                                     .padding(end = PlayerPlaylistHighlightEndInset)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
+                                    .indication(
+                                        interactionSource = interaction,
                                         indication = playerPressIndication(
                                             PlayerPressTarget.PlaylistRow,
                                         ),
-                                        onClick = { onSelect(media) },
-                                    )
-                                    .clearAndSetSemantics {},
+                                    ),
                             )
                         }
                     }
@@ -2177,7 +2152,7 @@ private fun SubtitlePanel(
     modifier: Modifier = Modifier,
 ) {
     CompositionLocalProvider(
-        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.SubtitleRow),
+        LocalRippleConfiguration provides PlayerPressRippleConfiguration,
     ) {
         Column(
             modifier = modifier

@@ -119,13 +119,11 @@ enum class PlayerPressTarget {
     TextButton,
     PlaylistRow,
     SubtitleRow,
-    GestureLayer,
     LockLayer,
     OutsideDismissLayer,
-    SeekDragLayer,
 }
 
-/** 按压反馈只覆盖交互控件；整屏手势、锁屏解锁、面板外关闭与进度拖拽不显示涟漪。 */
+/** 按压反馈只覆盖交互控件；锁屏整屏层与面板外关闭层不显示涟漪。 */
 fun playerPressFeedbackEnabled(target: PlayerPressTarget): Boolean = when (target) {
     PlayerPressTarget.IconButton,
     PlayerPressTarget.MorePanelRow,
@@ -135,10 +133,8 @@ fun playerPressFeedbackEnabled(target: PlayerPressTarget): Boolean = when (targe
     PlayerPressTarget.SubtitleRow,
     -> true
 
-    PlayerPressTarget.GestureLayer,
     PlayerPressTarget.LockLayer,
     PlayerPressTarget.OutsideDismissLayer,
-    PlayerPressTarget.SeekDragLayer,
     -> false
 }
 

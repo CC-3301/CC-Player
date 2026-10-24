@@ -5,8 +5,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerLayoutTest {
@@ -69,26 +67,32 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `按压反馈覆盖交互控件、不覆盖整屏手势与拖拽层`() {
-        listOf(
-            PlayerPressTarget.IconButton,
-            PlayerPressTarget.MorePanelRow,
-            PlayerPressTarget.AutoPlayNextRow,
-            PlayerPressTarget.TextButton,
-            PlayerPressTarget.PlaylistRow,
-            PlayerPressTarget.SubtitleRow,
-        ).forEach { target ->
-            assertTrue(target.name, playerPressFeedbackEnabled(target))
-        }
+    fun `按压反馈映射：交互控件有涟漪、锁屏与面板外层无涟漪`() {
+        val withRipple = PlayerPressTarget.values()
+            .filter { playerPressFeedbackEnabled(it) }
+            .toSet()
+        val withoutRipple = PlayerPressTarget.values()
+            .filterNot { playerPressFeedbackEnabled(it) }
+            .toSet()
 
-        listOf(
-            PlayerPressTarget.GestureLayer,
-            PlayerPressTarget.LockLayer,
-            PlayerPressTarget.OutsideDismissLayer,
-            PlayerPressTarget.SeekDragLayer,
-        ).forEach { target ->
-            assertFalse(target.name, playerPressFeedbackEnabled(target))
-        }
+        assertEquals(
+            setOf(
+                PlayerPressTarget.IconButton,
+                PlayerPressTarget.MorePanelRow,
+                PlayerPressTarget.AutoPlayNextRow,
+                PlayerPressTarget.TextButton,
+                PlayerPressTarget.PlaylistRow,
+                PlayerPressTarget.SubtitleRow,
+            ),
+            withRipple,
+        )
+        assertEquals(
+            setOf(
+                PlayerPressTarget.LockLayer,
+                PlayerPressTarget.OutsideDismissLayer,
+            ),
+            withoutRipple,
+        )
     }
 
     @Test
