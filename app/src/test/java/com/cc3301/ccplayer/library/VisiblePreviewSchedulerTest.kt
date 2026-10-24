@@ -199,6 +199,45 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
+    fun `源抛 Error 时按占位图收尾并可重订`() = runTest {
+        val source = SchedulerRecordingSource().apply { failure = OutOfMemoryError("模拟解码崩溃") }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+
+        val first = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+
+        assertNull(withTimeout(1_000) { first.await() }.durationMillis)
+
+        source.failure = null
+        val second = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+
+        assertEquals(1L, withTimeout(1_000) { second.await() }.durationMillis)
+        assertEquals(2, source.started.size)
+    }
+
+    @Test
+    fun `最后订阅者取消后请求移除且可重订`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+
+        val first = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        first.cancel()
+        runCurrent()
+
+        val second = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        source.gate?.complete(Unit)
+        runCurrent()
+
+        assertEquals(listOf(0, 0), source.started)
+        assertEquals(1L, withTimeout(1_000) { second.await() }.durationMillis)
+    }
+
+    @Test
     fun `取消全部后不再下发新请求`() = runTest {
         val source = SchedulerRecordingSource()
         val scheduler = scheduler(source, backgroundScope)
@@ -221,11 +260,13 @@ private class SchedulerRecordingSource : MediaPreviewSource {
     val windows = ConcurrentHashMap<String, Set<String>>()
 
     var gate: CompletableDeferred<Unit>? = null
+    var failure: Throwable? = null
 
     override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
 
     override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
         started += index
+        failure?.let { problem -> throw problem }
         try {
             gate?.await()
         } catch (cancellation: CancellationException) {

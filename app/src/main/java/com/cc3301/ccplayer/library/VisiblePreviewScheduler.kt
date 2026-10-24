@@ -5,7 +5,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 
@@ -166,7 +165,7 @@ class VisiblePreviewScheduler(
 
     private suspend fun drain() {
         while (true) {
-            val request = synchronized(lock) {
+            val (request, job) = synchronized(lock) {
                 if (!windowKnown || visibleLocations.isEmpty()) return
                 val next = requests.values
                     .filter { pending -> !pending.started && pending.file.location in visibleLocations }
@@ -174,36 +173,39 @@ class VisiblePreviewScheduler(
                     ?: return
                 next.started = true
                 next.pausedByWindow = false
-                next
+                // 先建 Job 并登记，再启动：reset/pause 在两步之间也能取消到它。
+                val created = scope.launch(start = CoroutineStart.LAZY) { runRequest(next) }
+                next.job = created
+                next to created
             }
-            val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                val self = currentCoroutineContext()[Job]
-                val preview = try {
-                    source.visiblePreview(request.file, request.index)
-                } catch (cancellation: CancellationException) {
-                    // 窗口暂停或订阅取消时不回填占位图；再次可见会重新下发。
-                    synchronized(lock) {
-                        if (request.job === self) request.job = null
-                    }
-                    throw cancellation
-                } catch (failure: Exception) {
-                    EMPTY_PREVIEW
-                }
-                synchronized(lock) {
-                    request.job = null
-                    if (!request.pausedByWindow) {
-                        request.deferred.complete(preview)
-                        removeRequestLocked(request, cancelDeferred = false)
-                    }
-                }
+            job.invokeOnCompletion { finishRequest(request, job) }
+            job.start()
+        }
+    }
+
+    private suspend fun runRequest(request: Request) {
+        val preview = try {
+            source.visiblePreview(request.file, request.index)
+        } catch (cancellation: CancellationException) {
+            // 窗口暂停或订阅取消时不回填占位图；再次可见会重新下发。
+            throw cancellation
+        } catch (failure: Throwable) {
+            // Error 也按失败收尾，避免 started 卡住、结果永不完成。
+            EMPTY_PREVIEW
+        }
+        synchronized(lock) {
+            if (!request.pausedByWindow) request.deferred.complete(preview)
+        }
+    }
+
+    /** 正常完成、Error 或取消都从这里收尾；窗口暂停的请求保留，等再次可见续订。 */
+    private fun finishRequest(request: Request, job: Job) {
+        synchronized(lock) {
+            if (request.job === job) request.job = null
+            if (!request.pausedByWindow && !request.deferred.isCompleted) {
+                request.deferred.complete(EMPTY_PREVIEW)
             }
-            synchronized(lock) {
-                if (job.isCompleted) {
-                    request.job = null
-                } else {
-                    request.job = job
-                }
-            }
+            if (request.deferred.isCompleted) removeRequestLocked(request, cancelDeferred = false)
         }
     }
 
