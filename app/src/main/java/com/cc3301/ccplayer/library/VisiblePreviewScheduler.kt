@@ -22,7 +22,7 @@ import kotlinx.coroutines.yield
  *    不得移除请求，也不得取消新 Job。
  * 4. 离屏、空窗口与 [reset] 只作废当前 attempt 并取消 Job，保留请求与 deferred；
  *    再次可见时重新下发。
- * 5. 只有最后一个订阅者取消时才完成 deferred 并移除请求。
+ * 5. 只有最后一个订阅者取消时才取消（异常完成）deferred 并移除请求。
  * 6. [cancelAll] 先在锁内快照并作废全部 attempt，再在锁外逐个取消 Job，
  *    完成回调不会遍历正在被修改的集合。
  */
