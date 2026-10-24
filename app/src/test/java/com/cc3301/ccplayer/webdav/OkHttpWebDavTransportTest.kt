@@ -203,6 +203,35 @@ class OkHttpWebDavTransportTest {
         }
     }
 
+    @Test
+    fun `等响应头时关闭句柄能快速退出且不再发起请求`() = runTest {
+        FakeWebDavServer(bytes = payload, stallHeadersAfterFirst = true).use { server ->
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret")
+            val failure = AtomicReference<Throwable?>()
+            val reading = Thread {
+                // 跳读会发第二个 GET，服务器迟迟不回响应头，读线程停在等响应头。
+                failure.set(runCatching { handle.readAt(2000, ByteArray(16), 0, 16) }.exceptionOrNull())
+            }
+            reading.start()
+            assertTrue("第二个 GET 应已到达并等响应头", server.awaitStalledHeaders(1))
+
+            val startedAt = System.nanoTime()
+            handle.close()
+            reading.join(TimeUnit.SECONDS.toMillis(2))
+
+            assertFalse("关闭后等响应头的读取应立即退出", reading.isAlive)
+            assertNotNull("关闭后的读取应失败", failure.get())
+            assertTrue(
+                "关闭不应等待读超时",
+                System.nanoTime() - startedAt < TimeUnit.SECONDS.toNanos(2),
+            )
+
+            val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
+            assertNotNull("关闭后读取必须直接失败", afterClose)
+            assertEquals("关闭后不得再发起 GET", 2, server.received().size)
+        }
+    }
+
     /** 监听后立刻关闭的端口：连上去必然被拒。 */
     private fun closedPortUrl(): String {
         val socket = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))

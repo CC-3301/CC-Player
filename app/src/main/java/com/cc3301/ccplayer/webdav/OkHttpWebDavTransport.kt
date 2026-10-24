@@ -2,8 +2,12 @@ package com.cc3301.ccplayer.webdav
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.Credentials
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -39,25 +43,56 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
     }
 
     override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle = withContext(Dispatchers.IO) {
-        val first = rangedResponse(url, username, password, position = 0)
+        val calls = ReadCallTracker()
+        try {
+            coroutineScope {
+                val opening = async { openWithCalls(calls, url, username, password) }
+                try {
+                    opening.await()
+                } catch (cancellation: CancellationException) {
+                    calls.cancel()
+                    throw cancellation
+                }
+            }
+        } catch (failure: Exception) {
+            calls.cancel()
+            throw failure
+        }
+    }
+
+    private suspend fun openWithCalls(
+        calls: ReadCallTracker,
+        url: String,
+        username: String,
+        password: String?,
+    ): WebDavReadHandle {
+        val first = rangedResponse(calls, url, username, password, position = 0)
         try {
             val size = totalSizeOf(first.response)
                 ?: throw MediaSourceException(MediaFailure.Unknown, "服务器没给出文件长度：$url")
-            OkHttpWebDavReadHandle(
+            return OkHttpWebDavReadHandle(
                 size = size,
                 first = first,
-                openFrom = { position -> rangedResponse(url, username, password, position) },
+                calls = calls,
+                openFrom = { position -> rangedResponse(calls, url, username, password, position) },
             )
         } catch (failure: Exception) {
+            calls.cancel()
             first.close()
             throw failure
         }
     }
 
     /** 从 [position] 起开一次带 Range 的 GET。 */
-    private fun rangedResponse(url: String, username: String, password: String?, position: Long): RangedResponse {
+    private fun rangedResponse(
+        calls: ReadCallTracker,
+        url: String,
+        username: String,
+        password: String?,
+        position: Long,
+    ): RangedResponse {
         val request = requestOf(url, username, password).header(RANGE_HEADER, "$BYTES_PREFIX$position-").build()
-        val response = execute(request)
+        val response = execute(calls, request)
         if (!response.isSuccessful) {
             val statusCode = response.code
             response.close()
@@ -83,6 +118,12 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
 
     private fun execute(request: Request): Response = try {
         client.newCall(request).execute()
+    } catch (failure: IOException) {
+        throw MediaSourceException(webdavFailureOf(failure), "请求发不出去：${request.url}", failure)
+    }
+
+    private fun execute(calls: ReadCallTracker, request: Request): Response = try {
+        calls.execute(client, request)
     } catch (failure: IOException) {
         throw MediaSourceException(webdavFailureOf(failure), "请求发不出去：${request.url}", failure)
     }
@@ -130,6 +171,41 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
     }
 }
 
+/**
+ * 正在执行的 GET 调用：关闭时先 `cancel()`，让等响应头、跳读与正文读取都能退出。
+ * 关闭后才决定发起的调用直接取消，不再建立连接。
+ */
+private class ReadCallTracker {
+
+    private val lock = Any()
+    private var closed = false
+    private var active: Call? = null
+
+    fun execute(client: OkHttpClient, request: Request): Response {
+        val call = client.newCall(request)
+        synchronized(lock) {
+            if (closed) {
+                call.cancel()
+                throw IOException("读取已取消")
+            }
+            active = call
+        }
+        return try {
+            call.execute()
+        } finally {
+            synchronized(lock) { if (active === call) active = null }
+        }
+    }
+
+    fun cancel() {
+        val call = synchronized(lock) {
+            closed = true
+            active.also { active = null }
+        }
+        call?.cancel()
+    }
+}
+
 /** 一次带 Range 的 GET 的内容：内容从 [start] 开始。 */
 private class RangedResponse(val start: Long, val stream: InputStream, val response: Response) : Closeable {
 
@@ -143,12 +219,13 @@ private class RangedResponse(val start: Long, val stream: InputStream, val respo
 /**
  * 带 Range 读的句柄：位置连续就沿用已打开的响应流，跳读按新起点重发 GET。
  *
- * 关闭不等待读取锁：先置关闭标志并关掉当前响应，让阻塞读退出。
+ * 关闭不等待读取锁：先取消当前 GET 并关掉当前响应，让阻塞读退出。
  * 关闭后任何读取立即失败，也不能再发起新的 GET。
  */
 private class OkHttpWebDavReadHandle(
     override val size: Long,
     first: RangedResponse,
+    private val calls: ReadCallTracker,
     private val openFrom: (Long) -> RangedResponse,
 ) : WebDavReadHandle {
 
@@ -181,6 +258,8 @@ private class OkHttpWebDavReadHandle(
     override fun close() {
         if (closed) return
         closed = true
+        // 先取消 GET：正在等响应头或读正文时，只关已拿到的响应不足以让调用退出。
+        calls.cancel()
         val response = current
         current = null
         response?.close()
