@@ -5,15 +5,16 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 
 /**
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
- * 可见请求按列表索引从上到下下发；快速滚动后离屏的排队请求与在途请求都会取消。
+ * 可见请求按列表索引从上到下下发。离屏只暂停抽取、保留待调度请求；
+ * 条目再次可见时续用同一结果，避免出现永久占位。订阅方取消时才移除请求。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
- * 每个条目只订阅自己那一项的结果。
  */
 class VisiblePreviewScheduler(
     private val source: MediaPreviewSource,
@@ -23,9 +24,8 @@ class VisiblePreviewScheduler(
 
     private val lock = Any()
 
-    /** 从下发到完成之间的请求；完成后移出。 */
+    /** 同一位置的请求；条目只订阅自己那一项的结果。 */
     private val requests = LinkedHashMap<String, Request>()
-    private val jobs = HashMap<String, Job>()
 
     private var visibleLocations: Set<String> = emptySet()
 
@@ -37,7 +37,7 @@ class VisiblePreviewScheduler(
     /** 离开库页面后不再接受新请求。 */
     private var closed = false
 
-    /** 更新可见与预取范围；离屏请求取消，不消耗抽取。空范围同样生效。 */
+    /** 更新可见与预取范围；离屏请求只暂停抽取，保留订阅等待再次可见。空范围同样生效。 */
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val visible = if (firstVisible >= 0 && lastVisible >= firstVisible) {
             (firstVisible..lastVisible).mapNotNullTo(HashSet()) { index -> entries.getOrNull(index)?.location }
@@ -47,7 +47,7 @@ class VisiblePreviewScheduler(
         synchronized(lock) {
             windowKnown = true
             visibleLocations = visible
-            cancelOutsideLocked(visible)
+            pauseOutsideLocked(visible)
         }
         prefetcher.update(entries, firstVisible, lastVisible, rowSize)
         dispatch()
@@ -58,23 +58,44 @@ class VisiblePreviewScheduler(
      * 新入屏条目可能先调用这里、后收到 [update]，因此不能按旧窗口直接拒绝。
      */
     suspend fun preview(entry: MediaFile, index: Int): MediaPreview {
-        if (entry.isDirectory) return MediaPreview(image = null, durationMillis = null)
+        if (entry.isDirectory) return EMPTY_PREVIEW
         val request = synchronized(lock) {
             if (closed) return EMPTY_PREVIEW
-            requests[entry.location]?.also { existing -> existing.index = index }
-                ?: Request(entry, index, CompletableDeferred()).also { created ->
+            val existing = requests[entry.location]
+            if (existing != null) {
+                existing.index = index
+                existing.waiters++
+                existing
+            } else {
+                Request(entry, index, CompletableDeferred()).also { created ->
+                    created.waiters = 1
                     requests[created.file.location] = created
                 }
+            }
         }
         dispatch()
-        return request.deferred.await()
+        var cancelled = false
+        try {
+            return request.deferred.await()
+        } catch (cancellation: CancellationException) {
+            cancelled = true
+            throw cancellation
+        } finally {
+            synchronized(lock) {
+                request.waiters--
+                // 只有最后一个订阅者取消时才移除；晚到的新请求不会被旧请求的清理误删。
+                if (cancelled && request.waiters <= 0) removeRequestLocked(request, cancelDeferred = true)
+            }
+        }
     }
 
-    /** 切换目录或视图时清空旧窗口与旧请求，保留调度器可继续使用。 */
+    /** 切换目录或视图时清空窗口并暂停全部在途抽取；订阅保留，后续可见时续订。 */
     fun reset() {
         synchronized(lock) {
             closed = false
-            cancelAllLocked()
+            visibleLocations = emptySet()
+            windowKnown = true
+            pauseAllLocked()
         }
         prefetcher.cancelAll()
     }
@@ -83,36 +104,43 @@ class VisiblePreviewScheduler(
     fun cancelAll() {
         synchronized(lock) {
             closed = true
-            cancelAllLocked()
+            requests.values.forEach { request ->
+                request.job?.cancel()
+                request.job = null
+                request.deferred.complete(EMPTY_PREVIEW)
+            }
+            requests.clear()
+            visibleLocations = emptySet()
+            windowKnown = true
+            dispatching = false
         }
         prefetcher.cancelAll()
     }
 
-    private fun cancelAllLocked() {
-        jobs.values.forEach(Job::cancel)
-        jobs.clear()
-        requests.values.forEach { request -> request.deferred.complete(EMPTY_PREVIEW) }
-        requests.clear()
-        visibleLocations = emptySet()
-        windowKnown = true
-        dispatching = false
+    private fun pauseOutsideLocked(visible: Set<String>) {
+        requests.values
+            .filter { request -> request.file.location !in visible }
+            .forEach(::pauseLocked)
     }
 
-    private fun cancelOutsideLocked(visible: Set<String>) {
-        val iterator = requests.iterator()
-        while (iterator.hasNext()) {
-            val (location, request) = iterator.next()
-            if (location in visible) continue
-            iterator.remove()
-            jobs.remove(location)?.cancel()
-            request.deferred.complete(EMPTY_PREVIEW)
-        }
-        val jobIterator = jobs.iterator()
-        while (jobIterator.hasNext()) {
-            val (location, job) = jobIterator.next()
-            if (location in visible) continue
-            jobIterator.remove()
-            job.cancel()
+    private fun pauseAllLocked() {
+        requests.values.forEach(::pauseLocked)
+    }
+
+    private fun pauseLocked(request: Request) {
+        request.started = false
+        request.pausedByWindow = true
+        request.job?.cancel()
+        request.job = null
+    }
+
+    private fun removeRequestLocked(request: Request, cancelDeferred: Boolean) {
+        val location = request.file.location
+        if (requests[location] === request) requests.remove(location)
+        request.job?.cancel()
+        request.job = null
+        if (cancelDeferred && !request.deferred.isCompleted) {
+            request.deferred.cancel(CancellationException("预览订阅已取消"))
         }
     }
 
@@ -145,31 +173,36 @@ class VisiblePreviewScheduler(
                     .minByOrNull(Request::index)
                     ?: return
                 next.started = true
+                next.pausedByWindow = false
                 next
             }
             val job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                val self = currentCoroutineContext()[Job]
                 val preview = try {
                     source.visiblePreview(request.file, request.index)
                 } catch (cancellation: CancellationException) {
+                    // 窗口暂停或订阅取消时不回填占位图；再次可见会重新下发。
+                    synchronized(lock) {
+                        if (request.job === self) request.job = null
+                    }
                     throw cancellation
                 } catch (failure: Exception) {
                     EMPTY_PREVIEW
                 }
-                request.deferred.complete(preview)
+                synchronized(lock) {
+                    request.job = null
+                    if (!request.pausedByWindow) {
+                        request.deferred.complete(preview)
+                        removeRequestLocked(request, cancelDeferred = false)
+                    }
+                }
             }
             synchronized(lock) {
                 if (job.isCompleted) {
-                    requests.remove(request.file.location)
+                    request.job = null
                 } else {
-                    jobs[request.file.location] = job
+                    request.job = job
                 }
-            }
-            job.invokeOnCompletion {
-                synchronized(lock) {
-                    jobs.remove(request.file.location, job)
-                    requests.remove(request.file.location)
-                }
-                request.deferred.complete(EMPTY_PREVIEW)
             }
         }
     }
@@ -183,6 +216,9 @@ class VisiblePreviewScheduler(
         var index: Int,
         val deferred: CompletableDeferred<MediaPreview>,
         var started: Boolean = false,
+        var pausedByWindow: Boolean = false,
+        var job: Job? = null,
+        var waiters: Int = 0,
     )
 
     private companion object {

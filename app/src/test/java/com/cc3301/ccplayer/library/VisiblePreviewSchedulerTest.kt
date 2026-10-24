@@ -48,21 +48,96 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `快速滚动后离屏请求取消且不再抽取`() = runTest {
+    fun `滚动离屏再回后重新下发并收到结果`() = runTest {
         val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
-
-        val requests = (0..2).map { index -> async { scheduler.preview(entries[index], index) } }
+        val request = async { scheduler.preview(entries[0], 0) }
         runCurrent()
-        assertEquals(listOf(0, 1, 2), source.started)
+        assertEquals(listOf(0), source.started)
 
         scheduler.update(entries, firstVisible = 5, lastVisible = 6, rowSize = 1)
         runCurrent()
+        assertEquals(listOf(0), source.cancelled)
+        assertEquals(listOf(0), source.started)
 
-        assertEquals(listOf(0, 1, 2), source.cancelled.sorted())
-        assertTrue(requests.map { it.await() }.all { preview -> preview.image == null })
-        assertEquals(listOf(0, 1, 2), source.started)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+        runCurrent()
+        assertEquals(listOf(0, 0), source.started)
+
+        source.gate?.complete(Unit)
+        runCurrent()
+        assertEquals(1L, withTimeout(1_000) { request.await() }.durationMillis)
+    }
+
+    @Test
+    fun `切换视图重置后仍能重新下发`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        val request = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        assertEquals(listOf(0), source.started)
+
+        scheduler.reset()
+        scheduler.update(entries, firstVisible = 0, lastVisible = 3, rowSize = 1)
+        runCurrent()
+
+        assertEquals(listOf(0), source.cancelled)
+        assertEquals(listOf(0, 0), source.started)
+        source.gate?.complete(Unit)
+        runCurrent()
+        assertEquals(1L, withTimeout(1_000) { request.await() }.durationMillis)
+    }
+
+    @Test
+    fun `排序变化后按新索引重新下发`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        val request = async { scheduler.preview(entries[1], 1) }
+        runCurrent()
+        assertEquals(listOf(1), source.started)
+
+        val reversed = entries.reversed()
+        val newIndex = reversed.indexOf(entries[1])
+        scheduler.reset()
+        scheduler.update(reversed, firstVisible = 0, lastVisible = reversed.lastIndex, rowSize = 1)
+        val resubscribed = async { scheduler.preview(entries[1], newIndex) }
+        runCurrent()
+
+        assertEquals(newIndex, source.started.last())
+        source.gate?.complete(Unit)
+        runCurrent()
+        assertEquals((newIndex + 1).toLong(), withTimeout(1_000) { request.await() }.durationMillis)
+        assertEquals((newIndex + 1).toLong(), withTimeout(1_000) { resubscribed.await() }.durationMillis)
+    }
+
+    @Test
+    fun `目录重载取消旧订阅后新请求可下发`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val old = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+
+        // 目录重载：旧条目被销毁，订阅取消。
+        old.cancel()
+        runCurrent()
+
+        val freshEntry = MediaFile(
+            name = "新目录.mkv",
+            location = "smb://nas/media/新目录.mkv",
+            source = MediaSource.Network,
+        )
+        scheduler.reset()
+        scheduler.update(listOf(freshEntry), firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val fresh = async { scheduler.preview(freshEntry, 0) }
+        runCurrent()
+
+        source.gate?.complete(Unit)
+        runCurrent()
+        assertEquals(1L, withTimeout(1_000) { fresh.await() }.durationMillis)
     }
 
     @Test
@@ -84,7 +159,7 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `空范围取消在途请求并清空预取窗口`() = runTest {
+    fun `空范围暂停在途请求并清空预取窗口`() = runTest {
         val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
@@ -95,37 +170,32 @@ class VisiblePreviewSchedulerTest {
         runCurrent()
 
         assertEquals(listOf(0, 1, 2), source.cancelled.sorted())
-        assertTrue(requests.map { it.await() }.all { preview -> preview.image == null })
+        assertEquals(listOf(0, 1, 2), source.started)
         assertTrue(source.windows.getValue("visible").isEmpty())
         assertTrue(source.windows.getValue("prefetch").isEmpty())
-    }
 
-    @Test
-    fun `切换目录后旧请求取消且新请求可下发`() = runTest {
-        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
-        val scheduler = scheduler(source, backgroundScope)
-        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
-        val old = async { scheduler.preview(entries[0], 0) }
-        runCurrent()
-
-        scheduler.reset()
-        runCurrent()
-        assertTrue(old.await().image == null)
-
-        val freshEntry = MediaFile(
-            name = "新目录.mkv",
-            location = "smb://nas/media/新目录.mkv",
-            source = MediaSource.Network,
-        )
-        val freshList = listOf(freshEntry) + entries
-        scheduler.update(freshList, firstVisible = 0, lastVisible = 0, rowSize = 1)
-        val fresh = async { scheduler.preview(freshEntry, 0) }
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
         runCurrent()
         source.gate?.complete(Unit)
         runCurrent()
+        assertEquals(listOf(1L, 2L, 3L), requests.map { request -> request.await().durationMillis })
+    }
 
-        assertNotNull(withTimeout(1_000) { fresh.await() })
-        assertEquals(0, source.started.last())
+    @Test
+    fun `同一位置取消一个订阅不影响另一个`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val first = async { scheduler.preview(entries[0], 0) }
+        val second = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+
+        first.cancel()
+        runCurrent()
+
+        source.gate?.complete(Unit)
+        runCurrent()
+        assertEquals(1L, withTimeout(1_000) { second.await() }.durationMillis)
     }
 
     @Test
@@ -138,12 +208,12 @@ class VisiblePreviewSchedulerTest {
         val request = async { scheduler.preview(entries[0], 0) }
         runCurrent()
 
-        assertNull(request.await().image)
+        assertNull(request.await().durationMillis)
         assertTrue(source.started.isEmpty())
     }
 }
 
-/** 记录下发与取消的假预览源；[gate] 非空时压住抽取，用来构造快速滚动。 */
+/** 记录下发与取消的假预览源；[gate] 非空时压住抽取，用来构造滚动与重置。 */
 private class SchedulerRecordingSource : MediaPreviewSource {
 
     val started = mutableListOf<Int>()
@@ -162,7 +232,8 @@ private class SchedulerRecordingSource : MediaPreviewSource {
             cancelled += index
             throw cancellation
         }
-        return MediaPreview(image = null, durationMillis = null)
+        // 用非空时长区分“已出结果”和占位图。
+        return MediaPreview(image = null, durationMillis = index + 1L)
     }
 
     override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
