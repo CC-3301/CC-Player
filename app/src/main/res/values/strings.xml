@@ -110,6 +110,7 @@
     <string name="settings_resume_last_position">播放上次位置</string>
     <string name="settings_resume_from_start">始终从头播放</string>
     <string name="settings_auto_restore_position">进入目录时自动回到上次停留的位置</string>
+    <string name="settings_restore_last_directory">启动时回到上次浏览的目录</string>
     <string name="settings_decode_title">解码方式</string>
     <string name="settings_decode_hardware">硬件解码</string>
     <string name="settings_decode_software">软件解码</string>

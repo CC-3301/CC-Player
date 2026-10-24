@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.ui
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.lifecycle.SavedStateHandle
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.library.DataStoreDirectoryPositionStore
 import com.cc3301.ccplayer.library.DirectoryPosition
 import com.cc3301.ccplayer.library.DirectoryPositionStore
@@ -131,6 +132,16 @@ private class GatedDirectoryPositionStore : DirectoryPositionStore {
     }
 }
 
+/** 记录导航恢复日志的测试出口。 */
+private class RecordingLibraryDiagnostics : DiagnosticsLog {
+    override val enabled: Boolean = true
+    val messages = mutableListOf<String>()
+
+    override fun log(message: String) {
+        messages += message
+    }
+}
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModelTest {
 
@@ -147,20 +158,25 @@ class LibraryViewModelTest {
     private val webDavRoot = testDirectory("cc", "https://dav.example.com/dav/files/cc")
 
     private val savedState = SavedStateHandle()
+    private val snapshots = InMemoryNavigationSnapshotStore()
+
+    private lateinit var navigation: NavigationViewModel
 
     private lateinit var viewModel: LibraryViewModel
 
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
+        navigation = NavigationViewModel(savedState)
         viewModel = createViewModel()
     }
 
     private fun createViewModel(
         library: MediaLibrary = DirectoryMediaLibrary(tree),
         positionStore: DirectoryPositionStore = positions,
-        state: SavedStateHandle = savedState,
+        navigation: NavigationViewModel = this.navigation,
         settings: SettingsRepository = this.settings,
+        snapshots: NavigationSnapshotStore = this.snapshots,
     ): LibraryViewModel = LibraryViewModel(
         library = library,
         files = tree,
@@ -168,7 +184,8 @@ class LibraryViewModelTest {
         sources = sources,
         verifier = verifier,
         positions = positionStore,
-        savedState = state,
+        navigation = navigation,
+        snapshots = snapshots,
     )
 
     @After
@@ -633,7 +650,7 @@ class LibraryViewModelTest {
         val gatedStore = GatedPreferencesDataStore(seedStore.data.first())
         val gatedViewModel = createViewModel(
             settings = SettingsRepository(gatedStore),
-            state = SavedStateHandle(),
+            navigation = NavigationViewModel(),
         )
         tree.addDirectory(
             smbRoot,
@@ -662,7 +679,7 @@ class LibraryViewModelTest {
         val gatedStore = GatedPreferencesDataStore(seedStore.data.first())
         val gatedViewModel = createViewModel(
             settings = SettingsRepository(gatedStore),
-            state = SavedStateHandle(),
+            navigation = NavigationViewModel(),
         )
         tree.addDirectory(
             smbRoot,
@@ -686,7 +703,7 @@ class LibraryViewModelTest {
     fun `空目录、读取失败或条目不在列表时不写位置`() = runTest {
         val emptyRoot = testDirectory("空", "smb://nas/empty")
         tree.addDirectory(emptyRoot)
-        val emptyViewModel = createViewModel(state = SavedStateHandle())
+        val emptyViewModel = createViewModel(navigation = NavigationViewModel())
         emptyViewModel.openSource(ConnectionSource(SourceProtocol.Smb, "空", emptyRoot.location, emptyRoot))
         advanceUntilIdle()
         emptyViewModel.savePosition(emptyRoot.location, "", "smb://nas/empty/x.mkv", 10)
@@ -696,7 +713,7 @@ class LibraryViewModelTest {
         val failingRoot = testDirectory("失败", "smb://nas/failing")
         tree.addDirectory(failingRoot, testVideo("a.mkv", "smb://nas/failing/a.mkv"))
         tree.markUnreadable(failingRoot.location)
-        val failingViewModel = createViewModel(state = SavedStateHandle())
+        val failingViewModel = createViewModel(navigation = NavigationViewModel())
         failingViewModel.openSource(ConnectionSource(SourceProtocol.Smb, "失败", failingRoot.location, failingRoot))
         advanceUntilIdle()
         failingViewModel.savePosition(failingRoot.location, "", "smb://nas/failing/a.mkv", 10)
@@ -705,7 +722,7 @@ class LibraryViewModelTest {
 
         val normalRoot = testDirectory("正常", "smb://nas/normal")
         tree.addDirectory(normalRoot, testVideo("a.mkv", "smb://nas/normal/a.mkv"))
-        val normalViewModel = createViewModel(state = SavedStateHandle())
+        val normalViewModel = createViewModel(navigation = NavigationViewModel())
         normalViewModel.openSource(ConnectionSource(SourceProtocol.Smb, "正常", normalRoot.location, normalRoot))
         advanceUntilIdle()
         normalViewModel.savePosition(normalRoot.location, "", "smb://nas/normal/不存在.mkv", 10)
@@ -740,7 +757,7 @@ class LibraryViewModelTest {
         tree.addDirectory(smbRoot, testVideo("a.mkv", "smb://nas/media/a.mkv"), series)
         tree.addDirectory(series, testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"))
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
-        val gatedViewModel = LibraryViewModel(gated, tree, settings, sources, verifier, positions)
+        val gatedViewModel = LibraryViewModel(gated, tree, settings, sources, verifier, positions, navigation)
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
 
         gatedViewModel.openSource(source)
@@ -764,7 +781,7 @@ class LibraryViewModelTest {
         tree.addDirectory(smbRoot, series)
         tree.addDirectory(series, testVideo("第01集.mkv", "smb://nas/media/剧集/第01集.mkv"))
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
-        val gatedViewModel = LibraryViewModel(gated, tree, settings, sources, verifier, positions)
+        val gatedViewModel = LibraryViewModel(gated, tree, settings, sources, verifier, positions, navigation)
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
         gatedViewModel.openSource(source)
         gated.gate.complete(Unit)
@@ -789,6 +806,7 @@ class LibraryViewModelTest {
             sources,
             verifier,
             FailingDirectoryPositionStore(),
+            navigation,
         )
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
 
@@ -807,7 +825,7 @@ class LibraryViewModelTest {
         openSmbForm(address = "nas", path = "media")
         advanceUntilIdle()
         val gatedStore = GatedDirectoryPositionStore()
-        val gatedViewModel = LibraryViewModel(DirectoryMediaLibrary(tree), tree, settings, sources, verifier, gatedStore)
+        val gatedViewModel = LibraryViewModel(DirectoryMediaLibrary(tree), tree, settings, sources, verifier, gatedStore, navigation)
         advanceUntilIdle()
 
         gatedViewModel.removeSource(gatedViewModel.sourcesState.value.smb.single())
@@ -848,7 +866,7 @@ class LibraryViewModelTest {
         )
         advanceUntilIdle()
 
-        val restored = createViewModel(state = restoredHandle())
+        val restored = createViewModel(navigation = restoredNavigation())
         advanceUntilIdle()
 
         assertEquals("smb://nas/media", restored.state.value.sourceLocation)
@@ -916,7 +934,7 @@ class LibraryViewModelTest {
             positions.load("smb://nas/media", "剧集/第二季")?.entryLocation,
         )
 
-        val restored = createViewModel(state = restoredHandle())
+        val restored = createViewModel(navigation = restoredNavigation())
         advanceUntilIdle()
 
         assertEquals(listOf("nas", "剧集", "第二季"), restored.state.value.stack.map { it.name })
@@ -971,7 +989,7 @@ class LibraryViewModelTest {
 
         val restored = createViewModel(
             library = FailTimesMediaLibrary(DirectoryMediaLibrary(tree), failures = 2),
-            state = restoredHandle(),
+            navigation = restoredNavigation(),
         )
         advanceUntilIdle()
         assertEquals(MediaFailure.Unreachable, restored.state.value.failure)
@@ -1011,7 +1029,7 @@ class LibraryViewModelTest {
 
         val restored = createViewModel(
             library = FailTimesMediaLibrary(DirectoryMediaLibrary(tree), failures = 1),
-            state = restoredHandle(),
+            navigation = restoredNavigation(),
         )
         advanceUntilIdle()
         assertTrue(restored.state.value.restorePositionForced)
@@ -1110,7 +1128,7 @@ class LibraryViewModelTest {
         settings.setAutoRestorePosition(false)
         advanceUntilIdle()
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
-        val gatedViewModel = createViewModel(library = gated, state = SavedStateHandle())
+        val gatedViewModel = createViewModel(library = gated, navigation = NavigationViewModel())
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
 
         gatedViewModel.openSource(source)
@@ -1156,6 +1174,208 @@ class LibraryViewModelTest {
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), recreated.state.value.scrollTarget)
     }
 
+    @Test
+    fun `冷启动开关开启时恢复连接源、完整目录栈与滚动位置`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        val season = testDirectory("第二季", "content://root/媒体/剧集/第二季")
+        tree.addDirectory(localRoot, testVideo("根.mkv", "content://root/媒体/根.mkv"), series)
+        tree.addDirectory(series, season)
+        tree.addDirectory(
+            season,
+            testVideo("第01集.mkv", "content://root/媒体/剧集/第二季/第01集.mkv"),
+            testVideo("第02集.mkv", "content://root/媒体/剧集/第二季/第02集.mkv"),
+        )
+        settings.addRoot(localRoot.location)
+        positions.save(
+            localRoot.location,
+            "剧集/第二季",
+            DirectoryPosition("content://root/媒体/剧集/第二季/第02集.mkv", 36),
+        )
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot, series, season),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Library, coldNavigation.state.value.screen)
+        assertEquals(
+            listOf("媒体", "剧集", "第二季"),
+            coldNavigation.state.value.library?.stack?.map { it.name },
+        )
+        assertEquals(localRoot.location, restored.state.value.sourceLocation)
+        assertEquals(listOf("第01集.mkv", "第02集.mkv"), restored.state.value.entries.map { it.name })
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 36), restored.state.value.scrollTarget)
+        assertFalse(restored.state.value.restorePositionForced)
+    }
+
+    @Test
+    fun `冷启动开关关闭时回首页`() = runTest {
+        tree.addDirectory(localRoot)
+        settings.addRoot(localRoot.location)
+        settings.setRestoreLastDirectory(false)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertEquals("", restored.state.value.sourceLocation)
+        assertFalse(coldNavigation.coldStartPending)
+    }
+
+    @Test
+    fun `上次停在非库页面时冷启动回首页`() = runTest {
+        settings.addRoot(localRoot.location)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Sources,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Home,
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+    }
+
+    @Test
+    fun `上次的连接源已删除时冷启动回首页并记录日志`() = runTest {
+        tree.addDirectory(localRoot)
+        val diagnostics = RecordingLibraryDiagnostics()
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = "content://root/已删除",
+                libraryStack = listOf(testDirectory("已删除", "content://root/已删除")),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(
+            SavedStateHandle(),
+            snapshots = snapshots,
+            diagnostics = diagnostics,
+        )
+
+        createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("连接源") })
+    }
+
+    @Test
+    fun `目录不可访问时冷启动回首页并记录日志`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        tree.markUnreadable(series.location)
+        settings.addRoot(localRoot.location)
+        val diagnostics = RecordingLibraryDiagnostics()
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot, series),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(
+            SavedStateHandle(),
+            snapshots = snapshots,
+            diagnostics = diagnostics,
+        )
+
+        val restored = createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertEquals("", restored.state.value.sourceLocation)
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("目录") })
+    }
+
+    @Test
+    fun `进程恢复停在设置页时库页面目录已准备好返回`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        settings.addRoot(localRoot.location)
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.local.single())
+        advanceUntilIdle()
+        viewModel.enter(series)
+        advanceUntilIdle()
+        navigation.openSettings()
+
+        val restoredNavigation = restoredNavigation()
+        val restored = createViewModel(navigation = restoredNavigation)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Settings, restoredNavigation.state.value.screen)
+        assertEquals("剧集", restored.state.value.currentDirectory?.name)
+        assertEquals(listOf("第01集.mkv"), restored.state.value.entries.map { it.name })
+
+        restoredNavigation.closeSettings()
+        assertEquals(AppScreen.Library, restoredNavigation.state.value.screen)
+
+        restored.navigateUp()
+        advanceUntilIdle()
+        assertEquals("媒体", restored.state.value.currentDirectory?.name)
+        assertEquals(listOf("剧集"), restored.state.value.entries.map { it.name })
+    }
+
+    @Test
+    fun `进程恢复打开目录失败时回首页并记录日志`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        settings.addRoot(localRoot.location)
+        advanceUntilIdle()
+        viewModel.openSource(viewModel.sourcesState.value.local.single())
+        advanceUntilIdle()
+        viewModel.enter(series)
+        advanceUntilIdle()
+        tree.markUnreadable(series.location)
+        val diagnostics = RecordingLibraryDiagnostics()
+        val restored = NavigationViewModel(
+            restoredHandle(),
+            snapshots = snapshots,
+            diagnostics = diagnostics,
+        )
+
+        createViewModel(navigation = restored)
+        advanceUntilIdle()
+
+        assertEquals(AppScreen.Home, restored.state.value.screen)
+        assertNull(restored.state.value.library)
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("目录") })
+    }
+
     /**
      * 模拟进程回收：新建句柄并深拷贝列表值。
      * 直接构造 SavedStateHandle 不经过 Bundle 序列化，只覆盖键值进入恢复路径。
@@ -1168,6 +1388,16 @@ class LibraryViewModelTest {
             }
         }
         return SavedStateHandle(restored)
+    }
+
+    private fun restoredNavigation(): NavigationViewModel {
+        val restored = savedState.keys().associateWith { key ->
+            when (val value = savedState.get<Any?>(key)) {
+                is ArrayList<*> -> ArrayList(value)
+                else -> value
+            }
+        }
+        return NavigationViewModel(SavedStateHandle(restored), snapshots = snapshots)
     }
 
     private fun openSmbForm(

@@ -53,7 +53,7 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 
 /**
- * 设置页：按播放与列表分组，归总连播、后台播放、起播位置、解码、屏幕方向与目录位置记忆。
+ * 设置页：按播放、列表与诊断分组，归总连播、后台播放、起播位置、解码、屏幕方向、目录位置记忆与启动目录恢复。
  * 顶栏进入，改动即写入持久设置。视图与排序由库页面顶栏提供，不在设置页。
  */
 @Composable
@@ -63,6 +63,7 @@ fun SettingsScreen(
     onSetBackgroundPlayback: (Boolean) -> Unit,
     onSetResumeMode: (ResumeMode) -> Unit,
     onSetAutoRestorePosition: (Boolean) -> Unit,
+    onSetRestoreLastDirectory: (Boolean) -> Unit,
     onSetDecodeMode: (DecodeMode) -> Unit,
     onSetOrientationMode: (OrientationMode) -> Unit,
     onSetDiagnosticsEnabled: (Boolean) -> Unit,
@@ -135,6 +136,12 @@ fun SettingsScreen(
                     label = stringResource(R.string.settings_auto_restore_position),
                     checked = state.autoRestorePosition,
                     onCheckedChange = onSetAutoRestorePosition,
+                )
+                RowDivider()
+                ToggleSetting(
+                    label = stringResource(R.string.settings_restore_last_directory),
+                    checked = state.restoreLastDirectory,
+                    onCheckedChange = onSetRestoreLastDirectory,
                 )
             }
             SettingsGroup(title = stringResource(R.string.settings_diagnostics_section)) {

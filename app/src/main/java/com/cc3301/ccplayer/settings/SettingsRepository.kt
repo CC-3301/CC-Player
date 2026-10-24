@@ -22,7 +22,8 @@ enum class ResumeMode { FromStart, LastPosition }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播与后台播放开关、屏幕方向模式、解码模式。
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播与后台播放开关、屏幕方向模式、解码模式、
+ * 目录位置记忆与启动目录恢复。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
 
@@ -78,6 +79,11 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             }
             legacy
         }
+    }
+
+    /** "启动时回到上次浏览的目录"开关，默认开；只影响冷启动。 */
+    val restoreLastDirectory: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[RESTORE_LAST_DIRECTORY] ?: DEFAULT_RESTORE_LAST_DIRECTORY
     }
 
     /** 全局解码模式，默认硬解（解码失败由 mpv 回退软解）。 */
@@ -146,6 +152,10 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[AUTO_RESTORE_POSITION] = enabled }
     }
 
+    suspend fun setRestoreLastDirectory(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[RESTORE_LAST_DIRECTORY] = enabled }
+    }
+
     suspend fun setDecodeMode(mode: DecodeMode) {
         dataStore.edit { preferences -> preferences[DECODE_MODE] = mode.name }
     }
@@ -164,6 +174,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val DEFAULT_ORIENTATION_MODE = OrientationMode.System
         val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
         const val DEFAULT_AUTO_RESTORE_POSITION = true
+        const val DEFAULT_RESTORE_LAST_DIRECTORY = true
         val DEFAULT_DECODE_MODE = DecodeMode.Hardware
         const val DEFAULT_DIAGNOSTICS_ENABLED = false
 
@@ -180,6 +191,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
         private val RESUME_MODE = stringPreferencesKey("resume_mode")
         private val AUTO_RESTORE_POSITION = booleanPreferencesKey("auto_restore_position")
+        private val RESTORE_LAST_DIRECTORY = booleanPreferencesKey("restore_last_directory")
         private val LEGACY_AUTO_SCROLL_TO_LAST_PLAYED = booleanPreferencesKey("auto_scroll_to_last_played")
         private val DECODE_MODE = stringPreferencesKey("decode_mode")
         private val DIAGNOSTICS_ENABLED = booleanPreferencesKey("diagnostics_enabled")

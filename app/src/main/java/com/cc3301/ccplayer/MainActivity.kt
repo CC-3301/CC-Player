@@ -107,11 +107,13 @@ import java.io.File
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
-    private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext) }
+    private val navigation: NavigationViewModel by viewModels {
+        NavigationViewModel.factory(applicationContext, diagnostics)
+    }
+
+    private val library: LibraryViewModel by viewModels { LibraryViewModel.factory(applicationContext, navigation) }
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
-
-    private val navigation: NavigationViewModel by viewModels { NavigationViewModel.factory() }
 
     private val mediaPreview: MediaPreviewSource by lazy {
         CachedMediaPreviewSource.create(applicationContext, createPreviewReads(), diagnostics)
@@ -397,6 +399,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
                             onSetResumeMode = settingsViewModel::setResumeMode,
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
+                            onSetRestoreLastDirectory = settingsViewModel::setRestoreLastDirectory,
                             onSetDecodeMode = settingsViewModel::setDecodeMode,
                             onSetOrientationMode = settingsViewModel::setOrientationMode,
                             onSetDiagnosticsEnabled = settingsViewModel::setDiagnosticsEnabled,
@@ -437,7 +440,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                     connectionLogLine(source.protocol, source.name, source.location)
                                 }
                                 library.openSource(source)
-                                navigation.openLibrary()
                             },
                             onEditSource = library::openEditSourceForm,
                             onDeleteSource = library::removeSource,
@@ -449,7 +451,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
                     else -> {
                         BackHandler {
-                            when (navigation.backFromLibrary(libraryState.stack.size > 1)) {
+                            when (navigation.backFromLibrary()) {
                                 LibraryBackAction.NavigateUp -> library.navigateUp()
                                 LibraryBackAction.LeaveLibrary -> Unit
                             }
