@@ -75,20 +75,26 @@ val PlayerSeekTrackHeight = 2.dp
 /** 播放列表条目内容距抽屉左右边缘的距离。 */
 val PlayerPlaylistHorizontalInset = 16.dp
 
-/** 播放列表当前项高亮条左侧内缩；高亮左边缘贴抽屉边缘。 */
+/** 播放列表当前项高亮条左边缘距抽屉左边缘的距离；0dp 表示贴边。 */
 val PlayerPlaylistHighlightStartInset = 0.dp
 
-/** 播放列表当前项高亮条右侧内缩。 */
+/** 播放列表当前项高亮条右边缘距抽屉右边缘的距离。 */
 val PlayerPlaylistHighlightEndInset = 4.dp
 
 /** 播放列表编号与标题之间的间距。 */
 val PlayerPlaylistIndexGap = 16.dp
+
+/** 播放列表编号颜色。 */
+val PlayerPlaylistIndexColor = Color.White
 
 /** 播放列表当前项三角图标字号。 */
 val PlayerPlaylistArrowFontSize = 17.25.sp
 
 /** 播放列表当前项三角图标宽度。 */
 val PlayerPlaylistArrowWidth = 24.dp
+
+/** 播放列表当前项三角图标颜色。 */
+val PlayerPlaylistArrowColor = AppColors.Accent
 
 /** 播放列表当前项高亮的横向像素范围。 */
 data class PlaylistHighlightBounds(val start: Float, val end: Float)

@@ -60,6 +60,12 @@ class PlayerLayoutTest {
     fun `播放列表三角字号 17_25sp、宽 24dp 且保持强调色`() {
         assertEquals(17.25.sp, PlayerPlaylistArrowFontSize)
         assertEquals(24.dp, PlayerPlaylistArrowWidth)
+        assertEquals(AppColors.Accent, PlayerPlaylistArrowColor)
+    }
+
+    @Test
+    fun `播放列表序号为白色`() {
+        assertEquals(Color.White, PlayerPlaylistIndexColor)
     }
 
     @Test

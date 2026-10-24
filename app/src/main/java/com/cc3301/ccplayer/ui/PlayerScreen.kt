@@ -12,6 +12,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Indication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -86,6 +87,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -103,6 +105,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -182,25 +185,20 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
     }
 }
 
-/** 无涟漪点击。 */
+/** 播放页点击：按压反馈由目标区域决定，覆盖范围外不显示涟漪。 */
 @Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit): Modifier =
-    noRippleClickable(onClick, enabled = true)
+private fun Modifier.playerPressClickable(
+    target: PlayerPressTarget,
+    onClick: () -> Unit,
+): Modifier = clickable(
+    interactionSource = remember { MutableInteractionSource() },
+    indication = playerPressIndication(target),
+    onClick = onClick,
+)
 
-/** 无涟漪点击；[enabled] 为假时不响应。 */
-@Composable
-private fun Modifier.noRippleClickable(onClick: () -> Unit, enabled: Boolean): Modifier {
-    val interaction = remember { MutableInteractionSource() }
-    return clickable(
-        interactionSource = interaction,
-        indication = null,
-        enabled = enabled,
-        onClick = onClick,
-    )
-}
-
-/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角。 */
+/** 播放器浮层统一面板：半透明深色底、细边框与统一圆角；裁剪子内容与涟漪。 */
 private fun Modifier.playerPanel(): Modifier = this
+    .clip(PlayerPanelShape)
     .background(PlayerPanelColor, PlayerPanelShape)
     .border(1.dp, AppColors.Line, PlayerPanelShape)
 
@@ -219,7 +217,9 @@ private fun PlayerTextButton(
     color: Color = AppColors.Foreground,
     style: TextStyle = MaterialTheme.typography.labelLarge,
 ) {
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.TextButton),
+    ) {
         TextButton(
             onClick = onClick,
             enabled = enabled,
@@ -256,6 +256,7 @@ private fun BufferingIndicator(modifier: Modifier = Modifier) {
                 text = text,
                 style = style.copy(drawStyle = Stroke(width = strokeWidth)),
                 color = PlayerBufferingTextScrimColor.copy(alpha = PLAYER_BUFFERING_TEXT_SCRIM_ALPHA),
+                modifier = Modifier.clearAndSetSemantics {},
             )
             Text(
                 text = text,
@@ -513,7 +514,7 @@ fun PlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .noRippleClickable({ lock.tapScreen() })
+                    .playerPressClickable(PlayerPressTarget.LockLayer) { lock.tapScreen() }
                     .semantics { contentDescription = lockedHint },
             )
         }
@@ -621,7 +622,9 @@ fun PlayerScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .noRippleClickable { panels.dismissOutside() }
+                        .playerPressClickable(PlayerPressTarget.OutsideDismissLayer) {
+                            panels.dismissOutside()
+                        }
                         .semantics {
                             contentDescription = closeHint
                             role = Role.Button
@@ -1351,6 +1354,32 @@ private val PlayerPressRippleConfiguration = RippleConfiguration(
     ),
 )
 
+/** 覆盖范围外的无涟漪配置：颜色与各态透明度均为 0。 */
+@OptIn(ExperimentalMaterial3Api::class)
+private val NoPlayerPressRippleConfiguration = RippleConfiguration(
+    color = Color.Transparent,
+    rippleAlpha = RippleAlpha(
+        draggedAlpha = 0f,
+        focusedAlpha = 0f,
+        hoveredAlpha = 0f,
+        pressedAlpha = 0f,
+    ),
+)
+
+/** 按目标区域选择涟漪配置。 */
+@OptIn(ExperimentalMaterial3Api::class)
+private fun playerPressRippleConfiguration(target: PlayerPressTarget): RippleConfiguration =
+    if (playerPressFeedbackEnabled(target)) {
+        PlayerPressRippleConfiguration
+    } else {
+        NoPlayerPressRippleConfiguration
+    }
+
+/** 按目标区域选择点击指示；覆盖范围外不显示涟漪。 */
+@Composable
+private fun playerPressIndication(target: PlayerPressTarget): Indication? =
+    if (playerPressFeedbackEnabled(target)) ripple() else null
+
 /** 播放页图标按钮的热区：点击范围与涟漪范围都取 [modifier] 的尺寸。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1360,11 +1389,13 @@ private fun PlayerIconButtonSurface(
     enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.IconButton),
+    ) {
         Box(
             modifier = modifier.clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = ripple(),
+                indication = playerPressIndication(PlayerPressTarget.IconButton),
                 enabled = enabled,
                 role = Role.Button,
                 onClick = onClick,
@@ -1803,15 +1834,13 @@ private fun MoreChoiceRow(
     val expandedState = stringResource(
         if (expanded) R.string.player_more_expanded else R.string.player_more_collapsed,
     )
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.MorePanelRow),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(),
-                    onClick = onClick,
-                )
+                .playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
                 .semantics { stateDescription = expandedState }
                 .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
             verticalAlignment = Alignment.CenterVertically,
@@ -1845,7 +1874,9 @@ private fun MoreChoiceRow(
 @Composable
 private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.MorePanelRow),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1854,7 +1885,7 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
                     onClick = onClick,
                     role = Role.RadioButton,
                     interactionSource = interaction,
-                    indication = ripple(),
+                    indication = playerPressIndication(PlayerPressTarget.MorePanelRow),
                 )
                 .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1882,7 +1913,11 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
 @Composable
 private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(
+            PlayerPressTarget.AutoPlayNextRow,
+        ),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1891,7 +1926,7 @@ private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit)
                     onValueChange = { onToggle() },
                     role = Role.Switch,
                     interactionSource = interaction,
-                    indication = ripple(),
+                    indication = playerPressIndication(PlayerPressTarget.AutoPlayNextRow),
                 )
                 .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
             verticalAlignment = Alignment.CenterVertically,
@@ -1991,7 +2026,7 @@ private fun PlaylistDrawer(
             .fillMaxSize()
             .background(PlayerPlaylistGradient)
             // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目内容左右各留 16dp，
-            // 当前项高亮在抽屉内左右各内缩 4dp；左侧不叠加系统 inset。
+            // 当前项高亮左侧 0dp、右侧 4dp；左侧不叠加系统 inset。
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(
                     WindowInsetsSides.Vertical + WindowInsetsSides.End,
@@ -2060,60 +2095,70 @@ private fun PlaylistDrawer(
                                         size = Size(bounds.end - bounds.start, size.height),
                                     )
                                 }
-                            },
+                            }
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { onSelect(media) },
+                            ),
                     ) {
-                        CompositionLocalProvider(
-                            LocalRippleConfiguration provides PlayerPressRippleConfiguration,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = PlayerPlaylistHorizontalInset),
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
+                            Text(
+                                text = playlistItemIndexLabel(index),
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFeatureSettings = "tnum",
+                                ),
+                                color = PlayerPlaylistIndexColor,
+                                maxLines = 1,
+                            )
+                            Text(
+                                text = media.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
-                                    .fillMaxSize()
-                                    // 涟漪右边缘与高亮条一致；右侧内容内边距由 4dp 内缩与 12dp 补足到 16dp。
+                                    .weight(1f)
+                                    .padding(start = PlayerPlaylistIndexGap),
+                            )
+                            if (active) {
+                                Text(
+                                    text = "▶",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        fontSize = PlayerPlaylistArrowFontSize,
+                                    ),
+                                    color = PlayerPlaylistArrowColor,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier
+                                        .padding(start = AppSpacing.Sm)
+                                        .width(PlayerPlaylistArrowWidth),
+                                )
+                            }
+                        }
+                        // 整行响应点击；涟漪单独覆盖到高亮条范围，右边缘与高亮条一致。
+                        CompositionLocalProvider(
+                            LocalRippleConfiguration provides playerPressRippleConfiguration(
+                                PlayerPressTarget.PlaylistRow,
+                            ),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
                                     .padding(end = PlayerPlaylistHighlightEndInset)
                                     .clickable(
                                         interactionSource = remember { MutableInteractionSource() },
-                                        indication = ripple(),
+                                        indication = playerPressIndication(
+                                            PlayerPressTarget.PlaylistRow,
+                                        ),
                                         onClick = { onSelect(media) },
                                     )
-                                    .padding(
-                                        start = PlayerPlaylistHorizontalInset,
-                                        end = PlayerPlaylistHorizontalInset -
-                                            PlayerPlaylistHighlightEndInset,
-                                    ),
-                            ) {
-                                Text(
-                                    text = playlistItemIndexLabel(index),
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontFeatureSettings = "tnum",
-                                    ),
-                                    color = Color.White,
-                                    maxLines = 1,
-                                )
-                                Text(
-                                    text = media.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(start = PlayerPlaylistIndexGap),
-                                )
-                                if (active) {
-                                    Text(
-                                        text = "▶",
-                                        style = MaterialTheme.typography.bodySmall.copy(
-                                            fontSize = PlayerPlaylistArrowFontSize,
-                                        ),
-                                        color = AppColors.Accent,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier
-                                            .padding(start = AppSpacing.Sm)
-                                            .width(PlayerPlaylistArrowWidth),
-                                    )
-                                }
-                            }
+                                    .clearAndSetSemantics {},
+                            )
                         }
                     }
                 }
@@ -2131,7 +2176,9 @@ private fun SubtitlePanel(
     interactive: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    CompositionLocalProvider(LocalRippleConfiguration provides PlayerPressRippleConfiguration) {
+    CompositionLocalProvider(
+        LocalRippleConfiguration provides playerPressRippleConfiguration(PlayerPressTarget.SubtitleRow),
+    ) {
         Column(
             modifier = modifier
                 .fillMaxWidth()
@@ -2150,7 +2197,7 @@ private fun SubtitlePanel(
                             .fillMaxWidth()
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
-                                indication = ripple(),
+                                indication = playerPressIndication(PlayerPressTarget.SubtitleRow),
                                 enabled = interactive,
                                 onClick = { onSelect(item) },
                             )
