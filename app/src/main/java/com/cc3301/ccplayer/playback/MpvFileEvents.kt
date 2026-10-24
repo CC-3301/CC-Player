@@ -38,7 +38,7 @@ internal class MpvFileEvents {
     @get:Synchronized
     val isLoaded: Boolean get() = state == State.Loaded
 
-    /** 是否有被取代文件的 END_FILE 还没消化；此时先到的 FILE_LOADED 一定属于更早代际。 */
+    /** 是否有被取代文件的 END_FILE 还没消化。 */
     @get:Synchronized
     val hasPendingEnds: Boolean get() = pendingEnds > 0
 
@@ -149,8 +149,8 @@ internal class MpvFileEvents {
 internal data class LoadSpec(val url: String, val token: Int)
 
 /**
- * loadfile 与 FILE_LOADED 的代际关联：每次 start 入队在途加载，FILE_LOADED 取最早的一条，
- * 因此同 URL 重载时迟到的旧 FILE_LOADED 仍带旧代际。
+ * loadfile 与 FILE_LOADED 的代际关联：每次 start 入队在途加载，FILE_LOADED 按目标路径匹配；
+ * 同 URL 重载无法按路径区分，迟到的旧事件仍可能命中新条目。
  *
  * 被新加载取代或停止的在途文件不会再有 FILE_LOADED，只会先来一次 END_FILE；
  * 结束队列按命令顺序记录每个将要结束的文件，用它把对应在途加载移出。

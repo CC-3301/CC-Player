@@ -439,7 +439,7 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂后等新帧。暂停态不会再有位置前进，直接由一次非 seek 刷新证明；
+     * Surface 重挂后等新帧。暂停态不会再有位置前进，刷新后以抓帧成功确认；
      * 播放态先等出帧通知，超时仍没有新帧才刷新一次。刷新未真正执行时短延迟重试。
      */
     private fun beginSurfaceFrameWait() {
@@ -580,7 +580,7 @@ class PlaybackController(
 
     /**
      * 界面在退到后台、分离 Surface 之前调用：暂停态先抓一帧备用。
-     * 抓帧在后台调度执行，立即返回任务；调用方只做有界等待，超时后丢弃结果。
+     * 抓帧在后台调度执行，立即返回任务；调用方等待任务结束后再分离 Surface。
      * 播放态不截帧，回前台由播放核心继续输出。
      */
     fun beginBackgroundCapture(): Job? {
