@@ -23,8 +23,10 @@ interface PlaybackEngine {
      */
     fun grabFrame(): Frame?
 
-    /** 引擎抓到的一帧画面。 */
-    class Frame(val bitmap: Bitmap?)
+    /** 引擎抓到的一帧画面；[hasFrame] 为显式结果，无帧时为假。 */
+    class Frame(val bitmap: Bitmap?) {
+        val hasFrame: Boolean get() = bitmap != null
+    }
 
     fun pause()
 

@@ -62,6 +62,7 @@ import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
+import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -101,7 +102,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
@@ -145,7 +145,23 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
-    private var surface: Surface? = null
+
+    /** Surface 的挂载、分离与回前台重建都由会话持有，Activity 只转发事件。 */
+    private val surfaceSession by lazy {
+        SurfaceSession(
+            attach = { surface ->
+                playback?.engine?.let {
+                    it.attachSurface(surface)
+                    true
+                } ?: false
+            },
+            detachEngine = { playback?.engine?.detachSurface() },
+            resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
+            onAvailabilityChanged = { available ->
+                playback?.controller?.setRenderSurfaceAvailable(available)
+            },
+        )
+    }
 
     /** 后台准备完成的播放请求，等播放服务与 Surface 就绪后起播。 */
     private val pendingPlayback = PendingPlayback()
@@ -241,14 +257,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
-            surface?.let { binder.engine.attachSurface(it) }
-            binder.controller.setRenderSurfaceAvailable(surface != null)
+            surfaceSession.onEngineAvailable()
+            binder.controller.setRenderSurfaceAvailable(
+                surfaceSession.state != SurfaceSession.State.Detached,
+            )
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
             playback = null
+            surfaceSession.onEngineLost()
         }
     }
 
@@ -608,7 +627,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 引擎就绪且 Surface 已就位时才开始播放。 */
     private fun startPendingPlayback() {
         val binder = playback ?: return
-        pendingPlayback.start(canStart = surface != null) { current, files, directoryEntries ->
+        pendingPlayback.start(canStart = surfaceSession.hasSurface) { current, files, directoryEntries ->
             binder.controller.openPlaylist(files, current, directoryEntries)
             // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
@@ -629,30 +648,27 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
-        // 后台上报可能已把播放暂停；抓帧成功后再分离 Surface，等待有上限。
+        surfaceSession.onActivityStopped()
+        // 后台上报可能已把播放暂停；抓帧在后台执行，完成后由 Surface 会话分离。
         detachAfterBackgroundCapture { !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
     }
 
     /**
-     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，主线程最多等
-     * [BACKGROUND_DETACH_WAIT_MILLIS]；超时即丢弃本次抓帧并直接分离。
+     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，主线程不做有界等待；
+     * 回到前台后放弃本周期结果，不再分离。
      */
     private fun detachAfterBackgroundCapture(shouldDetach: () -> Boolean) {
         val binder = playback ?: return
         backgroundDetachJob?.cancel()
         val capture = binder.controller.beginBackgroundCapture()
         backgroundDetachJob = lifecycleScope.launch {
-            val captured = capture != null && withTimeoutOrNull(BACKGROUND_DETACH_WAIT_MILLIS) {
-                capture.join()
-                true
-            } == true
+            capture?.join()
             if (!shouldDetach()) {
                 binder.controller.abandonBackgroundCapture()
                 return@launch
             }
-            if (!captured) binder.controller.abandonBackgroundCapture()
-            binder.engine.detachSurface()
-            binder.controller.setRenderSurfaceAvailable(false)
+            if (capture == null) binder.controller.abandonBackgroundCapture()
+            surfaceSession.detach()
         }
     }
 
@@ -660,21 +676,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
-        surface?.let {
-            playback?.engine?.attachSurface(it)
-            playback?.controller?.setRenderSurfaceAvailable(true)
-        }
+        // 复用保存的 Surface：回前台不依赖 surfaceCreated 再次触发。
+        surfaceSession.onActivityStarted()
     }
 
     override fun onSurfaceReady(surface: Surface) {
-        this.surface = surface
-        playback?.engine?.attachSurface(surface)
-        playback?.controller?.setRenderSurfaceAvailable(true)
+        surfaceSession.onSurfaceCreated(surface)
         startPendingPlayback()
     }
 
     override fun onSurfaceResized(width: Int, height: Int) {
-        playback?.engine?.setSurfaceSize(width, height)
+        surfaceSession.onSurfaceChanged(width, height)
     }
 
     /** 返回先尝试取消切集；没有切集才退出播放页。 */
@@ -683,17 +695,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onSurfaceReleased() {
-        if (surface == null) return
-        surface = null
+        surfaceSession.onSurfaceDestroyed()
         // 退后台时 Surface 可能先于 onStop 销毁，在这里补抓；转屏或关闭播放页不抓。
         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            detachAfterBackgroundCapture { surface == null }
+            detachAfterBackgroundCapture { !surfaceSession.hasSurface }
         } else {
             val binder = playback ?: return
             backgroundDetachJob?.cancel()
             binder.controller.abandonBackgroundCapture()
-            binder.engine.detachSurface()
-            binder.controller.setRenderSurfaceAvailable(false)
+            surfaceSession.detach()
         }
     }
 
@@ -782,6 +792,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onDestroy() {
         if (isFinishing) diagnostics.logSync("应用退出")
+        surfaceSession.release()
         releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()
@@ -789,8 +800,5 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private companion object {
         const val NO_MEDIA = -1
-
-        /** 主线程等待后台抓帧的上限；超时直接分离 Surface，不让原生调用阻塞离开后台。 */
-        const val BACKGROUND_DETACH_WAIT_MILLIS = 100L
     }
 }

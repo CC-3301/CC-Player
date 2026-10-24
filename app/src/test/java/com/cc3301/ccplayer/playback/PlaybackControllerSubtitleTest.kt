@@ -18,6 +18,7 @@ class PlaybackControllerSubtitleTest {
         engine,
         FakePlaybackProgressRepository(),
         CoroutineScope(dispatcher),
+        frameProbeDispatcher = dispatcher,
         nowMillis = { dispatcher.scheduler.currentTime },
     )
 

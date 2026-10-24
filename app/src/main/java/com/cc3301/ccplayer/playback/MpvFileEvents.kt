@@ -179,17 +179,29 @@ internal class MpvLoadQueue {
         return spec
     }
 
+    /** 与 [path] 对应的在途加载；没有匹配项时为 null。 */
+    @Synchronized
+    fun pendingLoadFor(path: String?): LoadSpec? =
+        pendingLoads.firstOrNull { isTargetPath(it.url, path) }
+
+    /** 是否还有同 URL 的旧文件结束事件未消化；同 URL 重载靠它拒绝迟到的旧 FILE_LOADED。 */
+    @Synchronized
+    fun hasEndingFor(url: String): Boolean = endingLoads.any { it.url == url }
+
     /**
-     * 校验后取出队首 FILE_LOADED。[path] 是 mpv 当前 path；与队首不一致时保留队列：
-     * 停止后紧接新加载时，迟到的旧 FILE_LOADED 不能占掉新加载的位置。
+     * 校验后取出 FILE_LOADED。[path] 是 mpv 当前 path。
+     * 连续切集时前一个目标可能还没发出 END_FILE，它的 FILE_LOADED 也不会再来：
+     * 按 path 直接取出最终目标，把它前面的死代际移出待加载队列（结束事件仍由结束队列消化）。
+     * 找不到匹配项时保留队列：停止后迟到的旧 FILE_LOADED 不能占掉新加载的位置。
      */
     @Synchronized
     fun takeFileLoaded(path: String?): LoadSpec? {
-        val head = pendingLoads.firstOrNull() ?: return null
-        if (!isTargetPath(head.url, path)) return null
-        pendingLoads.removeFirst()
-        loaded = head
-        return head
+        val index = pendingLoads.indexOfFirst { isTargetPath(it.url, path) }
+        if (index < 0) return null
+        repeat(index) { pendingLoads.removeFirst() }
+        val spec = pendingLoads.removeFirst()
+        loaded = spec
+        return spec
     }
 
     /** 已加载且仍是当前代际；旧代际的 FILE_LOADED 不满足，ready 不能上报。 */
@@ -356,12 +368,14 @@ internal class MpvLoadCoordinator(
     }
 
     /**
-     * FILE_LOADED 归属：先看是否还有旧文件的 END_FILE 未消化，再按 mpv path 校验队首。
-     * stop 后同 URL 重开时，迟到的旧 FILE_LOADED 会因待吞结束而先被拒绝。
+     * FILE_LOADED 归属：按 mpv path 找到在途加载。
+     * 还有旧文件的 END_FILE 未消化时，只有同 URL 的迟到事件必须拒绝（path 无法区分新旧代际）；
+     * 不同 URL 的最终目标可以提前接管，避免被取代目标的迟到 END_FILE 卡住连续切集。
      */
     @Synchronized
     fun onFileLoaded(path: String?): LoadSpec? {
-        if (fileEvents.hasPendingEnds) return null
+        val pending = loads.pendingLoadFor(path) ?: return null
+        if (fileEvents.hasPendingEnds && loads.hasEndingFor(pending.url)) return null
         val spec = loads.takeFileLoaded(path) ?: return null
         if (!fileEvents.onFileLoaded(isTarget = true)) return null
         return spec

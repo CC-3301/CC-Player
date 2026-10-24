@@ -488,6 +488,23 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a retargeted load is accepted before the superseded target ends`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.onFileLoaded("root/ep1.mkv")
+        coordinator.start("root/ep2.mkv")
+        val finalTarget = coordinator.start("root/ep3.mkv")
+
+        // ep2 被再次切集取代，它的 END_FILE 迟到；ep3 的 FILE_LOADED 不能因此卡死。
+        assertEquals(finalTarget, coordinator.onFileLoaded("root/ep3.mkv"))
+        assertEquals(finalTarget, coordinator.acceptReady(needsFrameConfirmation = false)?.spec)
+
+        // 被取代目标的 END_FILE 仍按替换吞掉，不影响已加载的最终目标。
+        assertEquals(MpvFileEvents.End.Replaced, coordinator.onEndFile().end)
+        assertEquals(finalTarget.token, coordinator.currentLoadedToken())
+    }
+
+    @Test
     fun `a late FILE_LOADED for a stopped same URL load is rejected by the end count`() {
         val coordinator = MpvLoadCoordinator()
         val first = coordinator.start("root/ep1.mkv")

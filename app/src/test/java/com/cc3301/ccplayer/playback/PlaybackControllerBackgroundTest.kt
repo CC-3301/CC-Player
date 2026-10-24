@@ -7,6 +7,7 @@ import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
@@ -153,6 +154,36 @@ class PlaybackControllerBackgroundTest {
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
         assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `暂停态回前台刷新执行但抓不到帧时保留缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.frameToGrab = null
+
+        reattach(controller)
+        runCurrent()
+
+        // 刷新指令成功不是出帧证据：抓不到帧就不撤缓存画面。
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `播放态刷新指令成功不算出帧证据`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        controller.resume()
+        engine.reportPauseChanged(false)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+
+        assertEquals(1, engine.refreshSurfaceCalls)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
     }
 
     @Test
@@ -448,7 +479,7 @@ class PlaybackControllerBackgroundTest {
         PlaybackController(
             engine,
             progress,
-            backgroundScope,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             frameProbeDispatcher = frameProbeDispatcher,
             nowMillis = { testScheduler.currentTime },
         )

@@ -4,8 +4,10 @@ import android.graphics.Bitmap
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -111,6 +113,33 @@ class PlaybackControllerSwitchTest {
         assertSame(frame, controller.freezeFrame.value)
         assertEquals(0, engine.resumeCalls)
         assertTrue(controller.switching.value)
+    }
+
+    @Test
+    fun `a switch grabs the frame off the caller before loading the target`() = runTest {
+        val probeDispatcher = StandardTestDispatcher(testScheduler)
+        val controller = PlaybackController(
+            engine,
+            progress,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            frameProbeDispatcher = probeDispatcher,
+            nowMillis = { testScheduler.currentTime },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv")
+        engine.reportMediaLoaded()
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+
+        controller.next()
+
+        // 抓帧不占调用线程：loadfile 必须等后台抓帧返回后再下发。
+        assertEquals(listOf("pause"), engine.actions.takeLast(1))
+        assertNull(controller.freezeFrame.value)
+
+        runCurrent()
+
+        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        assertSame(frame, controller.freezeFrame.value)
     }
 
     @Test
@@ -1650,8 +1679,11 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertNull(controller.freezeFrame.value)
 
-        // 回前台重挂 Surface 不应重新进入加载。
+        // 回前台重挂 Surface 不应重新进入加载；刷新后出帧才结束无帧窗口。
         controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        engine.reportFramePresented()
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
         runCurrent()
         assertFalse(controller.switching.value)
@@ -1882,12 +1914,12 @@ class PlaybackControllerSwitchTest {
         ) { it.applyTo(controller) }
     }
 
-    /** 抓帧用测试调度器，和虚拟时间一起推进；生产环境由控制器切到后台线程。 */
+    /** 控制层用即时调度，对齐生产的主线程 immediate；抓帧用同一虚拟时钟。 */
     private fun TestScope.controller(): PlaybackController =
         PlaybackController(
             engine,
             progress,
-            backgroundScope,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
