@@ -12,4 +12,7 @@ class RoutingMediaReads(private val readsByScheme: Map<String, NetworkMediaReads
     override suspend fun openRead(location: String): ByteSource =
         readsByScheme[schemeOf(location)]?.openRead(location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有能处理这个位置的网络源：$location")
+
+    override suspend fun sourceKey(location: String): String =
+        readsByScheme[schemeOf(location)]?.sourceKey(location) ?: location
 }

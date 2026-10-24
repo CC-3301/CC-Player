@@ -32,4 +32,6 @@ class SmbMediaReads(
             throw failure
         }
     }
+
+    override suspend fun sourceKey(location: String): String = locator.sourceKey(location) ?: location
 }

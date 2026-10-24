@@ -20,4 +20,6 @@ class WebDavMediaReads(
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
         return transport.openRead(target.url, target.username, target.password)
     }
+
+    override suspend fun sourceKey(location: String): String = locator.sourceKey(location) ?: location
 }

@@ -7,6 +7,7 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -14,6 +15,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 
 /**
  * 卡片预览接缝：列表界面只依赖本接口，本地与网络实现由此注入。
@@ -106,6 +108,8 @@ class CachedMediaPreviewSource(
     private val monotonicClock: () -> Long = System::nanoTime,
     /** 诊断日志出口；只记文件名与失败类型，不记连接凭据。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    /** 位置所属连接源的标识；并发按连接源分组，默认按位置自身分组。 */
+    private val sourceKeyOf: suspend (String) -> String = { location -> networkSourceKey(location) },
 ) : MediaPreviewSource {
 
     /** 本地同时提取数上限；可见项优先取得许可。 */
@@ -120,12 +124,15 @@ class CachedMediaPreviewSource(
     /** 本次运行已确认无图的缓存键；成功封面落盘，失败与无图不跨启动。 */
     private val noImageConfirmed = ConcurrentHashMap.newKeySet<String>()
 
+    /** 正在抽取的预取；可见请求需要名额时取消它们，排队中的预取不占名额、无需取消。 */
+    private val prefetchHolding = ConcurrentHashMap.newKeySet<Job>()
+
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
     private var previewWindow = PreviewWindow()
 
     /** 同一缓存键正在进行的抽取；等待者共享同一次结果。 */
-    private val inFlight = ConcurrentHashMap<String, CompletableDeferred<LoadedPreview>>()
+    private val inFlight = ConcurrentHashMap<String, InFlight>()
 
     /** 整次抽取失败后的退避记录；按缓存键分开，成功后清理。 */
     private val extractionFailures = ConcurrentHashMap<String, RetryState>()
@@ -179,6 +186,7 @@ class CachedMediaPreviewSource(
             key = key,
             maxAgeMillis = maxAge,
             clearNoImageOnCacheMiss = true,
+            priority = priority,
             onCacheHit = { cached -> durationOnCacheHit(file, key, cached, priority) },
             load = { extractLocal(file, key, targetWidth, priority) },
         )
@@ -222,7 +230,7 @@ class CachedMediaPreviewSource(
     ): LoadedPreview {
         val extracted = localPermits.withPermit(priority) {
             if (mayExtract(file.location, priority)) {
-                extractor.imageAndDuration(file, targetWidth)
+                withPrefetchHolding(priority) { extractor.imageAndDuration(file, targetWidth) }
             } else {
                 null
             }
@@ -246,9 +254,9 @@ class CachedMediaPreviewSource(
                 durationMillis = durationMillis,
                 durationKnown = durationKnown,
             )
-            noImageConfirmed.add(key)
+            rememberNoImage(key)
         } else {
-            noImageConfirmed.remove(key)
+            forgetNoImage(key)
         }
         return LoadedPreview(image, durationMillis)
     }
@@ -267,7 +275,7 @@ class CachedMediaPreviewSource(
                 null
             } else {
                 try {
-                    when (val millis = extractor.durationMillis(file)) {
+                    when (val millis = withPrefetchHolding(priority) { extractor.durationMillis(file) }) {
                         null -> PreviewDuration.Unavailable
                         else -> PreviewDuration.Known(millis)
                     }
@@ -316,26 +324,28 @@ class CachedMediaPreviewSource(
         priority: PreviewPriority,
     ): File? {
         // 本次运行已确认无图：不再重复抽取，重启后重新确认。
-        if (key in noImageConfirmed) return null
+        if (isNoImageRemembered(key)) return null
         val maxAge = cacheMaxAge(file)
         val loaded = cachedOrLoad(
             file = file,
             key = key,
             maxAgeMillis = maxAge,
             clearNoImageOnCacheMiss = false,
+            priority = priority,
             onCacheHit = { cached ->
-                noImageConfirmed.remove(key)
+                forgetNoImage(key)
                 LoadedPreview(cached.file, durationMillis = null)
             },
             load = {
                 // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
-                val attempt = networkPermits.withPermit(networkSourceKey(file.location), priority) {
+                val sourceKey = sourceKeyOf(file.location)
+                val attempt = networkPermits.withPermit(sourceKey, priority) {
                     if (!mayExtract(file.location, priority)) {
                         null
                     } else {
                         var decoded: ByteArray? = null
                         val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                            decoded = extractor.imageBytes(file, targetWidth)
+                            decoded = withPrefetchHolding(priority) { extractor.imageBytes(file, targetWidth) }
                             true
                         } ?: false
                         done to decoded
@@ -351,10 +361,10 @@ class CachedMediaPreviewSource(
                     if (!completed) throw IllegalStateException("网络预览超时")
                     if (bytes == null) {
                         // 无图只在本次运行内记住；不写缓存，重启后重新确认。
-                        noImageConfirmed.add(key)
+                        rememberNoImage(key)
                         LoadedPreview(image = null, durationMillis = null)
                     } else {
-                        noImageConfirmed.remove(key)
+                        forgetNoImage(key)
                         // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
                         LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
                     }
@@ -384,33 +394,37 @@ class CachedMediaPreviewSource(
         key: String,
         maxAgeMillis: Long?,
         clearNoImageOnCacheMiss: Boolean,
+        priority: PreviewPriority,
         onCacheHit: suspend (CachedThumbnail) -> LoadedPreview,
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
         while (true) {
             inFlight[key]?.let { pending ->
                 try {
-                    return pending.await()
+                    return pending.deferred.await()
                 } catch (cancellation: CancellationException) {
                     currentCoroutineContext().ensureActive()
                     // 首个调用者已取消且未完成，重新竞争抽取。
+                    yield()
                 }
             }
             val mine = CompletableDeferred<LoadedPreview>()
-            if (inFlight.putIfAbsent(key, mine) != null) continue
+            val entry = InFlight(mine)
+            if (inFlight.putIfAbsent(key, entry) != null) continue
             try {
                 val loaded = try {
                     val cached = cache.entry(key, maxAgeMillis)
                     // 上次运行留下的无图记录只用于复用时长；本次运行仍需确认是否有图。
-                    val usable = cached != null && (!cached.noImage || key in noImageConfirmed)
-                    if (usable) {
+                    if (cached != null && (!cached.noImage || isNoImageRemembered(key))) {
                         // 已有缓存时抽取失败记录已陈旧，清掉。
                         extractionFailures.remove(key)
-                        if (cached?.file != null) noImageConfirmed.remove(key)
-                        onCacheHit(cached!!)
+                        if (cached.file != null) forgetNoImage(key)
+                        onCacheHit(cached)
                     } else {
                         // 本地无图记录有效期到期后重新确认；网络无图不落盘，不在这里清。
-                        if (cached == null && clearNoImageOnCacheMiss) noImageConfirmed.remove(key)
+                        if (cached == null && clearNoImageOnCacheMiss) forgetNoImage(key)
+                        // 可见请求需要真正抽取时，先取消正在抽取的预取，腾出配额。
+                        if (priority.isVisible) cancelPrefetchHolders()
                         loadWithBackoff(file, key, load)
                     }
                 } catch (cancellation: CancellationException) {
@@ -420,7 +434,7 @@ class CachedMediaPreviewSource(
                 }
                 if (loaded.abandoned) {
                     // 先移出再取消：等待者不会取到已取消的 Deferred 空转。
-                    inFlight.remove(key, mine)
+                    inFlight.remove(key, entry)
                     mine.cancel(AbandonedPreviewException())
                     // 放弃的结果只给本次调用者；等待者重新竞争后可真正抽取或补读时长。
                     return loaded
@@ -433,9 +447,38 @@ class CachedMediaPreviewSource(
             } finally {
                 // 抽取抛 Error 或其它未被捕获的异常时也要唤醒等待者，不能留下永远未完成的 Deferred。
                 if (!mine.isCompleted) mine.cancel(CancellationException("预览抽取未完成"))
-                inFlight.remove(key, mine)
+                inFlight.remove(key, entry)
             }
         }
+    }
+
+    /** 可见请求需要抽取时取消正在占用名额的预取；排队中的预取会按优先级自然让位。 */
+    private fun cancelPrefetchHolders() {
+        prefetchHolding.forEach { load -> load.cancel(CancellationException("可见请求优先")) }
+    }
+
+    /** 预取真正进入抽取时登记；取消后关闭传输层并由 finally 归还许可。 */
+    private suspend fun <T> withPrefetchHolding(priority: PreviewPriority, block: suspend () -> T): T {
+        if (priority.isVisible) return block()
+        val job = currentCoroutineContext()[Job] ?: return block()
+        prefetchHolding.add(job)
+        try {
+            return block()
+        } finally {
+            prefetchHolding.remove(job)
+        }
+    }
+
+    private fun isNoImageRemembered(key: String): Boolean = key in noImageConfirmed
+
+    /** 无图只在本次运行内记忆；超过上限时整体清空，避免长期运行无限增长。 */
+    private fun rememberNoImage(key: String) {
+        if (noImageConfirmed.size >= MAX_NO_IMAGE_MEMORY) noImageConfirmed.clear()
+        noImageConfirmed.add(key)
+    }
+
+    private fun forgetNoImage(key: String) {
+        noImageConfirmed.remove(key)
     }
 
     /** 整次抽取失败后按键退避；退避到期才允许下一次真正重试。 */
@@ -502,6 +545,11 @@ class CachedMediaPreviewSource(
         val abandoned: Boolean = false,
     )
 
+    /** 同键在途请求：等待者共享同一次抽取结果。 */
+    private data class InFlight(
+        val deferred: CompletableDeferred<LoadedPreview>,
+    )
+
     companion object {
         /** 缩略图缓存目录的上限。 */
         private const val CACHE_BYTES = 192L * 1024 * 1024
@@ -533,6 +581,9 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
+        /** 本次运行无图记录上限；超出时整体清空，重启语义不变。 */
+        private const val MAX_NO_IMAGE_MEMORY = 512
+
         fun create(
             context: Context,
             networkReads: NetworkMediaReads,
@@ -545,6 +596,7 @@ class CachedMediaPreviewSource(
                 cache = thumbnailCache(appContext),
                 policy = policy,
                 diagnostics = diagnostics,
+                sourceKeyOf = { location -> networkReads.sourceKey(location) },
             )
         }
 

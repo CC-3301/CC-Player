@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.library
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -992,6 +993,117 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `网络并发按连接源书签分组而不是按共享`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            sourceKeyOf = { location ->
+                if (location.contains("/书签A/")) "bookmark-a" else "bookmark-b"
+            },
+        )
+        val files = listOf(
+            "smb://nas/media/书签A/第1 集.mkv",
+            "smb://nas/media/书签A/第2 集.mkv",
+            "smb://nas/media/书签A/第3 集.mkv",
+            "smb://nas/media/书签B/第1 集.mkv",
+            "smb://nas/media/书签B/第2 集.mkv",
+            "smb://nas/media/书签B/第3 集.mkv",
+        )
+
+        val requests = files.map { location -> async { bounded.preview(fileAt(location)) } }
+        runCurrent()
+
+        // 两个书签共用同一台主机与共享，仍各自拿到 2 个名额。
+        assertEquals(4, tracker.started.size)
+        tracker.imageGate?.complete(Unit)
+        requests.awaitAll()
+    }
+
+    @Test
+    fun `可见请求取消在途预取并占用其名额`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val prefetched = listOf("预取1.mkv", "预取2.mkv").map { name -> network(name) }
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = prefetched.mapTo(mutableSetOf(), MediaFile::location),
+        )
+        val prefetchJobs = prefetched.map { file -> async { bounded.prefetch(file) } }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val visible = async { bounded.preview(network("可见.mkv")) }
+        runCurrent()
+
+        assertTrue(tracker.cancelled.containsAll(prefetched.map(MediaFile::location)))
+        assertTrue(tracker.started.contains("smb://nas/media/可见.mkv"))
+
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        prefetchJobs.forEach { job -> runCatching { job.await() } }
+    }
+
+    @Test
+    fun `可见请求复用同键在途预取`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val file = network("同键.mkv")
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = setOf(file.location),
+        )
+        val prefetch = async { bounded.prefetch(file) }
+        runCurrent()
+        assertEquals(1, tracker.started.count { location -> location == file.location })
+
+        val visible = async { bounded.preview(file) }
+        runCurrent()
+
+        // 同键可见请求共享同一份在途抽取，不重复解码。
+        assertEquals(1, tracker.started.count { location -> location == file.location })
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        assertNotNull(prefetch.await().image)
+    }
+
+    @Test
+    fun `同一连接源内乱序到达仍按索引取得许可`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blockers = listOf("占位1.mkv", "占位2.mkv").map { name ->
+            async { bounded.preview(network(name)) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        val ordered = listOf(5, 3, 1).map { index ->
+            val file = network("第$index 集.mkv")
+            async { bounded.visiblePreview(file, index) }
+        }
+        runCurrent()
+        assertEquals(2, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        blockers.awaitAll()
+        ordered.awaitAll()
+
+        assertEquals(
+            listOf("第1 集.mkv", "第3 集.mkv", "第5 集.mkv"),
+            tracker.started.drop(2).map { location -> location.substringAfterLast('/') },
+        )
+    }
+
+    @Test
     fun `单个慢源不阻塞本地与其它源`() = runTest {
         val tracker = GatedExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1499,6 +1611,7 @@ private class GatedExtractor(
 ) : MediaPreviewExtractor {
 
     val started = mutableListOf<String>()
+    val cancelled = mutableListOf<String>()
     val durationRequests = mutableListOf<String>()
     var concurrent = 0
     var maxConcurrent = 0
@@ -1509,6 +1622,9 @@ private class GatedExtractor(
         maxConcurrent = maxOf(maxConcurrent, concurrent)
         try {
             imageGate?.await()
+        } catch (cancellation: CancellationException) {
+            cancelled += file.location
+            throw cancellation
         } finally {
             concurrent--
         }
