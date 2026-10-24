@@ -14,7 +14,7 @@ fun interface NetworkMediaReads {
 
     /**
      * 位置所属的连接源标识：同一书签下的条目共用并发配额。
-     * 默认把位置自身当作一个源；各协议实现按书签返回。
+     * 默认按主机与共享分组；各协议实现按书签返回。
      */
-    suspend fun sourceKey(location: String): String = location
+    suspend fun sourceKey(location: String): String = networkSourceKey(location)
 }

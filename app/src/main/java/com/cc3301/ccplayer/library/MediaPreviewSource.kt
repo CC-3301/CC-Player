@@ -7,6 +7,8 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -110,6 +112,8 @@ class CachedMediaPreviewSource(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     /** 位置所属连接源的标识；并发按连接源分组，默认按位置自身分组。 */
     private val sourceKeyOf: suspend (String) -> String = { location -> networkSourceKey(location) },
+    /** 书签查找使用的调度器；不放在主线程。 */
+    private val sourceKeyDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : MediaPreviewSource {
 
     /** 本地同时提取数上限；可见项优先取得许可。 */
@@ -121,11 +125,15 @@ class CachedMediaPreviewSource(
         sourceCapacity = NETWORK_SOURCE_CONCURRENCY,
     )
 
-    /** 本次运行已确认无图的缓存键；成功封面落盘，失败与无图不跨启动。 */
-    private val noImageConfirmed = ConcurrentHashMap.newKeySet<String>()
+    /** 正在等待或执行抽取的预取，按连接源登记；可见请求只取消同一连接源的预取。 */
+    private val prefetchHolders = ConcurrentHashMap<String, MutableSet<Job>>()
 
-    /** 正在抽取的预取；可见请求需要名额时取消它们，排队中的预取不占名额、无需取消。 */
-    private val prefetchHolding = ConcurrentHashMap.newKeySet<Job>()
+    /** 连接源标识查询结果；书签查找不放在主线程重复执行。 */
+    private val sourceKeyCache = ConcurrentHashMap<String, String>()
+
+    /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
+    private val noImageLock = Any()
+    private val noImageConfirmed = LinkedHashSet<String>()
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -228,11 +236,14 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): LoadedPreview {
-        val extracted = localPermits.withPermit(priority) {
-            if (mayExtract(file.location, priority)) {
-                withPrefetchHolding(priority) { extractor.imageAndDuration(file, targetWidth) }
-            } else {
-                null
+        if (priority.isVisible) cancelPrefetchHolders(LOCAL_SOURCE_KEY)
+        val extracted = withPrefetchHolder(LOCAL_SOURCE_KEY, priority) {
+            localPermits.withPermit(priority) {
+                if (mayExtract(file.location, priority)) {
+                    extractor.imageAndDuration(file, targetWidth)
+                } else {
+                    null
+                }
             }
         } ?: return LoadedPreview(image = null, durationMillis = null, abandoned = true)
         // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
@@ -270,19 +281,22 @@ class CachedMediaPreviewSource(
         val now = monotonicClock()
         val previous = durationFailures[key]
         if (previous != null && now < previous.retryAtMillis) return PreviewDuration.Failed
-        val result = localPermits.withPermit(priority) {
-            if (!mayExtract(file.location, priority)) {
-                null
-            } else {
-                try {
-                    when (val millis = withPrefetchHolding(priority) { extractor.durationMillis(file) }) {
-                        null -> PreviewDuration.Unavailable
-                        else -> PreviewDuration.Known(millis)
+        if (priority.isVisible) cancelPrefetchHolders(LOCAL_SOURCE_KEY)
+        val result = withPrefetchHolder(LOCAL_SOURCE_KEY, priority) {
+            localPermits.withPermit(priority) {
+                if (!mayExtract(file.location, priority)) {
+                    null
+                } else {
+                    try {
+                        when (val millis = extractor.durationMillis(file)) {
+                            null -> PreviewDuration.Unavailable
+                            else -> PreviewDuration.Known(millis)
+                        }
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (failure: Exception) {
+                        PreviewDuration.Failed
                     }
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (failure: Exception) {
-                    PreviewDuration.Failed
                 }
             }
         } ?: return null
@@ -338,17 +352,21 @@ class CachedMediaPreviewSource(
             },
             load = {
                 // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
-                val sourceKey = sourceKeyOf(file.location)
-                val attempt = networkPermits.withPermit(sourceKey, priority) {
-                    if (!mayExtract(file.location, priority)) {
-                        null
-                    } else {
-                        var decoded: ByteArray? = null
-                        val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                            decoded = withPrefetchHolding(priority) { extractor.imageBytes(file, targetWidth) }
-                            true
-                        } ?: false
-                        done to decoded
+                val sourceKey = sourceKeyFor(file.location)
+                if (priority.isVisible) cancelPrefetchHolders(sourceKey)
+                // 预取从等待许可到抽取结束都登记，可见请求可随时取消并腾出名额。
+                val attempt = withPrefetchHolder(sourceKey, priority) {
+                    networkPermits.withPermit(sourceKey, priority) {
+                        if (!mayExtract(file.location, priority)) {
+                            null
+                        } else {
+                            var decoded: ByteArray? = null
+                            val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                                decoded = extractor.imageBytes(file, targetWidth)
+                                true
+                            } ?: false
+                            done to decoded
+                        }
                     }
                 }
                 if (attempt == null) {
@@ -399,7 +417,15 @@ class CachedMediaPreviewSource(
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
         while (true) {
-            inFlight[key]?.let { pending ->
+            val pending = inFlight[key]
+            if (pending != null) {
+                if (priority.isVisible && pending.prefetch) {
+                    // 同键可见请求不等慢预取：摘掉预取并取消它，自己按可见优先级重抽。
+                    inFlight.remove(key, pending)
+                    pending.owner?.cancel(CancellationException("可见请求优先"))
+                    yield()
+                    continue
+                }
                 try {
                     return pending.deferred.await()
                 } catch (cancellation: CancellationException) {
@@ -409,7 +435,11 @@ class CachedMediaPreviewSource(
                 }
             }
             val mine = CompletableDeferred<LoadedPreview>()
-            val entry = InFlight(mine)
+            val entry = InFlight(
+                deferred = mine,
+                prefetch = !priority.isVisible,
+                owner = currentCoroutineContext()[Job],
+            )
             if (inFlight.putIfAbsent(key, entry) != null) continue
             try {
                 val loaded = try {
@@ -423,8 +453,6 @@ class CachedMediaPreviewSource(
                     } else {
                         // 本地无图记录有效期到期后重新确认；网络无图不落盘，不在这里清。
                         if (cached == null && clearNoImageOnCacheMiss) forgetNoImage(key)
-                        // 可见请求需要真正抽取时，先取消正在抽取的预取，腾出配额。
-                        if (priority.isVisible) cancelPrefetchHolders()
                         loadWithBackoff(file, key, load)
                     }
                 } catch (cancellation: CancellationException) {
@@ -452,33 +480,56 @@ class CachedMediaPreviewSource(
         }
     }
 
-    /** 可见请求需要抽取时取消正在占用名额的预取；排队中的预取会按优先级自然让位。 */
-    private fun cancelPrefetchHolders() {
-        prefetchHolding.forEach { load -> load.cancel(CancellationException("可见请求优先")) }
+    /** 取消同一连接源的预取（等待许可或正在抽取）；不波及其它连接源。 */
+    private fun cancelPrefetchHolders(sourceKey: String) {
+        prefetchHolders[sourceKey]?.forEach { load -> load.cancel(CancellationException("可见请求优先")) }
     }
 
-    /** 预取真正进入抽取时登记；取消后关闭传输层并由 finally 归还许可。 */
-    private suspend fun <T> withPrefetchHolding(priority: PreviewPriority, block: suspend () -> T): T {
+    /** 预取从等待许可到抽取结束都登记；取消后关闭传输层并由 finally 归还许可。 */
+    private suspend fun <T> withPrefetchHolder(
+        sourceKey: String,
+        priority: PreviewPriority,
+        block: suspend () -> T,
+    ): T {
         if (priority.isVisible) return block()
         val job = currentCoroutineContext()[Job] ?: return block()
-        prefetchHolding.add(job)
+        val holders = prefetchHolders.computeIfAbsent(sourceKey) { ConcurrentHashMap.newKeySet() }
+        holders.add(job)
         try {
             return block()
         } finally {
-            prefetchHolding.remove(job)
+            holders.remove(job)
+            if (holders.isEmpty()) prefetchHolders.remove(sourceKey, holders)
         }
     }
 
-    private fun isNoImageRemembered(key: String): Boolean = key in noImageConfirmed
+    /** 书签查找放到 IO 并缓存；并发重复查询允许覆盖同一结果。 */
+    private suspend fun sourceKeyFor(location: String): String =
+        sourceKeyCache[location] ?: withContext(sourceKeyDispatcher) { sourceKeyOf(location) }.also { key ->
+            if (sourceKeyCache.size >= MAX_SOURCE_KEY_CACHE) sourceKeyCache.clear()
+            sourceKeyCache[location] = key
+        }
 
-    /** 无图只在本次运行内记忆；超过上限时整体清空，避免长期运行无限增长。 */
-    private fun rememberNoImage(key: String) {
-        if (noImageConfirmed.size >= MAX_NO_IMAGE_MEMORY) noImageConfirmed.clear()
+    /** 无图记忆按最近使用排序；命中即刷新，超限淘汰最久未用的一条。 */
+    private fun isNoImageRemembered(key: String): Boolean = synchronized(noImageLock) {
+        if (!noImageConfirmed.remove(key)) return false
         noImageConfirmed.add(key)
+        true
+    }
+
+    private fun rememberNoImage(key: String) {
+        synchronized(noImageLock) {
+            noImageConfirmed.remove(key)
+            noImageConfirmed.add(key)
+            while (noImageConfirmed.size > MAX_NO_IMAGE_MEMORY) {
+                val oldest = noImageConfirmed.iterator().next()
+                noImageConfirmed.remove(oldest)
+            }
+        }
     }
 
     private fun forgetNoImage(key: String) {
-        noImageConfirmed.remove(key)
+        synchronized(noImageLock) { noImageConfirmed.remove(key) }
     }
 
     /** 整次抽取失败后按键退避；退避到期才允许下一次真正重试。 */
@@ -545,9 +596,11 @@ class CachedMediaPreviewSource(
         val abandoned: Boolean = false,
     )
 
-    /** 同键在途请求：等待者共享同一次抽取结果。 */
+    /** 同键在途请求：等待者共享同一次抽取结果；可见请求可取消预取 owner。 */
     private data class InFlight(
         val deferred: CompletableDeferred<LoadedPreview>,
+        val prefetch: Boolean,
+        val owner: Job?,
     )
 
     companion object {
@@ -581,8 +634,14 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
-        /** 本次运行无图记录上限；超出时整体清空，重启语义不变。 */
+        /** 本次运行无图记录上限；超出时淘汰最久未用的一条。 */
         private const val MAX_NO_IMAGE_MEMORY = 512
+
+        /** 连接源标识缓存上限；超出时整体清空后重建。 */
+        private const val MAX_SOURCE_KEY_CACHE = 512
+
+        /** 本地条目共用的配额键。 */
+        private const val LOCAL_SOURCE_KEY = "local"
 
         fun create(
             context: Context,

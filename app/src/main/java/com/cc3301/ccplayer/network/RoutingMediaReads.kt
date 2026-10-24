@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.network
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.NetworkMediaReads
+import com.cc3301.ccplayer.library.networkSourceKey
 import com.cc3301.ccplayer.library.schemeOf
 import com.cc3301.ccplayer.streaming.ByteSource
 
@@ -14,5 +15,5 @@ class RoutingMediaReads(private val readsByScheme: Map<String, NetworkMediaReads
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有能处理这个位置的网络源：$location")
 
     override suspend fun sourceKey(location: String): String =
-        readsByScheme[schemeOf(location)]?.sourceKey(location) ?: location
+        readsByScheme[schemeOf(location)]?.sourceKey(location) ?: networkSourceKey(location)
 }

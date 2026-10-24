@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.smb
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.NetworkMediaReads
+import com.cc3301.ccplayer.library.networkSourceKey
 import com.cc3301.ccplayer.streaming.ByteSource
 
 /**
@@ -33,5 +34,6 @@ class SmbMediaReads(
         }
     }
 
-    override suspend fun sourceKey(location: String): String = locator.sourceKey(location) ?: location
+    override suspend fun sourceKey(location: String): String =
+        locator.sourceKey(location) ?: networkSourceKey(location)
 }
