@@ -263,21 +263,6 @@ class MpvPlaybackEngine(
         videoOutputStopped = true
     }
 
-    /** 重新接一次同一块 Surface 并重设视频输出，逼播放核心再出一帧；不改变播放位置。 */
-    override fun refreshSurface(): Boolean {
-        val surface = attachedSurface ?: return false
-        if (videoOutputStopped) return false
-        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return false
-        awaitingSurfaceFrame = true
-        surfaceGenerationCounter++
-        MPVLib.setPropertyString("vo", "null")
-        MPVLib.detachSurface()
-        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
-        MPVLib.attachSurface(surface)
-        MPVLib.setOptionString("force-window", "yes")
-        return true
-    }
-
     override fun setSurfaceSize(width: Int, height: Int) {
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }

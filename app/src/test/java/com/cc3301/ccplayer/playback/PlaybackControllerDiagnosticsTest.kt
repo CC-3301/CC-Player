@@ -124,6 +124,26 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
+    fun `暂停态回前台抓帧始终无结果时记录保留旧画面`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = playingController(diagnostics)
+        controller.pause()
+        engine.reportPauseChanged(true)
+        engine.frameToGrab = null
+
+        controller.setRenderSurfaceAvailable(false)
+        engine.reportSurfaceReattached()
+        controller.setRenderSurfaceAvailable(true)
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue(text.contains("Surface 恢复: seek 到当前位置逼出帧"))
+        assertTrue(text.contains("Surface 恢复: seek 后仍无出帧证据"))
+    }
+
+    @Test
     fun `没有活动会话时重挂不写等待新帧`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)

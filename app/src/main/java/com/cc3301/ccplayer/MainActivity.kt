@@ -188,8 +188,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
-    /** 最近一次记录过的屏幕方向；横竖真正变化时写一条诊断日志。 */
-    private var screenOrientation = ScreenOrientation.System
+    /** 上一次记录过的横竖状态；横竖真正变化时据此写一条诊断日志。 */
+    private var lastScreenOrientation = ScreenOrientation.Portrait
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -290,7 +290,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        screenOrientation = currentScreenOrientation()
+        lastScreenOrientation = currentScreenOrientation()
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -810,9 +810,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         val current = currentScreenOrientation()
-        if (current == screenOrientation) return
-        val previous = screenOrientation
-        screenOrientation = current
+        if (current == lastScreenOrientation) return
+        val previous = lastScreenOrientation
+        lastScreenOrientation = current
         diagnostics.log {
             screenOrientationChangeLine(
                 from = screenOrientationLabel(previous),
@@ -821,12 +821,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 屏幕方向在诊断日志里的文案。 */
-    private fun screenOrientationLabel(orientation: ScreenOrientation): String = when (orientation) {
-        ScreenOrientation.Landscape -> "横屏"
-        ScreenOrientation.Portrait -> "竖屏"
-        ScreenOrientation.System -> "系统"
-    }
+    /** 屏幕方向在诊断日志里的文案：横竖判断只会给出这两种结果。 */
+    private fun screenOrientationLabel(orientation: ScreenOrientation): String =
+        if (orientation == ScreenOrientation.Landscape) "横屏" else "竖屏"
 
     private fun applyImmersive(immersive: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
@@ -858,7 +855,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private companion object {
         const val NO_MEDIA = -1
 
-        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由刷新与抓帧恢复。 */
+        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由 seek 逼出画面。 */
         const val BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS = 2_000L
     }
 }

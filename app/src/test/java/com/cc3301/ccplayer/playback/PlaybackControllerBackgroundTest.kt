@@ -155,13 +155,30 @@ class PlaybackControllerBackgroundTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-        // seek 完成前不算画面恢复，缓存帧先保留。
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        // seek 之后的抓帧成功即算画面恢复，不依赖任何加载事件。
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
 
-        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
+    @Test
+    fun `暂停态回前台在预算内重试抓帧直到出帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        engine.frameToGrab = null
+        var grabs = 0
+        engine.beforeGrab = {
+            grabs++
+            // 前两次抓不到：重绘晚于 seek。
+            if (grabs >= 3) engine.frameToGrab = PlaybackEngine.Frame(frame)
+        }
+
+        // 全程不产生 VideoReconfig / PlaybackRestart，画面只能靠抓帧探测恢复。
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_FRAME_PROBE_INTERVAL_MILLIS * 4)
         runCurrent()
 
-        // seek 之后的抓帧成功才算画面恢复。
+        assertEquals(1, engine.seekPositions.size)
+        assertTrue(grabs >= 3)
         assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
@@ -173,15 +190,10 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = null
 
         reattach(controller)
-        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
-        runCurrent()
-
-        assertEquals(1, engine.seekPositions.size)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-
-        // 等待有上限：超时后不再 seek，旧画面保持。
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
         runCurrent()
+
+        // 预算耗尽后不再 seek，也不再探测，旧画面保持。
         assertEquals(1, engine.seekPositions.size)
         assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -295,18 +307,12 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(true)
 
         assertTrue(engine.surfaceGeneration > generationBefore)
-        // 暂停态回前台 seek 到当前位置逼出帧，seek 完成前缓存帧仍在。
+        // 暂停态回前台 seek 到当前位置逼出帧，抓帧成功后撤掉缓存帧；状态保持暂停。
         assertEquals(1, engine.seekPositions.size)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-
-        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
-        runCurrent()
-
-        assertNull(controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test

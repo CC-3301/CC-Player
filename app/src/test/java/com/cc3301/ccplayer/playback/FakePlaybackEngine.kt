@@ -149,29 +149,6 @@ class FakePlaybackEngine : PlaybackEngine {
         attachedSurface = null
     }
 
-    var refreshSurfaceCalls = 0
-        private set
-
-    /** 非 seek 刷新是否真正执行；模拟未加载、无视频轨或输出已停。 */
-    var refreshSurfaceResult = true
-
-    /** 接下来几次刷新强制未执行，用来模拟 Surface 挂载晚于上报。 */
-    var refreshSurfaceFailures = 0
-
-    override fun refreshSurface(): Boolean {
-        actions += "refresh"
-        refreshSurfaceCalls++
-        if (refreshSurfaceFailures > 0) {
-            refreshSurfaceFailures--
-            return false
-        }
-        if (!refreshSurfaceResult) return false
-        // 与真实引擎一致：成功刷新重挂 Surface，代数递增并产生一次加载事件。
-        surfaceGeneration++
-        listener?.onLoadActivity(LoadActivity.VideoReconfig, currentLoadToken)
-        return true
-    }
-
     override fun setSurfaceSize(width: Int, height: Int) = Unit
 
     override fun release() = Unit
