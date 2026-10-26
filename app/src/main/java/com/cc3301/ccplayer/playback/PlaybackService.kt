@@ -309,13 +309,19 @@ class PlaybackService : Service() {
         return uri
     }
 
+    /**
+     * 封面取不到时的回退图标：直接把应用图标的前景层画在图标底色上。
+     * 不能用 [android.content.pm.PackageManager.getApplicationIcon]：它返回自适应图标，
+     * 按画布直接绘制会叠出多层三角。
+     */
     private fun appIconBitmap(): Bitmap {
         appIconBitmap?.let { return it }
-        val drawable = packageManager.getApplicationIcon(packageName)
-        val size = maxOf(drawable.intrinsicWidth, drawable.intrinsicHeight).takeIf { it > 0 } ?: APP_ICON_SIZE
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { icon ->
-            drawable.setBounds(0, 0, size, size)
-            drawable.draw(Canvas(icon))
+        val bitmap = Bitmap.createBitmap(APP_ICON_SIZE, APP_ICON_SIZE, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(getColor(R.color.ic_launcher_background))
+        getDrawable(R.drawable.ic_launcher_foreground)?.let { foreground ->
+            foreground.setBounds(0, 0, APP_ICON_SIZE, APP_ICON_SIZE)
+            foreground.draw(canvas)
         }
         appIconBitmap = bitmap
         return bitmap

@@ -3,7 +3,6 @@ package com.cc3301.ccplayer.webdav
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.NetworkMediaReads
-import com.cc3301.ccplayer.library.networkSourceKey
 import com.cc3301.ccplayer.streaming.ByteSource
 
 /**
@@ -21,7 +20,4 @@ class WebDavMediaReads(
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
         return transport.openRead(target.url, target.username, target.password)
     }
-
-    override suspend fun sourceKey(location: String): String =
-        locator.sourceKey(location) ?: networkSourceKey(location)
 }

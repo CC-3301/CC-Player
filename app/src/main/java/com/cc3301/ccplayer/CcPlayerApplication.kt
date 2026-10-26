@@ -4,7 +4,23 @@ import android.app.Application
 import com.cc3301.ccplayer.diagnostics.CrashLogger
 import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.RotatingFileSink
+import com.cc3301.ccplayer.library.CachedMediaPreviewSource
+import com.cc3301.ccplayer.library.MediaPreviewHolder
+import com.cc3301.ccplayer.library.MediaPreviewSource
+import com.cc3301.ccplayer.library.NetworkMediaReads
+import com.cc3301.ccplayer.network.DataStoreBookmarkStore
+import com.cc3301.ccplayer.network.EncryptedCredentialStore
+import com.cc3301.ccplayer.network.NetworkSourceRepository
+import com.cc3301.ccplayer.network.RoutingMediaReads
 import com.cc3301.ccplayer.settings.SettingsRepository
+import com.cc3301.ccplayer.smb.SmbJConnector
+import com.cc3301.ccplayer.smb.SmbLocation
+import com.cc3301.ccplayer.smb.SmbLocator
+import com.cc3301.ccplayer.smb.SmbMediaReads
+import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
+import com.cc3301.ccplayer.webdav.WebDavAddress
+import com.cc3301.ccplayer.webdav.WebDavLocator
+import com.cc3301.ccplayer.webdav.WebDavMediaReads
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -18,7 +34,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** 应用进程：持有诊断日志，并把 Java 未捕获异常写进日志后交回默认处理器。 */
+/** 应用进程：持有诊断日志与进程内唯一的预览源，并把 Java 未捕获异常写进日志后交回默认处理器。 */
 class CcPlayerApplication : Application() {
 
     lateinit var diagnostics: Diagnostics
@@ -27,6 +43,29 @@ class CcPlayerApplication : Application() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(this) }
+
+    private val previewHolder = MediaPreviewHolder {
+        CachedMediaPreviewSource.create(this, previewReads(), diagnostics)
+    }
+
+    /** 缩略图预览源：整个进程只有一份，转屏与界面重建后复用同一个抽帧许可。 */
+    val mediaPreview: MediaPreviewSource get() = previewHolder.instance
+
+    /** 预览读取直接走各协议，不建回环代理，也不参与播放代理的释放。 */
+    private fun previewReads(): NetworkMediaReads {
+        val sources = NetworkSourceRepository(
+            store = DataStoreBookmarkStore.create(this),
+            credentials = EncryptedCredentialStore.create(this),
+        )
+        val webDavReads = WebDavMediaReads(OkHttpWebDavTransport(), WebDavLocator(sources))
+        return RoutingMediaReads(
+            mapOf(
+                SmbLocation.SCHEME to SmbMediaReads(SmbJConnector(), SmbLocator(sources)),
+                WebDavAddress.SCHEME_HTTP to webDavReads,
+                WebDavAddress.SCHEME_HTTPS to webDavReads,
+            ),
+        )
+    }
 
     override fun onCreate() {
         super.onCreate()

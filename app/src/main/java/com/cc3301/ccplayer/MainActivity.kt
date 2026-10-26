@@ -44,18 +44,15 @@ import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.DiagnosticsExporter
 import com.cc3301.ccplayer.diagnostics.connectionLogLine
 import com.cc3301.ccplayer.diagnostics.logLibraryNavigation
-import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.MediaPreviewSource
-import com.cc3301.ccplayer.library.NetworkMediaReads
 import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.NetworkStreams
-import com.cc3301.ccplayer.network.RoutingMediaReads
 import com.cc3301.ccplayer.network.RoutingNetworkStreams
 import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.playback.DecodeMode
@@ -72,7 +69,6 @@ import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
-import com.cc3301.ccplayer.smb.SmbMediaReads
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.ui.AppScreen
 import com.cc3301.ccplayer.ui.HomeBackResult
@@ -100,7 +96,6 @@ import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
-import com.cc3301.ccplayer.webdav.WebDavMediaReads
 import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -122,9 +117,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
 
-    private val mediaPreview: MediaPreviewSource by lazy {
-        CachedMediaPreviewSource.create(applicationContext, createPreviewReads(), diagnostics)
-    }
+    private val mediaPreview: MediaPreviewSource get() = (application as CcPlayerApplication).mediaPreview
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
@@ -626,22 +619,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources)),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
-            ),
-        )
-    }
-
-    /** 预览读取直接走各协议，不建回环代理，也不参与播放代理的释放。 */
-    private fun createPreviewReads(): NetworkMediaReads {
-        val sources = NetworkSourceRepository(
-            store = DataStoreBookmarkStore.create(applicationContext),
-            credentials = EncryptedCredentialStore.create(applicationContext),
-        )
-        val webDavReads = WebDavMediaReads(OkHttpWebDavTransport(), WebDavLocator(sources))
-        return RoutingMediaReads(
-            mapOf(
-                SmbLocation.SCHEME to SmbMediaReads(SmbJConnector(), SmbLocator(sources)),
-                WebDavAddress.SCHEME_HTTP to webDavReads,
-                WebDavAddress.SCHEME_HTTPS to webDavReads,
             ),
         )
     }

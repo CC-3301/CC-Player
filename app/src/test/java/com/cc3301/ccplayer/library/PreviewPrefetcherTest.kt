@@ -119,7 +119,6 @@ class PreviewPrefetcherTest {
         try {
             val extractor = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
             val source = CachedMediaPreviewSource(
-            sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
                 cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
             )

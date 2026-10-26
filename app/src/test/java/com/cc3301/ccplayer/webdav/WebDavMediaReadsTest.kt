@@ -46,15 +46,4 @@ class WebDavMediaReadsTest {
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
     }
-
-    @Test
-    fun `并发分组键取最长匹配的书签`() = runTest {
-        val rootA = "https://dav.example.com/remote.php/dav/files/cc/A"
-        val rootB = "https://dav.example.com/remote.php/dav/files/cc/B"
-        addSource(rootA)
-        addSource(rootB)
-
-        assertEquals(rootA, reads.sourceKey("$rootA/电影.mkv"))
-        assertEquals(rootB, reads.sourceKey("$rootB/电影.mkv"))
-    }
 }

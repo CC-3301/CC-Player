@@ -129,12 +129,12 @@ private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, 
     return frameBytes(retriever, framePositions(duration, frameCount), targetWidth)
 }
 
-/** 网络只取一帧：位置为 max(1% 时长, 1 秒)；解不出或纯色时保持占位图。 */
+/** 网络抽帧：按候选位置取第一张非纯色帧；候选全部不合格时保持占位图。 */
 private fun networkVideoFrameBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? {
     val frame = extractNetworkFrame(
         durationMillis = readDurationOrNull(retriever),
-        decode = { position ->
-            retriever.getFrameAtTime(position.micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        decode = { micros ->
+            retriever.getFrameAtTime(micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?.let { bitmap -> scaleFrame(bitmap, targetWidth) }
         },
         isSolid = ::isSolidFrame,
