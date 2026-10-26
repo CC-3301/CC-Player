@@ -66,6 +66,13 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `滚轮上滚后退五秒、下滚前进五秒`() {
+        assertEquals(-5_000L, wheelSeekStep(-1f))
+        assertEquals(5_000L, wheelSeekStep(1f))
+        assertNull(wheelSeekStep(0f))
+    }
+
+    @Test
     fun `音量位移未超过 9dp 不进入调整`() {
         assertNull(dragGesture(GestureZone.LeftVolume, 0f, 9f, threshold))
         assertNull(dragGesture(GestureZone.RightVolume, 0f, -9f, threshold))

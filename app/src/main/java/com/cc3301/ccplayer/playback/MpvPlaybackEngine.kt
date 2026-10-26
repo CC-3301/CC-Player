@@ -181,6 +181,11 @@ class MpvPlaybackEngine(
         ) { audioDebugSnapshot() }
     }
 
+    /** 预览 seek 期间直接静音音频输出，不改变音量。 */
+    override fun setAudioMuted(muted: Boolean) {
+        MPVLib.setPropertyBoolean(MUTE_PROPERTY, muted)
+    }
+
     /** 读取排查丢声所需的播放核心状态；任何属性读取失败都只记为空值。 */
     private fun audioDebugSnapshot(): AudioDebugSnapshot = AudioDebugSnapshot(
         paused = readMpvProperty { MPVLib.getPropertyBoolean(PAUSE_PROPERTY) },

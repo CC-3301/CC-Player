@@ -133,6 +133,7 @@ import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
+import com.cc3301.ccplayer.playback.PlaybackController
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerOption
@@ -340,6 +341,8 @@ fun PlayerScreen(
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onSeekBy: (Long) -> Long,
+    onSeekStep: (Long) -> Long?,
+    onSeekHeartbeat: () -> Unit,
     onPlaylistSelect: (MediaFile) -> Unit,
     onSelectDecodeMode: (DecodeMode) -> Unit,
     onSelectLoopMode: (LoopMode) -> Unit,
@@ -423,6 +426,11 @@ fun PlayerScreen(
             seekHint = null
             volumeHint = null
         }
+    }
+
+    // 预览结束（松手、取消、滚轮落定）就收起目标时间提示，提示不晚于预览。
+    LaunchedEffect(seekPreviewMillis) {
+        if (seekPreviewMillis == null) seekHint = null
     }
 
     // 播放页内鼠标静止 3 秒隐藏指针，移动或离开播放页时恢复。其它界面不处理指针。
@@ -544,6 +552,8 @@ fun PlayerScreen(
                 controls.onInteraction()
                 onSeekCommit()
             },
+            onSeekStep = onSeekStep,
+            onSeekHeartbeat = onSeekHeartbeat,
             onToggleControls = { controls.toggle() },
             onUserInteraction = { controls.onInteraction() },
             onVolumeHint = { volumeHint = it },
@@ -678,6 +688,7 @@ fun PlayerScreen(
                     controls.onInteraction()
                     onSeekCommit()
                 },
+                onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
                     controls.onInteraction()
                     panels.toggle(PlayerPanel.Playlist)
@@ -799,7 +810,19 @@ fun PlayerScreen(
     }
 }
 
-/** 手势层：单击显隐控制条、三分区双击、两侧上下拖调音量、中间左右拖跳转。 */
+/** 拖动期间按心跳周期通知控制层：兜底只看心跳是否超时，不看指针事件频率。 */
+@Composable
+private fun PreviewHeartbeat(dragging: Boolean, onHeartbeat: () -> Unit) {
+    val latestOnHeartbeat = rememberUpdatedState(onHeartbeat)
+    LaunchedEffect(dragging) {
+        while (dragging) {
+            delay(PlaybackController.PREVIEW_HEARTBEAT_MILLIS)
+            latestOnHeartbeat.value()
+        }
+    }
+}
+
+/** 手势层：单击显隐控制条、三分区双击、两侧上下拖调音量、中间左右拖跳转、中间滚轮调时长。 */
 @Composable
 private fun PlayerGestureLayer(
     locked: Boolean,
@@ -815,6 +838,8 @@ private fun PlayerGestureLayer(
     onDoubleTapFeedback: (DoubleTapSide, Long) -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekStep: (Long) -> Long?,
+    onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
     onUserInteraction: () -> Unit,
     onVolumeHint: (Float?) -> Unit,
@@ -840,6 +865,8 @@ private fun PlayerGestureLayer(
     val latestOnDoubleTapFeedback = rememberUpdatedState(onDoubleTapFeedback)
     val latestOnSeekPreview = rememberUpdatedState(onSeekPreview)
     val latestOnSeekCommit = rememberUpdatedState(onSeekCommit)
+    val latestOnSeekStep = rememberUpdatedState(onSeekStep)
+    val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnUserInteraction = rememberUpdatedState(onUserInteraction)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
@@ -868,6 +895,10 @@ private fun PlayerGestureLayer(
             }
         }
     }
+
+    // 跳转拖动进行中：按住不动没有指针事件，靠心跳让控制层的兜底不收尾。
+    var seekDragActive by remember { mutableStateOf(false) }
+    PreviewHeartbeat(dragging = seekDragActive) { latestOnSeekHeartbeat.value() }
 
     Box(
         modifier = modifier
@@ -915,7 +946,10 @@ private fun PlayerGestureLayer(
                                         baseMillis = latestPosition.value,
                                         durationMillis = latestDuration.value,
                                         width = size.width,
-                                    ).also { seekDrag = it }
+                                    ).also {
+                                        seekDrag = it
+                                        seekDragActive = true
+                                    }
                                     seek.preview(update.seekDragX)?.let { target ->
                                         latestOnSeekPreview.value(target)
                                         latestOnSeekHint.value(SeekHint(target, target - seek.baseMillis))
@@ -929,8 +963,28 @@ private fun PlayerGestureLayer(
                             latestOnSeekCommit.value()
                         }
                     } finally {
+                        seekDragActive = false
                         latestOnVolumeHint.value(null)
                         latestOnSeekHint.value(null)
+                        // 拖动被转屏、手势禁掉或输入中断打断时同样落定：预览 seek 已经挪动画面。
+                        if (seekDrag != null) latestOnSeekCommit.value()
+                    }
+                }
+            }
+            // 滚轮调时长：中间区域上滚后退、下滚前进，连续滚动累积；停滚由控制层收尾。
+            .pointerInput(gesturesEnabled, seekAllowed) {
+                if (!gesturesEnabled || !seekAllowed) return@pointerInput
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (gestureZone(change.position.x, size.width) != GestureZone.Center) continue
+                        val step = wheelSeekStep(change.scrollDelta.y) ?: continue
+                        val target = latestOnSeekStep.value(step) ?: continue
+                        change.consume()
+                        latestOnUserInteraction.value()
+                        latestOnSeekHint.value(SeekHint(target, target - latestPosition.value))
                     }
                 }
             },
@@ -1211,6 +1265,7 @@ private fun Controls(
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekHeartbeat: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
     onLock: () -> Unit,
@@ -1244,6 +1299,7 @@ private fun Controls(
             appearanceEnabled = !initialLoading,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
+            onHeartbeat = onSeekHeartbeat,
             modifier = Modifier.padding(horizontal = PlayerSeekHorizontalInset),
         )
         PlayerIconBar(
@@ -1517,6 +1573,7 @@ private fun SeekBar(
     appearanceEnabled: Boolean = true,
     onPreview: (Long) -> Unit,
     onCommit: () -> Unit,
+    onHeartbeat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
@@ -1533,6 +1590,8 @@ private fun SeekBar(
     val unknownText = stringResource(R.string.player_time_unknown)
     val labels = seekBarLabels(positionMillis, durationMillis, previewForDisplay, unknownText)
     val sliderEnabled = enabled && labels.seekEnabled
+    // 按住进度条不动时没有指针事件；用心跳告诉控制层预览还活着。
+    PreviewHeartbeat(dragging = dragMillis != null, onHeartbeat = onHeartbeat)
     // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
     LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
         val held = heldMillis ?: return@LaunchedEffect
@@ -1725,8 +1784,6 @@ private fun SeekBar(
                             down.consume()
                             dragMillis = target
                             latestPreviewAt.value(target)
-                            var completed = false
-                            var cancelled = false
                             try {
                                 while (true) {
                                     val event = awaitPointerEvent()
@@ -1734,15 +1791,9 @@ private fun SeekBar(
                                     val pressedIds = event.changes
                                         .filter { it.pressed }
                                         .map { it.id.value }
-                                    if (isMultiPointerDrag(down.id.value, pressedIds)) {
-                                        cancelled = true
-                                        break
-                                    }
+                                    if (isMultiPointerDrag(down.id.value, pressedIds)) break
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (!change.pressed) {
-                                        completed = true
-                                        break
-                                    }
+                                    if (!change.pressed) break
                                     seekBarMillisAt(
                                         x = change.position.x,
                                         trackStart = bounds.start,
@@ -1759,11 +1810,8 @@ private fun SeekBar(
                             } finally {
                                 dragMillis = null
                                 dragTimeWidthPx = null
-                            }
-                            if (completed) {
+                                // 松手、多指取消或手势被打断都落定到当前预览位置并恢复声音。
                                 latestCommitAt.value(target, seekBase)
-                            } else if (cancelled) {
-                                latestPreviewAt.value(latestPositionMillis.value)
                             }
                         }
                     },

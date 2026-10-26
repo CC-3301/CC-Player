@@ -412,6 +412,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
+                            onSeekStep = { playback?.controller?.updateSeekPreviewBy(it) },
+                            onSeekHeartbeat = { playback?.controller?.seekPreviewHeartbeat() },
                             onPlaylistSelect = { media -> playback?.controller?.play(media) },
                             onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
                             onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
@@ -562,8 +564,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             durationMillis = progress.durationMillis,
             deltaMillis = deltaMillis,
         ) ?: return 0L
-        controller.updateSeekPreview(target.targetMillis)
-        controller.commitSeekPreview()
+        controller.seekTo(target.targetMillis)
         return target.deltaMillis
     }
 
@@ -690,6 +691,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
+        // 退后台时手势不会再收尾：落定预览并恢复声音，后台播放开着也一样。
+        binder?.controller?.commitSeekPreview()
         surfaceSession.onActivityStopped()
         // 后台上报可能已把播放暂停；抓帧在后台执行，完成后由 Surface 会话分离。
         detachAfterBackgroundCapture { !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }

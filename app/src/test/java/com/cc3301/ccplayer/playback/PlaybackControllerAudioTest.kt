@@ -16,7 +16,12 @@ class PlaybackControllerAudioTest {
 
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
-    private val controller = PlaybackController(engine, progress, CoroutineScope(UnconfinedTestDispatcher()))
+    private val controller = PlaybackController(
+        engine,
+        progress,
+        CoroutineScope(UnconfinedTestDispatcher()),
+        nowMillis = { 0L },
+    )
 
     @Test
     fun `fade in lasts the fixed 500 milliseconds`() {
@@ -34,6 +39,7 @@ class PlaybackControllerAudioTest {
     fun `seeking asks for another fade in`() {
         open(media)
         engine.reportMediaLoaded()
+        engine.reportPositionChanged(1_000, 60_000)
         controller.updateSeekPreview(30_000)
 
         controller.commitSeekPreview()

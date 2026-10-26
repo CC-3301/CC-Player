@@ -47,6 +47,9 @@ interface PlaybackEngine {
     /** 从当前位置起对音频输出做淡入，时长 [durationMillis]；画面不受影响。 */
     fun fadeInAudio(durationMillis: Long)
 
+    /** 静音或恢复音频输出；画面不受影响。 */
+    fun setAudioMuted(muted: Boolean)
+
     /** 设置本次会话的解码模式。 */
     fun setDecodeMode(mode: DecodeMode)
 
