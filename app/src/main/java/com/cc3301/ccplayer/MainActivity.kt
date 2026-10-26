@@ -190,10 +190,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 最近的设置方向档位；传感器回调在组合之外判定，需要即时读到。 */
     private var playerOrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE
 
-    /** 最近一次传感器角度；为空表示还没收到或设备平放无法判定，方向保持不动。 */
+    /** 最近一次传感器角度；为空表示还没收到或设备平放无法判定，此时不施加方向。 */
     private var sensorAngle: Int? = null
 
-    /** 已施加的播放页方向，用于方向迟滞；进入播放页时回到系统朝向。 */
+    /** 已施加的播放页方向，用于方向迟滞；[ScreenOrientation.System] 表示本次播放还没施加过。 */
     private var appliedScreenOrientation = ScreenOrientation.System
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
@@ -344,7 +344,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         applyOrientation(ScreenOrientation.System)
                     }
                 }
-                // 传感器只在播放页注册，离开播放页注销。
+                // 传感器只在播放页注册，离开播放页注销；没有可用传感器时不启用，方向仍由系统决定。
                 DisposableEffect(playerVisible) {
                     if (!playerVisible) return@DisposableEffect onDispose { }
                     val listener = object : OrientationEventListener(this@MainActivity, SensorManager.SENSOR_DELAY_UI) {
@@ -824,10 +824,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /**
      * 播放页按传感器角度与期望族施加四向朝向；方向真正变化时才写一条诊断日志。
+     * 还没有角度（传感器未注册成功或设备平放）时不施加，方向仍由系统决定。
      */
     private fun applyPlayerOrientation() {
+        val angle = sensorAngle ?: return
         val requested = sessionOrientation.resolve(playerOrientationMode, videoAspectRatio)
-        val target = sensorScreenOrientation(requested, sensorAngle, appliedScreenOrientation)
+        val target = sensorScreenOrientation(requested, angle, appliedScreenOrientation)
         if (target == appliedScreenOrientation) return
         appliedScreenOrientation = target
         applyOrientation(target)
@@ -853,7 +855,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 屏幕方向在诊断日志里的文案：按四个方向分别记录。 */
+    /**
+     * 屏幕方向在诊断日志里的文案：按四个方向分别记录。[ScreenOrientation.System] 不写方向日志，
+     * 该分支只为枚举完整。
+     */
     private fun screenOrientationLabel(orientation: ScreenOrientation): String = when (orientation) {
         ScreenOrientation.Portrait -> "竖屏"
         ScreenOrientation.ReversePortrait -> "反向竖屏"
@@ -872,7 +877,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 播放页按传感器判定施加朝向；离开播放页时交回系统自动旋转设置。 */
+    /** 设置窗口方向；[ScreenOrientation.System] 交回系统自动旋转设置，离开播放页时也走这条。 */
     private fun applyOrientation(orientation: ScreenOrientation) {
         requestedOrientation = when (orientation) {
             ScreenOrientation.System -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED

@@ -79,24 +79,23 @@ private fun angleDistance(a: Int, b: Int): Int {
  * 由传感器角度判定播放页要施加的四向朝向（ADR-0013）。
  *
  * [requested] 是期望族：[ScreenOrientation.System] 四向全跟，横屏与竖屏档只在各自族内判正向与
- * 反向，物理转 90° 不跨族。[angleDegrees] 为空表示还没收到角度或设备平放无法判定，此时保持
- * [current]；[current] 不属于期望族时取该族正向。换向需新方向比当前方向接近至少 30°，即相邻
- * 方向间偏离当前超过 60° 才进入、回到 30° 以内才退回。
+ * 反向，物理转 90° 不跨族。[current] 为已施加方向，[ScreenOrientation.System] 表示尚未施加：
+ * 此时从期望族正向起步，首次判定同样受迟滞约束，小角度不会翻向。
+ *
+ * 迟滞按步进区分：新方向要比当前方向接近至少 30° 才换。相隔 90° 的相邻档位因此是进入 61°、
+ * 退回 29°；锁定族内相隔 180° 的一对是 106° 进、74° 退。
  */
 fun sensorScreenOrientation(
     requested: ScreenOrientation,
-    angleDegrees: Int?,
-    current: ScreenOrientation?,
+    angleDegrees: Int,
+    current: ScreenOrientation,
 ): ScreenOrientation {
     val allowed = allowedOrientations(requested)
-    if (angleDegrees == null) {
-        return allowed.firstOrNull { it.first == current }?.first ?: allowed.first().first
-    }
     val angle = ((angleDegrees % 360) + 360) % 360
+    // 没有已施加方向（或它不属于期望族）时从期望族正向起步。
+    val started = allowed.firstOrNull { it.first == current } ?: allowed.first()
     val nearest = allowed.minBy { angleDistance(it.second, angle) }
-    if (current == null || allowed.none { it.first == current }) return nearest.first
-    if (nearest.first == current) return current
-    val currentAngle = allowed.first { it.first == current }.second
-    val closer = angleDistance(currentAngle, angle) - angleDistance(nearest.second, angle)
-    return if (closer > ORIENTATION_HYSTERESIS_DEGREES) nearest.first else current
+    if (nearest.first == started.first) return started.first
+    val closer = angleDistance(started.second, angle) - angleDistance(nearest.second, angle)
+    return if (closer > ORIENTATION_HYSTERESIS_DEGREES) nearest.first else started.first
 }
