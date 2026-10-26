@@ -24,29 +24,76 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络只取一帧且位置为 max 百分之一时长与 1 秒`() {
-        assertEquals(1_000_000L, networkFramePosition(90_000).micros)
-        assertEquals(3_000_000L, networkFramePosition(300_000).micros)
+    fun `网络抽帧位置为百分之一时长并封顶 30 秒`() {
+        assertEquals(1_000_000L, networkFramePosition(90_000))
+        assertEquals(3_000_000L, networkFramePosition(300_000))
+        // 1% 超过 30 秒时按 30 秒封顶，几个 GB 的文件不做远距离寻址。
+        assertEquals(30_000_000L, networkFramePosition(10_000_000))
     }
 
     @Test
     fun `网络时长未知时取 1 秒且不取 0 秒`() {
-        assertEquals(1_000_000L, networkFramePosition(null).micros)
-        assertEquals(1_000_000L, networkFramePosition(0).micros)
-        assertEquals(1_000_000L, networkFramePosition(-1).micros)
+        assertEquals(1_000_000L, networkFramePosition(null))
+        assertEquals(1_000_000L, networkFramePosition(0))
+        assertEquals(1_000_000L, networkFramePosition(-1))
     }
 
     @Test
-    fun `网络只解码一帧，纯色帧不合格并释放`() {
-        var decodes = 0
-        var asked: Long? = null
+    fun `网络候选为主候选加 60 秒与 90 秒，最多三个`() {
+        assertEquals(
+            listOf(1_000_000L, 60_000_000L, 90_000_000L),
+            networkFrameCandidates(90_000),
+        )
+        assertEquals(3, networkFrameCandidates(10_000_000).size)
+        assertEquals(1_000_000L, networkFrameCandidates(null).first())
+    }
+
+    @Test
+    fun `网络主候选非纯色时返回该帧且不试退避候选`() {
+        val asked = mutableListOf<Long>()
+
+        val frame = extractNetworkFrame(
+            durationMillis = 300_000,
+            decode = { micros ->
+                asked += micros
+                "正常帧"
+            },
+            isSolid = { false },
+        )
+
+        assertEquals("正常帧", frame)
+        assertEquals(listOf(3_000_000L), asked)
+    }
+
+    @Test
+    fun `网络主候选纯色时退到 60 秒与 90 秒候选`() {
+        val asked = mutableListOf<Long>()
         var released = 0
 
         val frame = extractNetworkFrame(
             durationMillis = 90_000,
-            decode = { position ->
-                decodes++
-                asked = position.micros
+            decode = { micros ->
+                asked += micros
+                if (micros == 90_000_000L) "正常帧" else "纯色帧"
+            },
+            isSolid = { frame -> frame == "纯色帧" },
+            release = { released++ },
+        )
+
+        assertEquals("正常帧", frame)
+        assertEquals(listOf(1_000_000L, 60_000_000L, 90_000_000L), asked)
+        assertEquals(2, released)
+    }
+
+    @Test
+    fun `网络三个候选都是纯色时保持占位图`() {
+        val asked = mutableListOf<Long>()
+        var released = 0
+
+        val frame = extractNetworkFrame(
+            durationMillis = 90_000,
+            decode = { micros ->
+                asked += micros
                 "纯色帧"
             },
             isSolid = { true },
@@ -54,38 +101,20 @@ class ThumbnailFramePolicyTest {
         )
 
         assertNull(frame)
-        assertEquals(1, decodes)
-        assertEquals(1_000_000L, asked)
-        assertEquals(1, released)
+        assertEquals(3, asked.size)
+        assertEquals(3, released)
     }
 
     @Test
-    fun `网络单帧非纯色时返回该帧`() {
-        var decodes = 0
-
-        val frame = extractNetworkFrame(
-            durationMillis = 300_000,
-            decode = {
-                decodes++
-                "正常帧"
-            },
-            isSolid = { false },
-        )
-
-        assertEquals("正常帧", frame)
-        assertEquals(1, decodes)
-    }
-
-    @Test
-    fun `网络单帧解不出时保持占位图`() {
+    fun `网络主候选解不出时保持占位图且不试退避候选`() {
         var decodes = 0
         var asked: Long? = null
 
         val frame = extractNetworkFrame<String>(
             durationMillis = null,
-            decode = { position ->
+            decode = { micros ->
                 decodes++
-                asked = position.micros
+                asked = micros
                 null
             },
             isSolid = { false },

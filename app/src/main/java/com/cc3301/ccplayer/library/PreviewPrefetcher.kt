@@ -59,7 +59,7 @@ class PreviewPrefetcher(
     }
 
     private companion object {
-        /** 预取前等待，让可见项的请求先占并发名额。 */
+        /** 预取前等待，让可见项的请求先取得唯一许可。 */
         const val PREFETCH_DELAY_MILLIS = 120L
     }
 }
