@@ -88,8 +88,9 @@ internal fun networkFrameCandidates(durationMillis: Long?): List<Long> =
     listOf(networkFramePosition(durationMillis)) + NETWORK_FALLBACK_FRAME_POSITION_MICROS
 
 /**
- * 网络抽帧：按候选位置依次解码，取第一个非纯色帧。
- * 解不出的位置直接放弃抽取；三个候选都是纯色或解不出时返回 null，界面保持占位图。
+ * 网络抽帧：按候选位置依次解码，取第一个非纯色帧；三个候选都不合格时返回 null，界面保持占位图。
+ * 只有黑帧或纯色帧才退到下一个候选：候选位置是给「画面不可用」准备的，
+ * 某个位置解不出图说明这一帧抽不出来，换位置不改变结果，直接按抽取失败收尾。
  * 不合格帧在换下一个候选前由 [release] 回收。
  */
 internal fun <T> extractNetworkFrame(
