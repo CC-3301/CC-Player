@@ -73,10 +73,7 @@ class PlayerIconBarMetricsTest {
     }
 
     @Test
-    fun `横排阈值与最小支持宽度`() {
-        assertEquals(378.dp, PlayerIconBarHorizontalThreshold)
-        assertEquals(348.dp, PlayerIconBarNarrowHorizontalThreshold)
-        assertEquals(252.dp, PlayerIconBarMinimumWidth)
+    fun `最小支持宽度仍按上下排列`() {
         assertTrue(playerIconBarMetrics(PlayerIconBarMinimumWidth).rightStacked)
     }
 

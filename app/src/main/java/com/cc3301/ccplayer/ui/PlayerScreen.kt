@@ -100,9 +100,12 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -180,6 +183,43 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
             awaitPointerEvent().changes.forEach { change ->
                 if (change.pressed) change.consume()
             }
+        }
+    }
+}
+
+/** 鼠标移动或进入才算指针活动；触摸与手写笔不参与指针显隐。 */
+private fun PointerEvent.isMouseActivity(): Boolean =
+    (type == PointerEventType.Enter || type == PointerEventType.Move) &&
+        changes.any { it.type == PointerType.Mouse }
+
+/** 等到下一次鼠标活动，期间到达的其它事件不写状态。 */
+private suspend fun AwaitPointerEventScope.awaitMouseActivity() {
+    while (!awaitPointerEvent().isMouseActivity()) {
+        // 忽略触摸与手写笔事件。
+    }
+}
+
+/**
+ * 鼠标静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 隐藏指针，再有任何鼠标活动立即恢复。
+ * 计时只在鼠标真正出现后开始，触屏用户不会进入这段逻辑；
+ * 每次鼠标移动只重置倒计时，只有可见性真正翻转时才回调，避免逐帧重组。
+ */
+private suspend fun AwaitPointerEventScope.autoHidePointer(onVisibilityChange: (Boolean) -> Unit) {
+    var hidden = false
+    while (true) {
+        awaitMouseActivity()
+        if (hidden) {
+            hidden = false
+            onVisibilityChange(false)
+        }
+        // 超时仍未收到鼠标活动即视为静止；期间收到活动则回到外层重新计时。
+        val idle = withTimeoutOrNull(PLAYER_POINTER_HIDE_DELAY_MILLIS) {
+            awaitMouseActivity()
+            false
+        } ?: true
+        if (idle) {
+            hidden = true
+            onVisibilityChange(true)
         }
     }
 }
@@ -385,18 +425,12 @@ fun PlayerScreen(
         }
     }
 
-    // 播放页内鼠标静止 3 秒隐藏指针；移动或离开播放页时恢复。其它界面不处理指针。
+    // 播放页内鼠标静止 3 秒隐藏指针，移动或离开播放页时恢复。其它界面不处理指针。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     var pointerHidden by remember { mutableStateOf(false) }
-    var pointerMoveCount by remember { mutableStateOf(0) }
-    LaunchedEffect(pointerMoveCount, pointerHidden) {
-        if (pointerHidden) return@LaunchedEffect
-        delay(PLAYER_POINTER_HIDE_DELAY_MILLIS)
-        pointerHidden = true
-    }
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
@@ -407,13 +441,7 @@ fun PlayerScreen(
         )
         .pointerInput(Unit) {
             awaitPointerEventScope {
-                while (true) {
-                    // 只观察，不消费；鼠标移动即视为活动，重置隐藏计时。
-                    if (awaitPointerEvent().type == PointerEventType.Move) {
-                        pointerHidden = false
-                        pointerMoveCount += 1
-                    }
-                }
+                autoHidePointer { hidden -> pointerHidden = hidden }
             }
         }) {
         val density = LocalDensity.current

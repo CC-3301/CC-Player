@@ -189,57 +189,52 @@ val PlayerBufferingSpinnerColor = AppColors.Accent
 /** 上一集/播放/下一集热区：可用宽度足够时各 62 × 58dp、总宽 186dp、彼此无间隙（ADR-0025）。 */
 val PlayerTransportButtonWidth = 62.dp
 
-/** 可用宽度不足 378dp 时三键热区收窄到的宽度；热区不得小于 52 × 58dp（ADR-0025）。 */
+/** 可用宽度不足 [PlayerTransportNarrowWidthThreshold] 时三键热区收窄到的宽度；不得小于 52 × 58dp（ADR-0025）。 */
 val PlayerTransportNarrowButtonWidth = 52.dp
 
 val PlayerTransportButtonHeight = 58.dp
 val PlayerTransportTotalWidth = PlayerTransportButtonWidth * 3
-val PlayerTransportNarrowTotalWidth = PlayerTransportNarrowButtonWidth * 3
 
 /** 侧键图标 28dp，播放键图标 34dp（ADR-0025）。 */
 val PlayerTransportIconSize = 28.dp
 val PlayerPlayPauseIconSize = 34.dp
 
 /**
- * 三键 62dp 时的横排阈值：三键居中后两侧余量各为 (可用宽度 - 186) / 2，
- * 右侧要容纳两个 48dp 侧键，因此至少 378dp；不足时三键收窄到 52dp。
+ * 三键热区收窄阈值 378dp：62dp 三键居中后两侧余量各为 (可用宽度 - 186) / 2，
+ * 右侧要容纳两个 48dp 侧键，因此至少 378dp；不足时三键各收窄到 52dp。
  */
-val PlayerIconBarHorizontalThreshold = PlayerTransportTotalWidth + PlayerSideTouchTarget * 4
+val PlayerTransportNarrowWidthThreshold = PlayerTransportTotalWidth + PlayerSideTouchTarget * 4
 
 /**
- * 三键收窄到 52dp 后的横排阈值 348dp：两侧余量各为 (可用宽度 - 156) / 2，
- * 仍要容纳两个 48dp 侧键。更窄时右侧两个侧键只能上下排列。
+ * 右侧字幕与播放列表两键并排的阈值 348dp：三键收窄后总宽 156dp，
+ * 居中后两侧余量各为 (可用宽度 - 156) / 2，仍需各容纳 96dp；不足时两键只能上下排列。
  */
-val PlayerIconBarNarrowHorizontalThreshold =
-    PlayerTransportNarrowTotalWidth + PlayerSideTouchTarget * 4
+val PlayerSideButtonsInlineThreshold =
+    PlayerTransportNarrowButtonWidth * 3 + PlayerSideTouchTarget * 4
 
 /**
- * 图标条最小可用宽度 252dp：左侧锁定键 + 156dp 三键 + 右侧上下排列的一个侧键。
- * 更窄时锁定键会压到三键，当前布局不压缩三键，因此不支持。
+ * 图标条最小可用宽度 252dp：左侧锁定键 + 收窄后 156dp 的三键 + 右侧上下排列的一个侧键。
+ * 更窄时锁定键会压到三键；三键已到 52dp 下限，不再收窄。
  */
-val PlayerIconBarMinimumWidth = PlayerTransportNarrowTotalWidth + PlayerSideTouchTarget * 2
+val PlayerIconBarMinimumWidth = PlayerTransportNarrowButtonWidth * 3 + PlayerSideTouchTarget * 2
 
 /**
- * 底部图标条布局：可用宽度不足 [PlayerIconBarHorizontalThreshold] 时三键收窄到 52dp 并保持居中；
- * 收窄后仍不足以让右下两个侧键并排时（低于 [PlayerIconBarNarrowHorizontalThreshold]）改为上下排列，
- * 保证两侧按钮不压到三键。
- *
- * 360dp 等常见竖屏宽度下三键收窄、两侧各剩 102dp，锁定键、三键、字幕与播放列表回到同一条水平线。
+ * 底部图标条布局：可用宽度不足 [PlayerTransportNarrowWidthThreshold] 时三键收窄到 52dp 并保持居中，
+ * 锁定键、三键、字幕与播放列表因此落在同一条水平线上；收窄后仍不足以让右侧两键并排时
+ * （低于 [PlayerSideButtonsInlineThreshold]）改为上下排列，保证两侧按钮不压到三键。
  * 低于 [PlayerIconBarMinimumWidth] 时布局不再保证不重叠。
  */
 data class PlayerIconBarMetrics(
     val availableWidth: Dp,
     val rightStacked: Boolean,
 ) {
-    val transportButtonWidth: Dp
-        get() = if (availableWidth < PlayerIconBarHorizontalThreshold) {
-            PlayerTransportNarrowButtonWidth
-        } else {
-            PlayerTransportButtonWidth
-        }
+    val transportButtonWidth: Dp = if (availableWidth < PlayerTransportNarrowWidthThreshold) {
+        PlayerTransportNarrowButtonWidth
+    } else {
+        PlayerTransportButtonWidth
+    }
     val transportButtonHeight: Dp = PlayerTransportButtonHeight
-    val transportTotalWidth: Dp
-        get() = transportButtonWidth * 3
+    val transportTotalWidth: Dp = transportButtonWidth * 3
 
     /** 图标条高度：普通排布取三键高度，上下排列时容纳两个侧键。 */
     val barHeight: Dp = if (rightStacked) {
@@ -365,5 +360,5 @@ fun isMultiPointerDrag(primaryId: Long, pressedPointerIds: List<Long>): Boolean 
 fun playerIconBarMetrics(availableWidth: Dp): PlayerIconBarMetrics =
     PlayerIconBarMetrics(
         availableWidth = availableWidth,
-        rightStacked = availableWidth < PlayerIconBarNarrowHorizontalThreshold,
+        rightStacked = availableWidth < PlayerSideButtonsInlineThreshold,
     )

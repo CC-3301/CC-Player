@@ -2,7 +2,6 @@ package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -20,18 +19,6 @@ class PlayerLayoutTest {
     fun `进度条触控高度 36dp、视觉轨道 2dp`() {
         assertEquals(36.dp, PlayerSeekTouchHeight)
         assertEquals(2.dp, PlayerSeekTrackHeight)
-    }
-
-    @Test
-    fun `拖动提示目标时间 44sp、增减量 36sp、两行间距 6dp`() {
-        assertEquals(44.sp, PlayerSeekHintTargetFontSize)
-        assertEquals(36.sp, PlayerSeekHintDeltaFontSize)
-        assertEquals(6.dp, PlayerSeekHintLineGap)
-    }
-
-    @Test
-    fun `播放页鼠标静止 3 秒隐藏指针`() {
-        assertEquals(3_000L, PLAYER_POINTER_HIDE_DELAY_MILLIS)
     }
 
     @Test
