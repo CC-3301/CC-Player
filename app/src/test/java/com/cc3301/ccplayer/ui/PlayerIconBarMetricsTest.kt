@@ -9,12 +9,13 @@ import org.junit.Test
 class PlayerIconBarMetricsTest {
 
     @Test
-    fun `三键热区各 62dp 宽、58dp 高，总宽 186dp`() {
+    fun `宽屏三键热区各 62dp 宽、58dp 高，总宽 186dp`() {
         val metrics = playerIconBarMetrics(400.dp)
 
         assertEquals(62.dp, metrics.transportButtonWidth)
         assertEquals(58.dp, metrics.transportButtonHeight)
         assertEquals(186.dp, metrics.transportTotalWidth)
+        assertFalse(metrics.rightStacked)
     }
 
     @Test
@@ -26,33 +27,56 @@ class PlayerIconBarMetricsTest {
     }
 
     @Test
-    fun `360dp 时右侧字幕与播放列表上下排列`() {
+    fun `360dp 竖屏三键收窄到 52dp 且字幕与播放列表同排`() {
         val metrics = playerIconBarMetrics(360.dp)
 
-        assertTrue(metrics.rightStacked)
-        assertEquals(PlayerSideTouchTarget * 2, metrics.barHeight)
+        assertFalse(metrics.rightStacked)
+        assertEquals(52.dp, metrics.transportButtonWidth)
+        assertEquals(156.dp, metrics.transportTotalWidth)
+        assertEquals(58.dp, metrics.barHeight)
+        // 收窄后三键居中，左右各剩 102dp，容得下 96dp 的两个侧键。
+        assertEquals(102.dp, (360.dp - metrics.transportTotalWidth) / 2)
     }
 
     @Test
-    fun `377dp 低于横排阈值时右侧按钮上下排列`() {
+    fun `377dp 不足 378dp 时收窄到 52dp 并保持同排`() {
         val metrics = playerIconBarMetrics(377.dp)
 
-        assertTrue(metrics.rightStacked)
-        assertEquals(PlayerSideTouchTarget * 2, metrics.barHeight)
+        assertFalse(metrics.rightStacked)
+        assertEquals(52.dp, metrics.transportButtonWidth)
+        assertEquals(58.dp, metrics.barHeight)
     }
 
     @Test
-    fun `378dp 达到横排阈值`() {
+    fun `378dp 达到横排阈值时不再收窄`() {
         val metrics = playerIconBarMetrics(378.dp)
 
         assertFalse(metrics.rightStacked)
-        assertEquals(58.dp, metrics.barHeight)
+        assertEquals(62.dp, metrics.transportButtonWidth)
+    }
+
+    @Test
+    fun `348dp 是收窄后横排的边界`() {
+        val metrics = playerIconBarMetrics(348.dp)
+
+        assertFalse(metrics.rightStacked)
+        assertEquals(52.dp, metrics.transportButtonWidth)
+    }
+
+    @Test
+    fun `347dp 收窄后仍放不下右侧并排时上下排列`() {
+        val metrics = playerIconBarMetrics(347.dp)
+
+        assertTrue(metrics.rightStacked)
+        assertEquals(52.dp, metrics.transportButtonWidth)
+        assertEquals(PlayerSideTouchTarget * 2, metrics.barHeight)
     }
 
     @Test
     fun `横排阈值与最小支持宽度`() {
         assertEquals(378.dp, PlayerIconBarHorizontalThreshold)
-        assertEquals(282.dp, PlayerIconBarMinimumWidth)
+        assertEquals(348.dp, PlayerIconBarNarrowHorizontalThreshold)
+        assertEquals(252.dp, PlayerIconBarMinimumWidth)
         assertTrue(playerIconBarMetrics(PlayerIconBarMinimumWidth).rightStacked)
     }
 
