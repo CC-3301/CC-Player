@@ -100,10 +100,17 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEvent
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -139,7 +146,6 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -177,6 +183,43 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
             awaitPointerEvent().changes.forEach { change ->
                 if (change.pressed) change.consume()
             }
+        }
+    }
+}
+
+/** 鼠标移动或进入才算指针活动；触摸与手写笔不参与指针显隐。 */
+private fun PointerEvent.isMouseActivity(): Boolean =
+    (type == PointerEventType.Enter || type == PointerEventType.Move) &&
+        changes.any { it.type == PointerType.Mouse }
+
+/** 等到下一次鼠标活动，期间到达的其它事件不写状态。 */
+private suspend fun AwaitPointerEventScope.awaitMouseActivity() {
+    while (!awaitPointerEvent().isMouseActivity()) {
+        // 忽略触摸与手写笔事件。
+    }
+}
+
+/**
+ * 鼠标静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 隐藏指针，再有任何鼠标活动立即恢复。
+ * 计时只在鼠标真正出现后开始，触屏用户不会进入这段逻辑；
+ * 每次鼠标移动只重置倒计时，只有可见性真正翻转时才回调，避免逐帧重组。
+ */
+private suspend fun AwaitPointerEventScope.autoHidePointer(onVisibilityChange: (Boolean) -> Unit) {
+    var hidden = false
+    while (true) {
+        awaitMouseActivity()
+        if (hidden) {
+            hidden = false
+            onVisibilityChange(false)
+        }
+        // 超时仍未收到鼠标活动即视为静止；期间收到活动则回到外层重新计时。
+        val idle = withTimeoutOrNull(PLAYER_POINTER_HIDE_DELAY_MILLIS) {
+            awaitMouseActivity()
+            false
+        } ?: true
+        if (idle) {
+            hidden = true
+            onVisibilityChange(true)
         }
     }
 }
@@ -382,9 +425,25 @@ fun PlayerScreen(
         }
     }
 
+    // 播放页内鼠标静止 3 秒隐藏指针，移动或离开播放页时恢复。其它界面不处理指针。
+    val context = LocalContext.current
+    val hiddenPointerIcon = remember(context) {
+        PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
+    }
+    var pointerHidden by remember { mutableStateOf(false) }
+
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
-        .background(Color.Black)) {
+        .background(Color.Black)
+        .pointerHoverIcon(
+            icon = if (pointerHidden) hiddenPointerIcon else PointerIcon.Default,
+            overrideDescendants = true,
+        )
+        .pointerInput(Unit) {
+            awaitPointerEventScope {
+                autoHidePointer { hidden -> pointerHidden = hidden }
+            }
+        }) {
         val density = LocalDensity.current
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
@@ -924,30 +983,32 @@ private fun LevelHintLabel(fraction: Float, modifier: Modifier = Modifier) {
     )
 }
 
-/** 拖动进度时的目标时间与增减量提示：居中两行、同字号白字、无底板。 */
+/** 拖动进度时的目标时间与增减量提示：居中两行、白字、无底板；目标时间明显大于增减量。 */
 @Composable
 private fun SeekHintLabel(hint: SeekHint, modifier: Modifier = Modifier) {
-    val style = MaterialTheme.typography.titleMedium.copy(
+    val shadow = Shadow(
+        color = Color.Black.copy(alpha = 0.9f),
+        offset = Offset(0f, 2f),
+        blurRadius = 14f,
+    )
+    val targetStyle = MaterialTheme.typography.titleMedium.copy(
         color = Color.White,
-        fontSize = 34.sp,
+        fontSize = PlayerSeekHintTargetFontSize,
         fontWeight = FontWeight.Medium,
         fontFeatureSettings = "tnum",
-        shadow = Shadow(
-            color = Color.Black.copy(alpha = 0.9f),
-            offset = Offset(0f, 2f),
-            blurRadius = 14f,
-        ),
+        shadow = shadow,
     )
+    val deltaStyle = targetStyle.copy(fontSize = PlayerSeekHintDeltaFontSize)
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(text = formatDuration(hint.targetMillis), style = style, maxLines = 1)
+        Text(text = formatDuration(hint.targetMillis), style = targetStyle, maxLines = 1)
         Text(
-            text = signedDuration(hint.deltaMillis),
-            style = style,
+            text = seekHintDeltaText(hint.deltaMillis),
+            style = deltaStyle,
             maxLines = 1,
-            modifier = Modifier.padding(top = 2.dp),
+            modifier = Modifier.padding(top = PlayerSeekHintLineGap),
         )
     }
 }
@@ -1025,9 +1086,6 @@ private fun DoubleTapEdgeRipple(ripple: DoubleTapRipple, onFinished: () -> Unit)
         )
     }
 }
-
-private fun signedDuration(millis: Long): String =
-    (if (millis < 0) "-" else "+") + formatDuration(abs(millis))
 
 /**
  * 叠加在画面之上的标题栏：左侧返回与文件名，右侧转屏与更多。

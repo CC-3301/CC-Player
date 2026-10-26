@@ -32,6 +32,14 @@ class DurationLabelTest {
     }
 
     @Test
+    fun `拖动提示的增减量用方括号括起并带正负号`() {
+        assertEquals("[+0:15]", seekHintDeltaText(15_000L))
+        assertEquals("[-0:15]", seekHintDeltaText(-15_000L))
+        assertEquals("[+0:00]", seekHintDeltaText(0L))
+        assertEquals("[+1:02:03]", seekHintDeltaText(3_723_000L))
+    }
+
+    @Test
     fun `进度条时间优先显示拖动预览`() {
         assertEquals(10_000L, seekBarProgressMillis(10_000L, 100_000L, null))
         assertEquals(45_000L, seekBarProgressMillis(10_000L, 100_000L, 45_000L))
