@@ -44,6 +44,9 @@ class FakePlaybackEngine : PlaybackEngine {
     var currentSeekSerial = 0
         private set
     val fadeInDurations = mutableListOf<Long>()
+
+    /** 静音指令序列：true 为静音，false 为恢复。 */
+    val muteCalls = mutableListOf<Boolean>()
     val decodeModes = mutableListOf<DecodeMode>()
 
     /** 当前媒体的内嵌字幕轨道，测试自己摆。 */
@@ -104,6 +107,10 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun fadeInAudio(durationMillis: Long) {
         fadeInDurations += durationMillis
+    }
+
+    override fun setAudioMuted(muted: Boolean) {
+        muteCalls += muted
     }
 
     override fun setDecodeMode(mode: DecodeMode) {

@@ -6,6 +6,12 @@ import kotlin.math.roundToLong
 /** 双击快退/快进的步长，毫秒。 */
 const val SEEK_STEP_MILLIS = 10_000L
 
+/** 鼠标滚轮每一格的跳转时长，毫秒。 */
+const val WHEEL_SEEK_STEP_MILLIS = 5_000L
+
+/** 滚轮停止滚动多久后落定，毫秒。 */
+const val WHEEL_SEEK_SETTLE_MILLIS = 400L
+
 /** 中间区域整屏宽度对应的跳转时长，毫秒。 */
 const val SEEK_FULL_WIDTH_MILLIS = 300_000L
 
@@ -103,6 +109,13 @@ fun relativeSeekTarget(
 fun seekDeltaMillis(dragX: Float, width: Int): Long {
     if (width <= 0) return 0L
     return (dragX / width * SEEK_FULL_WIDTH_MILLIS).roundToLong()
+}
+
+/** 滚轮一格的方向：上滚（负位移）后退，下滚前进；没有位移时不动作。 */
+fun wheelSeekStep(scrollDeltaY: Float): Long? = when {
+    scrollDeltaY > 0f -> WHEEL_SEEK_STEP_MILLIS
+    scrollDeltaY < 0f -> -WHEEL_SEEK_STEP_MILLIS
+    else -> null
 }
 
 /**

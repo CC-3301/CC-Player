@@ -381,6 +381,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
+                            onSeekStep = { playback?.controller?.updateSeekPreviewBy(it) },
                             onPlaylistSelect = { media -> playback?.controller?.play(media) },
                             onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
                             onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
@@ -531,8 +532,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             durationMillis = progress.durationMillis,
             deltaMillis = deltaMillis,
         ) ?: return 0L
-        controller.updateSeekPreview(target.targetMillis)
-        controller.commitSeekPreview()
+        controller.seekTo(target.targetMillis)
         return target.deltaMillis
     }
 

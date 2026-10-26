@@ -340,6 +340,7 @@ fun PlayerScreen(
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onSeekBy: (Long) -> Long,
+    onSeekStep: (Long) -> Long?,
     onPlaylistSelect: (MediaFile) -> Unit,
     onSelectDecodeMode: (DecodeMode) -> Unit,
     onSelectLoopMode: (LoopMode) -> Unit,
@@ -544,6 +545,7 @@ fun PlayerScreen(
                 controls.onInteraction()
                 onSeekCommit()
             },
+            onSeekStep = onSeekStep,
             onToggleControls = { controls.toggle() },
             onUserInteraction = { controls.onInteraction() },
             onVolumeHint = { volumeHint = it },
@@ -799,7 +801,7 @@ fun PlayerScreen(
     }
 }
 
-/** 手势层：单击显隐控制条、三分区双击、两侧上下拖调音量、中间左右拖跳转。 */
+/** 手势层：单击显隐控制条、三分区双击、两侧上下拖调音量、中间左右拖跳转、中间滚轮调时长。 */
 @Composable
 private fun PlayerGestureLayer(
     locked: Boolean,
@@ -815,6 +817,7 @@ private fun PlayerGestureLayer(
     onDoubleTapFeedback: (DoubleTapSide, Long) -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekStep: (Long) -> Long?,
     onToggleControls: () -> Unit,
     onUserInteraction: () -> Unit,
     onVolumeHint: (Float?) -> Unit,
@@ -840,6 +843,7 @@ private fun PlayerGestureLayer(
     val latestOnDoubleTapFeedback = rememberUpdatedState(onDoubleTapFeedback)
     val latestOnSeekPreview = rememberUpdatedState(onSeekPreview)
     val latestOnSeekCommit = rememberUpdatedState(onSeekCommit)
+    val latestOnSeekStep = rememberUpdatedState(onSeekStep)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnUserInteraction = rememberUpdatedState(onUserInteraction)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
@@ -867,6 +871,15 @@ private fun PlayerGestureLayer(
                 }
             }
         }
+    }
+
+    // 滚轮落定：停止滚动一会儿后提交预览并收起目标时间提示。
+    var wheelSeekTick by remember { mutableStateOf(0) }
+    LaunchedEffect(wheelSeekTick) {
+        if (wheelSeekTick == 0) return@LaunchedEffect
+        delay(WHEEL_SEEK_SETTLE_MILLIS)
+        latestOnSeekHint.value(null)
+        latestOnSeekCommit.value()
     }
 
     Box(
@@ -931,6 +944,24 @@ private fun PlayerGestureLayer(
                     } finally {
                         latestOnVolumeHint.value(null)
                         latestOnSeekHint.value(null)
+                    }
+                }
+            }
+            // 滚轮调时长：中间区域上滚后退、下滚前进，连续滚动累积，停止后落定。
+            .pointerInput(gesturesEnabled, seekAllowed) {
+                if (!gesturesEnabled || !seekAllowed) return@pointerInput
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        if (event.type != PointerEventType.Scroll) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (gestureZone(change.position.x, size.width) != GestureZone.Center) continue
+                        val step = wheelSeekStep(change.scrollDelta.y) ?: continue
+                        val target = latestOnSeekStep.value(step) ?: continue
+                        change.consume()
+                        wheelSeekTick++
+                        latestOnUserInteraction.value()
+                        latestOnSeekHint.value(SeekHint(target, target - latestPosition.value))
                     }
                 }
             },
@@ -1767,10 +1798,9 @@ private fun SeekBar(
                                 dragMillis = null
                                 dragTimeWidthPx = null
                             }
-                            if (completed) {
+                            // 取消时预览 seek 已经挪动画面：同样落定到最后的目标并恢复声音。
+                            if (completed || cancelled) {
                                 latestCommitAt.value(target, seekBase)
-                            } else if (cancelled) {
-                                latestPreviewAt.value(latestPositionMillis.value)
                             }
                         }
                     },

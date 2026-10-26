@@ -73,6 +73,12 @@ class PlaybackController(
     private val _seekPreviewMillis = MutableStateFlow<Long?>(null)
     val seekPreviewMillis: StateFlow<Long?> = _seekPreviewMillis.asStateFlow()
 
+    /** 上一次预览 seek 的下发时刻；null 表示本次预览还没下发过 seek。 */
+    private var previewSeekIssuedAtMillis: Long? = null
+
+    /** 预览 seek 期间音频已静音；收尾或预览结束时恢复。 */
+    private var previewMuted = false
+
     /** 正在切集：原视频暂停，画面冻结，等目标就绪后替换；恢复原片期间仍为真。 */
     private val _switching = MutableStateFlow(false)
     val switching: StateFlow<Boolean> = _switching.asStateFlow()
@@ -569,6 +575,8 @@ class PlaybackController(
     fun pauseForBackground() {
         if (!active) return
         paused = true
+        // 退后台时手势已被取消，不会再有收尾；预览 seek 的静音必须在这里解除。
+        endSeekPreview()
         suspendSwitchFrameWatchdog()
         engine.pause()
         settleStartedSwitchAsPaused()
@@ -585,7 +593,7 @@ class PlaybackController(
         diagnostics.log { "加载开始: ${media.name}" }
         _currentIndex.value = index
         _progress.value = PlaybackProgress()
-        _seekPreviewMillis.value = null
+        endSeekPreview()
         _subtitleTracks.value = emptyList()
         _externalSubtitles.value = emptyList()
         _subtitleSelection.value = SubtitleSelection.Off
@@ -658,7 +666,7 @@ class PlaybackController(
         _switching.value = true
         _restoring.value = false
         restartFromStartAfterRestore = false
-        _seekPreviewMillis.value = null
+        endSeekPreview()
         _subtitleTracks.value = emptyList()
         _externalSubtitles.value = emptyList()
         _subtitleSelection.value = SubtitleSelection.Off
@@ -883,9 +891,9 @@ class PlaybackController(
         }
         active = false
         paused = false
+        endSeekPreview()
         engine.stop()
         updateState(PlaybackState.Idle)
-        _seekPreviewMillis.value = null
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
         _videoAspectRatio.value = null
@@ -922,10 +930,37 @@ class PlaybackController(
         _sleepTimerOption.value = null
     }
 
-    /** 拖动中的预览：只更新气泡位置，实际播放位置不动。 */
+    /**
+     * 拖动与滚轮调时长的预览：更新预览位置，并按节流向播放核心下发静音的真实 seek。
+     * 首次加载、切集、恢复原片与时长未知时只更新提示位置，不碰播放核心。
+     */
     fun updateSeekPreview(positionMillis: Long) {
         if (!active) return
-        _seekPreviewMillis.value = positionMillis.coerceAtLeast(0)
+        val target = positionMillis.coerceAtLeast(0)
+        _seekPreviewMillis.value = target
+        if (!previewSeekAllowed()) return
+        val last = previewSeekIssuedAtMillis
+        val now = nowMillis()
+        if (last != null && now - last < PREVIEW_SEEK_INTERVAL_MILLIS) return
+        previewSeekIssuedAtMillis = now
+        // 预览期间只静音一次；逐次 seek 各自淡入会造成拖动中断续爆音。
+        if (!previewMuted) {
+            previewMuted = true
+            engine.setAudioMuted(true)
+        }
+        engine.seekTo(target)
+    }
+
+    /** 滚轮调时长的一档：在当前位置或本次预览目标上累计 [deltaMillis]，返回新的预览目标。 */
+    fun updateSeekPreviewBy(deltaMillis: Long): Long? {
+        if (!active) return null
+        val durationMillis = playedDurationMillis
+        if (durationMillis <= 0L) return null
+        val baseMillis = _seekPreviewMillis.value ?: playedPositionMillis
+        val target = (baseMillis + deltaMillis).coerceIn(0L, durationMillis)
+        if (target == baseMillis) return null
+        updateSeekPreview(target)
+        return target
     }
 
     /** 松手：跳到预览位置并收起气泡；没有预览时不动作。 */
@@ -933,12 +968,39 @@ class PlaybackController(
         val target = _seekPreviewMillis.value ?: return
         _seekPreviewMillis.value = null
         if (!active) return
+        endPreviewSeekAudio()
+        seekTo(target)
+    }
+
+    /** 立即跳转到 [positionMillis]：按正常 seek 落定并淡入，不经过预览。 */
+    fun seekTo(positionMillis: Long) {
+        if (!active) return
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
-        engine.seekTo(target)
+        engine.seekTo(positionMillis)
         engine.fadeInAudio(FADE_IN_MILLIS)
     }
+
+    /** 收起预览位置；预览 seek 静音过就恢复声音。 */
+    private fun endSeekPreview() {
+        _seekPreviewMillis.value = null
+        endPreviewSeekAudio()
+    }
+
+    /** 结束预览 seek 的静音：没静音过就什么都不做。 */
+    private fun endPreviewSeekAudio() {
+        previewSeekIssuedAtMillis = null
+        if (!previewMuted) return
+        previewMuted = false
+        engine.setAudioMuted(false)
+    }
+
+    /** 预览 seek 只在正常播放中下发；加载阶段与时长未知时保持原行为。 */
+    private fun previewSeekAllowed(): Boolean =
+        loadPhase == LoadPhase.None &&
+            playedDurationMillis > 0L &&
+            (_state.value == PlaybackState.Playing || _state.value == PlaybackState.Paused)
 
     fun setDecodeMode(mode: DecodeMode) {
         _decodeMode.value = mode
@@ -1264,6 +1326,8 @@ class PlaybackController(
 
     override fun onPositionChanged(positionMillis: Long, durationMillis: Long) {
         if (!active) return
+        // 预览 seek 挪动的位置不是用户落定的播放位置：不推进度、不落库。
+        if (_seekPreviewMillis.value != null) return
         // 加载中的位置属于新文件，切集时不能覆盖冻结画面上的原进度；时长要留下供就绪初始化。
         if (loadPhase != LoadPhase.None) {
             if (mediaLoaded && durationMillis > 0) loadDurationMillis = durationMillis
@@ -1883,6 +1947,9 @@ class PlaybackController(
     companion object {
         /** 起播与跳转后的音频淡入时长，固定值。 */
         const val FADE_IN_MILLIS = 500L
+
+        /** 拖动与滚轮预览 seek 的最小间隔；按一帧左右节流。 */
+        const val PREVIEW_SEEK_INTERVAL_MILLIS = 150L
 
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L

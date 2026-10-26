@@ -217,7 +217,7 @@ class PlaybackControllerTest {
     }
 
     @Test
-    fun `dragging the progress bar previews a position without moving playback`() {
+    fun `dragging the progress bar previews a position without moving the reported progress`() {
         open(media)
         engine.reportMediaLoaded()
         engine.reportPositionChanged(1_000, 60_000)
@@ -225,7 +225,9 @@ class PlaybackControllerTest {
         controller.updateSeekPreview(30_000)
 
         assertEquals(30_000L, controller.seekPreviewMillis.value)
-        assertEquals(emptyList<Long>(), engine.seekPositions)
+        // 画面要跟到目标位置：预览下发静音的真实 seek，进度状态仍停在原位。
+        assertEquals(listOf(30_000L), engine.seekPositions)
+        assertEquals(listOf(true), engine.muteCalls)
         assertEquals(1_000L, controller.progress.value.positionMillis)
     }
 

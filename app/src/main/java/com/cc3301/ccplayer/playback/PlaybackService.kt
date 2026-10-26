@@ -218,8 +218,7 @@ class PlaybackService : Service() {
         ) {
             return
         }
-        controller.updateSeekPreview(positionMillis)
-        controller.commitSeekPreview()
+        controller.seekTo(positionMillis)
     }
 
     /** 状态、加载阶段、前后台或播放位置变化时同步 MediaSession 与通知栏。 */
