@@ -207,6 +207,8 @@ class NavigationViewModelTest {
         assertEquals(AppScreen.Settings, recreated.state.value.screen)
         assertEquals(SourceProtocol.WebDav, recreated.state.value.sourcesProtocol)
         assertEquals(listOf(root, series), recreated.state.value.library?.stack)
+        // 有进程保存状态时状态已在构造期就位，不等待冷启动恢复。
+        assertFalse(recreated.coldStartPending.value)
 
         recreated.closeSettings()
         assertEquals(AppScreen.Library, recreated.state.value.screen)
@@ -287,13 +289,6 @@ class NavigationViewModelTest {
 
         assertFalse(navigation.coldStartPending.value)
         assertEquals(AppScreen.Home, navigation.state.value.screen)
-    }
-
-    @Test
-    fun `进程重建不等待冷启动恢复`() {
-        navigation.openLibrary(root.location, listOf(root, series))
-
-        assertFalse(restoredNavigation().coldStartPending.value)
     }
 
     @Test

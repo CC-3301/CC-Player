@@ -185,8 +185,8 @@ class NavigationViewModel(
         stack: List<MediaFile>,
     ): Boolean {
         if (!_coldStartPending.value) return false
-        _coldStartPending.value = false
         if (_state.value.screen != AppScreen.Home || stack.isEmpty()) {
+            _coldStartPending.value = false
             diagnostics.log { "导航恢复: 当前已离开首页或目录栈为空，忽略冷启动恢复" }
             return false
         }
@@ -197,6 +197,8 @@ class NavigationViewModel(
                 library = LibraryLocation(sourceLocation, stack),
             )
         }
+        // 当前屏、源协议与目录栈先一次性写入，最后才放行界面。
+        _coldStartPending.value = false
         diagnostics.log { "导航恢复: 冷启动恢复库页面" }
         return true
     }

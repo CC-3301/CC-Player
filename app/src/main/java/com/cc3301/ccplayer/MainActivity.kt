@@ -342,7 +342,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 when {
                     // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
                     coldStartPending -> {
-                        BackHandler { handleHomeBack() }
+                        // 判定期间返回键忽略：不退出、不提示，也不取消本次恢复。
+                        BackHandler {}
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
