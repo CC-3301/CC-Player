@@ -61,7 +61,7 @@ class NavigationViewModel(
     /** 没有进程保存状态时等待冷启动恢复；用户先导航或恢复结束后清除。 */
     private val _coldStartPending = MutableStateFlow(!savedState.contains(KEY_SCREEN))
 
-    /** 冷启动恢复判定未完成：界面只显示纯色底，不渲染首页，也不逐级播放目录栈。 */
+    /** 冷启动恢复判定未完成；恢复结束后清除。 */
     val coldStartPending: StateFlow<Boolean> = _coldStartPending.asStateFlow()
 
     /** 每次用户导航递增；库页面的冷启动校验据此取消。 */
