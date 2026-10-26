@@ -74,9 +74,12 @@ fun panelVisible(anyOpen: Boolean, controlsVisible: Boolean, locked: Boolean): B
 /** 播放列表编号：从 1 开始，至少两位。 */
 fun playlistItemIndexLabel(index: Int): String = (index + 1).toString().padStart(2, '0')
 
-/** 点左半屏关闭抽屉；右半屏归抽屉。 */
-fun playlistDismissTap(tapX: Float, width: Float): Boolean =
-    width > 0f && tapX >= 0f && tapX < width / 2f
+/** 点抽屉之外的那一半关闭抽屉：横屏点左半屏，竖屏点上半屏；落位由宽高推导。 */
+fun playlistDismissTap(tapX: Float, tapY: Float, width: Float, height: Float): Boolean =
+    when (playlistDrawerPlacement(width, height)) {
+        PlaylistDrawerPlacement.RightHalf -> width > 0f && tapX >= 0f && tapX < width / 2f
+        PlaylistDrawerPlacement.BottomHalf -> height > 0f && tapY >= 0f && tapY < height / 2f
+    }
 
 /**
  * 把当前项滚到列表可视区域中间所需的内容滚动量。
