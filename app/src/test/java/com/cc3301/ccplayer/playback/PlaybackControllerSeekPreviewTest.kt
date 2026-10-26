@@ -10,12 +10,13 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 拖动与滚轮的实时画面预览：节流下发真实 seek、预览期间静音、松手精确收尾，
+ * 拖动与滚轮的实时画面预览：节流下发真实 seek、预览期间静音、收尾精确落定，
  * 且不参与加载与切集的状态判定。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -80,30 +81,113 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `a released preview restores the audio and the progress updates`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(70_000)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        controller.commitSeekPreview()
+        engine.reportPositionChanged(120_000, 600_000)
+
+        assertEquals(listOf(true, false), engine.muteCalls)
+        // 预览结束后进度立刻恢复更新，不再被预览吞掉。
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `an idle preview times out and restores the audio`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(70_000)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 没有任何收尾调用时也不能一直静音、一直吞进度。
+        advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
+
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertNull(controller.seekPreviewMillis.value)
+        assertEquals(70_000L, engine.seekPositions.last())
+
+        engine.reportPositionChanged(120_000, 600_000)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `an external seek ends the preview without leaving the audio muted`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(70_000)
+
+        controller.seekTo(200_000)
+
+        // 先结束预览再正常跳转，不重复落到预览目标。
+        assertEquals(listOf(70_000L, 200_000L), engine.seekPositions)
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertNull(controller.seekPreviewMillis.value)
+
+        engine.reportPositionChanged(200_000, 600_000)
+        assertEquals(200_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
     fun `dragging during the first load does not preview`() = runTest {
         val controller = controller()
-        controller.openPlaylist(
-            listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")),
-            MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
-        )
+        open(controller)
 
         controller.updateSeekPreview(30_000)
+        advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
 
         assertTrue(engine.seekPositions.isEmpty())
         assertTrue(engine.muteCalls.isEmpty())
     }
 
     @Test
-    fun `dragging during a switch does not preview or create ready evidence`() = runTest {
+    fun `a preview during the first load leaves the buffering indicator alone`() = runTest {
+        val controller = controller()
+        open(controller)
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS + 1)
+        assertTrue(controller.buffering.value)
+
+        controller.updateSeekPreview(30_000)
+
+        assertTrue(controller.buffering.value)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `a preview during a switch creates no switch evidence`() = runTest {
         val controller = playingController()
         controller.next()
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS + 1)
+        assertTrue(controller.buffering.value)
+        val startedLoads = engine.startedUrls.size
+
+        controller.updateSeekPreview(30_000)
+        advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
+
+        // 预览既不推进加载，也不改出缓冲提示、不触发自动连播。
         assertTrue(controller.switching.value)
+        assertTrue(controller.buffering.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertTrue(engine.muteCalls.isEmpty())
+    }
+
+    @Test
+    fun `dragging while restoring the origin does not preview`() = runTest {
+        val controller = playingController()
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
 
         controller.updateSeekPreview(30_000)
 
         assertTrue(engine.seekPositions.isEmpty())
         assertTrue(engine.muteCalls.isEmpty())
-        assertTrue(controller.switching.value)
     }
 
     @Test
@@ -132,6 +216,20 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `a preview near the end does not start the next episode`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val startedLoads = engine.startedUrls.size
+
+        controller.updateSeekPreview(599_000)
+        controller.commitSeekPreview()
+
+        assertFalse(controller.switching.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+    }
+
+    @Test
     fun `wheel steps accumulate from the pending preview target`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
@@ -141,6 +239,30 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
 
         assertEquals(listOf(55_000L, 50_000L), engine.seekPositions)
+    }
+
+    @Test
+    fun `a wheel step inside the settle window keeps the preview alive`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val fadesBeforePreview = engine.fadeInDurations.size
+
+        assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        advanceTimeBy(200)
+        assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
+        advanceTimeBy(200)
+
+        // 窗口从最后一档起算：没有先落定再重新静音的音量跳变。
+        assertEquals(listOf(true), engine.muteCalls)
+        assertEquals(fadesBeforePreview, engine.fadeInDurations.size)
+        assertEquals(listOf(55_000L, 50_000L), engine.seekPositions)
+
+        advanceTimeBy(PlaybackController.WHEEL_SETTLE_MILLIS + 1)
+
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
+        assertEquals(50_000L, engine.seekPositions.last())
+        assertNull(controller.seekPreviewMillis.value)
     }
 
     @Test
@@ -166,6 +288,17 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true, false), engine.muteCalls)
     }
 
+    @Test
+    fun `stopping restores the audio muted by a preview`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(70_000)
+
+        controller.stop()
+
+        assertEquals(listOf(true, false), engine.muteCalls)
+    }
+
     private fun TestScope.controller(): PlaybackController = PlaybackController(
         engine,
         progress,
@@ -177,12 +310,16 @@ class PlaybackControllerSeekPreviewTest {
     /** 起播第一集并等首帧就绪，作为正常播放状态。 */
     private fun TestScope.playingController(): PlaybackController {
         val controller = controller()
+        open(controller)
+        engine.reportMediaLoaded()
+        return controller
+    }
+
+    private fun open(controller: PlaybackController) {
         val files = listOf(
             MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
             MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"),
         )
         controller.openPlaylist(files, files.first())
-        engine.reportMediaLoaded()
-        return controller
     }
 }

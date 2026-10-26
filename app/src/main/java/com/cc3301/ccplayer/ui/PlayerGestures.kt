@@ -9,9 +9,6 @@ const val SEEK_STEP_MILLIS = 10_000L
 /** 鼠标滚轮每一格的跳转时长，毫秒。 */
 const val WHEEL_SEEK_STEP_MILLIS = 5_000L
 
-/** 滚轮停止滚动多久后落定，毫秒。 */
-const val WHEEL_SEEK_SETTLE_MILLIS = 400L
-
 /** 中间区域整屏宽度对应的跳转时长，毫秒。 */
 const val SEEK_FULL_WIDTH_MILLIS = 300_000L
 

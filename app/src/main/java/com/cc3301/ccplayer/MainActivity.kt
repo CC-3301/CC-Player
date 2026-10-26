@@ -658,6 +658,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
+        // 退后台时手势不会再收尾：落定预览并恢复声音，后台播放开着也一样。
+        binder?.controller?.commitSeekPreview()
         surfaceSession.onActivityStopped()
         // 后台上报可能已把播放暂停；抓帧在后台执行，完成后由 Surface 会话分离。
         detachAfterBackgroundCapture { !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
