@@ -394,7 +394,16 @@ fun PlayerScreen(
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
-            videoAspectRatio = videoAspectRatio,
+            // 切集期间新文件比例未知，沿用原片比例，不把视频区铺满全屏。
+            videoAspectRatio = if (switching) {
+                switchFreezeAspectRatio(
+                    videoAspectRatio = videoAspectRatio,
+                    freezeFrameWidth = freezeFrame?.width ?: 0,
+                    freezeFrameHeight = freezeFrame?.height ?: 0,
+                )
+            } else {
+                videoAspectRatio
+            },
         )
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
@@ -431,7 +440,13 @@ fun PlayerScreen(
                 bitmap = freezeFrame.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
+                // 冻结画面按视频区绘制：保持原片比例，不居中放大。
+                modifier = Modifier
+                    .offset { IntOffset(viewport.left.roundToInt(), viewport.top.roundToInt()) }
+                    .size(
+                        width = with(density) { viewport.width.toDp() },
+                        height = with(density) { viewport.height.toDp() },
+                    ),
             )
         }
         // 后台回来先盖住离开前的画面；播放核心重新出帧后由控制层撤掉这一层。

@@ -44,6 +44,7 @@ import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.DiagnosticsExporter
 import com.cc3301.ccplayer.diagnostics.connectionLogLine
 import com.cc3301.ccplayer.diagnostics.logLibraryNavigation
+import com.cc3301.ccplayer.diagnostics.screenOrientationChangeLine
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaFile
@@ -186,6 +187,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
+
+    /** 最近一次记录过的屏幕方向；横竖真正变化时写一条诊断日志。 */
+    private var screenOrientation = ScreenOrientation.System
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -286,6 +290,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        screenOrientation = currentScreenOrientation()
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -800,6 +805,28 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             Configuration.ORIENTATION_LANDSCAPE -> ScreenOrientation.Landscape
             else -> ScreenOrientation.Portrait
         }
+
+    /** 每次横竖屏真正切换都写一条日志。 */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val current = currentScreenOrientation()
+        if (current == screenOrientation) return
+        val previous = screenOrientation
+        screenOrientation = current
+        diagnostics.log {
+            screenOrientationChangeLine(
+                from = screenOrientationLabel(previous),
+                to = screenOrientationLabel(current),
+            )
+        }
+    }
+
+    /** 屏幕方向在诊断日志里的文案。 */
+    private fun screenOrientationLabel(orientation: ScreenOrientation): String = when (orientation) {
+        ScreenOrientation.Landscape -> "横屏"
+        ScreenOrientation.Portrait -> "竖屏"
+        ScreenOrientation.System -> "系统"
+    }
 
     private fun applyImmersive(immersive: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)

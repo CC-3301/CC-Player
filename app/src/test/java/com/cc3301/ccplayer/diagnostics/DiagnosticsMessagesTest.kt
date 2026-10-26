@@ -57,4 +57,10 @@ class DiagnosticsMessagesTest {
         assertEquals(listOf("导航: 目录 我的源 /剧集/第1季"), sink.lines)
         assertTrue(sink.lines.single().contains("我的源"))
     }
+
+    @Test
+    fun `屏幕方向切换日志记录切换前后的方向`() {
+        assertEquals("屏幕方向: 竖屏 -> 横屏", screenOrientationChangeLine("竖屏", "横屏"))
+        assertEquals("屏幕方向: 横屏 -> 竖屏", screenOrientationChangeLine("横屏", "竖屏"))
+    }
 }

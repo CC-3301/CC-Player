@@ -142,95 +142,85 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停态回前台由一次非 seek 刷新证明新帧并撤掉缓存帧`() = runTest {
+    fun `暂停态回前台 seek 到当前位置逼出帧`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
+        engine.reportPositionChanged(42_000, 600_000)
 
         reattach(controller)
         runCurrent()
 
-        // 暂停态没有位置前进：一次成功的非 seek 刷新就是新帧证据。
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertNull(controller.backgroundRestoreFrame.value)
-        assertTrue(engine.seekPositions.isEmpty())
+        // 暂停态不会自然出帧：seek 到当前位置，播放位置不变。
+        assertEquals(listOf(42_000L), engine.seekPositions)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+        // seek 完成前不算画面恢复，缓存帧先保留。
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+
+        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
+        runCurrent()
+
+        // seek 之后的抓帧成功才算画面恢复。
+        assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `暂停态回前台刷新执行但抓不到帧时保留缓存帧`() = runTest {
+    fun `暂停态回前台 seek 后抓不到帧时保留旧画面`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
         engine.frameToGrab = null
 
         reattach(controller)
+        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
         runCurrent()
 
-        // 刷新指令成功不是出帧证据：抓不到帧就不撤缓存画面。
-        assertEquals(1, engine.refreshSurfaceCalls)
+        assertEquals(1, engine.seekPositions.size)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+
+        // 等待有上限：超时后不再 seek，旧画面保持。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        assertEquals(1, engine.seekPositions.size)
         assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `播放态刷新指令成功不算出帧证据`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        controller.resume()
-        engine.reportPauseChanged(false)
+    fun `播放态回前台先等画面自然输出再 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
 
         reattach(controller)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        runCurrent()
+        assertTrue(engine.seekPositions.isEmpty())
+
+        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS)
         runCurrent()
 
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        // 等不到自然出帧才 seek 到当前位置；位置与加载目标都不变。
+        assertEquals(listOf(30_000L), engine.seekPositions)
+        assertEquals(30_000L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+
+        // 只 seek 一次，不会反复逼帧。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
+        runCurrent()
+        assertEquals(1, engine.seekPositions.size)
     }
 
     @Test
-    fun `暂停态回前台刷新未执行时保留缓存帧并重试`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        engine.refreshSurfaceResult = false
+    fun `播放态回前台画面自然输出就不 seek`() = runTest {
+        val controller = playingController()
 
         reattach(controller)
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS * 3)
         runCurrent()
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
 
-        // 刷新未真正执行时计入重试次数：短延迟重试，用尽后保留缓存帧。
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(2, engine.refreshSurfaceCalls)
-
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS * 5)
-        runCurrent()
-        assertEquals(PlaybackController.SURFACE_REFRESH_MAX_ATTEMPTS, engine.refreshSurfaceCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-    }
-
-    @Test
-    fun `暂停态回前台重试成功后才撤缓存帧`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        engine.refreshSurfaceFailures = 2
-
-        reattach(controller)
-        runCurrent()
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(2, engine.refreshSurfaceCalls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-
-        advanceTimeBy(PlaybackController.SURFACE_REFRESH_RETRY_MILLIS)
-        runCurrent()
-        assertEquals(3, engine.refreshSurfaceCalls)
-        assertNull(controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(engine.seekPositions.isEmpty())
     }
 
     @Test
@@ -277,13 +267,13 @@ class PlaybackControllerBackgroundTest {
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(30_000L, controller.progress.value.positionMillis)
 
-        // 回前台走重挂后的出帧路径：位置前进过一次，刷新不再需要。
+        // 回前台走重挂后的出帧路径：位置前进过一次，不再 seek。
         engine.reportPositionChanged(31_000, 600_000)
         engine.reportFramePresented()
         assertNull(controller.backgroundRestoreFrame.value)
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
         runCurrent()
-        assertEquals(0, engine.refreshSurfaceCalls)
+        assertTrue(engine.seekPositions.isEmpty())
     }
 
     @Test
@@ -305,47 +295,18 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(true)
 
         assertTrue(engine.surfaceGeneration > generationBefore)
-        // 暂停态回前台由一次非 seek 刷新证明新帧，缓存帧随之撤掉；状态保持暂停。
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertNull(controller.backgroundRestoreFrame.value)
+        // 暂停态回前台 seek 到当前位置逼出帧，seek 完成前缓存帧仍在。
+        assertEquals(1, engine.seekPositions.size)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-        assertTrue(engine.seekPositions.isEmpty())
-    }
 
-    @Test
-    fun `Surface 重挂后没有新帧时只刷新一次且位置不变`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(12_000, 600_000)
-        controller.setRenderSurfaceAvailable(false)
-        controller.setRenderSurfaceAvailable(true)
-
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        engine.reportLoadActivity(LoadActivity.PlaybackRestart)
         runCurrent()
 
-        assertEquals(1, engine.refreshSurfaceCalls)
-        assertTrue(engine.seekPositions.isEmpty())
-        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-        assertEquals(12_000L, controller.progress.value.positionMillis)
-
-        // 只允许一次：之后仍无新帧也不再刷新。
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 5)
-        runCurrent()
-        assertEquals(1, engine.refreshSurfaceCalls)
-    }
-
-    @Test
-    fun `Surface 重挂后收到新帧就不再刷新`() = runTest {
-        val controller = playingController()
-        controller.setRenderSurfaceAvailable(false)
-        controller.setRenderSurfaceAvailable(true)
-
-        engine.reportFramePresented()
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
-        runCurrent()
-
-        assertEquals(0, engine.refreshSurfaceCalls)
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test

@@ -5,6 +5,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class PlayerLayoutTest {
@@ -182,6 +183,31 @@ class PlayerLayoutTest {
         assertViewport(0f, 0f, 0f, 0f, viewport)
     }
 
+    @Test
+    fun `切集期间按冻结画面的原片比例绘制`() {
+        // 新文件已上报 2.0：旧画面还在，视频区仍按原片比例，不跟着新文件改。
+        assertEquals(
+            16.0 / 9.0,
+            switchFreezeAspectRatio(videoAspectRatio = 2.0, freezeFrameWidth = 1600, freezeFrameHeight = 900)!!,
+            RATIO_TOLERANCE,
+        )
+    }
+
+    @Test
+    fun `切集期间还没有冻结画面时沿用已上报的比例`() {
+        assertEquals(
+            2.0,
+            switchFreezeAspectRatio(videoAspectRatio = 2.0, freezeFrameWidth = 0, freezeFrameHeight = 0)!!,
+            RATIO_TOLERANCE,
+        )
+    }
+
+    @Test
+    fun `切集期间没有可用比例时保持未知并交给铺满容器`() {
+        assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = 0, freezeFrameHeight = 0))
+        assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = -4, freezeFrameHeight = 90))
+    }
+
     private fun assertViewport(
         left: Float,
         top: Float,
@@ -197,5 +223,8 @@ class PlayerLayoutTest {
 
     private companion object {
         const val TOLERANCE = 0.001f
+
+        /** 宽高比按双精度比较。 */
+        const val RATIO_TOLERANCE = 0.0001
     }
 }
