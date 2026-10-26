@@ -59,8 +59,10 @@ class NavigationViewModel(
 ) : ViewModel() {
 
     /** 没有进程保存状态时等待冷启动恢复；用户先导航或恢复结束后清除。 */
-    var coldStartPending: Boolean = !savedState.contains(KEY_SCREEN)
-        private set
+    private val _coldStartPending = MutableStateFlow(!savedState.contains(KEY_SCREEN))
+
+    /** 冷启动恢复判定未完成；恢复结束后清除。 */
+    val coldStartPending: StateFlow<Boolean> = _coldStartPending.asStateFlow()
 
     /** 每次用户导航递增；库页面的冷启动校验据此取消。 */
     private val _userNavigationRevision = MutableStateFlow(0)
@@ -182,9 +184,9 @@ class NavigationViewModel(
         sourcesProtocol: SourceProtocol,
         stack: List<MediaFile>,
     ): Boolean {
-        if (!coldStartPending) return false
-        coldStartPending = false
+        if (!_coldStartPending.value) return false
         if (_state.value.screen != AppScreen.Home || stack.isEmpty()) {
+            _coldStartPending.value = false
             diagnostics.log { "导航恢复: 当前已离开首页或目录栈为空，忽略冷启动恢复" }
             return false
         }
@@ -195,20 +197,22 @@ class NavigationViewModel(
                 library = LibraryLocation(sourceLocation, stack),
             )
         }
+        // 当前屏、源协议与目录栈先一次性写入，最后才放行界面。
+        _coldStartPending.value = false
         diagnostics.log { "导航恢复: 冷启动恢复库页面" }
         return true
     }
 
     /** 放弃冷启动恢复；[reason] 非空时记录可解释的原因。 */
     fun discardColdStart(reason: String? = null) {
-        if (!coldStartPending) return
-        coldStartPending = false
+        if (!_coldStartPending.value) return
+        _coldStartPending.value = false
         if (reason != null) diagnostics.log { "导航恢复: $reason，回首页" }
     }
 
     /** 冷启动校验失败：只记录原因，不改变用户当前界面。 */
     fun failColdStart(reason: String) {
-        coldStartPending = false
+        _coldStartPending.value = false
         logRestoreFailure(
             reason,
             if (_state.value.screen == AppScreen.Home) "，回首页" else "，已放弃",
@@ -220,7 +224,7 @@ class NavigationViewModel(
      * 用户已离开时只记录日志并放弃。
      */
     fun failRestore(expected: LibraryLocation, reason: String) {
-        coldStartPending = false
+        _coldStartPending.value = false
         val current = _state.value
         val sameLibrary = current.library == expected
         when {
@@ -249,7 +253,7 @@ class NavigationViewModel(
     }
 
     private fun cancelColdStartRestore() {
-        coldStartPending = false
+        _coldStartPending.value = false
         _userNavigationRevision.value += 1
     }
 

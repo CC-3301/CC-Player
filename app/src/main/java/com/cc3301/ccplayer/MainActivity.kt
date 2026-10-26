@@ -22,12 +22,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -292,6 +297,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 val sourcesState by library.sourcesState.collectAsState()
                 val settingsState by settingsViewModel.state.collectAsState()
                 val navState by navigation.state.collectAsState()
+                val coldStartPending by navigation.coldStartPending.collectAsState()
                 val autoPlayNext by settings.autoPlayNext.collectAsState(
                     initial = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
                 )
@@ -299,7 +305,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     initial = SettingsRepository.DEFAULT_ORIENTATION_MODE,
                 )
                 LaunchedEffect(playerVisible) { applyImmersive(playerVisible) }
-                LaunchedEffect(navState.screen, navState.sourcesProtocol, playerVisible) {
+                LaunchedEffect(navState.screen, navState.sourcesProtocol, playerVisible, coldStartPending) {
+                    // 恢复判定完成前界面还没渲染，不产生导航日志。
+                    if (coldStartPending) return@LaunchedEffect
                     diagnostics.log {
                         if (playerVisible) {
                             "导航: 播放页"
@@ -332,6 +340,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 }
 
                 when {
+                    // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
+                    coldStartPending -> {
+                        // 判定期间返回键忽略：不退出、不提示，也不取消本次恢复。
+                        BackHandler {}
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.background),
+                        )
+                    }
+
                     playerVisible -> {
                         BackHandler { handlePlayerBack() }
                         PlayerScreen(

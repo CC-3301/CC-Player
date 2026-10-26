@@ -1256,7 +1256,7 @@ class LibraryViewModelTest {
         assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
         assertNull(coldNavigation.state.value.library)
         assertEquals("", restored.state.value.sourceLocation)
-        assertFalse(coldNavigation.coldStartPending)
+        assertFalse(coldNavigation.coldStartPending.value)
     }
 
     @Test
@@ -1419,6 +1419,42 @@ class LibraryViewModelTest {
 
         assertEquals(listOf(localRoot.location, series.location), counting.listCalls)
         assertEquals(listOf("第01集.mkv"), restored.state.value.entries.map { it.name })
+    }
+
+    @Test
+    fun `冷启动判定完成前停在首页，完成后落到目标库页面`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series)
+        settings.addRoot(localRoot.location)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Library,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot, series),
+            ),
+        )
+        val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(library = gated, navigation = coldNavigation)
+        advanceUntilIdle()
+
+        // 目录列举仍挂起：判定未完成，导航状态停在首页，没有可渲染的库页面。
+        assertTrue(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertTrue(restored.state.value.stack.isEmpty())
+
+        gated.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Library, coldNavigation.state.value.screen)
+        assertEquals(listOf("媒体", "剧集"), coldNavigation.state.value.library?.stack?.map { it.name })
+        assertEquals(series.location, restored.state.value.currentDirectory?.location)
     }
 
     @Test
