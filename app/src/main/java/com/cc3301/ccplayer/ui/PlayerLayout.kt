@@ -39,6 +39,22 @@ fun videoViewport(
 }
 
 /**
+ * 切集期间视频区的比例：冻结画面就是原片，按它的比例铺满可视区；还没有冻结画面时沿用
+ * 最近一次上报；两者都没有时保持未知。新文件的比例不参与判定，旧画面才不会放大或跳变。
+ */
+fun switchFreezeAspectRatio(
+    videoAspectRatio: Double?,
+    freezeFrameWidth: Int,
+    freezeFrameHeight: Int,
+): Double? {
+    if (freezeFrameWidth > 0 && freezeFrameHeight > 0) {
+        val frameRatio = freezeFrameWidth.toDouble() / freezeFrameHeight
+        if (frameRatio.isFinite() && frameRatio > 0.0) return frameRatio
+    }
+    return videoAspectRatio?.takeIf { it.isFinite() && it > 0.0 }
+}
+
+/**
  * 播放页黑底层规则：只有片尾、首次缓冲、或切集时已明确没有冻结画面才铺黑底。
  * 抓帧还在途时原画面仍留在 Surface 上，不铺黑底。
  */

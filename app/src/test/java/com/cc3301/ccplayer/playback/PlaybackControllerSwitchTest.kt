@@ -1246,7 +1246,6 @@ class PlaybackControllerSwitchTest {
         val controller = playingController()
         val frame = testBitmap()
         engine.frameToGrab = PlaybackEngine.Frame(frame)
-        engine.refreshSurfaceResult = false
         val failures = collectFailures(controller)
 
         controller.next()

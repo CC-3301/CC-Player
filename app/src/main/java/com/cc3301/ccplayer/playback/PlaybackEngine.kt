@@ -73,9 +73,6 @@ interface PlaybackEngine {
 
     fun detachSurface()
 
-    /** 非 seek 刷新：要求播放核心重新向当前 Surface 输出画面，播放位置不变。返回是否真正执行。 */
-    fun refreshSurface(): Boolean
-
     fun setSurfaceSize(width: Int, height: Int)
 
     /** 释放引擎持有的全部原生资源。 */
