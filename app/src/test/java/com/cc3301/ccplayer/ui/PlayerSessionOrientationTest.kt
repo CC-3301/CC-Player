@@ -42,6 +42,13 @@ class PlayerSessionOrientationTest {
     }
 
     @Test
+    fun `反向横屏下按转屏按钮切到竖屏`() {
+        session.toggle(ScreenOrientation.ReverseLandscape)
+
+        assertEquals(ScreenOrientation.Portrait, session.override)
+    }
+
+    @Test
     fun `进入新播放清零转屏覆盖`() {
         session.toggle(ScreenOrientation.Portrait)
 

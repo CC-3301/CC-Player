@@ -8,10 +8,14 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.hardware.SensorManager
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.view.Display
+import android.view.OrientationEventListener
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -26,6 +30,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -93,6 +98,7 @@ import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.relativeSeekTarget
+import com.cc3301.ccplayer.ui.sensorScreenOrientation
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
@@ -181,7 +187,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
-    /** 上一次记录过的横竖状态；横竖真正变化时据此写一条诊断日志。 */
+    /** 最近的设置方向档位；传感器回调在组合之外判定，需要即时读到。 */
+    private var playerOrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE
+
+    /** 最近一次传感器角度；为空表示还没收到或设备平放无法判定，方向保持不动。 */
+    private var sensorAngle: Int? = null
+
+    /** 已施加的播放页方向，用于方向迟滞；进入播放页时回到系统朝向。 */
+    private var appliedScreenOrientation = ScreenOrientation.System
+
+    /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
@@ -320,14 +335,30 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 LaunchedEffect(playbackState, buffering, switching) {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
+                // 播放页由传感器判定四向方向；离开播放页把方向交回系统。
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
-                    applyOrientation(
-                        if (playerVisible) {
-                            sessionOrientation.resolve(orientationMode, videoAspectRatio)
-                        } else {
-                            ScreenOrientation.System
-                        },
-                    )
+                    playerOrientationMode = orientationMode
+                    if (playerVisible) {
+                        applyPlayerOrientation()
+                    } else {
+                        applyOrientation(ScreenOrientation.System)
+                    }
+                }
+                // 传感器只在播放页注册，离开播放页注销。
+                DisposableEffect(playerVisible) {
+                    if (!playerVisible) return@DisposableEffect onDispose { }
+                    val listener = object : OrientationEventListener(this@MainActivity, SensorManager.SENSOR_DELAY_UI) {
+                        override fun onOrientationChanged(orientation: Int) {
+                            if (!playerVisible) return
+                            sensorAngle = orientation.takeIf { it != OrientationEventListener.ORIENTATION_UNKNOWN }
+                            applyPlayerOrientation()
+                        }
+                    }
+                    if (listener.canDetectOrientation()) listener.enable()
+                    onDispose {
+                        listener.disable()
+                        sensorAngle = null
+                    }
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
@@ -594,6 +625,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。 */
     private fun enterPlayer(preparing: Boolean) {
         sessionOrientation.beginPlayback()
+        appliedScreenOrientation = ScreenOrientation.System
         playerVisible = true
         playbackEntry.enter(preparing)
         requestNotificationPermission()
@@ -776,31 +808,59 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         applyOrientation(ScreenOrientation.System)
     }
 
-    /** 当前屏幕的横竖状态，供转屏按钮从现状切换。 */
+    /** 当前屏幕的四向方向，供转屏按钮从现状切换与方向日志判定。 */
     private fun currentScreenOrientation(): ScreenOrientation =
-        when (resources.configuration.orientation) {
-            Configuration.ORIENTATION_LANDSCAPE -> ScreenOrientation.Landscape
+        when (displayRotation()) {
+            Surface.ROTATION_90 -> ScreenOrientation.Landscape
+            Surface.ROTATION_180 -> ScreenOrientation.ReversePortrait
+            Surface.ROTATION_270 -> ScreenOrientation.ReverseLandscape
             else -> ScreenOrientation.Portrait
         }
 
-    /** 每次横竖屏真正切换都写一条日志。 */
+    /** 显示旋转值；180° 反向与正向同属一个族，只能由它区分。 */
+    private fun displayRotation(): Int =
+        getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
+            ?: Surface.ROTATION_0
+
+    /**
+     * 播放页按传感器角度与期望族施加四向朝向；方向真正变化时才写一条诊断日志。
+     */
+    private fun applyPlayerOrientation() {
+        val requested = sessionOrientation.resolve(playerOrientationMode, videoAspectRatio)
+        val target = sensorScreenOrientation(requested, sensorAngle, appliedScreenOrientation)
+        if (target == appliedScreenOrientation) return
+        appliedScreenOrientation = target
+        applyOrientation(target)
+        recordScreenOrientation(target)
+    }
+
+    /** 每次方向真正切换都写一条日志。 */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        val current = currentScreenOrientation()
-        if (current == lastScreenOrientation) return
+        recordScreenOrientation(currentScreenOrientation())
+    }
+
+    /** 记录一次屏幕方向切换；同一方向不重复记录。 */
+    private fun recordScreenOrientation(orientation: ScreenOrientation) {
+        if (orientation == lastScreenOrientation) return
         val previous = lastScreenOrientation
-        lastScreenOrientation = current
+        lastScreenOrientation = orientation
         diagnostics.log {
             screenOrientationChangeLine(
                 from = screenOrientationLabel(previous),
-                to = screenOrientationLabel(current),
+                to = screenOrientationLabel(orientation),
             )
         }
     }
 
-    /** 屏幕方向在诊断日志里的文案：横竖判断只会给出这两种结果。 */
-    private fun screenOrientationLabel(orientation: ScreenOrientation): String =
-        if (orientation == ScreenOrientation.Landscape) "横屏" else "竖屏"
+    /** 屏幕方向在诊断日志里的文案：按四个方向分别记录。 */
+    private fun screenOrientationLabel(orientation: ScreenOrientation): String = when (orientation) {
+        ScreenOrientation.Portrait -> "竖屏"
+        ScreenOrientation.ReversePortrait -> "反向竖屏"
+        ScreenOrientation.Landscape -> "横屏"
+        ScreenOrientation.ReverseLandscape -> "反向横屏"
+        ScreenOrientation.System -> "系统"
+    }
 
     private fun applyImmersive(immersive: Boolean) {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
@@ -812,12 +872,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 播放页按设置施加朝向；离开播放页时交回系统自动旋转设置。 */
+    /** 播放页按传感器判定施加朝向；离开播放页时交回系统自动旋转设置。 */
     private fun applyOrientation(orientation: ScreenOrientation) {
         requestedOrientation = when (orientation) {
             ScreenOrientation.System -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            ScreenOrientation.Landscape -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
             ScreenOrientation.Portrait -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            ScreenOrientation.ReversePortrait -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+            ScreenOrientation.Landscape -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            ScreenOrientation.ReverseLandscape -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
         }
     }
 
