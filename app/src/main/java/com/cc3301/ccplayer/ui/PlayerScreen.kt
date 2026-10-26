@@ -1288,7 +1288,7 @@ private fun PlayerIconBar(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(metrics.barHeight),
+                .height(metrics.transportButtonHeight),
         ) {
             // 左下角锁定键与上一集/播放/下一集同一条水平线。
             PlayerIconButton(
@@ -1306,7 +1306,8 @@ private fun PlayerIconBar(
                 ),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .size(PlayerSideTouchTarget),
+                    .size(metrics.sideTouchTarget),
+                iconSize = metrics.sideIconSize,
             )
             // 上一集在播放键左侧、下一集在右侧，播放键始终居中。
             Row(
@@ -1331,7 +1332,7 @@ private fun PlayerIconBar(
                         metrics.transportButtonWidth,
                         metrics.transportButtonHeight,
                     ),
-                    iconSize = PlayerTransportIconSize,
+                    iconSize = metrics.transportIconSize,
                 )
                 PlayerIconButton(
                     icon = if (playing) R.drawable.ic_player_pause else R.drawable.ic_player_play,
@@ -1353,7 +1354,7 @@ private fun PlayerIconBar(
                         metrics.transportButtonWidth,
                         metrics.transportButtonHeight,
                     ),
-                    iconSize = PlayerPlayPauseIconSize,
+                    iconSize = metrics.playPauseIconSize,
                 )
                 PlayerIconButton(
                     icon = R.drawable.ic_player_next,
@@ -1373,10 +1374,10 @@ private fun PlayerIconBar(
                         metrics.transportButtonWidth,
                         metrics.transportButtonHeight,
                     ),
-                    iconSize = PlayerTransportIconSize,
+                    iconSize = metrics.transportIconSize,
                 )
             }
-            // 字幕紧挨播放列表放在右下区域；极窄屏改为上下排列，避免与三键重叠。
+            // 字幕紧挨播放列表放在右下区域：通道不够宽时随整条按钮等比缩小，不改成上下排列。
             val subtitleButton: @Composable () -> Unit = {
                 PlayerIconButton(
                     icon = R.drawable.ic_player_subtitles,
@@ -1393,7 +1394,8 @@ private fun PlayerIconBar(
                         restoring = restoring,
                     ),
                     active = subtitleMenuVisible,
-                    modifier = Modifier.size(PlayerSideTouchTarget),
+                    modifier = Modifier.size(metrics.sideTouchTarget),
+                    iconSize = metrics.sideIconSize,
                 )
             }
             val playlistButton: @Composable () -> Unit = {
@@ -1411,25 +1413,16 @@ private fun PlayerIconBar(
                         initialLoading = initialLoading,
                         restoring = restoring,
                     ),
-                    modifier = Modifier.size(PlayerSideTouchTarget),
+                    modifier = Modifier.size(metrics.sideTouchTarget),
+                    iconSize = metrics.sideIconSize,
                 )
             }
-            if (metrics.rightStacked) {
-                Column(
-                    modifier = Modifier.align(Alignment.CenterEnd),
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    subtitleButton()
-                    playlistButton()
-                }
-            } else {
-                Row(
-                    modifier = Modifier.align(Alignment.CenterEnd),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    subtitleButton()
-                    playlistButton()
-                }
+            Row(
+                modifier = Modifier.align(Alignment.CenterEnd),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                subtitleButton()
+                playlistButton()
             }
         }
     }
