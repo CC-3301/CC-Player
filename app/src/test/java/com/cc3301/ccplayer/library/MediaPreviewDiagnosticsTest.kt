@@ -54,7 +54,6 @@ class MediaPreviewDiagnosticsTest {
 
     private fun source(diagnostics: Diagnostics): CachedMediaPreviewSource =
         CachedMediaPreviewSource(
-            sourceKeyDispatcher = Dispatchers.Unconfined,
             extractor = extractor,
             cache = ThumbnailCache(
                 directory = directory,

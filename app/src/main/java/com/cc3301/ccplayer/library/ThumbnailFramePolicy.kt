@@ -26,6 +26,9 @@ internal const val LOCAL_FRAME_COUNT = 3
 /** 网络单帧的最早位置：1 秒。 */
 internal const val NETWORK_MIN_FRAME_POSITION_MICROS = 1_000_000L
 
+/** 网络单帧的最晚位置：30 秒；再往后要跨很远做网络寻址，单帧会拖到十秒级。 */
+internal const val NETWORK_MAX_FRAME_POSITION_MICROS = 30_000_000L
+
 /** 全部候选都不合格时退回的比例位置。 */
 internal const val FALLBACK_FRAME_FRACTION = 1.0 / 3.0
 
@@ -67,28 +70,39 @@ internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePo
     }.distinctBy { it.micros }
 }
 
-/** 网络只取一帧：位置为 max(1% 时长, 1 秒)；时长未知时取 1 秒，不取片头。 */
-internal fun networkFramePosition(durationMillis: Long?): FramePosition {
-    val durationMicros = durationMillis?.takeIf { it > 0 }?.times(1_000)
-    val micros = durationMicros?.let { maxOf(it / 100, NETWORK_MIN_FRAME_POSITION_MICROS) }
-        ?: NETWORK_MIN_FRAME_POSITION_MICROS
-    return FramePosition(micros, fallback = true)
-}
+/** 主候选是纯色帧时依次退到的位置（微秒）。 */
+private val NETWORK_FALLBACK_FRAME_POSITION_MICROS = listOf(60_000_000L, 90_000_000L)
 
 /**
- * 网络单帧抽取：只解码一个位置；解不出或纯色时返回 null，界面保持占位图。
- * 不合格帧不缓存，下一次请求会重新解码。
- * [release] 在纯色帧被丢弃前调用，用于回收位图。
+ * 网络主候选位置（微秒）：`min(max(1% 时长, 1 秒), 30 秒)`；时长未知时取 1 秒，不取片头。
+ */
+internal fun networkFramePosition(durationMillis: Long?): Long {
+    val durationMicros = durationMillis?.takeIf { it > 0 }?.times(1_000)
+    return durationMicros
+        ?.let { (it / 100).coerceIn(NETWORK_MIN_FRAME_POSITION_MICROS, NETWORK_MAX_FRAME_POSITION_MICROS) }
+        ?: NETWORK_MIN_FRAME_POSITION_MICROS
+}
+
+/** 网络抽帧候选位置（微秒）：主候选之后依次试 60 秒与 90 秒，最多三个。 */
+internal fun networkFrameCandidates(durationMillis: Long?): List<Long> =
+    listOf(networkFramePosition(durationMillis)) + NETWORK_FALLBACK_FRAME_POSITION_MICROS
+
+/**
+ * 网络抽帧：按候选位置依次解码，取第一个非纯色帧。
+ * 解不出的位置直接放弃抽取；三个候选都是纯色或解不出时返回 null，界面保持占位图。
+ * 不合格帧在换下一个候选前由 [release] 回收。
  */
 internal fun <T> extractNetworkFrame(
     durationMillis: Long?,
-    decode: (FramePosition) -> T?,
+    decode: (micros: Long) -> T?,
     isSolid: (T) -> Boolean,
     release: (T) -> Unit = {},
 ): T? {
-    val frame = decode(networkFramePosition(durationMillis)) ?: return null
-    if (!isSolid(frame)) return frame
-    release(frame)
+    for (micros in networkFrameCandidates(durationMillis)) {
+        val frame = decode(micros) ?: return null
+        if (!isSolid(frame)) return frame
+        release(frame)
+    }
     return null
 }
 
