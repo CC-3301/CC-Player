@@ -1529,7 +1529,7 @@ class CachedMediaPreviewSourceTest {
         thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
 }
 
-/** 抽取开始后等待闸门，用来稳定构造并发名额被占满、后续请求排队的场景。 */
+/** 抽取开始后等待闸门，用来稳定构造唯一许可被占用、后续请求排队的场景。 */
 private class GatedExtractor(
     var imageGate: CompletableDeferred<Unit>? = CompletableDeferred(),
     var durationFailure: Exception? = null,
@@ -1564,7 +1564,7 @@ private class GatedExtractor(
     }
 }
 
-/** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的并发名额释放。 */
+/** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的许可释放。 */
 private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPreviewExtractor {
 
     val requests = mutableListOf<String>()
