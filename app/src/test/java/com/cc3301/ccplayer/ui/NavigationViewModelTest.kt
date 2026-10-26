@@ -260,7 +260,40 @@ class NavigationViewModelTest {
 
     @Test
     fun `没有保存状态时等待冷启动恢复`() {
-        assertTrue(navigation.coldStartPending)
+        assertTrue(navigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, navigation.state.value.screen)
+    }
+
+    @Test
+    fun `冷启动恢复库页面后放行界面`() = runTest {
+        navigation.restoreColdStartLibrary(root.location, SourceProtocol.Smb, listOf(root, series))
+        advanceUntilIdle()
+
+        assertFalse(navigation.coldStartPending.value)
+        assertEquals(AppScreen.Library, navigation.state.value.screen)
+    }
+
+    @Test
+    fun `冷启动判定停在首页后放行界面`() {
+        navigation.discardColdStart("上次停留界面不是库页面")
+
+        assertFalse(navigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, navigation.state.value.screen)
+    }
+
+    @Test
+    fun `冷启动校验失败后放行界面`() {
+        navigation.failColdStart("目录不可访问")
+
+        assertFalse(navigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, navigation.state.value.screen)
+    }
+
+    @Test
+    fun `进程重建不等待冷启动恢复`() {
+        navigation.openLibrary(root.location, listOf(root, series))
+
+        assertFalse(restoredNavigation().coldStartPending.value)
     }
 
     @Test
@@ -269,7 +302,7 @@ class NavigationViewModelTest {
         advanceUntilIdle()
 
         assertTrue(applied)
-        assertFalse(navigation.coldStartPending)
+        assertFalse(navigation.coldStartPending.value)
         assertEquals(AppScreen.Library, navigation.state.value.screen)
         assertEquals(SourceProtocol.Smb, navigation.state.value.sourcesProtocol)
         assertEquals(listOf(root, series), navigation.state.value.library?.stack)
@@ -297,7 +330,7 @@ class NavigationViewModelTest {
         val applied = navigation.restoreColdStartLibrary(root.location, SourceProtocol.Local, listOf(root))
 
         assertFalse(applied)
-        assertFalse(navigation.coldStartPending)
+        assertFalse(navigation.coldStartPending.value)
         assertEquals(AppScreen.Home, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
     }

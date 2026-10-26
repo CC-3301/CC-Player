@@ -637,7 +637,7 @@ class LibraryViewModel(
             when {
                 // 设置页来处是库页面时也先恢复目录栈，返回时直接可用。
                 navigation.state.value.library != null -> restoreSavedLibrary()
-                navigation.coldStartPending -> restoreColdStart()
+                navigation.coldStartPending.value -> restoreColdStart()
             }
         }
     }
@@ -656,7 +656,7 @@ class LibraryViewModel(
      * 连接源删除或目录不可访问时静默回首页并记录原因。
      */
     private suspend fun restoreColdStart() {
-        val sources = sourcesState.filter { it.ready }.first()
+        // 开关关闭、没有快照或上次不在库页面时立即结束判定，不必等连接源解析（可能连网）。
         if (!settings.restoreLastDirectory.first()) {
             navigation.discardColdStart()
             return
@@ -675,6 +675,7 @@ class LibraryViewModel(
             navigation.failColdStart("库页面目录栈为空")
             return
         }
+        val sources = sourcesState.filter { it.ready }.first()
         val source = (sources.local + sources.smb + sources.webDav)
             .firstOrNull { it.location == sourceLocation }
         if (source == null) {

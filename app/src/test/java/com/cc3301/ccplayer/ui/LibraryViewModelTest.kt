@@ -1256,7 +1256,7 @@ class LibraryViewModelTest {
         assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
         assertNull(coldNavigation.state.value.library)
         assertEquals("", restored.state.value.sourceLocation)
-        assertFalse(coldNavigation.coldStartPending)
+        assertFalse(coldNavigation.coldStartPending.value)
     }
 
     @Test
