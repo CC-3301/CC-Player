@@ -47,6 +47,9 @@ class FakePlaybackEngine : PlaybackEngine {
 
     /** 静音指令序列：true 为静音，false 为恢复。 */
     val muteCalls = mutableListOf<Boolean>()
+
+    /** seek、静音与淡入的调用顺序，用于断言收尾顺序。 */
+    val seekAudioCalls = mutableListOf<String>()
     val decodeModes = mutableListOf<DecodeMode>()
 
     /** 当前媒体的内嵌字幕轨道，测试自己摆。 */
@@ -102,15 +105,18 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun seekTo(positionMillis: Long): Int {
         seekPositions += positionMillis
+        seekAudioCalls += "seek($positionMillis)"
         return ++currentSeekSerial
     }
 
     override fun fadeInAudio(durationMillis: Long) {
         fadeInDurations += durationMillis
+        seekAudioCalls += "fade($durationMillis)"
     }
 
     override fun setAudioMuted(muted: Boolean) {
         muteCalls += muted
+        seekAudioCalls += "muted($muted)"
     }
 
     override fun setDecodeMode(mode: DecodeMode) {

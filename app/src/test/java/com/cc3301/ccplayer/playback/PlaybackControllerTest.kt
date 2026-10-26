@@ -235,11 +235,12 @@ class PlaybackControllerTest {
     fun `releasing the progress bar seeks to the previewed position`() {
         open(media)
         engine.reportMediaLoaded()
+        engine.reportPositionChanged(1_000, 60_000)
         controller.updateSeekPreview(30_000)
 
         controller.commitSeekPreview()
 
-        assertEquals(listOf(30_000L), engine.seekPositions)
+        assertEquals(30_000L, engine.seekPositions.last())
         assertNull(controller.seekPreviewMillis.value)
     }
 

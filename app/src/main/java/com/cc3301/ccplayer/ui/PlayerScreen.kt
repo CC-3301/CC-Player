@@ -133,6 +133,7 @@ import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
+import com.cc3301.ccplayer.playback.PlaybackController
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerOption
@@ -341,6 +342,7 @@ fun PlayerScreen(
     onSeekCommit: () -> Unit,
     onSeekBy: (Long) -> Long,
     onSeekStep: (Long) -> Long?,
+    onSeekHeartbeat: () -> Unit,
     onPlaylistSelect: (MediaFile) -> Unit,
     onSelectDecodeMode: (DecodeMode) -> Unit,
     onSelectLoopMode: (LoopMode) -> Unit,
@@ -551,6 +553,7 @@ fun PlayerScreen(
                 onSeekCommit()
             },
             onSeekStep = onSeekStep,
+            onSeekHeartbeat = onSeekHeartbeat,
             onToggleControls = { controls.toggle() },
             onUserInteraction = { controls.onInteraction() },
             onVolumeHint = { volumeHint = it },
@@ -685,6 +688,7 @@ fun PlayerScreen(
                     controls.onInteraction()
                     onSeekCommit()
                 },
+                onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
                     controls.onInteraction()
                     panels.toggle(PlayerPanel.Playlist)
@@ -806,6 +810,18 @@ fun PlayerScreen(
     }
 }
 
+/** 拖动期间按心跳周期通知控制层：兜底只看心跳是否超时，不看指针事件频率。 */
+@Composable
+private fun PreviewHeartbeat(dragging: Boolean, onHeartbeat: () -> Unit) {
+    val latestOnHeartbeat = rememberUpdatedState(onHeartbeat)
+    LaunchedEffect(dragging) {
+        while (dragging) {
+            delay(PlaybackController.PREVIEW_HEARTBEAT_MILLIS)
+            latestOnHeartbeat.value()
+        }
+    }
+}
+
 /** 手势层：单击显隐控制条、三分区双击、两侧上下拖调音量、中间左右拖跳转、中间滚轮调时长。 */
 @Composable
 private fun PlayerGestureLayer(
@@ -823,6 +839,7 @@ private fun PlayerGestureLayer(
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onSeekStep: (Long) -> Long?,
+    onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
     onUserInteraction: () -> Unit,
     onVolumeHint: (Float?) -> Unit,
@@ -849,6 +866,7 @@ private fun PlayerGestureLayer(
     val latestOnSeekPreview = rememberUpdatedState(onSeekPreview)
     val latestOnSeekCommit = rememberUpdatedState(onSeekCommit)
     val latestOnSeekStep = rememberUpdatedState(onSeekStep)
+    val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnUserInteraction = rememberUpdatedState(onUserInteraction)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
@@ -877,6 +895,10 @@ private fun PlayerGestureLayer(
             }
         }
     }
+
+    // 跳转拖动进行中：按住不动没有指针事件，靠心跳让控制层的兜底不收尾。
+    var seekDragActive by remember { mutableStateOf(false) }
+    PreviewHeartbeat(dragging = seekDragActive) { latestOnSeekHeartbeat.value() }
 
     Box(
         modifier = modifier
@@ -924,7 +946,10 @@ private fun PlayerGestureLayer(
                                         baseMillis = latestPosition.value,
                                         durationMillis = latestDuration.value,
                                         width = size.width,
-                                    ).also { seekDrag = it }
+                                    ).also {
+                                        seekDrag = it
+                                        seekDragActive = true
+                                    }
                                     seek.preview(update.seekDragX)?.let { target ->
                                         latestOnSeekPreview.value(target)
                                         latestOnSeekHint.value(SeekHint(target, target - seek.baseMillis))
@@ -938,6 +963,7 @@ private fun PlayerGestureLayer(
                             latestOnSeekCommit.value()
                         }
                     } finally {
+                        seekDragActive = false
                         latestOnVolumeHint.value(null)
                         latestOnSeekHint.value(null)
                         // 拖动被转屏、手势禁掉或输入中断打断时同样落定：预览 seek 已经挪动画面。
@@ -1239,6 +1265,7 @@ private fun Controls(
     onNext: () -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
+    onSeekHeartbeat: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
     onLock: () -> Unit,
@@ -1272,6 +1299,7 @@ private fun Controls(
             appearanceEnabled = !initialLoading,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
+            onHeartbeat = onSeekHeartbeat,
             modifier = Modifier.padding(horizontal = PlayerSeekHorizontalInset),
         )
         PlayerIconBar(
@@ -1552,6 +1580,7 @@ private fun SeekBar(
     appearanceEnabled: Boolean = true,
     onPreview: (Long) -> Unit,
     onCommit: () -> Unit,
+    onHeartbeat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
@@ -1568,6 +1597,8 @@ private fun SeekBar(
     val unknownText = stringResource(R.string.player_time_unknown)
     val labels = seekBarLabels(positionMillis, durationMillis, previewForDisplay, unknownText)
     val sliderEnabled = enabled && labels.seekEnabled
+    // 按住进度条不动时没有指针事件；用心跳告诉控制层预览还活着。
+    PreviewHeartbeat(dragging = dragMillis != null, onHeartbeat = onHeartbeat)
     // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
     LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
         val held = heldMillis ?: return@LaunchedEffect

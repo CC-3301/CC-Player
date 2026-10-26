@@ -43,7 +43,7 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `preview seeks mute the audio and only the release fades in`() = runTest {
+    fun `preview seeks mute once and the release lands before restoring the audio`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         val fadesBeforePreview = engine.fadeInDurations.size
@@ -58,10 +58,12 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.commitSeekPreview()
 
-        assertEquals(listOf(true, false), engine.muteCalls)
-        assertEquals(80_000L, engine.seekPositions.last())
+        // 先精确 seek，再恢复声音并淡入：落定前的旧位置不会以满音量播出。
+        assertEquals(
+            listOf("seek(80000)", "muted(false)", "fade(500)"),
+            engine.seekAudioCalls.takeLast(3),
+        )
         assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
-        assertEquals(PlaybackController.FADE_IN_MILLIS, engine.fadeInDurations.last())
     }
 
     @Test
@@ -97,35 +99,55 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `an idle preview times out and restores the audio`() = runTest {
+    fun `a stationary drag stays in preview while the heartbeat keeps coming`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
-
         controller.updateSeekPreview(70_000)
-        assertEquals(listOf(true), engine.muteCalls)
 
-        // 没有任何收尾调用时也不能一直静音、一直吞进度。
+        // 手指按住不动没有指针事件：心跳续命，兜底不能中途收尾。
+        repeat(5) {
+            advanceTimeBy(PlaybackController.PREVIEW_HEARTBEAT_MILLIS + 1)
+            controller.seekPreviewHeartbeat()
+            assertEquals(70_000L, controller.seekPreviewMillis.value)
+            assertEquals(listOf(true), engine.muteCalls)
+        }
+
+        assertEquals(listOf(70_000L), engine.seekPositions)
+    }
+
+    @Test
+    fun `a preview without heartbeat only restores the audio`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val fadesBeforePreview = engine.fadeInDurations.size
+        controller.updateSeekPreview(70_000)
+
+        // 心跳停了才收尾：不落定、不淡入，也不改写片尾这类与预览无关的状态。
         advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
 
         assertEquals(listOf(true, false), engine.muteCalls)
         assertNull(controller.seekPreviewMillis.value)
-        assertEquals(70_000L, engine.seekPositions.last())
+        assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(fadesBeforePreview, engine.fadeInDurations.size)
 
         engine.reportPositionChanged(120_000, 600_000)
         assertEquals(120_000L, controller.progress.value.positionMillis)
     }
 
     @Test
-    fun `an external seek ends the preview without leaving the audio muted`() = runTest {
+    fun `an external seek lands before restoring the audio`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.updateSeekPreview(70_000)
 
         controller.seekTo(200_000)
 
-        // 先结束预览再正常跳转，不重复落到预览目标。
+        // 与松手收尾同序：先 seek 到新目标，再恢复声音与淡入。
+        assertEquals(
+            listOf("seek(200000)", "muted(false)", "fade(500)"),
+            engine.seekAudioCalls.takeLast(3),
+        )
         assertEquals(listOf(70_000L, 200_000L), engine.seekPositions)
-        assertEquals(listOf(true, false), engine.muteCalls)
         assertNull(controller.seekPreviewMillis.value)
 
         engine.reportPositionChanged(200_000, 600_000)
@@ -140,6 +162,7 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(30_000)
         advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
 
+        assertNull(controller.seekPreviewMillis.value)
         assertTrue(engine.seekPositions.isEmpty())
         assertTrue(engine.muteCalls.isEmpty())
     }
@@ -173,6 +196,7 @@ class PlaybackControllerSeekPreviewTest {
         assertTrue(controller.buffering.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(startedLoads, engine.startedUrls.size)
+        assertNull(controller.seekPreviewMillis.value)
         assertTrue(engine.seekPositions.isEmpty())
         assertTrue(engine.muteCalls.isEmpty())
     }
@@ -186,17 +210,50 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.updateSeekPreview(30_000)
 
+        assertNull(controller.seekPreviewMillis.value)
         assertTrue(engine.seekPositions.isEmpty())
         assertTrue(engine.muteCalls.isEmpty())
     }
 
     @Test
-    fun `dragging with an unknown duration does not preview`() = runTest {
+    fun `dragging with an unknown duration leaves no preview state`() = runTest {
         val controller = playingController()
 
         controller.updateSeekPreview(30_000)
 
+        // 不允许预览时连标志都不写，进度不会被这条路径永久吞掉。
+        assertNull(controller.seekPreviewMillis.value)
         assertTrue(engine.seekPositions.isEmpty())
+        assertTrue(engine.muteCalls.isEmpty())
+
+        engine.reportPositionChanged(120_000, 600_000)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `a wheel step with an unknown duration leaves no preview state`() = runTest {
+        val controller = playingController()
+
+        assertNull(controller.updateSeekPreviewBy(-5_000))
+
+        assertNull(controller.seekPreviewMillis.value)
+        assertTrue(engine.muteCalls.isEmpty())
+
+        engine.reportPositionChanged(120_000, 600_000)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `a wheel step after playback ended leaves no preview state`() = runTest {
+        val controller = playingController()
+        controller.setAutoPlayNext(false)
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+        assertEquals(PlaybackState.Ended, controller.state.value)
+
+        assertNull(controller.updateSeekPreviewBy(-5_000))
+
+        assertNull(controller.seekPreviewMillis.value)
         assertTrue(engine.muteCalls.isEmpty())
     }
 
