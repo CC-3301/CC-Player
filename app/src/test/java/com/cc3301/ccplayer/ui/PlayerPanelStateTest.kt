@@ -72,12 +72,25 @@ class PlayerPanelStateTest {
     }
 
     @Test
-    fun `点左半屏关闭抽屉`() {
-        assertTrue(playlistDismissTap(tapX = 0f, width = 1_000f))
-        assertTrue(playlistDismissTap(tapX = 499.9f, width = 1_000f))
-        assertFalse(playlistDismissTap(tapX = 500f, width = 1_000f))
-        assertFalse(playlistDismissTap(tapX = 600f, width = 1_000f))
-        assertFalse(playlistDismissTap(tapX = 100f, width = 0f))
+    fun `横屏点左半屏关闭抽屉`() {
+        val placement = PlaylistDrawerPlacement.RightHalf
+
+        assertTrue(playlistDismissTap(tapX = 0f, tapY = 0f, width = 1_000f, height = 2_000f, placement = placement))
+        assertTrue(playlistDismissTap(tapX = 499.9f, tapY = 1_000f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 500f, tapY = 0f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 600f, tapY = 0f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 100f, tapY = 0f, width = 0f, height = 2_000f, placement = placement))
+    }
+
+    @Test
+    fun `竖屏点上半屏关闭抽屉`() {
+        val placement = PlaylistDrawerPlacement.BottomHalf
+
+        assertTrue(playlistDismissTap(tapX = 500f, tapY = 0f, width = 1_000f, height = 2_000f, placement = placement))
+        assertTrue(playlistDismissTap(tapX = 1_000f, tapY = 999.9f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 0f, tapY = 1_000f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 0f, tapY = 1_200f, width = 1_000f, height = 2_000f, placement = placement))
+        assertFalse(playlistDismissTap(tapX = 0f, tapY = 100f, width = 1_000f, height = 0f, placement = placement))
     }
 
     @Test

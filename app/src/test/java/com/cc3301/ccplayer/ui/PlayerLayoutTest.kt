@@ -2,7 +2,6 @@ package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -56,15 +55,31 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `播放列表三角字号 17_25sp、宽 24dp 且保持强调色`() {
-        assertEquals(17.25.sp, PlayerPlaylistArrowFontSize)
-        assertEquals(24.dp, PlayerPlaylistArrowWidth)
-        assertEquals(AppColors.Accent, PlayerPlaylistArrowColor)
+    fun `播放列表序号与标题均为白色`() {
+        assertEquals(Color.White, PlayerPlaylistIndexColor)
+        assertEquals(Color.White, PlayerPlaylistTitleColor)
     }
 
     @Test
-    fun `播放列表序号为白色`() {
-        assertEquals(Color.White, PlayerPlaylistIndexColor)
+    fun `播放列表当前项底色为深蓝 30 个百分点`() {
+        assertEquals(Color(0xFF1A73E8).copy(alpha = 0.30f), PlayerPlaylistCurrentItemColor)
+    }
+
+    @Test
+    fun `抽屉底色为统一 50 个百分点黑`() {
+        assertEquals(Color(0xFF020509).copy(alpha = 0.50f), PlayerPlaylistBackgroundColor)
+    }
+
+    @Test
+    fun `横屏抽屉占右半屏、竖屏占下半屏`() {
+        assertEquals(
+            PlaylistDrawerPlacement.RightHalf,
+            playlistDrawerPlacement(containerWidth = 2_000f, containerHeight = 1_000f),
+        )
+        assertEquals(
+            PlaylistDrawerPlacement.BottomHalf,
+            playlistDrawerPlacement(containerWidth = 1_000f, containerHeight = 2_000f),
+        )
     }
 
     @Test

@@ -9,7 +9,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Indication
@@ -163,13 +165,6 @@ private val PlayerBottomBarGradient = Brush.verticalGradient(
     0f to Color.Transparent,
     0.48f to Color.Black.copy(alpha = 0.46f),
     1f to Color.Black.copy(alpha = 0.78f),
-)
-
-/** 播放列表抽屉：左侧透明、越靠右越深的低透明度黑色渐变。 */
-private val PlayerPlaylistGradient = Brush.horizontalGradient(
-    0f to Color(0x14020509),
-    0.34f to Color(0x6B020509),
-    1f to Color(0xB8020509),
 )
 
 /** 播放列表条目固定高度，用于把当前项滚到可视区域中间。 */
@@ -408,6 +403,10 @@ fun PlayerScreen(
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
             .coerceAtLeast(72.dp)
+        // 抽屉落位随画面宽高比：横屏贴右半屏，竖屏贴下半屏。
+        val playlistPlacement = with(density) {
+            playlistDrawerPlacement(maxWidth.toPx(), maxHeight.toPx())
+        }
         AndroidView(
             factory = { context ->
                 MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
@@ -687,15 +686,25 @@ fun PlayerScreen(
                     .padding(AppSpacing.Lg),
             )
         }
-        // 左半屏是关闭抽屉的点击区；抽屉从右侧滑出，只盖住右半屏。
+        // 抽屉之外的那一半是关闭区：横屏点左半屏，竖屏点上半屏。
         if (playlistVisible && panelVisible) {
             val closeHint = stringResource(R.string.player_playlist_close)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
+                    .pointerInput(playlistPlacement) {
                         detectTapGestures { offset ->
-                            if (playlistDismissTap(offset.x, size.width.toFloat())) panels.close()
+                            if (
+                                playlistDismissTap(
+                                    tapX = offset.x,
+                                    tapY = offset.y,
+                                    width = size.width.toFloat(),
+                                    height = size.height.toFloat(),
+                                    placement = playlistPlacement,
+                                )
+                            ) {
+                                panels.close()
+                            }
                         }
                     }
                     .semantics { contentDescription = closeHint },
@@ -703,16 +712,29 @@ fun PlayerScreen(
         }
         AnimatedVisibility(
             visible = playlistVisible && panelVisible,
-            enter = slideInHorizontally(animationSpec = tween(260)) { it },
-            exit = slideOutHorizontally(animationSpec = tween(260)) { it },
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .fillMaxHeight()
-                .width(maxWidth / 2),
+            enter = when (playlistPlacement) {
+                PlaylistDrawerPlacement.RightHalf -> slideInHorizontally(animationSpec = tween(260)) { it }
+                PlaylistDrawerPlacement.BottomHalf -> slideInVertically(animationSpec = tween(260)) { it }
+            },
+            exit = when (playlistPlacement) {
+                PlaylistDrawerPlacement.RightHalf -> slideOutHorizontally(animationSpec = tween(260)) { it }
+                PlaylistDrawerPlacement.BottomHalf -> slideOutVertically(animationSpec = tween(260)) { it }
+            },
+            modifier = when (playlistPlacement) {
+                PlaylistDrawerPlacement.RightHalf -> Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(maxWidth / 2)
+                PlaylistDrawerPlacement.BottomHalf -> Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(maxHeight / 2)
+            },
         ) {
             PlaylistDrawer(
                 playlist = playlist,
                 currentIndex = currentIndex,
+                placement = playlistPlacement,
                 onSelect = { media -> panels.selectPlaylistItem(media, onPlaylistSelect) },
             )
         }
@@ -2005,12 +2027,13 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
     }
 }
 
-/** 播放列表抽屉：占右半屏，右侧加深的低透明度黑底，当前项居中。 */
+/** 播放列表抽屉：横屏占右半屏、竖屏占下半屏，统一低透明度黑底，当前项居中。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlaylistDrawer(
     playlist: List<MediaFile>,
     currentIndex: Int,
+    placement: PlaylistDrawerPlacement,
     onSelect: (MediaFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2018,15 +2041,19 @@ private fun PlaylistDrawer(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(PlayerPlaylistGradient)
-            // 抽屉贴在末端屏边，只避让上、下、末端 inset；条目内容左右各留 16dp，
-            // 当前项高亮左侧 0dp、右侧 4dp；左侧不叠加系统 inset。
+            .background(PlayerPlaylistBackgroundColor)
+            // 抽屉只避让真正接触的屏边：横屏为上、下、末端，竖屏为左、右、底部；
+            // 条目内容左右各留 16dp，当前项高亮左侧 0dp、右侧 4dp；不接触的一侧不叠加 inset。
             .windowInsetsPadding(
                 WindowInsets.safeDrawing.only(
-                    WindowInsetsSides.Vertical + WindowInsetsSides.End,
+                    when (placement) {
+                        PlaylistDrawerPlacement.RightHalf ->
+                            WindowInsetsSides.Vertical + WindowInsetsSides.End
+                        PlaylistDrawerPlacement.BottomHalf ->
+                            WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
+                    },
                 ),
-            )
-            .blockPlayerGestures(),
+            ),
     ) {
         Text(
             text = stringResource(R.string.player_playlist_count, playlist.size),
@@ -2085,7 +2112,7 @@ private fun PlaylistDrawer(
                                         endInsetPx = PlayerPlaylistHighlightEndInset.toPx(),
                                     )
                                     drawRect(
-                                        color = AppColors.Accent.copy(alpha = 0.16f),
+                                        color = PlayerPlaylistCurrentItemColor,
                                         topLeft = Offset(bounds.start, 0f),
                                         size = Size(bounds.end - bounds.start, size.height),
                                     )
@@ -2114,26 +2141,13 @@ private fun PlaylistDrawer(
                             Text(
                                 text = media.name,
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = Color.White,
+                                color = PlayerPlaylistTitleColor,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
                                     .weight(1f)
                                     .padding(start = PlayerPlaylistIndexGap),
                             )
-                            if (active) {
-                                Text(
-                                    text = "▶",
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        fontSize = PlayerPlaylistArrowFontSize,
-                                    ),
-                                    color = PlayerPlaylistArrowColor,
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier
-                                        .padding(start = AppSpacing.Sm)
-                                        .width(PlayerPlaylistArrowWidth),
-                                )
-                            }
                         }
                         // 整行只有一个点击节点；涟漪由同一交互源驱动，覆盖到高亮条范围。
                         CompositionLocalProvider(

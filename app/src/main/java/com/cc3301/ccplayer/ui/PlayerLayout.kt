@@ -3,7 +3,6 @@ package com.cc3301.ccplayer.ui
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import kotlin.math.abs
 import kotlin.math.min
@@ -103,14 +102,25 @@ val PlayerPlaylistIndexGap = 16.dp
 /** 播放列表编号颜色。 */
 val PlayerPlaylistIndexColor = Color.White
 
-/** 播放列表当前项三角图标字号。 */
-val PlayerPlaylistArrowFontSize = 17.25.sp
+/** 播放列表标题颜色。 */
+val PlayerPlaylistTitleColor = Color.White
 
-/** 播放列表当前项三角图标宽度。 */
-val PlayerPlaylistArrowWidth = 24.dp
+/** 播放列表抽屉底色：统一 50% 黑，不做渐变。 */
+val PlayerPlaylistBackgroundColor = Color(0xFF020509).copy(alpha = 0.50f)
 
-/** 播放列表当前项三角图标颜色。 */
-val PlayerPlaylistArrowColor = AppColors.Accent
+/** 播放列表当前项底色：深蓝 30%。 */
+val PlayerPlaylistCurrentItemColor = AppColors.AccentDeep.copy(alpha = 0.30f)
+
+/** 播放列表抽屉的落位：横屏占右半屏，竖屏占下半屏。 */
+enum class PlaylistDrawerPlacement { RightHalf, BottomHalf }
+
+/** 按画面宽高决定抽屉落位；宽度大于高度视为横屏。 */
+fun playlistDrawerPlacement(containerWidth: Float, containerHeight: Float): PlaylistDrawerPlacement =
+    if (containerWidth > containerHeight) {
+        PlaylistDrawerPlacement.RightHalf
+    } else {
+        PlaylistDrawerPlacement.BottomHalf
+    }
 
 /** 播放列表当前项高亮的横向像素范围。 */
 data class PlaylistHighlightBounds(val start: Float, val end: Float)
