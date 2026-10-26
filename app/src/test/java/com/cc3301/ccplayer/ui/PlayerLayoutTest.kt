@@ -56,8 +56,7 @@ class PlayerLayoutTest {
 
     @Test
     fun `播放列表序号与标题均为白色`() {
-        assertEquals(Color.White, PlayerPlaylistIndexColor)
-        assertEquals(Color.White, PlayerPlaylistTitleColor)
+        assertEquals(Color.White, PlayerPlaylistTextColor)
     }
 
     @Test
@@ -79,6 +78,14 @@ class PlayerLayoutTest {
         assertEquals(
             PlaylistDrawerPlacement.BottomHalf,
             playlistDrawerPlacement(containerWidth = 1_000f, containerHeight = 2_000f),
+        )
+    }
+
+    @Test
+    fun `宽高相等时按竖屏处理`() {
+        assertEquals(
+            PlaylistDrawerPlacement.BottomHalf,
+            playlistDrawerPlacement(containerWidth = 1_000f, containerHeight = 1_000f),
         )
     }
 

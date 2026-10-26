@@ -99,11 +99,8 @@ val PlayerPlaylistHighlightEndInset = 4.dp
 /** 播放列表编号与标题之间的间距。 */
 val PlayerPlaylistIndexGap = 16.dp
 
-/** 播放列表编号颜色。 */
-val PlayerPlaylistIndexColor = Color.White
-
-/** 播放列表标题颜色。 */
-val PlayerPlaylistTitleColor = Color.White
+/** 播放列表编号与标题的文字颜色。 */
+val PlayerPlaylistTextColor = Color.White
 
 /** 播放列表抽屉底色：统一 50% 黑，不做渐变。 */
 val PlayerPlaylistBackgroundColor = Color(0xFF020509).copy(alpha = 0.50f)
@@ -114,7 +111,7 @@ val PlayerPlaylistCurrentItemColor = AppColors.AccentDeep.copy(alpha = 0.30f)
 /** 播放列表抽屉的落位：横屏占右半屏，竖屏占下半屏。 */
 enum class PlaylistDrawerPlacement { RightHalf, BottomHalf }
 
-/** 按画面宽高决定抽屉落位；宽度大于高度视为横屏。 */
+/** 按窗口宽高决定抽屉落位；宽度大于高度视为横屏，其余按竖屏。 */
 fun playlistDrawerPlacement(containerWidth: Float, containerHeight: Float): PlaylistDrawerPlacement =
     if (containerWidth > containerHeight) {
         PlaylistDrawerPlacement.RightHalf

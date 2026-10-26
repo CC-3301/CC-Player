@@ -692,7 +692,7 @@ fun PlayerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(playlistPlacement) {
+                    .pointerInput(Unit) {
                         detectTapGestures { offset ->
                             if (
                                 playlistDismissTap(
@@ -700,7 +700,6 @@ fun PlayerScreen(
                                     tapY = offset.y,
                                     width = size.width.toFloat(),
                                     height = size.height.toFloat(),
-                                    placement = playlistPlacement,
                                 )
                             ) {
                                 panels.close()
@@ -2135,13 +2134,13 @@ private fun PlaylistDrawer(
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontFeatureSettings = "tnum",
                                 ),
-                                color = PlayerPlaylistIndexColor,
+                                color = PlayerPlaylistTextColor,
                                 maxLines = 1,
                             )
                             Text(
                                 text = media.name,
                                 style = MaterialTheme.typography.bodyLarge,
-                                color = PlayerPlaylistTitleColor,
+                                color = PlayerPlaylistTextColor,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
