@@ -4,8 +4,8 @@ package com.cc3301.ccplayer.ui
  * 传感器方向的去抖闸门。
  *
  * 设备架在支架上或平放时，角度可能长时间未知，随后某一帧突然报出有效角度。传感器驱动的换向要
- * 连续 [stableSamples] 帧同一目标才放行，单帧跳变与中途回摆都不换向。角度变成未知时作废待确认
- * 目标，已施加方向保持不变；用户操作与设置变化直接施加，不经过这里。
+ * 连续 [stableSamples] 帧同一目标才放行，单帧跳变与中途回摆都不换向。角度变成未知或用户已经
+ * 亲自施加方向时，待确认目标作废，已施加方向保持不变。
  */
 class SensorOrientationGate(private val stableSamples: Int = STABLE_SAMPLES) {
 
@@ -13,28 +13,24 @@ class SensorOrientationGate(private val stableSamples: Int = STABLE_SAMPLES) {
     private var samples = 0
 
     /** 角度未知：作废待确认目标，已施加方向保持不变。 */
-    fun onAngleUnknown() {
-        pending = null
-        samples = 0
-    }
+    fun onAngleUnknown() = clearPending()
 
     /** 用户操作已立即施加：清空待确认计数。 */
-    fun reset() {
-        pending = null
-        samples = 0
-    }
+    fun onUserApplied() = clearPending()
 
     /**
-     * 是否放行本次施加：[immediate] 为用户操作与设置变化，直接放行；否则要求目标方向连续稳定。
+     * 这一帧传感器是否达到施加条件：目标方向连续 [stableSamples] 帧一致才返回 true。
+     * 只更新计数，不改变任何方向。
      */
-    fun allowApply(target: ScreenOrientation, immediate: Boolean): Boolean {
-        if (immediate) {
-            reset()
-            return true
-        }
+    fun shouldApplyFromSensor(target: ScreenOrientation): Boolean {
         samples = if (target == pending) samples + 1 else 1
         pending = target
         return samples >= stableSamples
+    }
+
+    private fun clearPending() {
+        pending = null
+        samples = 0
     }
 
     companion object {

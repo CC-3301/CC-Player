@@ -197,8 +197,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 传感器换向的去抖闸门；用户操作与设置变化不走它。 */
     private val sensorOrientationGate = SensorOrientationGate()
 
-    /** 本次播放是否已记录过传感器首个角度。 */
-    private var orientationSensorReported = false
+    /** 本次播放是否已记录过传感器首个回调与首个有效角度。 */
+    private var orientationSensorCallbackLogged = false
+    private var orientationSensorAngleLogged = false
 
     /** 已施加的播放页方向，用于方向迟滞；[ScreenOrientation.System] 表示本次播放还没施加过。 */
     private var appliedScreenOrientation = ScreenOrientation.System
@@ -346,7 +347,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
                     playerOrientationMode = orientationMode
                     if (playerVisible) {
-                        applyPlayerOrientation(immediate = true)
+                        applyPlayerOrientationFromUser()
                     } else {
                         applyOrientation(ScreenOrientation.System)
                     }
@@ -358,15 +359,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         override fun onOrientationChanged(orientation: Int) {
                             if (!playerVisible) return
                             val angle = orientation.takeIf { it != OrientationEventListener.ORIENTATION_UNKNOWN }
-                            if (!orientationSensorReported) {
-                                orientationSensorReported = true
+                            if (!orientationSensorCallbackLogged) {
+                                orientationSensorCallbackLogged = true
                                 diagnostics.log {
                                     if (angle == null) {
-                                        "方向传感器: 首个角度未知（设备接近水平或传感器不可用）"
+                                        "方向传感器: 首个回调未知（设备接近水平或传感器不可用）"
                                     } else {
-                                        "方向传感器: 首个角度 $angle"
+                                        "方向传感器: 首个回调 $angle"
                                     }
                                 }
+                            }
+                            if (angle != null && !orientationSensorAngleLogged) {
+                                orientationSensorAngleLogged = true
+                                diagnostics.log { "方向传感器: 首个有效角度 $angle" }
                             }
                             if (angle == null) {
                                 // 角度再次未知：保留已施加方向，不回退到族正向重算。
@@ -375,7 +380,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 return
                             }
                             sensorAngle = angle
-                            applyPlayerOrientation(immediate = false)
+                            applyPlayerOrientationFromSensor()
                         }
                     }
                     if (listener.canDetectOrientation()) {
@@ -388,7 +393,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         listener.disable()
                         sensorAngle = null
                         sensorOrientationGate.onAngleUnknown()
-                        orientationSensorReported = false
+                        orientationSensorCallbackLogged = false
+                        orientationSensorAngleLogged = false
                     }
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -856,16 +862,33 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
             ?: Surface.ROTATION_0
 
+    /** 用户操作（进播放页、改设置、点转屏按钮、视频比例变化）立即施加，不经过传感器去抖。 */
+    private fun applyPlayerOrientationFromUser() {
+        sensorOrientationGate.onUserApplied()
+        applyPlayerOrientation()
+    }
+
+    /** 传感器帧：目标方向连续稳定达到阈值后才施加。 */
+    private fun applyPlayerOrientationFromSensor() {
+        if (!sensorOrientationGate.shouldApplyFromSensor(playerOrientationTarget())) return
+        applyPlayerOrientation()
+    }
+
+    /** 当前方向设置与传感器角度下要施加的朝向。 */
+    private fun playerOrientationTarget(): ScreenOrientation =
+        sensorScreenOrientation(
+            sessionOrientation.resolve(playerOrientationMode, videoAspectRatio),
+            sensorAngle,
+            appliedScreenOrientation,
+        )
+
     /**
-     * 播放页按方向设置与角度施加朝向；方向真正变化时才写一条诊断日志。
+     * 施加当前目标朝向；方向真正变化时才写一条诊断日志。
      *
-     * 角度未知时按档位施加族正向，「屏幕方向」档交回系统。传感器驱动的换向要先过去抖闸门，
-     * [immediate] 是用户操作与设置变化的路径，直接施加。
+     * 角度未知时按档位施加族正向（已施加过族内方向则保留），「屏幕方向」档交回系统。
      */
-    private fun applyPlayerOrientation(immediate: Boolean) {
-        val requested = sessionOrientation.resolve(playerOrientationMode, videoAspectRatio)
-        val target = sensorScreenOrientation(requested, sensorAngle, appliedScreenOrientation)
-        if (!sensorOrientationGate.allowApply(target, immediate)) return
+    private fun applyPlayerOrientation() {
+        val target = playerOrientationTarget()
         if (target == appliedScreenOrientation) return
         appliedScreenOrientation = target
         applyOrientation(target)

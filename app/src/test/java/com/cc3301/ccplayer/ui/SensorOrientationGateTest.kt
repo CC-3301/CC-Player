@@ -4,7 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 传感器方向去抖：单帧跳变与回摆都不换向，用户操作直接施加。 */
+/** 传感器方向去抖：单帧跳变与回摆都不换向，用户操作后重新计数。 */
 class SensorOrientationGateTest {
 
     private val gate = SensorOrientationGate()
@@ -13,53 +13,52 @@ class SensorOrientationGateTest {
     fun `角度未知后单帧有效角度不换向`() {
         gate.onAngleUnknown()
 
-        assertFalse(gate.allowApply(ScreenOrientation.ReverseLandscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.ReverseLandscape))
     }
 
     @Test
-    fun `连续三帧同一方向才换向`() {
+    fun `连续稳定达到阈值才换向`() {
         gate.onAngleUnknown()
 
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertTrue(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertTrue(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
     }
 
     @Test
     fun `中途回摆作废重新计数`() {
         gate.onAngleUnknown()
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
 
         // 回摆到竖屏：计数从竖屏重新开始。
-        assertFalse(gate.allowApply(ScreenOrientation.Portrait, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Portrait, immediate = false))
-        assertTrue(gate.allowApply(ScreenOrientation.Portrait, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Portrait))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Portrait))
+        assertTrue(gate.shouldApplyFromSensor(ScreenOrientation.Portrait))
     }
 
     @Test
     fun `角度再次未知作废待确认目标`() {
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
 
         gate.onAngleUnknown()
 
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertTrue(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertTrue(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
     }
 
     @Test
-    fun `用户操作立即施加并重新计数`() {
+    fun `用户施加后传感器帧重新计数`() {
         gate.onAngleUnknown()
-        assertFalse(gate.allowApply(ScreenOrientation.Portrait, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Portrait))
 
-        // 点转屏按钮：目标变成横屏，立即施加。
-        assertTrue(gate.allowApply(ScreenOrientation.Landscape, immediate = true))
+        // 用户点了转屏按钮：方向已立即施加，待确认计数清空。
+        gate.onUserApplied()
 
-        // 之后的传感器帧重新从第一帧计数。
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertFalse(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
-        assertTrue(gate.allowApply(ScreenOrientation.Landscape, immediate = false))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertFalse(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
+        assertTrue(gate.shouldApplyFromSensor(ScreenOrientation.Landscape))
     }
 }

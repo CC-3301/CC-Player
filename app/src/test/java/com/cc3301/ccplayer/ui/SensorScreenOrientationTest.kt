@@ -62,17 +62,38 @@ class SensorScreenOrientationTest {
     }
 
     @Test
-    fun `角度未知后再收到角度由族正向接管`() {
-        // 未知时施加横屏正向，首个角度落在反向侧再按迟滞换成反向横屏。
+    fun `角度未知时保留已施加的族内反向`() {
+        // 支架上角度未知，此前传感器已施加反向横屏：切集等重算不翻回正向。
+        assertEquals(
+            ScreenOrientation.ReverseLandscape,
+            decide(ScreenOrientation.Landscape, null, ScreenOrientation.ReverseLandscape),
+        )
+        assertEquals(
+            ScreenOrientation.ReversePortrait,
+            decide(ScreenOrientation.Portrait, null, ScreenOrientation.ReversePortrait),
+        )
+        // 已施加方向不属于新的期望族时回到该族正向。
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(ScreenOrientation.Landscape, null, ScreenOrientation.ReversePortrait),
+        )
+        assertEquals(
+            ScreenOrientation.Portrait,
+            decide(ScreenOrientation.Portrait, null, ScreenOrientation.ReverseLandscape),
+        )
+    }
+
+    @Test
+    fun `角度未知后收到角度仍按族内迟滞`() {
+        // 未知时施加横屏正向，角度落在正向附近保持，越过 106° 才换反向横屏。
         assertEquals(ScreenOrientation.Landscape, decide(ScreenOrientation.Landscape, null))
         assertEquals(
-            ScreenOrientation.ReverseLandscape,
-            decide(ScreenOrientation.Landscape, 90, ScreenOrientation.Landscape),
+            ScreenOrientation.Landscape,
+            decide(ScreenOrientation.Landscape, 300, ScreenOrientation.Landscape),
         )
-        // 屏幕方向档未知时交回系统，首个角度到达后按四向接管。
         assertEquals(
             ScreenOrientation.ReverseLandscape,
-            decide(ScreenOrientation.System, 90, ScreenOrientation.System),
+            decide(ScreenOrientation.Landscape, 16, ScreenOrientation.Landscape),
         )
     }
 
