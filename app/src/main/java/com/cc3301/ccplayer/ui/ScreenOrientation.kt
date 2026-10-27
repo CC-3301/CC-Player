@@ -76,21 +76,27 @@ private fun angleDistance(a: Int, b: Int): Int {
 }
 
 /**
- * 由传感器角度判定播放页要施加的四向朝向（ADR-0013）。
+ * 由传感器角度与期望族判定播放页要施加的朝向（ADR-0013）。
  *
  * [requested] 是期望族：[ScreenOrientation.System] 四向全跟，横屏与竖屏档只在各自族内判正向与
  * 反向，物理转 90° 不跨族。[current] 为已施加方向，[ScreenOrientation.System] 表示尚未施加：
  * 此时从期望族正向起步，首次判定同样受迟滞约束，小角度不会翻向。
+ *
+ * [angleDegrees] 为空表示角度未知（设备接近水平、架在支架上或传感器不可用）：此时不判正反向，
+ * 期望族是具体方向就施加该族正向，[ScreenOrientation.System] 则返回它交回系统，不得锁成竖屏。
  *
  * 迟滞按步进区分：新方向要比当前方向接近至少 30° 才换。相隔 90° 的相邻档位因此是进入 61°、
  * 退回 29°；锁定族内相隔 180° 的一对是 106° 进、74° 退。
  */
 fun sensorScreenOrientation(
     requested: ScreenOrientation,
-    angleDegrees: Int,
+    angleDegrees: Int?,
     current: ScreenOrientation,
 ): ScreenOrientation {
     val allowed = allowedOrientations(requested)
+    if (angleDegrees == null) {
+        return if (requested == ScreenOrientation.System) ScreenOrientation.System else allowed.first().first
+    }
     val angle = ((angleDegrees % 360) + 360) % 360
     // 没有已施加方向（或它不属于期望族）时从期望族正向起步。
     val started = allowed.firstOrNull { it.first == current } ?: allowed.first()

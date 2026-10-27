@@ -92,6 +92,7 @@ import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
+import com.cc3301.ccplayer.ui.SensorOrientationGate
 import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
@@ -190,8 +191,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 最近的设置方向档位；传感器回调在组合之外判定，需要即时读到。 */
     private var playerOrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE
 
-    /** 最近一次传感器角度；为空表示还没收到或设备平放无法判定，此时不施加方向。 */
+    /** 最近一次传感器角度；为空表示角度未知（设备接近水平、架在支架上或传感器不可用）。 */
     private var sensorAngle: Int? = null
+
+    /** 传感器换向的去抖闸门；用户操作与设置变化不走它。 */
+    private val sensorOrientationGate = SensorOrientationGate()
+
+    /** 本次播放是否已记录过传感器首个角度。 */
+    private var orientationSensorReported = false
 
     /** 已施加的播放页方向，用于方向迟滞；[ScreenOrientation.System] 表示本次播放还没施加过。 */
     private var appliedScreenOrientation = ScreenOrientation.System
@@ -335,29 +342,53 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 LaunchedEffect(playbackState, buffering, switching) {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
-                // 播放页由传感器判定四向方向；离开播放页把方向交回系统。
+                // 播放页按方向设置与角度施加朝向；离开播放页把方向交回系统。
                 LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
                     playerOrientationMode = orientationMode
                     if (playerVisible) {
-                        applyPlayerOrientation()
+                        applyPlayerOrientation(immediate = true)
                     } else {
                         applyOrientation(ScreenOrientation.System)
                     }
                 }
-                // 传感器只在播放页注册，离开播放页注销；没有可用传感器时不启用，方向仍由系统决定。
+                // 传感器只在播放页注册，离开播放页注销；没有可用传感器时按档位施加族正向。
                 DisposableEffect(playerVisible) {
                     if (!playerVisible) return@DisposableEffect onDispose { }
                     val listener = object : OrientationEventListener(this@MainActivity, SensorManager.SENSOR_DELAY_UI) {
                         override fun onOrientationChanged(orientation: Int) {
                             if (!playerVisible) return
-                            sensorAngle = orientation.takeIf { it != OrientationEventListener.ORIENTATION_UNKNOWN }
-                            applyPlayerOrientation()
+                            val angle = orientation.takeIf { it != OrientationEventListener.ORIENTATION_UNKNOWN }
+                            if (!orientationSensorReported) {
+                                orientationSensorReported = true
+                                diagnostics.log {
+                                    if (angle == null) {
+                                        "方向传感器: 首个角度未知（设备接近水平或传感器不可用）"
+                                    } else {
+                                        "方向传感器: 首个角度 $angle"
+                                    }
+                                }
+                            }
+                            if (angle == null) {
+                                // 角度再次未知：保留已施加方向，不回退到族正向重算。
+                                sensorAngle = null
+                                sensorOrientationGate.onAngleUnknown()
+                                return
+                            }
+                            sensorAngle = angle
+                            applyPlayerOrientation(immediate = false)
                         }
                     }
-                    if (listener.canDetectOrientation()) listener.enable()
+                    if (listener.canDetectOrientation()) {
+                        listener.enable()
+                        diagnostics.log { "方向传感器: 已启用" }
+                    } else {
+                        diagnostics.log { "方向传感器: 不可用，方向按档位施加" }
+                    }
                     onDispose {
                         listener.disable()
                         sensorAngle = null
+                        sensorOrientationGate.onAngleUnknown()
+                        orientationSensorReported = false
                     }
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -826,17 +857,20 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             ?: Surface.ROTATION_0
 
     /**
-     * 播放页按传感器角度与期望族施加四向朝向；方向真正变化时才写一条诊断日志。
-     * 还没有角度（传感器未注册成功或设备平放）时不施加，方向仍由系统决定。
+     * 播放页按方向设置与角度施加朝向；方向真正变化时才写一条诊断日志。
+     *
+     * 角度未知时按档位施加族正向，「屏幕方向」档交回系统。传感器驱动的换向要先过去抖闸门，
+     * [immediate] 是用户操作与设置变化的路径，直接施加。
      */
-    private fun applyPlayerOrientation() {
-        val angle = sensorAngle ?: return
+    private fun applyPlayerOrientation(immediate: Boolean) {
         val requested = sessionOrientation.resolve(playerOrientationMode, videoAspectRatio)
-        val target = sensorScreenOrientation(requested, angle, appliedScreenOrientation)
+        val target = sensorScreenOrientation(requested, sensorAngle, appliedScreenOrientation)
+        if (!sensorOrientationGate.allowApply(target, immediate)) return
         if (target == appliedScreenOrientation) return
         appliedScreenOrientation = target
         applyOrientation(target)
-        recordScreenOrientation(target)
+        // 交回系统时没有具体方向，系统切换完成后由配置变化记录。
+        if (target != ScreenOrientation.System) recordScreenOrientation(target)
     }
 
     /** 每次方向真正切换都写一条日志。 */
