@@ -4,8 +4,14 @@ import com.cc3301.ccplayer.settings.OrientationMode
 import kotlin.math.abs
 
 /**
- * 播放页要施加的朝向：`System` 在播放页里四向全跟、播放页外交回系统，
- * `Portrait` / `ReversePortrait` 为竖屏族正向与反向，`Landscape` / `ReverseLandscape` 为横屏族正向与反向。
+ * 屏幕朝向。`Portrait` / `ReversePortrait` 为竖屏族正向与反向，`Landscape` / `ReverseLandscape` 为
+ * 横屏族正向与反向。
+ *
+ * `System` 有四种含义，由出现的位置决定：
+ * - 请求侧的期望族（[resolvedOrientation] 与转屏结果）：播放页四向全跟；
+ * - [sensorScreenOrientation] 的返回值：角度未知时交回系统；
+ * - `appliedScreenOrientation` 一类字段：本次播放尚未施加过方向；
+ * - 播放页之外：`applyOrientation` 交回系统自动旋转设置。
  */
 enum class ScreenOrientation { System, Portrait, ReversePortrait, Landscape, ReverseLandscape }
 
@@ -76,21 +82,29 @@ private fun angleDistance(a: Int, b: Int): Int {
 }
 
 /**
- * 由传感器角度判定播放页要施加的四向朝向（ADR-0013）。
+ * 由传感器角度与期望族判定播放页要施加的朝向（ADR-0013）。
  *
  * [requested] 是期望族：[ScreenOrientation.System] 四向全跟，横屏与竖屏档只在各自族内判正向与
  * 反向，物理转 90° 不跨族。[current] 为已施加方向，[ScreenOrientation.System] 表示尚未施加：
  * 此时从期望族正向起步，首次判定同样受迟滞约束，小角度不会翻向。
+ *
+ * [angleDegrees] 为空表示角度未知（设备接近水平、架在支架上或传感器不可用）：不判正反向。
+ * [ScreenOrientation.System] 返回它交回系统；其余期望族保留已施加的族内方向，未施加过或不属
+ * 于该族时取族正向。
  *
  * 迟滞按步进区分：新方向要比当前方向接近至少 30° 才换。相隔 90° 的相邻档位因此是进入 61°、
  * 退回 29°；锁定族内相隔 180° 的一对是 106° 进、74° 退。
  */
 fun sensorScreenOrientation(
     requested: ScreenOrientation,
-    angleDegrees: Int,
+    angleDegrees: Int?,
     current: ScreenOrientation,
 ): ScreenOrientation {
     val allowed = allowedOrientations(requested)
+    if (angleDegrees == null) {
+        if (requested == ScreenOrientation.System) return ScreenOrientation.System
+        return allowed.firstOrNull { it.first == current }?.first ?: allowed.first().first
+    }
     val angle = ((angleDegrees % 360) + 360) % 360
     // 没有已施加方向（或它不属于期望族）时从期望族正向起步。
     val started = allowed.firstOrNull { it.first == current } ?: allowed.first()

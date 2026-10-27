@@ -6,18 +6,96 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 传感器角度 + 期望族 + 已施加方向 → 播放页四向朝向，接缝 12。
+ * 传感器角度 + 期望族 + 已施加方向 → 播放页要施加的朝向，接缝 12。
  *
  * 迟滞按步进区分：相隔 90° 的相邻档位为进入 61°、退回 29°；锁定族内相隔 180° 的一对为
- * 106° 进、74° 退。
+ * 106° 进、74° 退。角度未知时只施加族正向。
  */
 class SensorScreenOrientationTest {
 
     private fun decide(
         requested: ScreenOrientation,
-        angle: Int,
+        angle: Int?,
         current: ScreenOrientation = ScreenOrientation.System,
     ): ScreenOrientation = sensorScreenOrientation(requested, angle, current)
+
+    @Test
+    fun `角度未知时四个档位按族正向施加`() {
+        // 屏幕方向档交回系统，不锁竖屏。
+        assertEquals(ScreenOrientation.System, decide(ScreenOrientation.System, null))
+        // 横屏档与竖屏档施加各自族正向。
+        assertEquals(ScreenOrientation.Landscape, decide(ScreenOrientation.Landscape, null))
+        assertEquals(ScreenOrientation.Portrait, decide(ScreenOrientation.Portrait, null))
+        // 跟随视频先按宽高比定族，再施加族正向。
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(resolvedOrientation(OrientationMode.FollowVideo, 1.78), null),
+        )
+        assertEquals(
+            ScreenOrientation.Portrait,
+            decide(resolvedOrientation(OrientationMode.FollowVideo, 0.56), null),
+        )
+        // 跟随视频比例未知时按屏幕方向档处理。
+        assertEquals(ScreenOrientation.System, decide(resolvedOrientation(OrientationMode.FollowVideo, null), null))
+    }
+
+    @Test
+    fun `角度未知时转屏按钮的覆盖立即生效`() {
+        val session = PlayerSessionOrientation()
+        // 横屏档、角度未知：先按档位施加横屏正向。
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(session.resolve(OrientationMode.Landscape, null), null),
+        )
+        // 点一次转屏按钮：覆盖竖屏族，角度仍未知也立即施加竖屏正向。
+        session.toggle(ScreenOrientation.Landscape)
+        assertEquals(
+            ScreenOrientation.Portrait,
+            decide(session.resolve(OrientationMode.Landscape, null), null),
+        )
+        // 跟随视频档的族仍由视频宽高比决定，转屏按钮只覆盖族。
+        session.toggle(ScreenOrientation.Portrait)
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(session.resolve(OrientationMode.FollowVideo, 0.56), null),
+        )
+    }
+
+    @Test
+    fun `角度未知时保留已施加的族内反向`() {
+        // 支架上角度未知，此前传感器已施加反向横屏：切集等重算不翻回正向。
+        assertEquals(
+            ScreenOrientation.ReverseLandscape,
+            decide(ScreenOrientation.Landscape, null, ScreenOrientation.ReverseLandscape),
+        )
+        assertEquals(
+            ScreenOrientation.ReversePortrait,
+            decide(ScreenOrientation.Portrait, null, ScreenOrientation.ReversePortrait),
+        )
+        // 已施加方向不属于新的期望族时回到该族正向。
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(ScreenOrientation.Landscape, null, ScreenOrientation.ReversePortrait),
+        )
+        assertEquals(
+            ScreenOrientation.Portrait,
+            decide(ScreenOrientation.Portrait, null, ScreenOrientation.ReverseLandscape),
+        )
+    }
+
+    @Test
+    fun `角度未知后收到角度仍按族内迟滞`() {
+        // 未知时施加横屏正向，角度落在正向附近保持，越过 106° 才换反向横屏。
+        assertEquals(ScreenOrientation.Landscape, decide(ScreenOrientation.Landscape, null))
+        assertEquals(
+            ScreenOrientation.Landscape,
+            decide(ScreenOrientation.Landscape, 300, ScreenOrientation.Landscape),
+        )
+        assertEquals(
+            ScreenOrientation.ReverseLandscape,
+            decide(ScreenOrientation.Landscape, 16, ScreenOrientation.Landscape),
+        )
+    }
 
     @Test
     fun `四向档四向全跟`() {
