@@ -75,6 +75,9 @@ class PlaybackController(
     /** 上一次预览 seek 的下发时刻；null 表示本次预览还没下发过 seek。 */
     private var previewSeekIssuedAtMillis: Long? = null
 
+    /** 最后一次已下发的预览 seek 目标；收尾目标与它相同时不再重复下发。 */
+    private var lastPreviewSeekTargetMillis: Long? = null
+
     /** 预览 seek 期间音频已静音；收尾时恢复。 */
     private var previewMuted = false
 
@@ -933,6 +936,7 @@ class PlaybackController(
             previewMuted = true
             engine.setAudioMuted(true)
         }
+        lastPreviewSeekTargetMillis = target
         engine.seekTo(target)
         return true
     }
@@ -950,6 +954,7 @@ class PlaybackController(
     /**
      * 预览的唯一结束入口：收起预览位置并取消兜底计时。
      * [commit] 为真时先精确 seek，再恢复声音并淡入，避免落定前的旧位置以满音量播出；
+     * 目标与最后一次预览 seek 相同时不再下发 seek，只恢复声音并淡入；
      * [commitTarget] 为外部跳转的目标，省略时落定到预览位置。
      */
     private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null) {
@@ -957,9 +962,11 @@ class PlaybackController(
         previewEndJob = null
         val target = commitTarget ?: _seekPreviewMillis.value
         val muted = previewMuted
+        val lastIssuedTarget = lastPreviewSeekTargetMillis
         _seekPreviewMillis.value = null
         previewMuted = false
         previewSeekIssuedAtMillis = null
+        lastPreviewSeekTargetMillis = null
         if (!active || target == null) {
             if (muted) engine.setAudioMuted(false)
             return
@@ -968,7 +975,8 @@ class PlaybackController(
             clearRestoreHoldOnUserAction()
             // 用户主动跳转后不再算停在片尾。
             pausedAtEpisodeEnd = false
-            engine.seekTo(target)
+            // 收尾目标与最后一次预览 seek 相同就不再下发：同一目标连跳两次会让画面清空重解码，先闪一下才落定。
+            if (target != lastIssuedTarget) engine.seekTo(target)
         }
         if (muted) engine.setAudioMuted(false)
         if (commit) engine.fadeInAudio(FADE_IN_MILLIS)
@@ -1928,7 +1936,7 @@ class PlaybackController(
         const val PREVIEW_IDLE_TIMEOUT_MILLIS = 3_000L
 
         /** 滚轮停滚后落定的窗口；窗口内再来一档就顺延。 */
-        const val WHEEL_SETTLE_MILLIS = 400L
+        const val WHEEL_SETTLE_MILLIS = 1_000L
 
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L

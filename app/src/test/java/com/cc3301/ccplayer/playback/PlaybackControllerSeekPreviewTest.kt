@@ -58,11 +58,12 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.commitSeekPreview()
 
-        // 先精确 seek，再恢复声音并淡入：落定前的旧位置不会以满音量播出。
+        // 最后一档预览已经 seek 到同一目标：收尾只恢复声音并淡入，旧位置不会以满音量播出。
         assertEquals(
-            listOf("seek(80000)", "muted(false)", "fade(500)"),
-            engine.seekAudioCalls.takeLast(3),
+            listOf("muted(false)", "fade(500)"),
+            engine.seekAudioCalls.takeLast(2),
         )
+        assertEquals(listOf(70_000L, 80_000L), engine.seekPositions)
         assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
     }
 
@@ -79,6 +80,23 @@ class PlaybackControllerSeekPreviewTest {
         controller.commitSeekPreview()
 
         assertEquals(130_000L, engine.seekPositions.last())
+        assertNull(controller.seekPreviewMillis.value)
+    }
+
+    @Test
+    fun `releasing at the last preview target does not seek again`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val fadesBeforePreview = engine.fadeInDurations.size
+
+        controller.updateSeekPreview(70_000)
+        controller.commitSeekPreview()
+
+        // 同一目标再下发一次会把画面清空重解码，落定前先闪一下。
+        assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(listOf("muted(false)", "fade(500)"), engine.seekAudioCalls.takeLast(2))
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
         assertNull(controller.seekPreviewMillis.value)
     }
 
@@ -319,6 +337,31 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true, false), engine.muteCalls)
         assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
         assertEquals(50_000L, engine.seekPositions.last())
+        assertNull(controller.seekPreviewMillis.value)
+    }
+
+    @Test
+    fun `a wheel step just before the settle window still extends it`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val gapMillis = PlaybackController.WHEEL_SETTLE_MILLIS - 100
+
+        assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        advanceTimeBy(gapMillis)
+
+        // 窗口内再滚一格只顺延，不先落定再重新静音。
+        assertEquals(55_000L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
+        advanceTimeBy(gapMillis)
+        assertEquals(50_000L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        advanceTimeBy(PlaybackController.WHEEL_SETTLE_MILLIS + 1)
+        // 两档只收尾一次：静音一次、恢复一次、落定一跳到最后一档。
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(listOf(55_000L, 50_000L), engine.seekPositions)
         assertNull(controller.seekPreviewMillis.value)
     }
 

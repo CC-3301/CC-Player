@@ -402,6 +402,59 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `双击暂停与继续不显示任何元素`() {
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = true, GestureHintSource.DoubleTapPause))
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.DoubleTapPause))
+        assertEquals(GestureHintSource.DoubleTapPause, doubleTapHintSource(DoubleTapAction.TogglePlayPause))
+    }
+
+    @Test
+    fun `双击加减十秒只显示该侧箭头与累计秒数`() {
+        assertEquals(
+            setOf(GestureHint.DoubleTapSide),
+            shownGestureHints(controlsVisible = false, GestureHintSource.DoubleTapSeek),
+        )
+        // 控制层可见时箭头、秒数与涟漪一起显示。
+        assertEquals(
+            setOf(GestureHint.DoubleTapSide, GestureHint.DoubleTapRipple),
+            shownGestureHints(controlsVisible = true, GestureHintSource.DoubleTapSeek),
+        )
+        assertEquals(
+            GestureHintSource.DoubleTapSeek,
+            doubleTapHintSource(DoubleTapAction.Seek(SEEK_STEP_MILLIS, DoubleTapSide.Right)),
+        )
+    }
+
+    @Test
+    fun `控制层隐藏时拖动与滚轮不显示目标时间提示`() {
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.Seek))
+        assertEquals(
+            setOf(GestureHint.SeekTarget),
+            shownGestureHints(controlsVisible = true, GestureHintSource.Seek),
+        )
+    }
+
+    @Test
+    fun `控制层隐藏时音量拖动不显示百分比`() {
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.Volume))
+        assertEquals(
+            setOf(GestureHint.VolumePercent),
+            shownGestureHints(controlsVisible = true, GestureHintSource.Volume),
+        )
+    }
+
+    @Test
+    fun `同一手势在可见与隐藏下显示的元素不同`() {
+        GestureHintSource.entries.forEach { source ->
+            // 显示规则只由可见性收紧：隐藏时是可见时的子集，且只有双击 ±10 秒保留元素。
+            val shown = shownGestureHints(controlsVisible = true, source)
+            val hidden = shownGestureHints(controlsVisible = false, source)
+            assertTrue(hidden.all { it in shown })
+            assertTrue(hidden.all { it == GestureHint.DoubleTapSide })
+        }
+    }
+
+    @Test
     fun `反馈清空条件覆盖锁定面板加载与恢复`() {
         assertTrue(doubleTapFeedbackBlocked(true, false, false, false, false))
         assertTrue(doubleTapFeedbackBlocked(false, true, false, false, false))

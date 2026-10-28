@@ -377,7 +377,7 @@ fun PlayerScreen(
     // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
     LaunchedEffect(switching, initialLoading) {
         // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
-        controls.onInteraction()
+        controls.show()
         panels.closeWhenBlocked(switching, initialLoading)
     }
 
@@ -530,6 +530,7 @@ fun PlayerScreen(
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelVisible,
+            controlsVisible = controlsVisible,
             switching = switching,
             initialLoading = initialLoading,
             restoring = restoring,
@@ -537,60 +538,75 @@ fun PlayerScreen(
             durationMillis = progress.durationMillis,
             levelControls = levelControls,
             onTogglePlayPause = {
-                controls.onInteraction()
+                controls.resetTimer()
                 onTogglePlayPause()
             },
             onSeekBy = {
-                controls.onInteraction()
+                controls.resetTimer()
                 onSeekBy(it)
             },
-            onDoubleTapFeedback = doubleTapFeedback::onDoubleTap,            onSeekPreview = {
-                controls.onInteraction()
+            onDoubleTapFeedback = { side, deltaMillis, ripple ->
+                doubleTapFeedback.onDoubleTap(side, deltaMillis, ripple)
+            },
+            onSeekPreview = {
+                controls.resetTimer()
                 onSeekPreview(it)
             },
             onSeekCommit = {
-                controls.onInteraction()
+                controls.resetTimer()
                 onSeekCommit()
             },
             onSeekStep = onSeekStep,
             onSeekHeartbeat = onSeekHeartbeat,
             onToggleControls = { controls.toggle() },
-            onUserInteraction = { controls.onInteraction() },
+            onGestureInteraction = { controls.resetTimer() },
             onVolumeHint = { volumeHint = it },
             onSeekHint = { seekHint = it },
             modifier = Modifier.fillMaxSize(),
         )
-        volumeHint?.let { fraction ->
-            LevelHintLabel(fraction = fraction, modifier = Modifier.align(Alignment.Center))
-        }
-        seekHint?.let { hint ->
-            SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
-        }
-        doubleTapFeedback.ripples.forEach { ripple ->
-            key(ripple.id) {
-                DoubleTapEdgeRipple(
-                    ripple = ripple,
-                    onFinished = { doubleTapFeedback.removeRipple(ripple.id) },
-                )
+        // 手势提示元素由控制层可见性与手势类型决定：隐藏时只留双击 ±10 秒的该侧箭头与累计秒数。
+        val seekHints = shownGestureHints(controlsVisible, GestureHintSource.Seek)
+        val volumeHints = shownGestureHints(controlsVisible, GestureHintSource.Volume)
+        val doubleTapSeekHints = shownGestureHints(controlsVisible, GestureHintSource.DoubleTapSeek)
+        if (GestureHint.VolumePercent in volumeHints) {
+            volumeHint?.let { fraction ->
+                LevelHintLabel(fraction = fraction, modifier = Modifier.align(Alignment.Center))
             }
         }
-        doubleTapFeedback.left?.let { hint ->
-            DoubleTapHint(
-                side = DoubleTapSide.Left,
-                accumulatedMillis = hint.accumulatedMillis,
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = maxWidth * 0.06f),
-            )
+        if (GestureHint.SeekTarget in seekHints) {
+            seekHint?.let { hint ->
+                SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
+            }
         }
-        doubleTapFeedback.right?.let { hint ->
-            DoubleTapHint(
-                side = DoubleTapSide.Right,
-                accumulatedMillis = hint.accumulatedMillis,
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = maxWidth * 0.06f),
-            )
+        if (GestureHint.DoubleTapRipple in doubleTapSeekHints) {
+            doubleTapFeedback.ripples.forEach { ripple ->
+                key(ripple.id) {
+                    DoubleTapEdgeRipple(
+                        ripple = ripple,
+                        onFinished = { doubleTapFeedback.removeRipple(ripple.id) },
+                    )
+                }
+            }
+        }
+        if (GestureHint.DoubleTapSide in doubleTapSeekHints) {
+            doubleTapFeedback.left?.let { hint ->
+                DoubleTapHint(
+                    side = DoubleTapSide.Left,
+                    accumulatedMillis = hint.accumulatedMillis,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = maxWidth * 0.06f),
+                )
+            }
+            doubleTapFeedback.right?.let { hint ->
+                DoubleTapHint(
+                    side = DoubleTapSide.Right,
+                    accumulatedMillis = hint.accumulatedMillis,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = maxWidth * 0.06f),
+                )
+            }
         }
         // 锁定态只响应点画面：重新显示解锁按钮，不触发任何手势。
         // 加载期间动作按钮仍由 actionAllowed 禁用；点按只用于解锁，始终放行。
@@ -639,11 +655,11 @@ fun PlayerScreen(
                 ),
                 onBack = onClose,
                 onRotate = {
-                    controls.onInteraction()
+                    controls.show()
                     onToggleRotation()
                 },
                 onToggleMore = {
-                    controls.onInteraction()
+                    controls.show()
                     panels.toggle(PlayerPanel.More)
                 },
             )
@@ -669,32 +685,32 @@ fun PlayerScreen(
                 restoring = restoring,
                 interactive = barsVisible,
                 onTogglePlayPause = {
-                    controls.onInteraction()
+                    controls.show()
                     onTogglePlayPause()
                 },
                 onPrevious = {
-                    controls.onInteraction()
+                    controls.show()
                     onPrevious()
                 },
                 onNext = {
-                    controls.onInteraction()
+                    controls.show()
                     onNext()
                 },
                 onSeekPreview = {
-                    controls.onInteraction()
+                    controls.resetTimer()
                     onSeekPreview(it)
                 },
                 onSeekCommit = {
-                    controls.onInteraction()
+                    controls.resetTimer()
                     onSeekCommit()
                 },
                 onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
-                    controls.onInteraction()
+                    controls.show()
                     panels.toggle(PlayerPanel.Playlist)
                 },
                 onToggleSubtitleMenu = {
-                    controls.onInteraction()
+                    controls.show()
                     panels.toggle(PlayerPanel.Subtitles)
                 },
                 onLock = { lock.tapLockButton() },
@@ -748,7 +764,7 @@ fun PlayerScreen(
             UnlockButton(
                 onTap = {
                     lock.tapLockButton()
-                    controls.onInteraction()
+                    controls.show()
                 },
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -827,6 +843,7 @@ private fun PreviewHeartbeat(dragging: Boolean, onHeartbeat: () -> Unit) {
 private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
+    controlsVisible: Boolean,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
@@ -835,13 +852,13 @@ private fun PlayerGestureLayer(
     levelControls: PlayerLevelControls,
     onTogglePlayPause: () -> Unit,
     onSeekBy: (Long) -> Long,
-    onDoubleTapFeedback: (DoubleTapSide, Long) -> Unit,
+    onDoubleTapFeedback: (DoubleTapSide, Long, Boolean) -> Unit,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: () -> Unit,
     onSeekStep: (Long) -> Long?,
     onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
-    onUserInteraction: () -> Unit,
+    onGestureInteraction: () -> Unit,
     onVolumeHint: (Float?) -> Unit,
     onSeekHint: (SeekHint?) -> Unit,
     modifier: Modifier = Modifier,
@@ -868,23 +885,33 @@ private fun PlayerGestureLayer(
     val latestOnSeekStep = rememberUpdatedState(onSeekStep)
     val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
-    val latestOnUserInteraction = rememberUpdatedState(onUserInteraction)
+    val latestOnGestureInteraction = rememberUpdatedState(onGestureInteraction)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
     val latestDuration = rememberUpdatedState(durationMillis)
+    // 控制层可能在手势层注册之后才隐藏：读状态而不是闭包里的旧值。
+    val latestControlsVisible = rememberUpdatedState(controlsVisible)
     val tapGesture = remember { PlayerTapGesture() }
     val dispatchTap: (TapGestureAction) -> Unit = { action ->
         when (action) {
             TapGestureAction.ToggleControls -> latestOnToggleControls.value()
             is TapGestureAction.DoubleTap -> {
-                latestOnUserInteraction.value()
-                when (val doubleTap = action.action) {
+                // 双击只重置自动隐藏计时：隐藏态双击暂停不显示任何元素，双击 ±10 秒只显示箭头与累计秒数。
+                latestOnGestureInteraction.value()
+                val doubleTap = action.action
+                when (doubleTap) {
                     is DoubleTapAction.Seek -> if (doubleTapFeedbackEnabled) {
+                        // 该手势此刻显示哪些提示元素：箭头与累计秒数、涟漪都由此判定。
+                        val hints = shownGestureHints(latestControlsVisible.value, doubleTapHintSource(doubleTap))
                         // 用夹取后的实际位移累计，时长未知、到边界或片尾不叠加。
                         val actualDelta = latestOnSeekBy.value(doubleTap.deltaMillis)
-                        if (actualDelta != 0L) {
-                            latestOnDoubleTapFeedback.value(doubleTap.side, actualDelta)
+                        if (actualDelta != 0L && GestureHint.DoubleTapSide in hints) {
+                            latestOnDoubleTapFeedback.value(
+                                doubleTap.side,
+                                actualDelta,
+                                GestureHint.DoubleTapRipple in hints,
+                            )
                         }
                     }
 
@@ -932,7 +959,8 @@ private fun PlayerGestureLayer(
                             }
                             if (!interactionNotified && update.gesture != null) {
                                 interactionNotified = true
-                                latestOnUserInteraction.value()
+                                // 手势只重置计时，不唤出控制层。
+                                latestOnGestureInteraction.value()
                             }
                             when (update.gesture) {
                                 DragGesture.Volume -> if (volumeAllowed && update.volumeDragY != 0f) {
@@ -983,7 +1011,7 @@ private fun PlayerGestureLayer(
                         val step = wheelSeekStep(change.scrollDelta.y) ?: continue
                         val target = latestOnSeekStep.value(step) ?: continue
                         change.consume()
-                        latestOnUserInteraction.value()
+                        latestOnGestureInteraction.value()
                         latestOnSeekHint.value(SeekHint(target, target - latestPosition.value))
                     }
                 }
@@ -1582,6 +1610,8 @@ private fun SeekBar(
     var heldMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var heldBaseMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var pendingSliderMillis by remember(mediaKey) { mutableStateOf<Long?>(null) }
+    // 滑块拖动与指针拖动共用同一基线语义：本次拖动开始时的播放位置。
+    var sliderBaseMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var leftTimeWidthPx by remember { mutableStateOf(0f) }
     var rightTimeWidthPx by remember { mutableStateOf(0f) }
     var dragTimeWidthPx by remember(mediaKey, durationMillis) { mutableStateOf<Float?>(null) }
@@ -1595,16 +1625,16 @@ private fun SeekBar(
     // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
     LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
         val held = heldMillis ?: return@LaunchedEffect
-        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, false)) {
+        val base = heldBaseMillis ?: return@LaunchedEffect
+        if (!shouldKeepSeekPreview(positionMillis, held, base)) {
             heldMillis = null
         }
     }
     LaunchedEffect(heldMillis) {
-        val held = heldMillis ?: return@LaunchedEffect
+        if (heldMillis == null) return@LaunchedEffect
         delay(SEEK_PREVIEW_HOLD_MILLIS)
-        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, true)) {
-            heldMillis = null
-        }
+        // 位置迟迟追不上目标时也要撤掉保持值，避免时间停在旧值。
+        heldMillis = null
     }
     val previewAt: (Long) -> Unit = {
         heldMillis = null
@@ -1673,14 +1703,18 @@ private fun SeekBar(
                 value = progress.toFloat(),
                 onValueChange = {
                     val target = it.toLong()
+                    // 基线取本次拖动开始时的位置，与指针路径一致。
+                    if (sliderBaseMillis == null) sliderBaseMillis = latestPositionMillis.value
                     pendingSliderMillis = target
                     previewAt(target)
                 },
                 onValueChangeFinished = {
                     val target = pendingSliderMillis
+                    val base = sliderBaseMillis ?: latestPositionMillis.value
                     pendingSliderMillis = null
+                    sliderBaseMillis = null
                     if (target != null) {
-                        commitAt(target, latestPositionMillis.value)
+                        commitAt(target, base)
                     } else {
                         onCommit()
                     }
