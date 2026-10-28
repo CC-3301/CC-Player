@@ -45,7 +45,8 @@ class CcPlayerApplication : Application() {
     private val settings: SettingsRepository by lazy { SettingsRepository.create(this) }
 
     private val previewHolder = MediaPreviewHolder {
-        CachedMediaPreviewSource.create(this, previewReads(), diagnostics)
+        // 后台范围用进程级 scope：时长补读等任务跟随应用，不随界面重建。
+        CachedMediaPreviewSource.create(this, previewReads(), diagnostics, backgroundScope = scope)
     }
 
     /** 缩略图预览源：整个进程只有一份，转屏与界面重建后复用同一个抽帧许可。 */

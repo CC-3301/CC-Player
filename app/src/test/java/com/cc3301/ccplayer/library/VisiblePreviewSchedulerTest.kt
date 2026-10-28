@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.library
 
+import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -8,6 +10,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -180,6 +183,7 @@ class VisiblePreviewSchedulerTest {
         scheduler.update(entries, firstVisible = -1, lastVisible = -1, rowSize = 1)
         runCurrent()
 
+        // 整屏一次性下发入队，空范围把在途的三条都暂停。
         assertEquals(listOf(0, 1, 2), source.cancelled.sorted())
         assertEquals(listOf(0, 1, 2), source.started)
         assertTrue(source.windows.getValue("visible").isEmpty())
@@ -187,6 +191,7 @@ class VisiblePreviewSchedulerTest {
 
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
         runCurrent()
+        assertEquals(listOf(0, 1, 2, 0, 1, 2), source.started)
         source.gate?.complete(Unit)
         runCurrent()
         assertEquals(listOf(1L, 2L, 3L), requests.map { request -> request.await().durationMillis })
@@ -262,12 +267,12 @@ class VisiblePreviewSchedulerTest {
         runCurrent()
         assertEquals(listOf(0), source.cancelled)
 
-        // 快速回屏：新 attempt 先下发并等待 secondGate。
+        // 快速回屏：新 attempt 立即下发，与旧 attempt 的迟到收尾并存。
         scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
         runCurrent()
         assertEquals(listOf(0, 0), source.started)
 
-        // 旧 attempt 在新 attempt 之后收尾，不得回填占位图或移除新请求。
+        // 旧 attempt 的收尾不得回填占位图或顶替新结果。
         source.cancelGate.complete(Unit)
         runCurrent()
         source.secondGate.complete(Unit)
@@ -288,6 +293,7 @@ class VisiblePreviewSchedulerTest {
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         try {
             repeat(200) {
+                // 整屏一次性下发：八条都在抽取前挂住，再与取消全部并发收尾。
                 val entered = CountDownLatch(entries.size)
                 val gate = CompletableDeferred<Unit>()
                 val source = CompletionGateSource(entered, gate)
@@ -312,6 +318,36 @@ class VisiblePreviewSchedulerTest {
             executor.shutdownNow()
         }
         assertTrue("完成回调并发清理抛异常：$failures", failures.isEmpty())
+    }
+
+    @Test
+    fun `一屏可见项按列表索引依次出图`() = runTest {
+        val directory: File = Files.createTempDirectory("scheduler-order").toFile()
+        try {
+            val extractor = OrderRecordingExtractor()
+            val source = CachedMediaPreviewSource(
+                extractor = extractor,
+                cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+                backgroundScope = backgroundScope,
+            )
+            val scheduler = VisiblePreviewScheduler(
+                source = source,
+                scope = backgroundScope,
+                prefetcher = PreviewPrefetcher(source, backgroundScope, prefetchDelayMillis = 60_000),
+            )
+            scheduler.update(entries, firstVisible = 0, lastVisible = entries.lastIndex, rowSize = 1)
+
+            // 乱序订阅，抽图顺序仍按列表索引。
+            val subscribers = listOf(5, 2, 7, 0, 3, 1, 6, 4).map { index ->
+                async { scheduler.preview(entries[index], index) }
+            }
+            subscribers.forEach { subscriber -> subscriber.await() }
+
+            assertEquals("出图顺序与索引一致", (0..entries.lastIndex).toList(), extractor.started)
+            scheduler.cancelAll()
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 
     @Test
@@ -382,6 +418,19 @@ private class CompletionGateSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+}
+
+/** 记录抽图开始顺序的抽取器，用来断言一屏可见项的出图顺序。 */
+private class OrderRecordingExtractor : MediaPreviewExtractor {
+
+    val started = mutableListOf<Int>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+        started += file.name.removePrefix("第").substringBefore(' ').toInt()
+        return byteArrayOf(1)
+    }
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
 }
 
 /** 记录下发与取消的假预览源；[gate] 非空时压住抽取，用来构造滚动与重置。 */

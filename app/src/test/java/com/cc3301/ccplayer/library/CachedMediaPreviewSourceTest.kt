@@ -4,6 +4,8 @@ import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -32,6 +34,7 @@ class CachedMediaPreviewSourceTest {
     private val source = CachedMediaPreviewSource(
         extractor = extractor,
         cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        backgroundScope = unconfinedBackgroundScope,
     )
 
     @After
@@ -261,7 +264,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `旧格式单行元数据命中后重新读取时长并回写`() = runTest {
+    fun `旧格式单行元数据命中后先出图，后台补读时长并回写`() = runTest {
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
         val file = local("电影.mkv", lastModified = 1_000)
@@ -272,7 +275,9 @@ class CachedMediaPreviewSourceTest {
 
         val hit = source.preview(file)
 
-        assertEquals(187_000L, hit.durationMillis)
+        // 命中先出图，时长在后台补读后回写缓存。
+        assertNotNull(hit.image)
+        assertNull(hit.durationMillis)
         assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
         val written = cache().entry(key)
         assertNotNull(written)
@@ -285,7 +290,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `无元数据的旧条目命中后重新读取时长并回写`() = runTest {
+    fun `无元数据的旧条目命中后先出图，后台补读时长并回写`() = runTest {
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
         val file = local("电影.mkv", lastModified = 1_000)
@@ -296,14 +301,15 @@ class CachedMediaPreviewSourceTest {
 
         val hit = source.preview(file)
 
-        assertEquals(187_000L, hit.durationMillis)
+        assertNotNull(hit.image)
+        assertNull(hit.durationMillis)
         assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
         val written = cache().entry(key)
         assertNotNull(written)
         assertEquals(187_000L, written!!.durationMillis)
         assertTrue(written.durationKnown)
 
-        source.preview(file)
+        assertEquals(187_000L, source.preview(file).durationMillis)
         assertEquals(callsAfterFirst + 1, extractor.durationRequests.size)
     }
 
@@ -315,6 +321,7 @@ class CachedMediaPreviewSourceTest {
             extractor = extractor,
             cache = cache,
             monotonicClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
         )
         val image = byteArrayOf(1, 2, 3)
         extractor.imageBytes = image
@@ -339,6 +346,7 @@ class CachedMediaPreviewSourceTest {
             extractor = extractor,
             cache = cache,
             monotonicClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
         )
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
@@ -359,12 +367,13 @@ class CachedMediaPreviewSourceTest {
 
         now += 60 * 60 * 1000L
         extractor.durationFailure = null
-        val retried = bounded.preview(file)
-        assertEquals(187_000L, retried.durationMillis)
+        // 退避到期后的命中仍先出图，补读结果回写缓存，下一次命中带时长。
+        assertNotNull(bounded.preview(file).image)
         val written = cache.entry(key)
         assertNotNull(written)
         assertEquals(187_000L, written!!.durationMillis)
         assertTrue(written.durationKnown)
+        assertEquals(187_000L, bounded.preview(file).durationMillis)
     }
 
     @Test
@@ -375,6 +384,7 @@ class CachedMediaPreviewSourceTest {
             extractor = extractor,
             cache = cache,
             monotonicClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
         )
         extractor.imageBytes = byteArrayOf(1)
         extractor.durationMillis = 187_000
@@ -392,6 +402,8 @@ class CachedMediaPreviewSourceTest {
 
         now += 60 * 60 * 1000L
         extractor.durationFailure = null
+        assertNull(bounded.preview(file).durationMillis)
+        assertEquals(callsBeforeFailure + 2, extractor.durationRequests.size)
         assertEquals(187_000L, bounded.preview(file).durationMillis)
         assertEquals(callsBeforeFailure + 2, extractor.durationRequests.size)
     }
@@ -446,6 +458,7 @@ class CachedMediaPreviewSourceTest {
             extractor = extractor,
             cache = cache,
             monotonicClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
         )
         extractor.imageBytes = null
         extractor.durationMillis = 5_000
@@ -486,11 +499,13 @@ class CachedMediaPreviewSourceTest {
         val hit = source.preview(file)
 
         assertNull(hit.image)
-        assertEquals(187_000L, hit.durationMillis)
+        // 命中先返回，时长在后台补读后回写缓存。
+        assertNull(hit.durationMillis)
         val updated = cache().entry(key)
         assertNotNull(updated)
         assertEquals(187_000L, updated!!.durationMillis)
         assertTrue(updated.durationKnown)
+        assertEquals(187_000L, source.preview(file).durationMillis)
     }
 
     @Test
@@ -506,6 +521,7 @@ class CachedMediaPreviewSourceTest {
             extractor = tracker,
             cache = cache,
             monotonicClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
         )
         val file = local("电影.mkv", lastModified = 1_000)
 
@@ -1229,44 +1245,26 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `时长补读放弃不共享，同键可见等待者重新补读`() = runTest {
+    fun `命中补读时长与出图解耦，同键并发命中只补读一次`() = runTest {
         val tracker = GatedExtractor(durationFailure = IllegalStateException("无时长"))
         val bounded = CachedMediaPreviewSource(
             extractor = tracker,
             cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
         )
         val file = local("同键时长.mkv")
         tracker.imageGate = null
+        // 首次抽取读时长失败：落图并记录时长未知。
         assertNotNull(bounded.preview(file).image)
         assertEquals(1, tracker.durationRequests.count { it == file.location })
 
         tracker.durationFailure = null
         tracker.durationMillis = 500L
-        tracker.imageGate = CompletableDeferred()
-        val blocker = async { bounded.preview(local("占位.mkv")) }
-        runCurrent()
-        // 1 次预热抽取 + 1 个占着唯一许可的请求。
-        assertEquals(2, tracker.started.size)
+        val hits = (1..5).map { async { bounded.preview(file) } }.awaitAll()
 
-        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
-        val leader = async { bounded.prefetch(file) }
-        runCurrent()
-        val waiter = async { bounded.preview(file) }
-        runCurrent()
-        assertEquals(1, tracker.durationRequests.count { it == file.location })
-
-        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
-        tracker.imageGate?.complete(Unit)
-        // 可见请求取消同键预取；预取以取消收尾。
-        runCatching { leader.await() }
-        val waiterPreview = waiter.await()
-        blocker.await()
-
-        assertNotNull(waiterPreview.image)
-        assertEquals(500L, waiterPreview.durationMillis)
-        // 预热 1 次 + 等待者 1 次；leader 被取消时没有补读。
-        assertEquals(2, tracker.durationRequests.count { it == file.location })
-        assertEquals(2, imageFileCount())
+        assertTrue("命中先出图", hits.all { preview -> preview.image != null })
+        assertEquals("同键只补读一次", 2, tracker.durationRequests.count { it == file.location })
+        assertEquals(500L, bounded.preview(file).durationMillis)
     }
 
     @Test
@@ -1396,6 +1394,7 @@ class CachedMediaPreviewSourceTest {
         val bounded = CachedMediaPreviewSource(
             extractor = tracker,
             cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
         )
         val cached = local("旧.mkv")
         // 先落一张图为缓存，时长读取失败，记录为“时长未知”。
@@ -1507,6 +1506,130 @@ class CachedMediaPreviewSourceTest {
         assertTrue(extractor.imageRequests.isEmpty())
     }
 
+    @Test
+    fun `命中缓存先出图，时长补读不阻塞出图`() = runTest {
+        val tracker = GatedExtractor(durationGate = CompletableDeferred())
+        val cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = cache,
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = local("电影.mkv", lastModified = 1_000)
+        cache.save(
+            location = thumbnailCacheKey(file, ThumbnailPolicy(), THUMBNAIL_TARGET_WIDTH),
+            bytes = byteArrayOf(1),
+            durationKnown = false,
+        )
+
+        // 时长补读被闸门压住，图片仍然立刻返回。
+        val preview = bounded.preview(file)
+
+        assertNotNull(preview.image)
+        assertNull("时长还在后台补读", preview.durationMillis)
+        assertEquals(1, tracker.durationRequests.count { it == file.location })
+
+        tracker.durationGate?.complete(Unit)
+        runCurrent()
+    }
+
+    @Test
+    fun `补读时长不排到可见请求前面`() = runTest {
+        val tracker = GatedExtractor()
+        val cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = cache,
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val hit = local("已出图.mkv", lastModified = 1_000)
+        cache.save(
+            location = thumbnailCacheKey(hit, ThumbnailPolicy(), THUMBNAIL_TARGET_WIDTH),
+            bytes = byteArrayOf(1),
+            durationKnown = false,
+        )
+
+        // 唯一许可被占住，命中补读与可见请求都只能排队。
+        val blocker = async { bounded.preview(network("占位.mkv")) }
+        runCurrent()
+        assertEquals(1, tracker.started.size)
+
+        val shown = bounded.preview(hit)
+        assertNotNull("命中缓存立即出图", shown.image)
+
+        val visible = async { bounded.visiblePreview(network("可见.mkv"), 1) }
+        runCurrent()
+
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        blocker.await()
+        runCurrent()
+
+        // 许可按列表索引发给可见请求，补读时长排在它之后：断言取许可的实际先后，不只看抽图。
+        assertEquals(
+            listOf("image:占位.mkv", "image:可见.mkv", "duration:已出图.mkv"),
+            tracker.events,
+        )
+    }
+
+    @Test
+    fun `后到的低索引仍先于已排队的高索引出图`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val entries = (0 until 8).map { index -> network("第$index 集.mkv") }
+
+        // 高索引先发起：它入队后停在发放之前，低索引这时才发起。
+        val high = async(start = CoroutineStart.UNDISPATCHED) { bounded.visiblePreview(entries[7], 7) }
+        val low = async(start = CoroutineStart.UNDISPATCHED) { bounded.visiblePreview(entries[0], 0) }
+        runCurrent()
+
+        // 发放从整队取最小 rank：先出图的是后到的低索引。
+        assertEquals(listOf("第0 集.mkv"), tracker.started.map { it.substringAfterLast('/') })
+
+        tracker.imageGate?.complete(Unit)
+        high.await()
+        low.await()
+        assertEquals(
+            listOf("第0 集.mkv", "第7 集.mkv"),
+            tracker.started.map { it.substringAfterLast('/') },
+        )
+    }
+
+    @Test
+    fun `缓存命中不取消同键预取`() = runTest {
+        // 预取还在解码、调用方等待时，同键缓存被填上：命中直接出图，不动在途预取。
+        val tracker = GatedExtractor()
+        val cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = cache,
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = network("同键.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+        val prefetch = async { bounded.prefetch(file) }
+        runCurrent()
+        assertEquals(1, tracker.started.size)
+
+        cache.save(
+            location = thumbnailCacheKey(file, ThumbnailPolicy(), NETWORK_TARGET_WIDTH),
+            bytes = byteArrayOf(9),
+        )
+
+        val shown = bounded.preview(file)
+
+        assertArrayEquals(byteArrayOf(9), shown.image!!.readBytes())
+        assertTrue("命中不取消同键预取", tracker.cancelled.isEmpty())
+        assertEquals(1, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        runCatching { prefetch.await() }
+    }
+
     private fun imageFileCount(): Int =
         directory.listFiles().orEmpty().count { file -> file.name.endsWith(".img") }
 
@@ -1529,9 +1652,13 @@ class CachedMediaPreviewSourceTest {
         thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
 }
 
+/** 测试用的后台范围：不受限调度，命中后的时长补读在断言前跑完。 */
+private val unconfinedBackgroundScope = CoroutineScope(Dispatchers.Unconfined)
+
 /** 抽取开始后等待闸门，用来稳定构造唯一许可被占用、后续请求排队的场景。 */
 private class GatedExtractor(
     var imageGate: CompletableDeferred<Unit>? = CompletableDeferred(),
+    var durationGate: CompletableDeferred<Unit>? = null,
     var durationFailure: Exception? = null,
     var durationMillis: Long? = null,
 ) : MediaPreviewExtractor {
@@ -1539,11 +1666,15 @@ private class GatedExtractor(
     val started = mutableListOf<String>()
     val cancelled = mutableListOf<String>()
     val durationRequests = mutableListOf<String>()
+
+    /** 按取到许可后的实际发生顺序记录读取：抽图与补读时长混在一条序列里。 */
+    val events = mutableListOf<String>()
     var concurrent = 0
     var maxConcurrent = 0
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         started += file.location
+        events += "image:${file.location.substringAfterLast('/')}"
         concurrent++
         maxConcurrent = maxOf(maxConcurrent, concurrent)
         try {
@@ -1559,6 +1690,8 @@ private class GatedExtractor(
 
     override suspend fun durationMillis(file: MediaFile): Long? {
         durationRequests += file.location
+        events += "duration:${file.location.substringAfterLast('/')}"
+        durationGate?.await()
         durationFailure?.let { throw it }
         return durationMillis
     }

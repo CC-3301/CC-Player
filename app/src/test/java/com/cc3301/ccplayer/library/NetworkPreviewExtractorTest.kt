@@ -38,6 +38,7 @@ class NetworkPreviewExtractorTest {
         assertArrayEquals(payload.copyOfRange(0, 8), extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)!!)
         assertEquals(MediaKind.Video, askedKind)
         assertEquals(listOf(movie.location), reads.opened)
+        assertEquals("文件大小取自目录列表", listOf(movie.size), reads.sizes)
         assertEquals(listOf(0L), source.reads)
         assertTrue(source.closed)
     }
@@ -84,7 +85,7 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `打开句柄失败时向调用方抛出`() = runTest {
-        val extractor = NetworkPreviewExtractor({ error("打不开") }) { _, _, _ -> ByteArray(1) }
+        val extractor = NetworkPreviewExtractor({ _, _ -> error("打不开") }) { _, _, _ -> ByteArray(1) }
 
         try {
             extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
@@ -105,7 +106,7 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `取消时关闭句柄以中断阻塞读取`() = runBlocking {
         val blocking = BlockingByteSource()
-        val extractor = NetworkPreviewExtractor({ blocking }) { opened, _, _ ->
+        val extractor = NetworkPreviewExtractor({ _, _ -> blocking }) { opened, _, _ ->
             opened.readAt(0, ByteArray(1), 0, 1)
             ByteArray(1)
         }
@@ -194,13 +195,15 @@ private class BlockingByteSource : ByteSource {
     }
 }
 
-/** 记录打开位置的假读取接缝。 */
+/** 记录打开位置与文件大小的假读取接缝。 */
 private class RecordingReads(private val source: ByteSource) : NetworkMediaReads {
 
     val opened = mutableListOf<String>()
+    val sizes = mutableListOf<Long>()
 
-    override suspend fun openRead(location: String): ByteSource {
+    override suspend fun openRead(location: String, size: Long): ByteSource {
         opened += location
+        sizes += size
         return source
     }
 }

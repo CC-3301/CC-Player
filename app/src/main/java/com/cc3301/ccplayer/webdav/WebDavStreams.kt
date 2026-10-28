@@ -24,7 +24,8 @@ class WebDavStreams(
     /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
     override suspend fun probe(location: String) {
         val target = targetOf(location)
-        transport.openRead(target.url, target.username, target.password).close()
+        // 播放读取没有目录列表的大小，句柄打开时探测一次长度。
+        transport.openRead(target.url, target.username, target.password, size = 0).close()
     }
 
     /** 位置对应的本机地址。 */
@@ -38,7 +39,7 @@ class WebDavStreams(
     private fun openBlocking(location: String): ByteSource = runBlocking {
         val target = targetOf(location)
         NetworkReadPriority.shared.wrap(
-            transport.openRead(target.url, target.username, target.password),
+            transport.openRead(target.url, target.username, target.password, size = 0),
             ReadKind.Playback,
         )
     }

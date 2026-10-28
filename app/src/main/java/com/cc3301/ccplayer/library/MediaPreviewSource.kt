@@ -7,10 +7,16 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -97,7 +103,8 @@ data class ThumbnailPolicy(
  *
  * 缓存键包含位置、大小、修改时间、策略版本与目标宽度；修改时间缺失时退化为大小与有效期。
  * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。底层取帧是阻塞的原生调用且取消不掉，
- * 同一时刻只跑一路；串行同时让可见项按列表索引从上到下出图。
+ * 同一时刻只跑一路；许可按列表索引发给排队的可见请求，许可空闲也不让后来者越过排队者。
+ * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
  * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，预取失败不写退避。
  * 成功封面落盘复用；失败与无图结果只在本次运行内记忆。
@@ -108,8 +115,10 @@ class CachedMediaPreviewSource(
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
     /** 单调时钟，单位毫秒；有效期与失败退避都按毫秒比较。 */
     private val monotonicClockMillis: () -> Long = { systemMonotonicMillis() },
-    /** 诊断日志出口；只记文件名与失败类型，不记连接凭据。 */
+    /** 诊断日志出口；记文件名、失败类型与网络抽帧的排队与取帧耗时，不记连接凭据。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    /** 时长补读等后台任务的执行范围；应用内由 [create] 传入进程级范围，缺省自建。 */
+    private val backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : MediaPreviewSource {
 
     /** 抽帧许可：容量为 1，本地与网络共用；可见项优先于预取取得。 */
@@ -130,6 +139,9 @@ class CachedMediaPreviewSource(
 
     /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
+
+    /** 正在后台补读时长的缓存键与那一次的 Job；同键只补读一次。 */
+    private val durationRefills = ConcurrentHashMap<String, Job>()
 
     override suspend fun preview(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.visible(Int.MAX_VALUE - 1))
@@ -171,45 +183,61 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): MediaPreview {
-        val maxAge = cacheMaxAge(file)
+        val cached = cache.entry(key, cacheMaxAge(file))
+        if (cached != null) {
+            // 上次运行留下的无图记录只用于复用时长；本次运行仍需重新确认是否有图。
+            if (!cached.noImage || isNoImageRemembered(key)) {
+                // 命中缓存立即出图：不排队、不等同键在途抽取，时长未知时在后台补读。
+                extractionFailures.remove(key)
+                if (cached.file != null) forgetNoImage(key)
+                refillDuration(file, key, cached, priority)
+                return MediaPreview(cached.file, cached.durationMillis)
+            }
+        } else {
+            // 本地无图记录有效期到期后重新确认。
+            forgetNoImage(key)
+        }
         val loaded = cachedOrLoad(
             file = file,
             key = key,
-            maxAgeMillis = maxAge,
-            clearNoImageOnCacheMiss = true,
             priority = priority,
-            onCacheHit = { cached -> durationOnCacheHit(file, key, cached, priority) },
             load = { extractLocal(file, key, targetWidth, priority) },
         )
         return MediaPreview(loaded.image, loaded.durationMillis)
     }
 
-    /** 命中缓存时复用已记录的时长；未知时才补读，失败只影响角标。 */
-    private suspend fun durationOnCacheHit(
+    /** 命中缓存后先出图；时长未知时在后台补读，排在可见与预取之后，不阻塞本次出图。 */
+    private fun refillDuration(
         file: MediaFile,
         key: String,
         cached: CachedThumbnail,
-        priority: PreviewPriority,
-    ): LoadedPreview {
-        if (cached.durationKnown) return LoadedPreview(cached.file, cached.durationMillis)
-        val duration = readLocalDuration(file, key, priority)
-            // 已离开范围：图片可返回，但时长未补读；同键等待者需要重试。
-            ?: return LoadedPreview(cached.file, durationMillis = null, abandoned = true)
-        return when (duration) {
-            is PreviewDuration.Known -> {
-                writeDurationSafely(key, duration.millis)
-                LoadedPreview(cached.file, duration.millis)
-            }
-
-            PreviewDuration.Unavailable -> {
+        trigger: PreviewPriority,
+    ) {
+        if (cached.durationKnown) return
+        // 后台范围已取消（进程收尾）时不再补读，也不登记。
+        if (!backgroundScope.isActive) return
+        // 先占位再启动：占位失败说明同键已在补读，直接放弃这一次。
+        val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
+            when (val duration = readLocalDuration(file, key, trigger)) {
+                is PreviewDuration.Known -> writeDurationSafely(key, duration.millis)
                 // 确定没有时长：写入后，后续命中不再重读。
-                writeDurationSafely(key, null)
-                LoadedPreview(cached.file, durationMillis = null)
+                PreviewDuration.Unavailable -> writeDurationSafely(key, null)
+                // 读取失败只影响角标：不落盘，退避后重试。
+                PreviewDuration.Failed, null -> Unit
             }
-
-            // 读取失败只影响角标；不落盘，退避后重试。
-            PreviewDuration.Failed -> LoadedPreview(cached.file, durationMillis = null)
         }
+        if (durationRefills.putIfAbsent(key, job) != null) {
+            job.cancel()
+            return
+        }
+        // 完成或被取消都按身份回滚登记：同键可能已被下一轮补读重新登记。
+        job.invokeOnCompletion { finishDurationRefill(key, job) }
+        job.start()
+    }
+
+    /** 只删自己登记的这一次：同键的下一轮补读已重新登记时保留它的登记。 */
+    private fun finishDurationRefill(key: String, job: Job) {
+        durationRefills.compute(key) { _, current -> if (current === job) null else current }
     }
 
     /** 一次读取会话取图与时长；无图条目也记录时长，避免下次重开文件。 */
@@ -252,7 +280,10 @@ class CachedMediaPreviewSource(
         return LoadedPreview(image, durationMillis)
     }
 
-    /** 读时长失败只影响角标；可见请求失败后退避，避免慢源每次命中都重试并长期占用许可。 */
+    /**
+     * 读时长失败只影响角标；可见请求失败后退避，避免慢源每次命中都重试并长期占用许可。
+     * 许可按最低优先级排队：补读时长不排到可见请求与预取之前；准入仍按触发它的请求判断。
+     */
     private suspend fun readLocalDuration(
         file: MediaFile,
         key: String,
@@ -261,7 +292,7 @@ class CachedMediaPreviewSource(
         val now = monotonicClockMillis()
         val previous = durationFailures[key]
         if (previous != null && now < previous.retryAtMillis) return PreviewDuration.Failed
-        val result = permits.withPermit(priority) {
+        val result = permits.withPermit(PreviewPriority.Duration) {
             if (!mayExtract(file.location, priority)) {
                 null
             } else {
@@ -319,20 +350,23 @@ class CachedMediaPreviewSource(
     ): File? {
         // 本次运行已确认无图：不再重复抽取，重启后重新确认。
         if (isNoImageRemembered(key)) return null
-        val maxAge = cacheMaxAge(file)
+        val cached = cache.entry(key, cacheMaxAge(file))
+        if (cached != null) {
+            // 命中缓存立即出图，不等同键在途抽取；网络条目不显示时长，命中不补读。
+            extractionFailures.remove(key)
+            if (cached.file != null) forgetNoImage(key)
+            return cached.file
+        }
         val loaded = cachedOrLoad(
             file = file,
             key = key,
-            maxAgeMillis = maxAge,
-            clearNoImageOnCacheMiss = false,
             priority = priority,
-            onCacheHit = { cached ->
-                forgetNoImage(key)
-                LoadedPreview(cached.file, durationMillis = null)
-            },
             load = {
                 // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
+                val requestedAt = monotonicClockMillis()
+                var queuedMillis = 0L
                 val attempt = permits.withPermit(priority) {
+                    queuedMillis = monotonicClockMillis() - requestedAt
                     if (!mayExtract(file.location, priority)) {
                         null
                     } else {
@@ -343,6 +377,11 @@ class CachedMediaPreviewSource(
                         } ?: false
                         done to decoded
                     }
+                }
+                if (attempt != null) {
+                    // 排队与许可内耗时分开记：许可内包含字节预读与解码，两者在同一许可里交替发生。
+                    val total = monotonicClockMillis() - requestedAt
+                    diagnostics.log { "网络封面: ${file.name} 排队 ${queuedMillis}ms 预读解码 ${total - queuedMillis}ms" }
                 }
                 if (attempt == null) {
                     // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
@@ -378,17 +417,13 @@ class CachedMediaPreviewSource(
     private fun cacheMaxAge(file: MediaFile): Long? = thumbnailCacheMaxAge(file, policy)
 
     /**
-     * 先查缓存；没有就让第一个调用者抽取，同一缓存键的并发调用等待同一结果。
-     * 命中缓存时的时长读取也由第一个调用者完成，并发调用共享结果。
+     * 让第一个调用者抽取，同一缓存键的并发调用等待同一结果；缓存命中已在调用方先行返回。
      * 首个调用者被取消时，等待者重新竞争，避免把取消当成抽取失败。
      */
     private suspend fun cachedOrLoad(
         file: MediaFile,
         key: String,
-        maxAgeMillis: Long?,
-        clearNoImageOnCacheMiss: Boolean,
         priority: PreviewPriority,
-        onCacheHit: suspend (CachedThumbnail) -> LoadedPreview,
         load: suspend () -> LoadedPreview,
     ): LoadedPreview {
         while (true) {
@@ -418,18 +453,7 @@ class CachedMediaPreviewSource(
             if (inFlight.putIfAbsent(key, entry) != null) continue
             try {
                 val loaded = try {
-                    val cached = cache.entry(key, maxAgeMillis)
-                    // 上次运行留下的无图记录只用于复用时长；本次运行仍需确认是否有图。
-                    if (cached != null && (!cached.noImage || isNoImageRemembered(key))) {
-                        // 已有缓存时抽取失败记录已陈旧，清掉。
-                        extractionFailures.remove(key)
-                        if (cached.file != null) forgetNoImage(key)
-                        onCacheHit(cached)
-                    } else {
-                        // 本地无图记录有效期到期后重新确认；网络无图不落盘，不在这里清。
-                        if (cached == null && clearNoImageOnCacheMiss) forgetNoImage(key)
-                        loadWithBackoff(file, key, priority, load)
-                    }
+                    loadWithBackoff(file, key, priority, load)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
@@ -564,10 +588,12 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
+        /** [backgroundScope] 由调用方给出应用级范围：时长补读等后台任务跟随进程，不随界面重建。 */
         fun create(
             context: Context,
             networkReads: NetworkMediaReads,
             diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+            backgroundScope: CoroutineScope,
         ): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
@@ -576,6 +602,7 @@ class CachedMediaPreviewSource(
                 cache = thumbnailCache(appContext),
                 policy = policy,
                 diagnostics = diagnostics,
+                backgroundScope = backgroundScope,
             )
         }
 
@@ -622,12 +649,12 @@ private data class PreviewWindow(
 private class AbandonedPreviewException : CancellationException("预览请求已离开可见范围")
 
 /**
- * 取抽帧许可的优先级：可见项先于预取项。
+ * 取抽帧许可的优先级：可见项先于预取，时长补读排在最后。
  * [order] 为可见项在列表中的索引；同级可见请求按索引从小到大取得许可。
  */
 private data class PreviewPriority(val kind: Kind, val order: Int) {
 
-    enum class Kind { Visible, Prefetch }
+    enum class Kind { Visible, Prefetch, Duration }
 
     val isVisible: Boolean get() = kind == Kind.Visible
 
@@ -635,12 +662,15 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
         fun visible(order: Int) = PreviewPriority(Kind.Visible, order)
 
         val Prefetch = PreviewPriority(Kind.Prefetch, Int.MAX_VALUE)
+
+        /** 命中缓存后补读时长：排在任何可见请求与预取之后。 */
+        val Duration = PreviewPriority(Kind.Duration, Int.MAX_VALUE)
     }
 }
 
 /**
- * 带优先级的抽帧许可：有许可可用时先交给等待中的可见请求，其次预取请求。
- * 可见请求按 [PreviewPriority.order] 从小到大取得许可；同级预取按等待顺序。
+ * 带优先级的抽帧许可：许可只发给排队者中优先级最高的一位，可见请求按列表索引从小到大。
+ * 许可空闲也不直接放行后来的请求，后到的高索引项不会越过仍在排队的低索引项。
  * 取消等待会退出队列；已发出的许可在取消竞争中归还，避免许可泄漏。
  */
 private class PrioritySemaphore(private val capacity: Int) {
@@ -660,24 +690,30 @@ private class PrioritySemaphore(private val capacity: Int) {
 
     private suspend fun acquire(priority: PreviewPriority) {
         val waiter = Waiter(priority, CompletableDeferred())
-        var queued = false
         try {
-            lock.withLock {
-                if (available > 0 && waiters.isEmpty()) {
-                    available--
-                } else {
-                    waiters.addLast(waiter)
-                    queued = true
-                }
-            }
-            if (queued) waiter.granted.await()
+            // 一律先入队再发放；这里的 yield 只是给同一轮下发的请求一个入队机会，
+            // 不构成「同轮请求必全部入队」的保证（用立即调度时不让出）。
+            // 顺序由 grantIdleLocked 每次从整队取最小 rank 决定，加上下发按索引升序 start。
+            lock.withLock { waiters.addLast(waiter) }
+            yield()
+            lock.withLock { grantIdleLocked() }
+            waiter.granted.await()
         } catch (cancellation: CancellationException) {
-            if (queued) {
-                withContext(NonCancellable) {
-                    if (!lock.withLock { waiters.remove(waiter) }) release()
-                }
+            withContext(NonCancellable) {
+                // 仍在排队：直接退出；许可已发出：交还，让排在后面的请求继续。
+                if (!lock.withLock { waiters.remove(waiter) }) release()
             }
             throw cancellation
+        }
+    }
+
+    /** 连续把空闲许可发给当前排队者中优先级最高的一位。 */
+    private fun grantIdleLocked() {
+        while (available > 0) {
+            val index = waiters.indices.minByOrNull { position -> priorityRank(waiters[position]) } ?: return
+            val granted = waiters.removeAt(index)
+            available--
+            granted.granted.complete(Unit)
         }
     }
 
@@ -694,10 +730,11 @@ private class PrioritySemaphore(private val capacity: Int) {
         next?.granted?.complete(Unit)
     }
 
-    /** 可见请求先于预取；可见请求内按列表索引排序，预取保持等待顺序。 */
+    /** 可见请求先于预取，时长补读最后；可见请求内按列表索引排序，同级保持等待顺序。 */
     private fun priorityRank(waiter: Waiter): Long = when (waiter.priority.kind) {
         PreviewPriority.Kind.Visible -> waiter.priority.order.toLong()
         PreviewPriority.Kind.Prefetch -> PREFETCH_RANK
+        PreviewPriority.Kind.Duration -> DURATION_RANK
     }
 
     private class Waiter(
@@ -706,6 +743,7 @@ private class PrioritySemaphore(private val capacity: Int) {
     )
 
     private companion object {
-        const val PREFETCH_RANK = Long.MAX_VALUE
+        const val PREFETCH_RANK = Long.MAX_VALUE - 1
+        const val DURATION_RANK = Long.MAX_VALUE
     }
 }

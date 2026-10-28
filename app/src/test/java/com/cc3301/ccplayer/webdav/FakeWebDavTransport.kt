@@ -8,11 +8,17 @@ class FakeWebDavTransport : WebDavTransport {
 
     var failure: MediaSourceException? = null
 
+    /** 置真时读句柄在读取时抛区间不支持，模拟忽略 Range 的服务器。 */
+    var ignoreRange: Boolean = false
+
     /** 每次调用用到的用户名与密码。 */
     val logins = mutableListOf<Pair<String, String?>>()
 
     /** 每次列目录用到的地址。 */
     val listings = mutableListOf<String>()
+
+    /** 每次打开读句柄时给出的文件大小。 */
+    val openedSizes = mutableListOf<Long>()
 
     private val childrenByUrl = mutableMapOf<String, List<WebDavEntry>>()
     private val bytesByUrl = mutableMapOf<String, ByteArray>()
@@ -37,22 +43,27 @@ class FakeWebDavTransport : WebDavTransport {
         return childrenByUrl[url].orEmpty()
     }
 
-    override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle {
+    override suspend fun openRead(url: String, username: String, password: String?, size: Long): WebDavReadHandle {
         failure?.let { throw it }
         logins += username to password
+        openedSizes += size
         val bytes = bytesByUrl[url] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$url")
-        return RecordingWebDavHandle(bytes).also { handles[url] = it }
+        return RecordingWebDavHandle(bytes, ignoreRange).also { handles[url] = it }
     }
 }
 
-/** 记录是否被关闭的读句柄。 */
-class RecordingWebDavHandle(private val bytes: ByteArray) : WebDavReadHandle {
+/** 记录是否被关闭的读句柄；[ignoreRange] 置真时读取抛区间不支持。 */
+class RecordingWebDavHandle(
+    private val bytes: ByteArray,
+    private val ignoreRange: Boolean = false,
+) : WebDavReadHandle {
 
     var closed = false
 
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (ignoreRange) throw WebDavRangeUnsupportedException("服务器忽略了区间请求")
         if (position >= bytes.size) return 0
         val count = minOf(length.toLong(), bytes.size - position).toInt()
         bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)

@@ -102,9 +102,9 @@ class OkHttpWebDavTransportTest {
     }
 
     @Test
-    fun `打开文件按 Range 发 GET，长度取自响应`() = runTest {
+    fun `大小未知时打开就发探测请求，长度取自响应`() = runTest {
         FakeWebDavServer(bytes = payload).use { server ->
-            transport.openRead("${server.root}/电影.mkv", "cc", "secret").use { handle ->
+            transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0).use { handle ->
                 val buffer = ByteArray(16)
 
                 assertEquals(payload.size.toLong(), handle.size)
@@ -118,7 +118,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `连续读沿用同一个流，跳读重发带新起点的 Range`() = runTest {
         FakeWebDavServer(bytes = payload).use { server ->
-            transport.openRead("${server.root}/电影.mkv", "cc", "secret").use { handle ->
+            transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0).use { handle ->
                 val buffer = ByteArray(64)
                 handle.readAt(0, buffer, 0, 64)
                 handle.readAt(64, buffer, 0, 64)
@@ -135,16 +135,16 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `读到的位置超过文件长度时返回 0`() = runTest {
         FakeWebDavServer(bytes = payload).use { server ->
-            transport.openRead("${server.root}/电影.mkv", "cc", "secret").use { handle ->
+            transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0).use { handle ->
                 assertEquals(0, handle.readAt(payload.size.toLong(), ByteArray(16), 0, 16))
             }
         }
     }
 
     @Test
-    fun `服务器忽略 Range 时从头给流，读到的仍是请求位置的数据`() = runTest {
+    fun `大小未知时服务器忽略 Range 仍按顺序丢弃到请求位置`() = runTest {
         FakeWebDavServer(bytes = payload, ignoreRange = true).use { server ->
-            transport.openRead("${server.root}/电影.mkv", "cc", "secret").use { handle ->
+            transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0).use { handle ->
                 val buffer = ByteArray(32)
 
                 assertEquals(32, handle.readAt(2000, buffer, 0, 32))
@@ -156,7 +156,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `服务器没给出长度时打开失败`() = runTest {
         FakeWebDavServer(bytes = payload, withoutLength = true).use { server ->
-            val exception = runCatching { transport.openRead("${server.root}/电影.mkv", "cc", "secret") }.exceptionOrNull()
+            val exception = runCatching { transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0) }.exceptionOrNull()
 
             assertEquals(MediaFailure.Unknown, (exception as MediaSourceException).failure)
         }
@@ -165,7 +165,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `打开文件状态码非 2xx 归到来源失败原因`() = runTest {
         FakeWebDavServer(bytes = payload, getStatus = 404).use { server ->
-            val exception = runCatching { transport.openRead("${server.root}/电影.mkv", "cc", "secret") }.exceptionOrNull()
+            val exception = runCatching { transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0) }.exceptionOrNull()
 
             assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
         }
@@ -174,7 +174,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `关闭句柄后阻塞读取快速失败且不再发起请求`() = runTest {
         FakeWebDavServer(bytes = payload, stallBody = true).use { server ->
-            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret")
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
             // 首个 GET 已发出响应头并停在正文前。
             assertTrue("首个 GET 应停在正文前", server.awaitStalledBody(1))
 
@@ -206,7 +206,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `等响应头时关闭句柄能快速退出且不再发起请求`() = runTest {
         FakeWebDavServer(bytes = payload, stallHeadersAfterFirst = true).use { server ->
-            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret")
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
             val failure = AtomicReference<Throwable?>()
             val reading = Thread {
                 // 跳读会发第二个 GET，服务器迟迟不回响应头，读线程停在等响应头。
@@ -229,6 +229,33 @@ class OkHttpWebDavTransportTest {
             val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
             assertNotNull("关闭后读取必须直接失败", afterClose)
             assertEquals("关闭后不得再发起 GET", 2, server.received().size)
+        }
+    }
+
+    @Test
+    fun `已知大小时打开不发请求，首个读取才发带新起点的 Range`() = runTest {
+        FakeWebDavServer(bytes = payload).use { server ->
+            transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = payload.size.toLong()).use { handle ->
+                assertEquals("打开句柄不应为取长度发请求", 0, server.received().size)
+
+                val buffer = ByteArray(16)
+                assertEquals(16, handle.readAt(1000, buffer, 0, 16))
+                assertArrayEquals(payload.copyOfRange(1000, 1016), buffer)
+                assertEquals("bytes=1000-", server.received().single().header("Range"))
+            }
+        }
+    }
+
+    @Test
+    fun `服务器忽略 Range 时抽帧读取抛区间不支持`() = runTest {
+        FakeWebDavServer(bytes = payload, ignoreRange = true).use { server ->
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = payload.size.toLong())
+            val failure = runCatching { handle.readAt(1000, ByteArray(16), 0, 16) }.exceptionOrNull()
+            handle.close()
+
+            // 按位置读拿不到目标字节时不再从文件开头丢弃，由调用方按网络源记下结论。
+            assertTrue(failure is WebDavRangeUnsupportedException)
+            assertEquals(1, server.received().size)
         }
     }
 

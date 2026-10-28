@@ -25,6 +25,8 @@ import java.util.concurrent.TimeUnit
  * OkHttp 实现：PROPFIND 列目录，带 Range 的 GET 随机读。
  *
  * 读文件时位置连续就沿用同一个响应流，跳读才按新起点重发 GET。
+ * 已知文件大小（抽帧读取）时打开句柄不发请求，并要求服务器支持区间读；
+ * 服务器忽略 Range 时抛 [WebDavRangeUnsupportedException]，由调用方按网络源记录结论。
  */
 class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) : WebDavTransport {
 
@@ -42,11 +44,11 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
         parsePropfind(body, directoryUrl)
     }
 
-    override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle = withContext(Dispatchers.IO) {
+    override suspend fun openRead(url: String, username: String, password: String?, size: Long): WebDavReadHandle = withContext(Dispatchers.IO) {
         val calls = ReadCallTracker()
         try {
             coroutineScope {
-                val opening = async { openWithCalls(calls, url, username, password) }
+                val opening = async { openWithCalls(calls, url, username, password, size) }
                 try {
                     opening.await()
                 } catch (cancellation: CancellationException) {
@@ -65,16 +67,31 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
         url: String,
         username: String,
         password: String?,
+        size: Long,
     ): WebDavReadHandle {
-        val first = rangedResponse(calls, url, username, password, position = 0)
-        try {
-            val size = totalSizeOf(first.response)
-                ?: throw MediaSourceException(MediaFailure.Unknown, "服务器没给出文件长度：$url")
+        if (size > 0) {
+            // 目录列表已给出大小：打开时不发请求，首个读取才按起点发带 Range 的 GET。
             return OkHttpWebDavReadHandle(
                 size = size,
+                first = null,
+                calls = calls,
+                openFrom = { position ->
+                    rangedResponse(calls, url, username, password, position, requireRanges = true)
+                },
+            )
+        }
+        // 大小未知（播放读取）：用首个 GET 探测总长度。
+        val first = rangedResponse(calls, url, username, password, position = 0, requireRanges = false)
+        try {
+            val totalSize = totalSizeOf(first.response)
+                ?: throw MediaSourceException(MediaFailure.Unknown, "服务器没给出文件长度：$url")
+            return OkHttpWebDavReadHandle(
+                size = totalSize,
                 first = first,
                 calls = calls,
-                openFrom = { position -> rangedResponse(calls, url, username, password, position) },
+                openFrom = { position ->
+                    rangedResponse(calls, url, username, password, position, requireRanges = false)
+                },
             )
         } catch (failure: Exception) {
             calls.cancel()
@@ -83,13 +100,17 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
         }
     }
 
-    /** 从 [position] 起开一次带 Range 的 GET。 */
+    /**
+     * 从 [position] 起开一次带 Range 的 GET。
+     * [requireRanges] 为真时服务器回 200（忽略区间）即失败，不从文件开头丢弃字节。
+     */
     private fun rangedResponse(
         calls: ReadCallTracker,
         url: String,
         username: String,
         password: String?,
         position: Long,
+        requireRanges: Boolean,
     ): RangedResponse {
         val request = requestOf(url, username, password).header(RANGE_HEADER, "$BYTES_PREFIX$position-").build()
         val response = execute(calls, request)
@@ -97,6 +118,10 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
             val statusCode = response.code
             response.close()
             throw statusFailure(statusCode, url)
+        }
+        if (requireRanges && response.code != STATUS_PARTIAL) {
+            response.close()
+            throw WebDavRangeUnsupportedException("服务器忽略了区间请求：$url")
         }
         val body = response.body
         if (body == null) {
@@ -219,12 +244,13 @@ private class RangedResponse(val start: Long, val stream: InputStream, val respo
 /**
  * 带 Range 读的句柄：位置连续就沿用已打开的响应流，跳读按新起点重发 GET。
  *
+ * [first] 为 null 表示打开时还没有响应流（大小已知），首个读取才发起 GET。
  * 关闭不等待读取锁：先取消当前 GET 并关掉当前响应，让阻塞读退出。
  * 关闭后任何读取立即失败，也不能再发起新的 GET。
  */
 private class OkHttpWebDavReadHandle(
     override val size: Long,
-    first: RangedResponse,
+    first: RangedResponse?,
     private val calls: ReadCallTracker,
     private val openFrom: (Long) -> RangedResponse,
 ) : WebDavReadHandle {
@@ -236,7 +262,7 @@ private class OkHttpWebDavReadHandle(
     private var closed = false
 
     /** 已打开的流读到的位置：流从 [RangedResponse.start] 起，读完 [已读数] 后落在这里。 */
-    private var position = first.start
+    private var position = first?.start ?: NO_POSITION
 
     /** 解码器与关闭可能来自不同线程，读与关闭串行进行。 */
     private val lock = Any()
@@ -295,7 +321,7 @@ private class OkHttpWebDavReadHandle(
         return opened
     }
 
-    /** 服务器忽略 Range 时响应从头给流，跳到请求位置。 */
+    /** 大小未知的读取里服务器忽略了 Range，响应从头给流：按顺序丢弃到请求位置。 */
     private fun skipTo(response: RangedResponse, wanted: Long) {
         var remaining = wanted - response.start
         val buffer = ByteArray(SKIP_BUFFER_BYTES)
@@ -308,6 +334,9 @@ private class OkHttpWebDavReadHandle(
     }
 
     private companion object {
+        /** 还没有打开的响应流。 */
+        const val NO_POSITION = -1L
+
         const val SKIP_BUFFER_BYTES = 64 * 1024
     }
 }
