@@ -416,11 +416,9 @@ class PlaybackController(
         _renderSurfaceAvailable.value = available
         if (available) {
             // 新的前后台周期开始：作废尚未完成的抓帧，并允许下一次退后台重新抓。
-            backgroundCaptureToken++
-            backgroundCaptureAttempted = false
-            backgroundCaptureJob = null
+            resetBackgroundCapture(clearFrame = false)
             if (!wasAvailable) {
-                // 没有进入恢复等待说明画面一直在或不需要恢复，缓存帧多余。
+                // 未进入恢复等待（无会话、加载中或片尾黑底）：缓存帧不适用，立即撤掉。
                 if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
@@ -435,17 +433,17 @@ class PlaybackController(
     }
 
     /**
-     * 回前台：Surface 未重挂时画面一直在，后台缓存帧多余，立即撤掉并作废在途抓帧。
-     * 已进入恢复等待时保留缓存帧，等播放核心的首个新帧。
+     * 回前台：两种情况都作废在途抓帧，晚到的结果不能跨进前台。
+     * Surface 未重挂时画面一直在，缓存帧多余，立即撤掉；已进入恢复等待时保留缓存帧，等首个新帧。
      */
     fun onReturnedToForeground() {
         if (!_renderSurfaceAvailable.value) return
-        if (awaitingSurfaceFrame) return
-        // 新的前后台周期开始：在途抓帧的结果不能跨进前台。
-        backgroundCaptureToken++
-        backgroundCaptureAttempted = false
-        backgroundCaptureJob = null
-        replaceBackgroundRestoreFrame(null)
+        if (awaitingSurfaceFrame) {
+            // 保留缓存帧等首个新帧，但在途抓帧的结果不能跨进前台。
+            resetBackgroundCapture(clearFrame = false)
+            return
+        }
+        resetBackgroundCapture()
     }
 
     /**
@@ -1698,12 +1696,15 @@ class PlaybackController(
         _freezeFrame.value = frame
     }
 
-    /** 新一次加载或会话开始：作废尚未完成的后台抓帧，允许下一周期重新抓。 */
-    private fun resetBackgroundCapture() {
+    /**
+     * 新一次加载、会话开始或前后台周期切换：作废尚未完成的后台抓帧，允许下一周期重新抓。
+     * [clearFrame] 为假时保留当前缓存帧，只作废在途结果。
+     */
+    private fun resetBackgroundCapture(clearFrame: Boolean = true) {
         backgroundCaptureToken++
         backgroundCaptureAttempted = false
         backgroundCaptureJob = null
-        replaceBackgroundRestoreFrame(null)
+        if (clearFrame) replaceBackgroundRestoreFrame(null)
     }
 
     /** 换掉后台恢复帧；同样交给 GC，不手动回收。 */

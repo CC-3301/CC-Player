@@ -212,6 +212,19 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `Surface 尚未重挂时回前台保留缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        controller.setRenderSurfaceAvailable(false)
+
+        // onStart 可能早于 surfaceCreated：没有可用画面时不清帧，也不进入恢复等待。
+        controller.onReturnedToForeground()
+
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
     fun `切集进行中重挂不触发 3 秒翻转`() = runTest {
         val controller = playingController()
 
@@ -236,6 +249,23 @@ class PlaybackControllerBackgroundTest {
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
 
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `片尾黑底重挂后不产生缓存帧`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(600_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+        engine.reportFileLoaded()
+        assertTrue(controller.holdBlack.value)
+
+        reattach(controller)
+        runCurrent()
+
+        // 片尾黑底没有画面可盖：未进入恢复等待，清帧路径不产生遮罩。
+        assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(0, engine.flipVideoOutputCalls)
     }
 
