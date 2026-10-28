@@ -184,10 +184,10 @@ class NavigationViewModel(
         sourcesProtocol: SourceProtocol,
         stack: List<MediaFile>,
     ): Boolean {
-        if (!_coldStartPending.value) return false
-        if (_state.value.screen != AppScreen.Home || stack.isEmpty()) {
+        if (!beginColdStartRestore()) return false
+        if (stack.isEmpty()) {
             _coldStartPending.value = false
-            diagnostics.log { "导航恢复: 当前已离开首页或目录栈为空，忽略冷启动恢复" }
+            diagnostics.log { "导航恢复: 目录栈为空，忽略冷启动恢复" }
             return false
         }
         update {
@@ -208,15 +208,24 @@ class NavigationViewModel(
      * 返回是否恢复；用户已先导航时丢弃本次恢复。
      */
     fun restoreColdStartSources(sourcesProtocol: SourceProtocol): Boolean {
+        if (!beginColdStartRestore()) return false
+        update { it.copy(screen = AppScreen.Sources, sourcesProtocol = sourcesProtocol, library = null) }
+        _coldStartPending.value = false
+        diagnostics.log { "导航恢复: 冷启动恢复源列表" }
+        return true
+    }
+
+    /**
+     * 冷启动恢复的公共闸门：判定已完成或用户已离开首页时放弃本次恢复。
+     * 返回是否可以继续恢复。
+     */
+    private fun beginColdStartRestore(): Boolean {
         if (!_coldStartPending.value) return false
         if (_state.value.screen != AppScreen.Home) {
             _coldStartPending.value = false
             diagnostics.log { "导航恢复: 当前已离开首页，忽略冷启动恢复" }
             return false
         }
-        update { it.copy(screen = AppScreen.Sources, sourcesProtocol = sourcesProtocol, library = null) }
-        _coldStartPending.value = false
-        diagnostics.log { "导航恢复: 冷启动恢复源列表" }
         return true
     }
 

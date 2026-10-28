@@ -20,10 +20,22 @@ data class NavigationSnapshot(
     val libraryStack: List<MediaFile> = emptyList(),
 )
 
+/** 快照读取结果：没有快照（首次启动）与写了但无法解析分开，后者回首页要记录原因。 */
+sealed interface NavigationSnapshotLoad {
+
+    data class Loaded(val snapshot: NavigationSnapshot) : NavigationSnapshotLoad
+
+    /** 从没写过快照。 */
+    data object Absent : NavigationSnapshotLoad
+
+    /** 写过快照但内容无法解析。 */
+    data object Unreadable : NavigationSnapshotLoad
+}
+
 /** 导航快照的持久化接缝：冷启动没有保存状态时从这里读回上次导航。 */
 interface NavigationSnapshotStore {
 
-    suspend fun load(): NavigationSnapshot?
+    suspend fun load(): NavigationSnapshotLoad
 
     suspend fun save(snapshot: NavigationSnapshot)
 }
@@ -31,7 +43,7 @@ interface NavigationSnapshotStore {
 /** 不持久化导航快照的实现，供不需要冷启动恢复的构造使用。 */
 object NoNavigationSnapshotStore : NavigationSnapshotStore {
 
-    override suspend fun load(): NavigationSnapshot? = null
+    override suspend fun load(): NavigationSnapshotLoad = NavigationSnapshotLoad.Absent
 
     override suspend fun save(snapshot: NavigationSnapshot) = Unit
 }
@@ -44,8 +56,10 @@ class DataStoreNavigationSnapshotStore(
     private val dataStore: DataStore<Preferences>,
 ) : NavigationSnapshotStore {
 
-    override suspend fun load(): NavigationSnapshot? =
-        dataStore.data.first()[SNAPSHOT]?.let(::decode)
+    override suspend fun load(): NavigationSnapshotLoad {
+        val encoded = dataStore.data.first()[SNAPSHOT] ?: return NavigationSnapshotLoad.Absent
+        return decode(encoded)?.let(NavigationSnapshotLoad::Loaded) ?: NavigationSnapshotLoad.Unreadable
+    }
 
     override suspend fun save(snapshot: NavigationSnapshot) {
         dataStore.edit { preferences -> preferences[SNAPSHOT] = encode(snapshot) }

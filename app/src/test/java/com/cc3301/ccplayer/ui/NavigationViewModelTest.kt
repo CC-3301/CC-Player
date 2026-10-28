@@ -25,7 +25,7 @@ import org.junit.Test
 
 /** 快照保存失败，用于观察诊断日志。 */
 private class FailingNavigationSnapshotStore : NavigationSnapshotStore {
-    override suspend fun load(): NavigationSnapshot? = null
+    override suspend fun load(): NavigationSnapshotLoad = NavigationSnapshotLoad.Absent
 
     override suspend fun save(snapshot: NavigationSnapshot) {
         throw IllegalStateException("磁盘不可写")
@@ -37,7 +37,8 @@ private class FlakyNavigationSnapshotStore : NavigationSnapshotStore {
     var attempts = 0
     var saved: NavigationSnapshot? = null
 
-    override suspend fun load(): NavigationSnapshot? = saved
+    override suspend fun load(): NavigationSnapshotLoad =
+        saved?.let(NavigationSnapshotLoad::Loaded) ?: NavigationSnapshotLoad.Absent
 
     override suspend fun save(snapshot: NavigationSnapshot) {
         attempts += 1
@@ -324,9 +325,18 @@ class NavigationViewModelTest {
         assertEquals(AppScreen.Library, navigation.state.value.screen)
         assertEquals(SourceProtocol.Smb, navigation.state.value.sourcesProtocol)
         assertEquals(listOf(root, series), navigation.state.value.library?.stack)
-        assertEquals(AppScreen.Library, snapshots.load()?.screen)
-        assertEquals(SourceProtocol.Smb, snapshots.load()?.sourcesProtocol)
-        assertEquals(listOf(root, series), snapshots.load()?.libraryStack)
+        assertEquals(
+            NavigationSnapshotLoad.Loaded(
+                NavigationSnapshot(
+                    screen = AppScreen.Library,
+                    sourcesProtocol = SourceProtocol.Smb,
+                    settingsReturn = AppScreen.Home,
+                    librarySource = root.location,
+                    libraryStack = listOf(root, series),
+                ),
+            ),
+            snapshots.load(),
+        )
     }
 
     @Test
@@ -360,12 +370,12 @@ class NavigationViewModelTest {
         navigation.openSettings()
         advanceUntilIdle()
 
-        val snapshot = snapshots.load()
-        assertEquals(AppScreen.Settings, snapshot?.screen)
-        assertEquals(SourceProtocol.Smb, snapshot?.sourcesProtocol)
-        assertEquals(AppScreen.Library, snapshot?.settingsReturn)
-        assertEquals(root.location, snapshot?.librarySource)
-        assertEquals(listOf(root, series), snapshot?.libraryStack)
+        val snapshot = (snapshots.load() as NavigationSnapshotLoad.Loaded).snapshot
+        assertEquals(AppScreen.Settings, snapshot.screen)
+        assertEquals(SourceProtocol.Smb, snapshot.sourcesProtocol)
+        assertEquals(AppScreen.Library, snapshot.settingsReturn)
+        assertEquals(root.location, snapshot.librarySource)
+        assertEquals(listOf(root, series), snapshot.libraryStack)
     }
 
     @Test

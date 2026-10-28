@@ -653,40 +653,55 @@ class LibraryViewModel(
 
     /**
      * 冷启动：设置页不作落点，按设置页来处决定落到库页面、源列表或首页。
-     * 开关关闭、没有快照或没有可恢复的落点时保持首页；连接源删除或目录不可访问时静默回首页并记录原因。
+     * 开关关闭或没有快照时保持首页；快照无法解析、连接源删除或目录不可访问时回首页并记录原因。
      */
     private suspend fun restoreColdStart() {
-        // 开关关闭或没有快照时立即结束判定，不必等连接源解析（可能连网）。
+        // 开关关闭时立即结束判定，不必等连接源解析（可能连网）。
         if (!settings.restoreLastDirectory.first()) {
             navigation.discardColdStart()
             return
         }
-        val snapshot = runCatching { snapshots.load() }.getOrNull()
-        if (snapshot == null) {
-            navigation.discardColdStart()
-            return
+        val loaded = try {
+            snapshots.load()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            NavigationSnapshotLoad.Unreadable
         }
-        // 设置页不是恢复目标：按设置页来处决定落点。
-        val target = if (snapshot.screen == AppScreen.Settings) snapshot.settingsReturn else snapshot.screen
-        when (target) {
+        val snapshot = when (loaded) {
+            is NavigationSnapshotLoad.Loaded -> loaded.snapshot
+            // 首次启动没有写过快照，不属于恢复失败。
+            NavigationSnapshotLoad.Absent -> {
+                navigation.discardColdStart()
+                return
+            }
+            NavigationSnapshotLoad.Unreadable -> {
+                navigation.discardColdStart("导航快照不可用")
+                return
+            }
+        }
+        // 设置页不是恢复目标：先把来处归一到库页面、源列表或首页，再决定落点。
+        val fromSettings = snapshot.screen == AppScreen.Settings
+        when (if (fromSettings) snapshot.settingsReturn else snapshot.screen) {
             AppScreen.Library -> Unit
             AppScreen.Sources -> {
-                // 来处是源列表时回到该协议源列表；直接停在源列表不属于恢复目标。
-                if (snapshot.screen == AppScreen.Settings) {
+                // 只有设置页来处才恢复源列表；直接停在源列表不属于恢复目标。
+                if (fromSettings) {
                     navigation.restoreColdStartSources(snapshot.sourcesProtocol)
                 } else {
-                    navigation.discardColdStart("上次停留界面不是库页面")
+                    navigation.discardColdStart("上次停留界面是源列表")
                 }
                 return
             }
-            AppScreen.Home, AppScreen.Settings -> {
+            AppScreen.Home -> {
                 navigation.discardColdStart(
-                    if (snapshot.screen == AppScreen.Settings && target == AppScreen.Home) {
-                        "上次停留界面是设置页，来处是首页"
-                    } else {
-                        "上次停留界面不是库页面"
-                    },
+                    if (fromSettings) "上次停留界面是设置页，来处是首页" else "上次停留界面是首页",
                 )
+                return
+            }
+            // 来处记录成设置页，属快照内容非法。
+            AppScreen.Settings -> {
+                navigation.discardColdStart("上次停留界面是设置页，来处非法")
                 return
             }
         }
