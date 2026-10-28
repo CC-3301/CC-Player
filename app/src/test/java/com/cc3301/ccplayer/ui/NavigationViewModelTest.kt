@@ -145,7 +145,7 @@ class NavigationViewModelTest {
     }
 
     @Test
-    fun `设置页来处的库目录栈为空时回首页`() {
+    fun `进程重建时设置页来处的库目录栈为空时回首页并记录原因`() {
         val invalid = SavedStateHandle(
             mapOf(
                 NavigationViewModel.KEY_SCREEN to AppScreen.Settings.name,
@@ -156,6 +156,27 @@ class NavigationViewModelTest {
         val restored = NavigationViewModel(invalid, { now }, snapshots, diagnostics)
 
         assertEquals(AppScreen.Home, restored.state.value.screen)
+        assertNull(restored.state.value.library)
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("目录栈为空") })
+    }
+
+    @Test
+    fun `进程重建时设置页来处的库目录栈失效时回首页并记录原因`() {
+        val brokenStack = SavedStateHandle(
+            mapOf(
+                NavigationViewModel.KEY_SCREEN to AppScreen.Settings.name,
+                NavigationViewModel.KEY_SETTINGS_RETURN to AppScreen.Library.name,
+                NavigationViewModel.KEY_LIBRARY_SOURCE to root.location,
+                NavigationViewModel.KEY_STACK_LOCATIONS to arrayListOf(root.location, series.location),
+                NavigationViewModel.KEY_STACK_NAMES to arrayListOf(root.name),
+            ),
+        )
+
+        val restored = NavigationViewModel(brokenStack, { now }, snapshots, diagnostics)
+
+        assertEquals(AppScreen.Home, restored.state.value.screen)
+        assertNull(restored.state.value.library)
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("目录栈为空") })
     }
 
     @Test
@@ -198,36 +219,56 @@ class NavigationViewModelTest {
     }
 
     @Test
-    fun `界面重建后保持当前层级、协议、设置来处与库目录栈`() {
+    fun `进程重建时停在设置页按来处回到库页面`() {
         navigation.openProtocol(SourceProtocol.WebDav)
         navigation.openLibrary(root.location, listOf(root, series))
         navigation.openSettings()
 
         val recreated = NavigationViewModel(restoredHandle(), { now }, snapshots, diagnostics)
 
-        assertEquals(AppScreen.Settings, recreated.state.value.screen)
+        assertEquals(AppScreen.Library, recreated.state.value.screen)
         assertEquals(SourceProtocol.WebDav, recreated.state.value.sourcesProtocol)
-        assertEquals(listOf(root, series), recreated.state.value.library?.stack)
+        assertEquals(LibraryLocation(root.location, listOf(root, series)), recreated.state.value.library)
         // 有进程保存状态时状态已在构造期就位，不等待冷启动恢复。
         assertFalse(recreated.coldStartPending.value)
-
-        recreated.closeSettings()
-        assertEquals(AppScreen.Library, recreated.state.value.screen)
-        assertEquals(listOf(root, series), recreated.state.value.library?.stack)
     }
 
     @Test
-    fun `进程回收后设置页返回源列表`() {
+    fun `进程重建时停在设置页按来处回到源列表`() {
         navigation.openProtocol(SourceProtocol.Smb)
         navigation.openSettings()
 
         val restored = restoredNavigation()
 
-        assertEquals(AppScreen.Settings, restored.state.value.screen)
-
-        restored.closeSettings()
         assertEquals(AppScreen.Sources, restored.state.value.screen)
         assertEquals(SourceProtocol.Smb, restored.state.value.sourcesProtocol)
+        assertNull(restored.state.value.library)
+    }
+
+    @Test
+    fun `进程重建时停在设置页按来处回首页`() {
+        navigation.openSettings()
+
+        val restored = restoredNavigation()
+
+        assertEquals(AppScreen.Home, restored.state.value.screen)
+        assertNull(restored.state.value.library)
+        assertFalse(restored.coldStartPending.value)
+    }
+
+    @Test
+    fun `进程重建时设置页来处非法时回首页并记录原因`() {
+        val invalidReturn = SavedStateHandle(
+            mapOf(
+                NavigationViewModel.KEY_SCREEN to AppScreen.Settings.name,
+                NavigationViewModel.KEY_SETTINGS_RETURN to AppScreen.Settings.name,
+            ),
+        )
+
+        val restored = NavigationViewModel(invalidReturn, { now }, snapshots, diagnostics)
+
+        assertEquals(AppScreen.Home, restored.state.value.screen)
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("来处非法") })
     }
 
     @Test
@@ -388,6 +429,23 @@ class NavigationViewModelTest {
         assertEquals(AppScreen.Home, navigation.state.value.screen)
         assertNull(navigation.state.value.library)
         assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("目录不可访问") })
+    }
+
+    @Test
+    fun `恢复失败时用户停在设置页则关闭设置后回首页`() = runTest {
+        navigation.openLibrary(root.location, listOf(root, series))
+        val target = LibraryLocation(root.location, listOf(root, series))
+        navigation.openSettings()
+
+        navigation.failRestore(target, "目录不可访问")
+
+        assertEquals(AppScreen.Settings, navigation.state.value.screen)
+        assertEquals(AppScreen.Home, navigation.state.value.settingsReturn)
+        assertNull(navigation.state.value.library)
+        assertTrue(sink.lines.any { it.contains("导航恢复失败") && it.contains("关闭设置后回首页") })
+
+        navigation.closeSettings()
+        assertEquals(AppScreen.Home, navigation.state.value.screen)
     }
 
     @Test

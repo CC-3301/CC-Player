@@ -357,29 +357,42 @@ class NavigationViewModel(
         }
     }
 
+    /**
+     * 进程重建：设置页不是落点，当前屏为设置页时按来处归一，与冷启动同一套判定。
+     * 来处是库页面时目录栈必须非空，失效或来处非法时回首页并记录原因。
+     */
     private fun restoredState(): NavigationState {
         if (!savedState.contains(KEY_SCREEN)) return NavigationState()
         val screen = savedState.enumValue(KEY_SCREEN, AppScreen.entries, AppScreen.Home)
         val protocol = savedState.enumValue(KEY_SOURCES_PROTOCOL, SourceProtocol.entries, SourceProtocol.Local)
         val settingsReturn = savedState.enumValue(KEY_SETTINGS_RETURN, AppScreen.entries, AppScreen.Home)
         val library = restoredLibrary()
-        val invalidLibraryReturn = screen == AppScreen.Settings && settingsReturn == AppScreen.Library && library == null
-        if ((screen == AppScreen.Library && library == null) || invalidLibraryReturn) {
-            logRestoreFailure("库页面目录栈为空", "，回首页")
-            return NavigationState(
-                screen = AppScreen.Home,
+        val landing = if (screen == AppScreen.Settings) settingsReturn else screen
+        return when {
+            // 来处记录成设置页，属快照内容非法。
+            landing == AppScreen.Settings -> {
+                logRestoreFailure("上次停留界面是设置页，来处非法", "，回首页")
+                homeState(protocol)
+            }
+            landing == AppScreen.Library && library == null -> {
+                logRestoreFailure("库页面目录栈为空", "，回首页")
+                homeState(protocol)
+            }
+            else -> NavigationState(
+                screen = landing,
                 sourcesProtocol = protocol,
-                settingsReturn = AppScreen.Home,
-                library = null,
+                settingsReturn = settingsReturn,
+                library = library,
             )
         }
-        return NavigationState(
-            screen = screen,
-            sourcesProtocol = protocol,
-            settingsReturn = settingsReturn,
-            library = library,
-        )
     }
+
+    private fun homeState(protocol: SourceProtocol): NavigationState = NavigationState(
+        screen = AppScreen.Home,
+        sourcesProtocol = protocol,
+        settingsReturn = AppScreen.Home,
+        library = null,
+    )
 
     private fun restoredLibrary(): LibraryLocation? {
         val source = savedState.get<String>(KEY_LIBRARY_SOURCE)?.takeIf { it.isNotBlank() } ?: return null
