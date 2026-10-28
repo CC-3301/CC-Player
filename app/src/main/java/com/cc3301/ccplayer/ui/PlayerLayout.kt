@@ -334,8 +334,9 @@ fun seekBarDownMillis(
 /**
  * 末次拖动预览是否继续保留。
  * 位置还在 [baseMillis]（拖动起点）与 [heldMillis]（预览目标）之间时一律保留：落定 seek 尚未生效或还没到目标，
- * 此时位置靠近目标不代表已到达。离开这一段后按到达判据：位置仍在目标之前（反向为目标之上）就保留，
- * 进入 [SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 到 [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS] 的目标附近或越过目标即清除。
+ * 此时位置靠近目标不代表已到达。离开这一段后按方向判定：正向位置比目标还差
+ * [SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 以上时保留，否则清除；反向位置高于目标
+ * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS] 以上时保留，否则清除。
  */
 fun shouldKeepSeekPreview(
     positionMillis: Long,

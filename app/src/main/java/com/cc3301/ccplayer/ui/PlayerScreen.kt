@@ -578,12 +578,14 @@ fun PlayerScreen(
                 SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
             }
         }
-        doubleTapFeedback.ripples.forEach { ripple ->
-            key(ripple.id) {
-                DoubleTapEdgeRipple(
-                    ripple = ripple,
-                    onFinished = { doubleTapFeedback.removeRipple(ripple.id) },
-                )
+        if (GestureHint.DoubleTapRipple in doubleTapSeekHints) {
+            doubleTapFeedback.ripples.forEach { ripple ->
+                key(ripple.id) {
+                    DoubleTapEdgeRipple(
+                        ripple = ripple,
+                        onFinished = { doubleTapFeedback.removeRipple(ripple.id) },
+                    )
+                }
             }
         }
         if (GestureHint.DoubleTapSide in doubleTapSeekHints) {
@@ -888,6 +890,8 @@ private fun PlayerGestureLayer(
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
     val latestDuration = rememberUpdatedState(durationMillis)
+    // 控制层可能在手势层注册之后才隐藏：读状态而不是闭包里的旧值。
+    val latestControlsVisible = rememberUpdatedState(controlsVisible)
     val tapGesture = remember { PlayerTapGesture() }
     val dispatchTap: (TapGestureAction) -> Unit = { action ->
         when (action) {
@@ -896,10 +900,10 @@ private fun PlayerGestureLayer(
                 // 双击只重置自动隐藏计时：隐藏态双击暂停不显示任何元素，双击 ±10 秒只显示箭头与累计秒数。
                 latestOnGestureInteraction.value()
                 val doubleTap = action.action
-                // 该手势此刻显示哪些提示元素：箭头与累计秒数、涟漪都由此判定。
-                val hints = shownGestureHints(controlsVisible, doubleTapHintSource(doubleTap))
                 when (doubleTap) {
                     is DoubleTapAction.Seek -> if (doubleTapFeedbackEnabled) {
+                        // 该手势此刻显示哪些提示元素：箭头与累计秒数、涟漪都由此判定。
+                        val hints = shownGestureHints(latestControlsVisible.value, doubleTapHintSource(doubleTap))
                         // 用夹取后的实际位移累计，时长未知、到边界或片尾不叠加。
                         val actualDelta = latestOnSeekBy.value(doubleTap.deltaMillis)
                         if (actualDelta != 0L && GestureHint.DoubleTapSide in hints) {

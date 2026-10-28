@@ -119,6 +119,18 @@ class SeekBarStateTest {
     }
 
     @Test
+    fun `到达窗口两侧仍按起点到目标区间判定`() {
+        // 正向：位置已进入目标 −50ms 以内但还没到目标，仍保留。
+        assertTrue(shouldKeepSeekPreview(44_950L, 45_000L, 44_600L))
+        // 正向：走到目标即清除。
+        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 44_600L))
+        // 反向：位置还在目标 +1.5 秒内但未到目标，区间判定优先，仍保留。
+        assertTrue(shouldKeepSeekPreview(46_500L, 45_000L, 90_000L))
+        // 反向：越过目标（降到目标以下）即清除。
+        assertFalse(shouldKeepSeekPreview(44_722L, 45_000L, 90_000L))
+    }
+
+    @Test
     fun `小幅跳转在起点附近来回一帧也不提前清除`() {
         // 反向小幅拖动：起点只比目标大 200ms，首帧与下一帧 tick 都落在起点与目标之间。
         assertTrue(shouldKeepSeekPreview(45_200L, 45_000L, 45_200L))
