@@ -5,10 +5,9 @@ import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.settings.FakePreferencesDataStore
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
-/** 导航快照：整份状态一次写入、一次读回，损坏内容按没有快照处理。 */
+/** 导航快照：整份状态一次写入、一次读回；没有快照与无法解析分开。 */
 class NavigationSnapshotStoreTest {
 
     private val dataStore = FakePreferencesDataStore()
@@ -29,7 +28,7 @@ class NavigationSnapshotStoreTest {
 
         store.save(snapshot)
 
-        assertEquals(snapshot, store.load())
+        assertEquals(NavigationSnapshotLoad.Loaded(snapshot), store.load())
     }
 
     @Test
@@ -42,11 +41,16 @@ class NavigationSnapshotStoreTest {
 
         store.save(snapshot)
 
-        assertEquals(snapshot, store.load())
+        assertEquals(NavigationSnapshotLoad.Loaded(snapshot), store.load())
     }
 
     @Test
-    fun `损坏的快照按没有记录处理`() = runTest {
+    fun `没有写过快照时读回没有记录`() = runTest {
+        assertEquals(NavigationSnapshotLoad.Absent, store.load())
+    }
+
+    @Test
+    fun `损坏的快照读回无法解析`() = runTest {
         store.save(NavigationSnapshot(AppScreen.Home, SourceProtocol.Local, AppScreen.Home))
         dataStore.updateData { preferences ->
             preferences.toMutablePreferences().apply {
@@ -57,6 +61,6 @@ class NavigationSnapshotStoreTest {
             }
         }
 
-        assertNull(store.load())
+        assertEquals(NavigationSnapshotLoad.Unreadable, store.load())
     }
 }
