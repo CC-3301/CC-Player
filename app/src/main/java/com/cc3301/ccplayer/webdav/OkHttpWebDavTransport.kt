@@ -19,7 +19,6 @@ import okhttp3.Response
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -27,12 +26,9 @@ import java.util.concurrent.TimeUnit
  *
  * 读文件时位置连续就沿用同一个响应流，跳读才按新起点重发 GET。
  * 已知文件大小（抽帧读取）时打开句柄不发请求，并要求服务器支持区间读；
- * 服务器忽略 Range 时按源记录结论，同一源的后续读取直接失败，不再发请求。
+ * 服务器忽略 Range 时抛 [WebDavRangeUnsupportedException]，由调用方按网络源记录结论。
  */
 class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) : WebDavTransport {
-
-    /** 已确认忽略区间请求的源，按 scheme://host:port 记录；这些源不再发抽取请求。 */
-    private val rangeUnsupported = ConcurrentHashMap.newKeySet<String>()
 
     override suspend fun list(url: String, username: String, password: String?): List<WebDavEntry> = withContext(Dispatchers.IO) {
         // PROPFIND 的目录地址统一以 `/` 结尾（ADR-0002），不依赖重定向处理。
@@ -75,7 +71,6 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
     ): WebDavReadHandle {
         if (size > 0) {
             // 目录列表已给出大小：打开时不发请求，首个读取才按起点发带 Range 的 GET。
-            requireRangeSupported(url)
             return OkHttpWebDavReadHandle(
                 size = size,
                 first = null,
@@ -107,7 +102,7 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
 
     /**
      * 从 [position] 起开一次带 Range 的 GET。
-     * [requireRanges] 为真时服务器回 200（忽略区间）即按源记下结论并失败，不从文件开头丢弃字节。
+     * [requireRanges] 为真时服务器回 200（忽略区间）即失败，不从文件开头丢弃字节。
      */
     private fun rangedResponse(
         calls: ReadCallTracker,
@@ -126,8 +121,7 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
         }
         if (requireRanges && response.code != STATUS_PARTIAL) {
             response.close()
-            rangeUnsupported += originOf(url)
-            throw MediaSourceException(MediaFailure.Unknown, "服务器忽略了区间请求：$url")
+            throw WebDavRangeUnsupportedException("服务器忽略了区间请求：$url")
         }
         val body = response.body
         if (body == null) {
@@ -139,19 +133,6 @@ class OkHttpWebDavTransport(private val client: OkHttpClient = defaultClient()) 
             stream = body.byteStream(),
             response = response,
         )
-    }
-
-    /** 该源已确认忽略区间请求时直接失败，不再发请求。 */
-    private fun requireRangeSupported(url: String) {
-        if (originOf(url) in rangeUnsupported) {
-            throw MediaSourceException(MediaFailure.Unknown, "服务器忽略了区间请求：$url")
-        }
-    }
-
-    /** 源的身份：协议、主机与端口相同即视为同一台服务器。 */
-    private fun originOf(url: String): String {
-        val parsed = requestUrl(url)
-        return "${parsed.scheme}://${parsed.host}:${parsed.port}"
     }
 
     private fun requestOf(url: String, username: String, password: String?): Request.Builder {

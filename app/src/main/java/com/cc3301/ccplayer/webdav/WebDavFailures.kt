@@ -7,6 +7,9 @@ import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
+/** 服务器忽略区间请求：按位置读取拿不到目标字节，抽帧无法进行。 */
+class WebDavRangeUnsupportedException(message: String) : IOException(message)
+
 /** 把 OkHttp 抛出的异常归到界面可读的来源失败原因。 */
 fun webdavFailureOf(failure: Throwable): MediaFailure = when (failure) {
     is UnknownHostException, is ConnectException, is NoRouteToHostException,

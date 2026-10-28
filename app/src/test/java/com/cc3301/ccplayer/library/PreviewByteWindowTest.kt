@@ -126,6 +126,40 @@ class PreviewByteWindowTest {
     }
 
     @Test
+    fun `锚点移动后淘汰窗口外的块`() {
+        val origin = RecordingOrigin(payload(1 shl 16))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+
+        read(source, 0, 4)
+        executor.runAll()
+        assertEquals(1, origin.reads.count { it == 0L })
+
+        // 跳到远处：锚点移动后开头那块被淘汰，再读开头要重新向底层取。
+        read(source, 8192, 4)
+        executor.runAll()
+        read(source, 0, 4)
+
+        assertEquals(2, origin.reads.count { it == 0L })
+    }
+
+    @Test
+    fun `关闭时正在补齐的块不返回`() {
+        val origin = BlockingOrigin(payload(1000))
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val reader = Thread { failure.set(runCatching { read(source, 0, 4) }.exceptionOrNull()) }
+        reader.start()
+        assertTrue("读应已进入底层", origin.awaitReading())
+
+        source.close()
+        origin.release()
+        reader.join(TimeUnit.SECONDS.toMillis(5))
+
+        assertTrue("关闭后补齐的块不得返回：${failure.get()}", failure.get() is IOException)
+    }
+
+    @Test
     fun `关闭后读取失败并关闭底层`() {
         val origin = RecordingOrigin(payload(1000))
         val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
@@ -187,6 +221,33 @@ private class RecordingOrigin(private val bytes: ByteArray) : ByteSource {
 
     override fun close() {
         closed = true
+    }
+}
+
+/** 读取会阻塞到放行，用来构造「补齐过程中被关闭」。 */
+private class BlockingOrigin(private val bytes: ByteArray) : ByteSource {
+
+    private val lock = Object()
+    private val entered = CountDownLatch(1)
+    private val gate = CountDownLatch(1)
+
+    override val size: Long get() = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        entered.countDown()
+        gate.await(5, TimeUnit.SECONDS)
+        if (position >= bytes.size) return 0
+        val count = minOf(length.toLong(), bytes.size - position).toInt()
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    fun awaitReading(): Boolean = entered.await(5, TimeUnit.SECONDS)
+
+    fun release() = gate.countDown()
+
+    override fun close() {
+        synchronized(lock) { gate.countDown() }
     }
 }
 

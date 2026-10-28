@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -113,9 +114,9 @@ class CachedMediaPreviewSource(
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
     /** 单调时钟，单位毫秒；有效期与失败退避都按毫秒比较。 */
     private val monotonicClockMillis: () -> Long = { systemMonotonicMillis() },
-    /** 诊断日志出口；只记文件名与失败类型，不记连接凭据。 */
+    /** 诊断日志出口；记文件名、失败类型与网络抽帧的排队与取帧耗时，不记连接凭据。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    /** 时长补读等后台任务的执行范围；与请求方生命周期无关。 */
+    /** 时长补读等后台任务的执行范围；应用内由 [create] 传入进程级范围，缺省自建。 */
     private val backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : MediaPreviewSource {
 
@@ -212,8 +213,10 @@ class CachedMediaPreviewSource(
         trigger: PreviewPriority,
     ) {
         if (cached.durationKnown) return
+        // 后台范围已取消（进程收尾）时不再补读，也不登记。
+        if (!backgroundScope.isActive) return
         if (!durationRefills.add(key)) return
-        backgroundScope.launch {
+        val job = backgroundScope.launch {
             try {
                 when (val duration = readLocalDuration(file, key, trigger)) {
                     is PreviewDuration.Known -> writeDurationSafely(key, duration.millis)
@@ -226,6 +229,8 @@ class CachedMediaPreviewSource(
                 durationRefills.remove(key)
             }
         }
+        // 范围在 launch 与执行之间被取消时协程体不跑、finally 不执行，这里兜底回滚登记。
+        job.invokeOnCompletion { durationRefills.remove(key) }
     }
 
     /** 一次读取会话取图与时长；无图条目也记录时长，避免下次重开文件。 */
@@ -576,10 +581,12 @@ class CachedMediaPreviewSource(
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
 
+        /** [backgroundScope] 由调用方给出应用级范围：时长补读等后台任务跟随进程，不随界面重建。 */
         fun create(
             context: Context,
             networkReads: NetworkMediaReads,
             diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+            backgroundScope: CoroutineScope,
         ): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
@@ -588,6 +595,7 @@ class CachedMediaPreviewSource(
                 cache = thumbnailCache(appContext),
                 policy = policy,
                 diagnostics = diagnostics,
+                backgroundScope = backgroundScope,
             )
         }
 
@@ -676,11 +684,11 @@ private class PrioritySemaphore(private val capacity: Int) {
     private suspend fun acquire(priority: PreviewPriority) {
         val waiter = Waiter(priority, CompletableDeferred())
         try {
-            // 一律先入队，空闲许可再由队列里优先级最高的一位取得。
-            lock.withLock {
-                waiters.addLast(waiter)
-                grantIdleLocked()
-            }
+            // 一律先入队；让同一轮下发的请求都进来，再由 rank 决定发放顺序，
+            // 先到的高索引项不因许可空闲越过仍在路上的低索引项。
+            lock.withLock { waiters.addLast(waiter) }
+            yield()
+            lock.withLock { grantIdleLocked() }
             waiter.granted.await()
         } catch (cancellation: CancellationException) {
             withContext(NonCancellable) {

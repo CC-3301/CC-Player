@@ -16,7 +16,8 @@ internal const val PREVIEW_READ_CHUNK_BYTES = 256 * 1024
  *
  * 同一时刻最多两路底层读取：解码线程读当前块，后台预读线程读后续块。
  * 预读锚点跟着解码位置走，跳到别处时重置并只预读新位置之后的窗口，不从头重读；
- * 窗口到文件末尾时按实际长度收口。预读失败不在调用方之外扩散，由下一次读取暴露。
+ * 常驻内存只保留锚点窗口内的块，锚点移动时淘汰窗口外的块，窗口到文件末尾时按实际长度收口。
+ * 关闭后不再补齐、不再回写，读取一律失败。预读失败不在调用方之外扩散，由下一次读取暴露。
  */
 internal class PreviewByteWindow(
     private val origin: ByteSource,
@@ -79,9 +80,10 @@ internal class PreviewByteWindow(
     private fun chunkAt(start: Long): ByteArray {
         synchronized(lock) {
             while (true) {
+                // 关闭优先于一切：已关闭时本地有块也不返回。
+                if (closed) throw IOException("预览读取已取消")
                 chunks[start]?.let { return it }
                 failures[start]?.let { throw it }
-                if (closed) throw IOException("预览读取已取消")
                 if (start in pending) {
                     lock.wait()
                 } else {
@@ -91,14 +93,19 @@ internal class PreviewByteWindow(
             }
         }
         val result = runCatching { load(start) }
+        var closedWhileLoading = false
         synchronized(lock) {
             pending -= start
-            result.fold(
-                onSuccess = { bytes -> chunks[start] = bytes },
-                onFailure = { failure -> failures[start] = failure.asPreviewReadFailure() },
-            )
+            closedWhileLoading = closed
+            if (!closedWhileLoading) {
+                result.fold(
+                    onSuccess = { bytes -> chunks[start] = bytes },
+                    onFailure = { failure -> failures[start] = failure.asPreviewReadFailure() },
+                )
+            }
             lock.notifyAll()
         }
+        if (closedWhileLoading) throw IOException("预览读取已取消")
         return result.getOrThrow()
     }
 
@@ -124,6 +131,9 @@ internal class PreviewByteWindow(
             if (closed || lastPrefetchChunk == start) return
             lastPrefetchChunk = start
             anchor = from
+            // 只保留锚点窗口内的块：跨远距读取不会把走过的字节一直留在内存里。
+            val retainTo = start + chunkBytes + windowBytes
+            chunks.keys.removeAll { chunk -> chunk < start || chunk >= retainTo }
             queued.clear()
             var next = from
             val end = minOf(size, from + windowBytes)
@@ -148,8 +158,11 @@ internal class PreviewByteWindow(
         val result = runCatching { load(start) }
         synchronized(lock) {
             pending -= start
-            result.onSuccess { bytes -> chunks[start] = bytes }
-            result.onFailure { failure -> failures[start] = failure.asPreviewReadFailure() }
+            // 关闭后补齐的块不回写：窗口已经废弃，写回只会留下无法回收的字节。
+            if (!closed) {
+                result.onSuccess { bytes -> chunks[start] = bytes }
+                result.onFailure { failure -> failures[start] = failure.asPreviewReadFailure() }
+            }
             lock.notifyAll()
         }
     }

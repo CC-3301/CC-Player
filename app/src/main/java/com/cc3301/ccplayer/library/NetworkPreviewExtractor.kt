@@ -7,6 +7,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -46,16 +48,34 @@ class NetworkPreviewExtractor(
             }
         }
 
-    /** 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。 */
+    /**
+     * 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。
+     * 解码侧的异常先收在子协程里：关闭句柄会让阻塞读抛错，取消收尾时按取消上报，不当成抽取失败。
+     */
     private suspend fun decode(window: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
         coroutineScope {
-            val decoding = async { decoder.imageBytes(window, kind, targetWidth) }
+            var image: ByteArray? = null
+            var failure: Throwable? = null
+            val decoding = async {
+                try {
+                    image = decoder.imageBytes(window, kind, targetWidth)
+                } catch (error: Throwable) {
+                    failure = error
+                }
+            }
             try {
                 decoding.await()
             } catch (cancellation: CancellationException) {
                 runCatching { window.close() }
                 throw cancellation
             }
+            failure?.let { error ->
+                runCatching { window.close() }
+                // 已经取消时结果是关闭句柄造成的，按取消收尾。
+                currentCoroutineContext().ensureActive()
+                throw error
+            }
+            image
         }
 }
 

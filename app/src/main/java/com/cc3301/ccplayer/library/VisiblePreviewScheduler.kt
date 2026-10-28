@@ -11,7 +11,7 @@ import kotlinx.coroutines.yield
 /**
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
- * 可见请求严格按列表索引下发：前一条收尾后才放下一条，后到的高索引项不会越过低索引项。
+ * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
@@ -43,6 +43,9 @@ class VisiblePreviewScheduler(
     private var windowKnown = false
 
     private var dispatching = false
+
+    /** 下发批次的代号；[cancelAll] 递增即作废仍在运行的旧批次。 */
+    private var drainGeneration = 0L
 
     /** 离开库页面后不再接受新请求。 */
     private var closed = false
@@ -117,6 +120,8 @@ class VisiblePreviewScheduler(
             visibleLocations = emptySet()
             windowKnown = true
             dispatching = false
+            // 作废旧批次：它与新批次并跑会打乱下发顺序。
+            drainGeneration++
             val snapshot = requests.values.map { request ->
                 invalidateAttemptLocked(request) to request
             }
@@ -163,17 +168,21 @@ class VisiblePreviewScheduler(
     }
 
     private fun dispatch() {
+        val generation: Long
         synchronized(lock) {
             if (dispatching) return
             dispatching = true
+            generation = ++drainGeneration
         }
         scope.launch {
             try {
                 // 让同一轮组合中的可见条目都先入队，再按索引排序下发。
                 yield()
-                drain()
+                drain(generation)
             } finally {
                 val again = synchronized(lock) {
+                    // 已被 cancelAll 作废的 drain 不得复位标志，也不得再发起新一轮。
+                    if (generation != drainGeneration) return@synchronized false
                     dispatching = false
                     hasDispatchableLocked()
                 }
@@ -182,9 +191,15 @@ class VisiblePreviewScheduler(
         }
     }
 
-    private suspend fun drain() {
+    /**
+     * 整屏可见项一次性下发入队，顺序交给抽帧许可按列表索引决定。
+     * 不在这里等前一条收尾：许可释放时若还在等，正在排队的预取会先拿到许可，
+     * 可见项要多等一次完整的预取解码；许可空闲与已发出的许可都由许可自身按索引排序。
+     */
+    private suspend fun drain(generation: Long) {
         while (true) {
             val attempt = synchronized(lock) {
+                if (generation != drainGeneration) return
                 if (!windowKnown || visibleLocations.isEmpty()) return
                 val next = requests.values
                     .filter { request -> request.job == null && request.file.location in visibleLocations }
@@ -198,8 +213,6 @@ class VisiblePreviewScheduler(
             }
             attempt.job.invokeOnCompletion { finishAttempt(attempt) }
             attempt.job.start()
-            // 严格按列表索引下发：这一条收尾后才放下一条。
-            attempt.job.join()
         }
     }
 

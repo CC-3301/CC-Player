@@ -247,22 +247,15 @@ class OkHttpWebDavTransportTest {
     }
 
     @Test
-    fun `服务器忽略 Range 时抽帧读取失败并把结论记在该源上`() = runTest {
+    fun `服务器忽略 Range 时抽帧读取抛区间不支持`() = runTest {
         FakeWebDavServer(bytes = payload, ignoreRange = true).use { server ->
-            val first = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = payload.size.toLong())
-            val failure = runCatching { first.readAt(1000, ByteArray(16), 0, 16) }.exceptionOrNull()
-            first.close()
+            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = payload.size.toLong())
+            val failure = runCatching { handle.readAt(1000, ByteArray(16), 0, 16) }.exceptionOrNull()
+            handle.close()
 
-            assertEquals(MediaFailure.Unknown, (failure as MediaSourceException).failure)
-            assertEquals("探测一次就够", 1, server.received().size)
-
-            // 同一源的后续条目直接按不可用收尾，不再发请求。
-            val second = runCatching {
-                transport.openRead("${server.root}/另一集.mkv", "cc", "secret", size = payload.size.toLong())
-            }.exceptionOrNull()
-
-            assertEquals(MediaFailure.Unknown, (second as MediaSourceException).failure)
-            assertEquals("同一源不再发请求", 1, server.received().size)
+            // 按位置读拿不到目标字节时不再从文件开头丢弃，由调用方按网络源记下结论。
+            assertTrue(failure is WebDavRangeUnsupportedException)
+            assertEquals(1, server.received().size)
         }
     }
 

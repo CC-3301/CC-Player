@@ -1562,13 +1562,44 @@ class CachedMediaPreviewSourceTest {
         tracker.imageGate?.complete(Unit)
         assertNotNull(visible.await().image)
         blocker.await()
+        runCurrent()
 
-        // 许可按列表索引发给可见请求，补读时长排在它之后。
+        // 许可按列表索引发给可见请求，补读时长排在它之后：断言取许可的实际先后，不只看抽图。
         assertEquals(
-            listOf("smb://nas/media/占位.mkv", "smb://nas/media/可见.mkv"),
-            tracker.started,
+            listOf("image:占位.mkv", "image:可见.mkv", "duration:已出图.mkv"),
+            tracker.events,
         )
-        assertEquals(1, tracker.durationRequests.count { it == hit.location })
+    }
+
+    @Test
+    fun `缓存命中不取消同键预取`() = runTest {
+        // 预取还在解码、调用方等待时，同键缓存被填上：命中直接出图，不动在途预取。
+        val tracker = GatedExtractor()
+        val cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = cache,
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = network("同键.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+        val prefetch = async { bounded.prefetch(file) }
+        runCurrent()
+        assertEquals(1, tracker.started.size)
+
+        cache.save(
+            location = thumbnailCacheKey(file, ThumbnailPolicy(), NETWORK_TARGET_WIDTH),
+            bytes = byteArrayOf(9),
+        )
+
+        val shown = bounded.preview(file)
+
+        assertArrayEquals(byteArrayOf(9), shown.image!!.readBytes())
+        assertTrue("命中不取消同键预取", tracker.cancelled.isEmpty())
+        assertEquals(1, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        runCatching { prefetch.await() }
     }
 
     private fun imageFileCount(): Int =
@@ -1607,11 +1638,15 @@ private class GatedExtractor(
     val started = mutableListOf<String>()
     val cancelled = mutableListOf<String>()
     val durationRequests = mutableListOf<String>()
+
+    /** 按取到许可后的实际发生顺序记录读取：抽图与补读时长混在一条序列里。 */
+    val events = mutableListOf<String>()
     var concurrent = 0
     var maxConcurrent = 0
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         started += file.location
+        events += "image:${file.location.substringAfterLast('/')}"
         concurrent++
         maxConcurrent = maxOf(maxConcurrent, concurrent)
         try {
@@ -1627,6 +1662,7 @@ private class GatedExtractor(
 
     override suspend fun durationMillis(file: MediaFile): Long? {
         durationRequests += file.location
+        events += "duration:${file.location.substringAfterLast('/')}"
         durationGate?.await()
         durationFailure?.let { throw it }
         return durationMillis

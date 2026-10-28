@@ -26,6 +26,7 @@ interface WebDavTransport {
      *
      * [size] 为目录列表给出的文件大小：给出正数时打开不发请求，并要求服务器支持区间读；
      * 未知大小时（播放读取）打开时探测一次长度。
+     * 服务器忽略区间请求时，已知大小的读取抛 [WebDavRangeUnsupportedException]。
      */
     suspend fun openRead(url: String, username: String, password: String?, size: Long): WebDavReadHandle
 }
