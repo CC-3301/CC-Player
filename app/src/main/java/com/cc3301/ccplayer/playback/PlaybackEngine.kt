@@ -68,11 +68,17 @@ interface PlaybackEngine {
     /** 关闭字幕显示。 */
     fun disableSubtitles()
 
-    /** 当前 Surface 代数；每次重新挂载后递增，用于丢弃迟到的画面事件。 */
-    val surfaceGeneration: Int
-
-    /** 把画面接到视图的 Surface 上。 */
+    /** 把画面接到视图的 Surface 上；不开启视频输出。 */
     fun attachSurface(surface: Surface)
+
+    /**
+     * 挂载完成后开启视频输出。必须在 [attachSurface] 与 [setSurfaceSize] 之后调用，
+     * 顺序固定为挂载 Surface、设尺寸、开窗口、恢复视频输出。
+     */
+    fun startVideoOutput()
+
+    /** 视频输出翻转：把 VO 置空后立即恢复，用于挂载后仍等不到新帧。 */
+    fun flipVideoOutput()
 
     fun detachSurface()
 
@@ -113,10 +119,9 @@ interface PlaybackEngine {
 
         /**
          * 新画面已真正输出到 Surface：加载已就绪后播放位置实际前进，或重新挂载 Surface 后再次前进。
-         * [surfaceGeneration] 标识本次挂载，[loadToken] 标识产生它的加载。
-         * 暂停态没有位置前进，不能凭视频输出重配冒充这个信号。
+         * [loadToken] 标识产生它的加载。暂停态没有位置前进，不能凭视频输出重配冒充这个信号。
          */
-        fun onFramePresented(surfaceGeneration: Int, loadToken: Int)
+        fun onFramePresented(loadToken: Int)
 
         /** 暂停状态变化。 */
         fun onPauseChanged(paused: Boolean)

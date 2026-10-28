@@ -5,12 +5,14 @@ import android.view.Surface
 /**
  * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
  *
- * Activity 生命周期、Surface 回调、尺寸变化与服务连接只向这里转发。
- * 挂载与分离幂等；回前台优先复用已保存的 Surface，不依赖 surfaceCreated 再次触发。
+ * Surface 回调、尺寸变化与服务连接只向这里转发。
+ * 拆挂只由 SurfaceHolder 回调触发：surfaceCreated 挂载，surfaceDestroyed 只标记不可用；
+ * Activity 的停止与恢复不拆不挂。挂载与分离幂等，可重复、可乱序。
  * 后台抓帧完成前不主动分离，由调用方在抓帧结束后调用 [detach]。
  */
 class SurfaceSession(
     private val attach: (Surface) -> Boolean,
+    private val startOutput: () -> Unit,
     private val detachEngine: () -> Unit,
     private val resize: (Int, Int) -> Unit,
     private val onAvailabilityChanged: (Boolean) -> Unit,
@@ -23,7 +25,6 @@ class SurfaceSession(
         private set
 
     private var surface: Surface? = null
-    private var foreground = false
 
     /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，后台销毁后仍要等抓帧结束再分离。 */
     private var mountedSurface: Surface? = null
@@ -35,19 +36,8 @@ class SurfaceSession(
 
     private val mounted: Boolean get() = mountedSurface != null
 
-    /** 是否有可挂载的 Surface；回前台时用它恢复画面。 */
+    /** 当前是否有可挂载且有效的 Surface。 */
     val hasSurface: Boolean get() = surface?.let(isValid) == true
-
-    fun onActivityStarted() {
-        foreground = true
-        attachCurrent()
-        publish()
-    }
-
-    fun onActivityStopped() {
-        foreground = false
-        publish()
-    }
 
     fun onSurfaceCreated(surface: Surface) {
         this.surface = surface
@@ -61,18 +51,17 @@ class SurfaceSession(
         if (mounted) resize(width, height)
     }
 
+    /** Surface 已销毁：只标记不可用，分离由调用方在后台抓帧结束后调用 [detach] 完成。 */
     fun onSurfaceDestroyed() {
         surface = null
         if (mounted) mountedSurfaceDestroyed = true
-        // 退后台时先让抓帧跑完，分离由调用方在抓帧结束后触发。
-        if (foreground) detachIfMounted()
         publish()
     }
 
     /** 当前是否可渲染；服务重连时由调用方同步一次。 */
     val available: Boolean get() = state == State.Ready
 
-    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去。 */
+    /** 播放服务重新连上时调用；有有效 Surface 则补挂。 */
     fun onEngineAvailable() {
         attachCurrent()
         publish()
@@ -94,12 +83,10 @@ class SurfaceSession(
     fun release() {
         detachIfMounted()
         surface = null
-        foreground = false
         publish()
     }
 
     private fun attachCurrent() {
-        if (!foreground) return
         val target = surface?.takeIf(isValid) ?: return
         // 同一个 Surface 且没有被销毁才是幂等挂载；对象身份不能当作会话 ID。
         if (mountedSurface === target && !mountedSurfaceDestroyed) return
@@ -107,7 +94,9 @@ class SurfaceSession(
         if (!attach(target)) return
         mountedSurface = target
         mountedSurfaceDestroyed = false
+        // 挂载顺序：先挂 Surface，再设尺寸，最后开窗口并恢复视频输出。
         if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
+        startOutput()
     }
 
     private fun detachIfMounted() {
@@ -119,7 +108,7 @@ class SurfaceSession(
 
     private fun publish() {
         val next = when {
-            !foreground || !mounted -> State.Detached
+            !mounted -> State.Detached
             hasSurface && !mountedSurfaceDestroyed -> State.Ready
             else -> State.Attached
         }

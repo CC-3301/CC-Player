@@ -141,21 +141,21 @@ class FakePlaybackEngine : PlaybackEngine {
         disableSubtitleCalls++
     }
 
-    /** 重新挂载 Surface 时递增，模拟引擎的挂载代数。 */
-    override var surfaceGeneration: Int = 0
-        private set
-
-    /** 模拟一次重新挂载 Surface。 */
-    fun reportSurfaceReattached() {
-        surfaceGeneration++
-    }
-
     private var attachedSurface: Surface? = null
+
+    /** 视频输出翻转次数；用于断言 3 秒无新帧只翻转一次。 */
+    var flipVideoOutputCalls = 0
+        private set
 
     override fun attachSurface(surface: Surface) {
         if (attachedSurface === surface) return
         attachedSurface = surface
-        surfaceGeneration++
+    }
+
+    override fun startVideoOutput() = Unit
+
+    override fun flipVideoOutput() {
+        flipVideoOutputCalls++
     }
 
     override fun detachSurface() {
@@ -240,10 +240,8 @@ class FakePlaybackEngine : PlaybackEngine {
     ) = listener?.onLoadActivity(activity, loadToken)
 
     /** 真正出帧：加载就绪后播放位置前进。 */
-    fun reportFramePresented(
-        generation: Int = surfaceGeneration,
-        loadToken: Int = currentLoadToken,
-    ) = listener?.onFramePresented(generation, loadToken)
+    fun reportFramePresented(loadToken: Int = currentLoadToken) =
+        listener?.onFramePresented(loadToken)
 
     fun reportPauseChanged(paused: Boolean) = listener?.onPauseChanged(paused)
 

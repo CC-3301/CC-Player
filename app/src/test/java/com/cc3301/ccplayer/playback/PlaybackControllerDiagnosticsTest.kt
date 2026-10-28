@@ -90,57 +90,20 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
-    fun `Surface 重挂与 seek 结果写日志`() = runTest {
+    fun `Surface 重挂与 3 秒无新帧翻转写日志`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("Surface 分离"))
         assertTrue(text.contains("Surface 重挂: 等待新帧"))
-        assertTrue(text.contains("Surface 恢复: seek 到当前位置逼出帧"))
-    }
-
-    @Test
-    fun `seek 之后仍没有出帧证据时记录保留旧画面`() = runTest {
-        val sink = MemoryDiagnosticsSink()
-        val diagnostics = diagnostics(sink, enabled = true)
-        val controller = playingController(diagnostics)
-
-        controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
-        controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
-        runCurrent()
-
-        assertTrue(sink.lines.any { it.contains("Surface 恢复: seek 后仍无出帧证据") })
-    }
-
-    @Test
-    fun `暂停态回前台抓帧始终无结果时记录保留旧画面`() = runTest {
-        val sink = MemoryDiagnosticsSink()
-        val diagnostics = diagnostics(sink, enabled = true)
-        val controller = playingController(diagnostics)
-        controller.pause()
-        engine.reportPauseChanged(true)
-        engine.frameToGrab = null
-
-        controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
-        controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
-        runCurrent()
-
-        val text = sink.lines.joinToString("\n")
-        assertTrue(text.contains("Surface 恢复: seek 到当前位置逼出帧"))
-        assertTrue(text.contains("Surface 恢复: seek 后仍无出帧证据"))
+        assertTrue(text.contains("Surface 恢复: 3 秒无新帧，翻转视频输出"))
     }
 
     @Test
@@ -164,7 +127,6 @@ class PlaybackControllerDiagnosticsTest {
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         engine.reportFramePresented()
         runCurrent()
@@ -179,9 +141,8 @@ class PlaybackControllerDiagnosticsTest {
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
 
         assertTrue(sink.lines.isEmpty())

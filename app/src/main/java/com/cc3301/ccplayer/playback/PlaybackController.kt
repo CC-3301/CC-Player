@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
@@ -136,10 +135,6 @@ class PlaybackController(
 
     /** 本后台周期的抓帧任务；同一周期重复触发时复用。 */
     private var backgroundCaptureJob: Job? = null
-
-    /** 缓存帧对应的 Surface 代数；只接受更晚代数的出帧通知。 */
-    @Volatile
-    private var capturedSurfaceGeneration = -1
 
     /** 播放失败事件，供界面提示“播放失败”。 */
     private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -265,16 +260,14 @@ class PlaybackController(
     private var bufferingJob: Job? = null
 
     /**
-     * 出帧就绪状态机。加载阶段仍由 [LoadPhase] 表示，这里只区分是否还在等新帧证据：
-     * 播放态等位置前进，暂停态等抓帧成功确认。
+     * 出帧就绪状态机。加载阶段仍由 [LoadPhase] 表示，这里只区分是否还在等新帧：
+     * 收到加载完成或就绪信号后等位置前进，2 秒无前进按就绪收尾。
      */
     private enum class ReadyState {
         /** 没有等待中的新帧。 */
         Idle,
         /** 已收到加载完成或就绪信号，等新帧上屏；2 秒无位置前进按就绪收尾。 */
         AwaitingFrame,
-        /** Surface 重挂后等新帧；播放态等位置前进，暂停态等抓帧成功。 */
-        AwaitingSurfaceFrame,
     }
 
     private var readyState = ReadyState.Idle
@@ -300,14 +293,11 @@ class PlaybackController(
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
     private val resumeActivityGate = ResumeActivityGate()
 
-    /** Surface 重挂后的出新帧等待；超时结束等待，旧画面保留到真正出帧。 */
-    private var surfaceFrameWaitJob: Job? = null
+    /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间保留后台缓存帧。 */
+    private var awaitingSurfaceFrame = false
 
-    /** 暂停态 seek 后的抓帧探测；抓帧成功才算新帧证据，超时由等待预算收尾。 */
-    private var surfaceProbeJob: Job? = null
-
-    /** 抓帧探测的令牌；新的等待或分离会让迟到的结果失效。 */
-    private var surfaceProbeToken = 0
+    /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
+    private var surfaceRestoreJob: Job? = null
 
     /** 切集抓帧的令牌；取消、重定向或开始新加载后，迟到的抓帧不能开新目标。 */
     private var switchCaptureToken = 0
@@ -426,116 +416,73 @@ class PlaybackController(
         _renderSurfaceAvailable.value = available
         if (available) {
             // 新的前后台周期开始：作废尚未完成的抓帧，并允许下一次退后台重新抓。
-            backgroundCaptureToken++
-            backgroundCaptureAttempted = false
-            backgroundCaptureJob = null
+            resetBackgroundCapture(clearFrame = false)
             if (!wasAvailable) {
-                beginSurfaceFrameWait()
+                // 未进入恢复等待（无会话、加载中或片尾黑底）：缓存帧不适用，立即撤掉。
+                if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
             }
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
-            cancelSurfaceFrameWait()
-            cancelSurfaceProbe()
+            cancelSurfaceRestore()
             suspendSwitchFrameWatchdog()
-            if (readyState == ReadyState.AwaitingSurfaceFrame) readyState = ReadyState.Idle
         }
         finishLoadWithoutSurface()
         evaluateDeferredReady()
     }
 
     /**
-     * Surface 重挂后等新帧。重建视频输出不会自己出帧：暂停态直接 seek 到当前位置逼出重绘，
-     * 播放态先等画面自然输出，等不到再 seek。位置不变，seek 之后的出帧或抓帧成功才算恢复。
+     * 回前台：两种情况都作废在途抓帧，晚到的结果不能跨进前台。
+     * Surface 未重挂时画面一直在，缓存帧多余，立即撤掉；已进入恢复等待时保留缓存帧，等首个新帧。
      */
-    private fun beginSurfaceFrameWait() {
-        cancelSurfaceFrameWait()
-        if (!active) return
-        // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
-        if (loadPhase != LoadPhase.None || readyState == ReadyState.AwaitingFrame) return
-        // 片尾黑底不显示画面，seek 只会重新触发播完事件。
-        if (_holdBlack.value) return
-        readyState = ReadyState.AwaitingSurfaceFrame
-        diagnostics.log("Surface 重挂: 等待新帧")
-        if (paused) {
-            seekForSurfaceFrame()
-            probeSurfaceFrameWithinBudget()
+    fun onReturnedToForeground() {
+        if (!_renderSurfaceAvailable.value) return
+        if (awaitingSurfaceFrame) {
+            // 保留缓存帧等首个新帧，但在途抓帧的结果不能跨进前台。
+            resetBackgroundCapture(clearFrame = false)
             return
         }
-        surfaceFrameWaitJob = scope.launch {
-            try {
-                delay(SURFACE_NATURAL_FRAME_WAIT_MILLIS)
-                if (!active || !_renderSurfaceAvailable.value) return@launch
-                if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-                seekForSurfaceFrame()
-                // seek 后等播放位置前进；超时只结束等待，旧画面保留到真正出帧。
-                delay(FRAME_FALLBACK_MILLIS)
-                if (!active || readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-                diagnostics.log("Surface 恢复: seek 后仍无出帧证据，保留旧画面")
-                finishSurfaceFrameWait()
-            } finally {
-                val runningJob = coroutineContext[Job]
-                if (surfaceFrameWaitJob === runningJob) surfaceFrameWaitJob = null
-            }
-        }
-    }
-
-    /** seek 到当前位置逼播放核心重绘一帧；播放位置不变。 */
-    private fun seekForSurfaceFrame() {
-        if (!active || !_renderSurfaceAvailable.value) return
-        if (readyState != ReadyState.AwaitingSurfaceFrame) return
-        engine.seekTo(playedPositionMillis)
-        diagnostics.log("Surface 恢复: seek 到当前位置逼出帧")
+        resetBackgroundCapture()
     }
 
     /**
-     * 暂停态没有位置前进：seek 之后按间隔反复抓帧，成功才算画面恢复。
-     * 重绘可能晚于 seek，也可能没有出帧事件，因此不依赖事件，只在等待预算内探测。
+     * Surface 重挂后只等播放核心的首个新帧：不 seek、不抓帧。
+     * 视频输出重建后由播放核心自行重解码；等待超时只翻转一次视频输出，不 seek、不改播放位置。
+     * 返回是否真的进入恢复等待。
      */
-    private fun probeSurfaceFrameWithinBudget() {
-        cancelSurfaceProbe()
-        val token = ++surfaceProbeToken
-        surfaceProbeJob = scope.launch {
-            var elapsed = 0L
-            while (elapsed <= FRAME_FALLBACK_MILLIS) {
-                val frame = withContext(frameProbeDispatcher) {
-                    runCatching { engine.grabFrame() }.getOrNull()
-                }
-                if (token != surfaceProbeToken) return@launch
+    private fun beginSurfaceRestore(): Boolean {
+        cancelSurfaceRestore()
+        if (!active) return false
+        // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
+        if (loadPhase != LoadPhase.None) return false
+        // 片尾黑底不显示画面，不需要恢复。
+        if (_holdBlack.value) return false
+        awaitingSurfaceFrame = true
+        diagnostics.log("Surface 重挂: 等待新帧")
+        surfaceRestoreJob = scope.launch {
+            try {
+                delay(SURFACE_RESTORE_WAIT_MILLIS)
                 if (!active || !_renderSurfaceAvailable.value) return@launch
-                if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-                // 非 null Frame 就表示确实抓到帧；位图本身为空只出现在测试替身里。
-                if (frame != null) {
-                    confirmFrame(engine.surfaceGeneration)
-                    return@launch
+                if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
+                awaitingSurfaceFrame = false
+                engine.flipVideoOutput()
+                diagnostics.log {
+                    "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出"
                 }
-                delay(SURFACE_FRAME_PROBE_INTERVAL_MILLIS)
-                elapsed += SURFACE_FRAME_PROBE_INTERVAL_MILLIS
+            } finally {
+                val runningJob = coroutineContext[Job]
+                if (surfaceRestoreJob === runningJob) surfaceRestoreJob = null
             }
-            if (token != surfaceProbeToken) return@launch
-            if (readyState != ReadyState.AwaitingSurfaceFrame) return@launch
-            diagnostics.log("Surface 恢复: seek 后仍无出帧证据，保留旧画面")
-            finishSurfaceFrameWait()
         }
+        return true
     }
 
-    private fun cancelSurfaceFrameWait() {
-        surfaceFrameWaitJob?.cancel()
-        surfaceFrameWaitJob = null
-    }
-
-    /** 取消抓帧探测；[surfaceProbeToken] 递增让在途结果失效。 */
-    private fun cancelSurfaceProbe() {
-        surfaceProbeToken++
-        surfaceProbeJob?.cancel()
-        surfaceProbeJob = null
-    }
-
-    private fun finishSurfaceFrameWait() {
-        cancelSurfaceFrameWait()
-        cancelSurfaceProbe()
-        if (readyState == ReadyState.AwaitingSurfaceFrame) readyState = ReadyState.Idle
+    /** 结束本次恢复等待：迟到的翻转不再下发，旧画面留到真正出帧。 */
+    private fun cancelSurfaceRestore() {
+        surfaceRestoreJob?.cancel()
+        surfaceRestoreJob = null
+        awaitingSurfaceFrame = false
     }
 
     /**
@@ -552,14 +499,12 @@ class PlaybackController(
         // 新周期不复用旧帧，避免上一次后台留下的画面跨周期出现。
         replaceBackgroundRestoreFrame(null)
         if (!active || !paused || loadPhase != LoadPhase.None || _holdBlack.value) return null
-        val generation = engine.surfaceGeneration
         val token = ++backgroundCaptureToken
         backgroundCaptureInFlight = true
         val job = scope.launch(frameProbeDispatcher) {
             val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
             backgroundCaptureInFlight = false
             if (frame == null || token != backgroundCaptureToken) return@launch
-            capturedSurfaceGeneration = generation
             _backgroundRestoreFrame.value = frame
         }
         backgroundCaptureJob = job
@@ -1262,38 +1207,29 @@ class PlaybackController(
     }
 
     /**
-     * 新画面已真正输出到 Surface（加载就绪后播放位置前进）或暂停态抓帧成功。
+     * 新画面已真正输出到 Surface：加载就绪后播放位置前进，或 Surface 重挂后再次前进。
      * 新帧确认在这里撤冻结画面与后台缓存帧。例外：切集目标无视频轨时由
      * [finishSwitch] 按黑底撤帧；片尾恢复由 [finishRestore] 保持或撤掉黑底。
      */
-    override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
+    override fun onFramePresented(loadToken: Int) {
         if (!active) return
+        confirmFrame(loadToken)
+    }
+
+    /**
+     * 新帧确认：撤掉冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。
+     * 只有当前加载的帧才能撤冻结画面，迟到或旧加载的帧不能把切集提前撤成黑底。
+     */
+    private fun confirmFrame(loadToken: Int) {
         if (loadToken != expectedLoadToken) return
-        confirmFrame(surfaceGeneration)
-    }
-
-    /** 新帧证据：撤掉对应冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。 */
-    private fun confirmFrame(surfaceGeneration: Int) {
-        if (surfaceGeneration == engine.surfaceGeneration) replaceFreezeFrame(null)
-        clearBackgroundRestoreFrameIfCurrent(surfaceGeneration)
-        if (switchFramePending) clearPendingSwitchFrame()
-        when (readyState) {
-            ReadyState.AwaitingFrame -> finishReady(loadPhase, frameConfirmed = true)
-            ReadyState.AwaitingSurfaceFrame -> {
-                finishSurfaceFrameWait()
-                diagnostics.log("Surface 恢复: 新帧已上屏")
-            }
-            ReadyState.Idle -> Unit
-        }
-    }
-
-    /** Surface 可用且通知来自缓存帧之后的代数时才撤帧，迟到的通知不能清掉下一周期刚抓的帧。 */
-    private fun clearBackgroundRestoreFrameIfCurrent(surfaceGeneration: Int) {
-        if (!_renderSurfaceAvailable.value) return
-        if (_backgroundRestoreFrame.value == null) return
-        if (surfaceGeneration <= capturedSurfaceGeneration) return
-        if (surfaceGeneration != engine.surfaceGeneration) return
+        replaceFreezeFrame(null)
         replaceBackgroundRestoreFrame(null)
+        if (awaitingSurfaceFrame) {
+            cancelSurfaceRestore()
+            diagnostics.log("Surface 恢复: 新帧已上屏")
+        }
+        if (switchFramePending) clearPendingSwitchFrame()
+        if (readyState == ReadyState.AwaitingFrame) finishReady(loadPhase, frameConfirmed = true)
     }
 
     override fun onPauseChanged(paused: Boolean) {
@@ -1760,12 +1696,15 @@ class PlaybackController(
         _freezeFrame.value = frame
     }
 
-    /** 新一次加载或会话开始：作废尚未完成的后台抓帧，允许下一周期重新抓。 */
-    private fun resetBackgroundCapture() {
+    /**
+     * 新一次加载、会话开始或前后台周期切换：作废尚未完成的后台抓帧，允许下一周期重新抓。
+     * [clearFrame] 为假时保留当前缓存帧，只作废在途结果。
+     */
+    private fun resetBackgroundCapture(clearFrame: Boolean = true) {
         backgroundCaptureToken++
         backgroundCaptureAttempted = false
         backgroundCaptureJob = null
-        replaceBackgroundRestoreFrame(null)
+        if (clearFrame) replaceBackgroundRestoreFrame(null)
     }
 
     /** 换掉后台恢复帧；同样交给 GC，不手动回收。 */
@@ -1782,8 +1721,7 @@ class PlaybackController(
         readyState = ReadyState.Idle
         frameWaitJob?.cancel()
         frameWaitJob = null
-        cancelSurfaceFrameWait()
-        cancelSurfaceProbe()
+        cancelSurfaceRestore()
         cancelSwitchCapture()
         switchPlaybackStarted = false
         switchFramePending = false
@@ -1829,8 +1767,7 @@ class PlaybackController(
         clearSwitchFrameDeadline()
         frameWaitJob?.cancel()
         frameWaitJob = null
-        cancelSurfaceFrameWait()
-        cancelSurfaceProbe()
+        cancelSurfaceRestore()
     }
 
     /**
@@ -1952,8 +1889,8 @@ class PlaybackController(
             scope.launch { target.onLoadActivity(activity, loadToken) }
         }
 
-        override fun onFramePresented(surfaceGeneration: Int, loadToken: Int) {
-            scope.launch { target.onFramePresented(surfaceGeneration, loadToken) }
+        override fun onFramePresented(loadToken: Int) {
+            scope.launch { target.onFramePresented(loadToken) }
         }
 
         override fun onPauseChanged(paused: Boolean) {
@@ -1996,14 +1933,11 @@ class PlaybackController(
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L
 
-        /** 起播后等位置前进的兜底时长；超时按就绪收尾。也用作 seek 后等出帧证据的上限。 */
+        /** 起播后等位置前进的兜底时长；超时按就绪收尾。 */
         const val FRAME_FALLBACK_MILLIS = 2_000L
 
-        /** Surface 重挂后播放态先等画面自然输出的时长；等不到才 seek 到当前位置。 */
-        const val SURFACE_NATURAL_FRAME_WAIT_MILLIS = 500L
-
-        /** 暂停态 seek 后的抓帧探测间隔；在等待预算内反复探测直到拿到画面。 */
-        const val SURFACE_FRAME_PROBE_INTERVAL_MILLIS = 250L
+        /** 挂载后等播放核心首个新帧的时长；仍无新帧只翻转一次视频输出。 */
+        const val SURFACE_RESTORE_WAIT_MILLIS = 3_000L
 
         /** 完全无加载事件时看门狗才会触发的时长；任一加载事件都会重置。 */
         const val LOAD_WATCHDOG_MILLIS = 60_000L
