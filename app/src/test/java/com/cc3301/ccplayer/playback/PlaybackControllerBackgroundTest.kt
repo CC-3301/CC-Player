@@ -1,7 +1,6 @@
 package com.cc3301.ccplayer.playback
 
 import android.graphics.Bitmap
-import android.view.Surface
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import java.util.concurrent.CountDownLatch
@@ -120,29 +119,7 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `迟到或未重新挂载的出帧通知不清缓存帧`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-
-        engine.reportFramePresented()
-
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-    }
-
-    @Test
-    fun `没有可用 Surface 时出帧通知不清缓存帧`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
-
-        engine.reportFramePresented()
-
-        assertSame(frame, controller.backgroundRestoreFrame.value)
-    }
-
-    @Test
-    fun `暂停态回前台 seek 到当前位置逼出帧`() = runTest {
+    fun `暂停态回前台不 seek，缓存帧留到下一次出帧`() = runTest {
         val frame = testBitmap()
         val controller = capturedController(frame)
         engine.reportPositionChanged(42_000, 600_000)
@@ -150,88 +127,108 @@ class PlaybackControllerBackgroundTest {
         reattach(controller)
         runCurrent()
 
-        // 暂停态不会自然出帧：seek 到当前位置，播放位置不变。
-        assertEquals(listOf(42_000L), engine.seekPositions)
+        // 暂停态不会产生出帧通知：不 seek、不改播放位置，缓存帧继续盖住画面。
+        assertTrue(engine.seekPositions.isEmpty())
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-        // seek 之后的抓帧成功即算画面恢复，不依赖任何加载事件。
-        assertNull(controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
-    }
-
-    @Test
-    fun `暂停态回前台在预算内重试抓帧直到出帧`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        engine.frameToGrab = null
-        var grabs = 0
-        engine.beforeGrab = {
-            grabs++
-            // 前两次抓不到：重绘晚于 seek。
-            if (grabs >= 3) engine.frameToGrab = PlaybackEngine.Frame(frame)
-        }
-
-        // 全程不产生 VideoReconfig / PlaybackRestart，画面只能靠抓帧探测恢复。
-        reattach(controller)
-        advanceTimeBy(PlaybackController.SURFACE_FRAME_PROBE_INTERVAL_MILLIS * 4)
-        runCurrent()
-
-        assertEquals(1, engine.seekPositions.size)
-        assertTrue(grabs >= 3)
-        assertNull(controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
-    }
-
-    @Test
-    fun `暂停态回前台 seek 后抓不到帧时保留旧画面`() = runTest {
-        val frame = testBitmap()
-        val controller = capturedController(frame)
-        engine.frameToGrab = null
-
-        reattach(controller)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
-        runCurrent()
-
-        // 预算耗尽后不再 seek，也不再探测，旧画面保持。
-        assertEquals(1, engine.seekPositions.size)
         assertSame(frame, controller.backgroundRestoreFrame.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `播放态回前台先等画面自然输出再 seek`() = runTest {
+    fun `挂载后 3 秒仍无新帧只翻转一次视频输出`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS - 1)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+
+        // 只翻转一次：之后不再翻转、不 seek。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `3 秒内收到新帧就不再翻转视频输出`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(30_000, 600_000)
 
         reattach(controller)
+        engine.reportPositionChanged(31_000, 600_000)
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
+
+        assertEquals(0, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
-
-        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS)
-        runCurrent()
-
-        // 等不到自然出帧才 seek 到当前位置；位置与加载目标都不变。
-        assertEquals(listOf(30_000L), engine.seekPositions)
-        assertEquals(30_000L, controller.progress.value.positionMillis)
-        assertEquals(PlaybackState.Playing, controller.state.value)
-        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-
-        // 只 seek 一次，不会反复逼帧。
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 3)
-        runCurrent()
-        assertEquals(1, engine.seekPositions.size)
+        assertNull(controller.backgroundRestoreFrame.value)
     }
 
     @Test
-    fun `播放态回前台画面自然输出就不 seek`() = runTest {
+    fun `Surface 分离时取消恢复等待`() = runTest {
+        val controller = capturedController()
+
+        reattach(controller)
+        controller.setRenderSurfaceAvailable(false)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `片尾黑底重挂不等待也不翻转`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(600_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+        engine.reportFileLoaded()
+        assertTrue(controller.holdBlack.value)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `播放态回前台不 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
+        runCurrent()
+
+        // 恢复完全不 seek：画面由播放核心重建输出后自行出帧。
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(30_000L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+    }
+
+    @Test
+    fun `播放态回前台画面自然输出就不翻转`() = runTest {
         val controller = playingController()
 
         reattach(controller)
         engine.reportFramePresented()
-        advanceTimeBy(PlaybackController.SURFACE_NATURAL_FRAME_WAIT_MILLIS * 3)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
         runCurrent()
 
+        assertEquals(0, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
     }
 
@@ -264,7 +261,6 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         engine.reportPositionChanged(30_000, 600_000)
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
-        val generationBefore = engine.surfaceGeneration
 
         // 退后台：播放继续，画面停止渲染。
         policy.setAppInForeground(false)
@@ -273,19 +269,19 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
-        assertTrue(engine.surfaceGeneration > generationBefore)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(30_000L, controller.progress.value.positionMillis)
 
-        // 回前台走重挂后的出帧路径：位置前进过一次，不再 seek。
+        // 回前台走重挂后的出帧路径：位置前进过一次，不再 seek、不翻转。
         engine.reportPositionChanged(31_000, 600_000)
         engine.reportFramePresented()
         assertNull(controller.backgroundRestoreFrame.value)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS * 2)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
         assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(0, engine.flipVideoOutputCalls)
     }
 
     @Test
@@ -295,7 +291,6 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         val policy = BackgroundPlaybackPolicy(pausePlayback = controller::pauseForBackground)
         policy.setBackgroundPlaybackEnabled(false)
-        val generationBefore = engine.surfaceGeneration
 
         // 退后台：立即暂停，再抓一帧留给回前台。
         policy.setAppInForeground(false)
@@ -306,10 +301,9 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
-        assertTrue(engine.surfaceGeneration > generationBefore)
-        // 暂停态回前台 seek 到当前位置逼出帧，抓帧成功后撤掉缓存帧；状态保持暂停。
-        assertEquals(1, engine.seekPositions.size)
-        assertNull(controller.backgroundRestoreFrame.value)
+        // 暂停态回前台不 seek：缓存帧盖住画面，保持暂停。
+        assertTrue(engine.seekPositions.isEmpty())
+        assertSame(frame, controller.backgroundRestoreFrame.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
@@ -413,19 +407,6 @@ class PlaybackControllerBackgroundTest {
         }
     }
 
-    @Test
-    fun `假引擎重复挂载同一 Surface 不重复递增代数`() {
-        val surface = testSurface()
-
-        engine.attachSurface(surface)
-        engine.attachSurface(surface)
-        assertEquals(1, engine.surfaceGeneration)
-
-        engine.detachSurface()
-        engine.attachSurface(surface)
-        assertEquals(2, engine.surfaceGeneration)
-    }
-
     private fun openPaused(controller: PlaybackController) {
         val files = listOf(
             MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
@@ -491,8 +472,6 @@ class PlaybackControllerBackgroundTest {
      * 沿用现有测试的 Unsafe 分配方式。
      */
     private fun testBitmap(): Bitmap = unsafeAllocate(Bitmap::class.java)
-
-    private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)
 
     @Suppress("UNCHECKED_CAST")
     private fun <T> unsafeAllocate(type: Class<T>): T {

@@ -35,7 +35,7 @@ class MpvPlaybackEngine(
     @Volatile
     private var attachedSurface: Surface? = null
 
-    /** 退后台后重新挂上 Surface，等待播放位置再次前进以证明画面已输出。 */
+    /** 挂载后等待播放位置再次前进，作为画面已重新输出到 Surface 的信号。 */
     @Volatile
     private var awaitingSurfaceFrame = false
 
@@ -45,11 +45,6 @@ class MpvPlaybackEngine(
 
     /** 位置前进判定：seek 后先重建基线，避免队列里的旧位置冒充前进。 */
     private val positionGate = PositionProgressGate()
-
-    @Volatile
-    private var surfaceGenerationCounter = 0
-
-    override val surfaceGeneration: Int get() = surfaceGenerationCounter
 
     /** 加载代际、结束判定与 ready 序号；同一临界区，控制层与事件线程都会调用。 */
     private val loadCoordinator = MpvLoadCoordinator()
@@ -244,18 +239,30 @@ class MpvPlaybackEngine(
     }
 
     override fun attachSurface(surface: Surface) {
-        if (attachedSurface === surface && !videoOutputStopped) return
-        if (videoOutputStopped) {
-            // 先进入等待，再切回视频输出，避免首个重配事件先到而被漏掉。
-            awaitingSurfaceFrame = true
-            videoOutputStopped = false
-            surfaceGenerationCounter++
-            MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
-        }
+        if (attachedSurface === surface) return
         attachedSurface = surface
         MPVLib.attachSurface(surface)
+    }
+
+    /**
+     * 挂载、设尺寸之后才开窗口并恢复视频输出：视频输出初始化时就能拿到 Surface 与尺寸，
+     * 暂停态没有后续解码推进也能自行重绘一帧。
+     */
+    override fun startVideoOutput() {
+        if (attachedSurface == null) return
+        videoOutputStopped = false
+        awaitingSurfaceFrame = true
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         MPVLib.setOptionString("force-window", "yes")
+        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+    }
+
+    /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出。 */
+    override fun flipVideoOutput() {
+        if (attachedSurface == null || videoOutputStopped) return
+        awaitingSurfaceFrame = true
+        MPVLib.setPropertyString("vo", "null")
+        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
     }
 
     override fun detachSurface() {
@@ -352,7 +359,7 @@ class MpvPlaybackEngine(
         val token = loadCoordinator.currentLoadedToken() ?: return
         awaitingLoadFrame = false
         awaitingSurfaceFrame = false
-        listener?.onFramePresented(surfaceGenerationCounter, token)
+        listener?.onFramePresented(token)
     }
 
     /**

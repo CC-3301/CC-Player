@@ -166,6 +166,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     true
                 } ?: false
             },
+            startOutput = { playback?.engine?.startVideoOutput() },
             detachEngine = { playback?.engine?.detachSurface() },
             resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
             onAvailabilityChanged = { available ->
@@ -722,7 +723,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    /** 退到后台停止画面渲染；是否暂停由播放服务按后台播放设置决定。 */
+    /** 退到后台：不拆挂画面；暂停态先抓一帧备用。是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
         diagnostics.log("应用退到后台")
@@ -730,13 +731,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         binder?.setAppInForeground(false)
         // 退后台时手势不会再收尾：落定预览并恢复声音，后台播放开着也一样。
         binder?.controller?.commitSeekPreview()
-        surfaceSession.onActivityStopped()
-        // 后台上报可能已把播放暂停；抓帧在后台执行，完成后由 Surface 会话分离。
-        detachAfterBackgroundCapture { !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
+        // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
+        binder?.controller?.beginBackgroundCapture()
     }
 
     /**
-     * 后台离开时先抓帧再分离 Surface。抓帧在后台调度执行，最多等待
+     * Surface 销毁时先抓帧再分离。抓帧在后台调度执行，最多等待
      * [BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS]；超时放弃结果并照常分离，避免挂住已销毁的 Surface。
      * 回到前台后同样放弃本周期结果，不再分离。
      */
@@ -759,8 +759,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
-        // 复用保存的 Surface：回前台不依赖 surfaceCreated 再次触发。
-        surfaceSession.onActivityStarted()
     }
 
     override fun onSurfaceReady(surface: Surface) {
@@ -779,7 +777,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onSurfaceReleased() {
         surfaceSession.onSurfaceDestroyed()
-        // 退后台时 Surface 可能先于 onStop 销毁，在这里补抓；转屏或关闭播放页不抓。
+        // 后台离开时先等暂停态抓帧结束再分离；转屏或关闭播放页不抓，直接分离。
         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
             detachAfterBackgroundCapture { !surfaceSession.hasSurface }
         } else {
