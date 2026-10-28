@@ -341,27 +341,27 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `a wheel step within one second of the last one still extends the settle window`() = runTest {
+    fun `a wheel step just before the settle window still extends it`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
-
-        assertEquals(1_000L, PlaybackController.WHEEL_SETTLE_MILLIS)
+        val gapMillis = PlaybackController.WHEEL_SETTLE_MILLIS - 100
 
         assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
-        advanceTimeBy(900)
+        advanceTimeBy(gapMillis)
 
-        // 停滚 1 秒才落定：窗口内再滚一格只顺延，不先落定再重新静音。
+        // 窗口内再滚一格只顺延，不先落定再重新静音。
         assertEquals(55_000L, controller.seekPreviewMillis.value)
         assertEquals(listOf(true), engine.muteCalls)
 
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
-        advanceTimeBy(900)
+        advanceTimeBy(gapMillis)
         assertEquals(50_000L, controller.seekPreviewMillis.value)
         assertEquals(listOf(true), engine.muteCalls)
 
-        advanceTimeBy(101)
+        advanceTimeBy(PlaybackController.WHEEL_SETTLE_MILLIS + 1)
+        // 两档只收尾一次：静音一次、恢复一次、落定一跳到最后一档。
         assertEquals(listOf(true, false), engine.muteCalls)
-        assertEquals(50_000L, engine.seekPositions.last())
+        assertEquals(listOf(55_000L, 50_000L), engine.seekPositions)
         assertNull(controller.seekPreviewMillis.value)
     }
 

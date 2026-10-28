@@ -557,7 +557,6 @@ fun PlayerScreen(
             onSeekHeartbeat = onSeekHeartbeat,
             onToggleControls = { controls.toggle() },
             onGestureInteraction = { controls.resetTimer() },
-            onVolumeInteraction = { controls.show() },
             onVolumeHint = { volumeHint = it },
             onSeekHint = { seekHint = it },
             modifier = Modifier.fillMaxSize(),
@@ -566,7 +565,7 @@ fun PlayerScreen(
             LevelHintLabel(fraction = fraction, modifier = Modifier.align(Alignment.Center))
         }
         // 控制层隐藏时手势不唤出控制层，拖动与滚轮的目标时间提示同样不显示。
-        if (controlsVisible) {
+        if (seekTargetHintVisible(controlsVisible)) {
             seekHint?.let { hint ->
                 SeekHintLabel(hint = hint, modifier = Modifier.align(Alignment.Center))
             }
@@ -847,7 +846,6 @@ private fun PlayerGestureLayer(
     onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
     onGestureInteraction: () -> Unit,
-    onVolumeInteraction: () -> Unit,
     onVolumeHint: (Float?) -> Unit,
     onSeekHint: (SeekHint?) -> Unit,
     modifier: Modifier = Modifier,
@@ -875,7 +873,6 @@ private fun PlayerGestureLayer(
     val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnGestureInteraction = rememberUpdatedState(onGestureInteraction)
-    val latestOnVolumeInteraction = rememberUpdatedState(onVolumeInteraction)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
@@ -887,11 +884,13 @@ private fun PlayerGestureLayer(
             is TapGestureAction.DoubleTap -> {
                 // 双击只重置自动隐藏计时：隐藏态双击暂停不显示任何元素，双击 ±10 秒只显示箭头与累计秒数。
                 latestOnGestureInteraction.value()
-                when (val doubleTap = action.action) {
+                val doubleTap = action.action
+                val showSideHint = doubleTapHint(doubleTap) == DoubleTapHint.Side && doubleTapFeedbackEnabled
+                when (doubleTap) {
                     is DoubleTapAction.Seek -> if (doubleTapFeedbackEnabled) {
                         // 用夹取后的实际位移累计，时长未知、到边界或片尾不叠加。
                         val actualDelta = latestOnSeekBy.value(doubleTap.deltaMillis)
-                        if (actualDelta != 0L) {
+                        if (actualDelta != 0L && showSideHint) {
                             latestOnDoubleTapFeedback.value(doubleTap.side, actualDelta)
                         }
                     }
@@ -940,12 +939,8 @@ private fun PlayerGestureLayer(
                             }
                             if (!interactionNotified && update.gesture != null) {
                                 interactionNotified = true
-                                // 跳转拖动只重置计时，不唤出控制层；音量拖动沿用唤出控制层。
-                                if (update.gesture == DragGesture.Seek) {
-                                    latestOnGestureInteraction.value()
-                                } else {
-                                    latestOnVolumeInteraction.value()
-                                }
+                                // 手势只重置计时，不唤出控制层。
+                                latestOnGestureInteraction.value()
                             }
                             when (update.gesture) {
                                 DragGesture.Volume -> if (volumeAllowed && update.volumeDragY != 0f) {
@@ -1608,14 +1603,17 @@ private fun SeekBar(
     // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
     LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
         val held = heldMillis ?: return@LaunchedEffect
-        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, false)) {
+        val base = heldBaseMillis ?: return@LaunchedEffect
+        if (!shouldKeepSeekPreview(positionMillis, held, base, false, false)) {
             heldMillis = null
         }
     }
     LaunchedEffect(heldMillis) {
         val held = heldMillis ?: return@LaunchedEffect
         delay(SEEK_PREVIEW_HOLD_MILLIS)
-        if (!shouldKeepSeekPreview(positionMillis, held, heldBaseMillis, false, true)) {
+        val base = heldBaseMillis
+        // 超时后一律清除，不再判位置。
+        if (base == null || !shouldKeepSeekPreview(positionMillis, held, base, false, true)) {
             heldMillis = null
         }
     }

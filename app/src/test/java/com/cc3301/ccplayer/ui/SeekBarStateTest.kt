@@ -110,6 +110,14 @@ class SeekBarStateTest {
     }
 
     @Test
+    fun `位置还停在拖动起点时不判为到达`() {
+        // 小幅度反向拖动：起点 45_200 落在目标 +1.5 秒内，松手首帧位置仍等于起点。
+        assertTrue(shouldKeepSeekPreview(45_200L, 45_000L, 45_200L, mediaChanged = false, timedOut = false))
+        // 原地松手（目标就是起点）没有可等的位置，立即清除。
+        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 45_000L, mediaChanged = false, timedOut = false))
+    }
+
+    @Test
     fun `seek 途中引擎退回目标之前不撤掉保持值`() {
         // 落定 seek 从目标前的关键帧起解，位置会先报告目标前约 278ms。
         assertTrue(shouldKeepSeekPreview(44_722L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))

@@ -335,19 +335,20 @@ fun seekBarDownMillis(
  * 末次拖动预览是否继续保留：未切媒体、未超时，且播放位置尚未到达目标。
  * 只有位置真正进入目标附近（[SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 到
  * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS]）才停止保留：seek 途中位置会先退回目标之前，
- * 按差值判定会误清并让圆球回跳。按 [baseMillis]（拖动起点）判断方向；位置越过目标时同样停止保留。
+ * 按差值判定会误清并让圆球回跳。位置仍停在 [baseMillis]（拖动起点）时落定 seek 尚未生效，同样保留；
+ * 按起点判断方向，位置越过目标时停止保留。
  */
 fun shouldKeepSeekPreview(
     positionMillis: Long,
     heldMillis: Long?,
-    baseMillis: Long?,
+    baseMillis: Long,
     mediaChanged: Boolean,
     timedOut: Boolean,
 ): Boolean {
     if (heldMillis == null || mediaChanged || timedOut) return false
-    val base = baseMillis ?: return positionMillis !in
-        (heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS)..(heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS)
-    return if (heldMillis >= base) {
+    // 位置还停在拖动起点、且目标与起点不同：落定 seek 尚未生效，不判为到达。
+    if (positionMillis == baseMillis && baseMillis != heldMillis) return true
+    return if (heldMillis >= baseMillis) {
         positionMillis < heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS
     } else {
         positionMillis > heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS

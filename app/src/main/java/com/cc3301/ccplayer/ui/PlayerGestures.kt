@@ -60,6 +60,24 @@ sealed interface DoubleTapAction {
     data object TogglePlayPause : DoubleTapAction
 }
 
+/** 双击后显示的界面元素。 */
+enum class DoubleTapHint {
+    /** 不显示任何元素。 */
+    None,
+
+    /** 只显示该侧箭头与累计秒数。 */
+    Side,
+}
+
+/** 双击的提示元素：暂停/继续不显示任何元素，±10 秒只显示该侧箭头与累计秒数。 */
+fun doubleTapHint(action: DoubleTapAction): DoubleTapHint = when (action) {
+    is DoubleTapAction.Seek -> DoubleTapHint.Side
+    DoubleTapAction.TogglePlayPause -> DoubleTapHint.None
+}
+
+/** 拖动与滚轮的目标时间提示是否显示：控制层隐藏时手势不唤出控制层，也不显示该提示。 */
+fun seekTargetHintVisible(controlsVisible: Boolean): Boolean = controlsVisible
+
 /** 拖动进入的手势：音量或跳转。 */
 sealed interface DragGesture {
     data object Volume : DragGesture

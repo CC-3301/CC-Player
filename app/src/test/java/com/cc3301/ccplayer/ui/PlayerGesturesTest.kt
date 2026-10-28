@@ -402,6 +402,23 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `双击暂停与继续不显示任何元素`() {
+        assertEquals(DoubleTapHint.None, doubleTapHint(DoubleTapAction.TogglePlayPause))
+    }
+
+    @Test
+    fun `双击加减十秒只显示该侧箭头与累计秒数`() {
+        assertEquals(DoubleTapHint.Side, doubleTapHint(DoubleTapAction.Seek(-SEEK_STEP_MILLIS, DoubleTapSide.Left)))
+        assertEquals(DoubleTapHint.Side, doubleTapHint(DoubleTapAction.Seek(SEEK_STEP_MILLIS, DoubleTapSide.Right)))
+    }
+
+    @Test
+    fun `控制层隐藏时拖动与滚轮不显示目标时间提示`() {
+        assertFalse(seekTargetHintVisible(controlsVisible = false))
+        assertTrue(seekTargetHintVisible(controlsVisible = true))
+    }
+
+    @Test
     fun `反馈清空条件覆盖锁定面板加载与恢复`() {
         assertTrue(doubleTapFeedbackBlocked(true, false, false, false, false))
         assertTrue(doubleTapFeedbackBlocked(false, true, false, false, false))
