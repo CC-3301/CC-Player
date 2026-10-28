@@ -157,7 +157,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 的挂载、分离与回前台重建都由会话持有，Activity 只转发事件。 */
+    /** Surface 的挂载与分离由会话持有；拆挂只由 SurfaceHolder 回调触发。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
@@ -957,7 +957,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private companion object {
         const val NO_MEDIA = -1
 
-        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由 seek 逼出画面。 */
+        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由 Surface 重挂恢复画面。 */
         const val BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS = 2_000L
     }
 }

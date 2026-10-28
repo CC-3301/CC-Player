@@ -5,7 +5,7 @@ import android.view.Surface
 /**
  * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
  *
- * Activity 生命周期、Surface 回调、尺寸变化与服务连接只向这里转发。
+ * Surface 回调、尺寸变化与服务连接只向这里转发。
  * 拆挂只由 SurfaceHolder 回调触发：surfaceCreated 挂载，surfaceDestroyed 只标记不可用；
  * Activity 的停止与恢复不拆不挂。挂载与分离幂等，可重复、可乱序。
  * 后台抓帧完成前不主动分离，由调用方在抓帧结束后调用 [detach]。
@@ -36,7 +36,7 @@ class SurfaceSession(
 
     private val mounted: Boolean get() = mountedSurface != null
 
-    /** 是否有可挂载的 Surface；回前台时用它恢复画面。 */
+    /** 当前是否有可挂载且有效的 Surface。 */
     val hasSurface: Boolean get() = surface?.let(isValid) == true
 
     fun onSurfaceCreated(surface: Surface) {
@@ -61,7 +61,7 @@ class SurfaceSession(
     /** 当前是否可渲染；服务重连时由调用方同步一次。 */
     val available: Boolean get() = state == State.Ready
 
-    /** 播放服务重新连上时调用；已在前台则把保存的 Surface 挂回去。 */
+    /** 播放服务重新连上时调用；有有效 Surface 则补挂。 */
     fun onEngineAvailable() {
         attachCurrent()
         publish()
