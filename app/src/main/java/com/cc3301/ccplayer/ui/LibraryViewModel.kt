@@ -652,11 +652,11 @@ class LibraryViewModel(
     }
 
     /**
-     * 冷启动：开关关闭、上次不在库页面或没有快照时保持首页。
-     * 连接源删除或目录不可访问时静默回首页并记录原因。
+     * 冷启动：设置页不作落点，按设置页来处决定落到库页面、源列表或首页。
+     * 开关关闭、没有快照或没有可恢复的落点时保持首页；连接源删除或目录不可访问时静默回首页并记录原因。
      */
     private suspend fun restoreColdStart() {
-        // 开关关闭、没有快照或上次不在库页面时立即结束判定，不必等连接源解析（可能连网）。
+        // 开关关闭或没有快照时立即结束判定，不必等连接源解析（可能连网）。
         if (!settings.restoreLastDirectory.first()) {
             navigation.discardColdStart()
             return
