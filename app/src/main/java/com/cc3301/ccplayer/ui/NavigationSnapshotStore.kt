@@ -20,7 +20,7 @@ data class NavigationSnapshot(
     val libraryStack: List<MediaFile> = emptyList(),
 )
 
-/** 快照读取结果：没有快照（首次启动）与写了但无法解析分开，后者回首页要记录原因。 */
+/** 快照读取结果：没有快照（首次启动）与读不出或无法解析分开，后者回首页要记录原因。 */
 sealed interface NavigationSnapshotLoad {
 
     data class Loaded(val snapshot: NavigationSnapshot) : NavigationSnapshotLoad
@@ -28,7 +28,7 @@ sealed interface NavigationSnapshotLoad {
     /** 从没写过快照。 */
     data object Absent : NavigationSnapshotLoad
 
-    /** 写过快照但内容无法解析。 */
+    /** 写过快照但读不出或无法解析。 */
     data object Unreadable : NavigationSnapshotLoad
 }
 
