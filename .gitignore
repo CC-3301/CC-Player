@@ -26,3 +26,5 @@ HANDOFF.md
 
 #备份
 backups/
+# Kotlin 编译会话目录
+.kotlin/
