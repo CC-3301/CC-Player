@@ -99,13 +99,22 @@ class SeekBarStateTest {
     }
 
     @Test
-    fun `末次预览在位置追平或越过目标后清除`() {
+    fun `末次预览在位置到达目标附近后清除`() {
         assertTrue(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(44_500L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
+        // 到达窗口：目标 -50ms 到 +1500ms。
+        assertFalse(shouldKeepSeekPreview(44_950L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
         assertFalse(shouldKeepSeekPreview(50_000L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
         assertTrue(shouldKeepSeekPreview(80_000L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(40_000L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
+        assertFalse(shouldKeepSeekPreview(46_500L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
         assertFalse(shouldKeepSeekPreview(20_000L, null, 10_000L, mediaChanged = false, timedOut = false))
+    }
+
+    @Test
+    fun `seek 途中引擎退回目标之前不撤掉保持值`() {
+        // 落定 seek 从目标前的关键帧起解，位置会先报告目标前约 278ms。
+        assertTrue(shouldKeepSeekPreview(44_722L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
+        // 反向跳转：位置还没降到目标 +1.5 秒以内时继续保留。
+        assertTrue(shouldKeepSeekPreview(46_600L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
     }
 
     @Test

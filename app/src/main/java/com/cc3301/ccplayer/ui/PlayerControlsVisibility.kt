@@ -36,12 +36,17 @@ class PlayerControlsVisibility(
 
     /** 点击画面：显示时隐藏，隐藏时显示并重新计时。 */
     fun toggle() {
-        if (visible) visible = false else onInteraction()
+        if (visible) visible = false else show()
     }
 
-    /** 任意操作：显示控制层并重新计时。 */
-    fun onInteraction() {
+    /** 显示控制层并重新计时；点击画面或控件时使用。 */
+    fun show() {
         visible = true
+        lastInteractionAtMillis = elapsedMillis()
+    }
+
+    /** 仅重新计时，不改显隐；手势只重置自动隐藏计时，不唤出控制层。 */
+    fun resetTimer() {
         lastInteractionAtMillis = elapsedMillis()
     }
 

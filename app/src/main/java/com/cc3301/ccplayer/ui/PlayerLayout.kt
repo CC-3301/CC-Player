@@ -5,7 +5,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
-import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToLong
 
@@ -257,8 +256,11 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 松手后预览保留到播放位置追平的时间容差，毫秒。 */
-const val SEEK_PREVIEW_SETTLE_MILLIS = 1_000L
+/** 预览目标的到达窗口下沿：落定 seek 从目标前的关键帧起解，位置会先报告目标之前，毫秒。 */
+const val SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS = 50L
+
+/** 预览目标的到达窗口上沿：落定后位置向前追到这里仍未清除也算到达，毫秒。 */
+const val SEEK_PREVIEW_ARRIVE_AFTER_MILLIS = 1_500L
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
@@ -331,7 +333,9 @@ fun seekBarDownMillis(
 
 /**
  * 末次拖动预览是否继续保留：未切媒体、未超时，且播放位置尚未到达目标。
- * 按 [baseMillis]（拖动起点）判断方向；位置越过目标时立即停止保留。
+ * 只有位置真正进入目标附近（[SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 到
+ * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS]）才停止保留：seek 途中位置会先退回目标之前，
+ * 按差值判定会误清并让圆球回跳。按 [baseMillis]（拖动起点）判断方向；位置越过目标时同样停止保留。
  */
 fun shouldKeepSeekPreview(
     positionMillis: Long,
@@ -341,12 +345,12 @@ fun shouldKeepSeekPreview(
     timedOut: Boolean,
 ): Boolean {
     if (heldMillis == null || mediaChanged || timedOut) return false
-    if (abs(positionMillis - heldMillis) <= SEEK_PREVIEW_SETTLE_MILLIS) return false
-    val base = baseMillis ?: return true
+    val base = baseMillis ?: return positionMillis !in
+        (heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS)..(heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS)
     return if (heldMillis >= base) {
-        positionMillis < heldMillis - SEEK_PREVIEW_SETTLE_MILLIS
+        positionMillis < heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS
     } else {
-        positionMillis > heldMillis + SEEK_PREVIEW_SETTLE_MILLIS
+        positionMillis > heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS
     }
 }
 
