@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -112,7 +113,6 @@ class PlaybackControllerBackgroundTest {
     fun `回前台播放核心出帧后撤掉缓存帧`() = runTest {
         val controller = capturedController()
 
-        engine.reportSurfaceReattached()
         engine.reportFramePresented()
 
         assertNull(controller.backgroundRestoreFrame.value)
@@ -185,6 +185,77 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
 
         assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `Surface 未销毁时回前台立刻撤掉缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+
+        // Surface 一直可用，没有进入恢复等待：画面本来就在，缓存帧多余。
+        controller.onReturnedToForeground()
+
+        assertNull(controller.backgroundRestoreFrame.value)
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `重挂进入恢复等待时回前台保留缓存帧`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        reattach(controller)
+
+        // 已进入恢复等待：缓存帧留到播放核心的首个新帧。
+        controller.onReturnedToForeground()
+
+        assertSame(frame, controller.backgroundRestoreFrame.value)
+    }
+
+    @Test
+    fun `切集进行中重挂不触发 3 秒翻转`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+
+        // 切集自己等新帧，重挂不叠加恢复等待。
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `首次加载中重挂不触发 3 秒翻转`() = runTest {
+        val controller = controller()
+        val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
+        controller.openPlaylist(files, files.first())
+
+        reattach(controller)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `旧加载的迟到帧不撤切集冻结画面`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(10_000, 600_000)
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+
+        controller.next()
+        val freeze = controller.freezeFrame.value
+        assertNotNull(freeze)
+
+        // 原片代际的迟到出帧不能撤掉切集冻结画面。
+        engine.reportFramePresented(loadToken = 1)
+        assertSame(freeze, controller.freezeFrame.value)
+
+        // 当前目标加载的帧才能撤。
+        engine.reportFramePresented(loadToken = engine.currentLoadToken)
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test
@@ -265,7 +336,6 @@ class PlaybackControllerBackgroundTest {
         // 退后台：播放继续，画面停止渲染。
         policy.setAppInForeground(false)
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
@@ -297,7 +367,6 @@ class PlaybackControllerBackgroundTest {
         engine.reportPauseChanged(true)
         capture(controller)
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
@@ -407,6 +476,33 @@ class PlaybackControllerBackgroundTest {
         }
     }
 
+    @Test
+    fun `回前台放弃在途抓帧结果`() = runBlocking {
+        val gate = CountDownLatch(1)
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
+        engine.beforeGrab = { gate.await() }
+        val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+        try {
+            val controller = PlaybackController(
+                engine,
+                progress,
+                this,
+                frameProbeDispatcher = dispatcher,
+            )
+            openPaused(controller)
+            val job = controller.beginBackgroundCapture()
+
+            // Surface 未销毁就回到前台：在途抓帧的结果不能跨进前台。
+            controller.onReturnedToForeground()
+            gate.countDown()
+            job?.join()
+
+            assertNull(controller.backgroundRestoreFrame.value)
+        } finally {
+            dispatcher.close()
+        }
+    }
+
     private fun openPaused(controller: PlaybackController) {
         val files = listOf(
             MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
@@ -463,7 +559,6 @@ class PlaybackControllerBackgroundTest {
 
     private fun reattach(controller: PlaybackController) {
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
     }
 

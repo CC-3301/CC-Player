@@ -141,9 +141,6 @@ class FakePlaybackEngine : PlaybackEngine {
         disableSubtitleCalls++
     }
 
-    /** 模拟一次 Surface 重挂后的视频输出重建。 */
-    fun reportSurfaceReattached() = startVideoOutput()
-
     private var attachedSurface: Surface? = null
 
     /** 视频输出翻转次数；用于断言 3 秒无新帧只翻转一次。 */

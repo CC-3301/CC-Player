@@ -420,7 +420,8 @@ class PlaybackController(
             backgroundCaptureAttempted = false
             backgroundCaptureJob = null
             if (!wasAvailable) {
-                beginSurfaceRestore()
+                // 没有进入恢复等待说明画面一直在或不需要恢复，缓存帧多余。
+                if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
             }
@@ -434,16 +435,31 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂后只等播放核心的首个新帧：不 seek、不抓帧。
-     * 视频输出重建后由播放核心自行重解码；3 秒仍无新帧只翻转一次视频输出，不 seek、不改播放位置。
+     * 回前台：Surface 未重挂时画面一直在，后台缓存帧多余，立即撤掉并作废在途抓帧。
+     * 已进入恢复等待时保留缓存帧，等播放核心的首个新帧。
      */
-    private fun beginSurfaceRestore() {
+    fun onReturnedToForeground() {
+        if (!_renderSurfaceAvailable.value) return
+        if (awaitingSurfaceFrame) return
+        // 新的前后台周期开始：在途抓帧的结果不能跨进前台。
+        backgroundCaptureToken++
+        backgroundCaptureAttempted = false
+        backgroundCaptureJob = null
+        replaceBackgroundRestoreFrame(null)
+    }
+
+    /**
+     * Surface 重挂后只等播放核心的首个新帧：不 seek、不抓帧。
+     * 视频输出重建后由播放核心自行重解码；等待超时只翻转一次视频输出，不 seek、不改播放位置。
+     * 返回是否真的进入恢复等待。
+     */
+    private fun beginSurfaceRestore(): Boolean {
         cancelSurfaceRestore()
-        if (!active) return
+        if (!active) return false
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
-        if (loadPhase != LoadPhase.None) return
+        if (loadPhase != LoadPhase.None) return false
         // 片尾黑底不显示画面，不需要恢复。
-        if (_holdBlack.value) return
+        if (_holdBlack.value) return false
         awaitingSurfaceFrame = true
         diagnostics.log("Surface 重挂: 等待新帧")
         surfaceRestoreJob = scope.launch {
@@ -453,12 +469,15 @@ class PlaybackController(
                 if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
                 awaitingSurfaceFrame = false
                 engine.flipVideoOutput()
-                diagnostics.log("Surface 恢复: 3 秒无新帧，翻转视频输出")
+                diagnostics.log {
+                    "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出"
+                }
             } finally {
                 val runningJob = coroutineContext[Job]
                 if (surfaceRestoreJob === runningJob) surfaceRestoreJob = null
             }
         }
+        return true
     }
 
     /** 结束本次恢复等待：迟到的翻转不再下发，旧画面留到真正出帧。 */
@@ -1196,12 +1215,15 @@ class PlaybackController(
      */
     override fun onFramePresented(loadToken: Int) {
         if (!active) return
-        if (loadToken != expectedLoadToken) return
-        confirmFrame()
+        confirmFrame(loadToken)
     }
 
-    /** 新帧确认：撤掉冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。 */
-    private fun confirmFrame() {
+    /**
+     * 新帧确认：撤掉冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。
+     * 只有当前加载的帧才能撤冻结画面，迟到或旧加载的帧不能把切集提前撤成黑底。
+     */
+    private fun confirmFrame(loadToken: Int) {
+        if (loadToken != expectedLoadToken) return
         replaceFreezeFrame(null)
         replaceBackgroundRestoreFrame(null)
         if (awaitingSurfaceFrame) {

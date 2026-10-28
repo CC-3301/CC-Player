@@ -759,6 +759,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
+        // Surface 未销毁时画面一直在，缓存帧多余；已经重挂则等播放核心的首个新帧。
+        playback?.controller?.onReturnedToForeground()
     }
 
     override fun onSurfaceReady(surface: Surface) {

@@ -96,7 +96,6 @@ class PlaybackControllerDiagnosticsTest {
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
@@ -128,7 +127,6 @@ class PlaybackControllerDiagnosticsTest {
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         engine.reportFramePresented()
         runCurrent()
@@ -143,7 +141,6 @@ class PlaybackControllerDiagnosticsTest {
         val controller = playingController(diagnostics)
 
         controller.setRenderSurfaceAvailable(false)
-        engine.reportSurfaceReattached()
         controller.setRenderSurfaceAvailable(true)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
