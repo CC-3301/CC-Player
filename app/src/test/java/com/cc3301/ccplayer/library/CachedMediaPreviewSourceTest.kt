@@ -5,6 +5,7 @@ import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -1568,6 +1569,33 @@ class CachedMediaPreviewSourceTest {
         assertEquals(
             listOf("image:占位.mkv", "image:可见.mkv", "duration:已出图.mkv"),
             tracker.events,
+        )
+    }
+
+    @Test
+    fun `后到的低索引仍先于已排队的高索引出图`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val entries = (0 until 8).map { index -> network("第$index 集.mkv") }
+
+        // 高索引先发起：它入队后停在发放之前，低索引这时才发起。
+        val high = async(start = CoroutineStart.UNDISPATCHED) { bounded.visiblePreview(entries[7], 7) }
+        val low = async(start = CoroutineStart.UNDISPATCHED) { bounded.visiblePreview(entries[0], 0) }
+        runCurrent()
+
+        // 发放从整队取最小 rank：先出图的是后到的低索引。
+        assertEquals(listOf("第0 集.mkv"), tracker.started.map { it.substringAfterLast('/') })
+
+        tracker.imageGate?.complete(Unit)
+        high.await()
+        low.await()
+        assertEquals(
+            listOf("第0 集.mkv", "第7 集.mkv"),
+            tracker.started.map { it.substringAfterLast('/') },
         )
     }
 

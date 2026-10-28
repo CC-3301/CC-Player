@@ -132,8 +132,7 @@ internal class PreviewByteWindow(
             lastPrefetchChunk = start
             anchor = from
             // 只保留锚点窗口内的块：跨远距读取不会把走过的字节一直留在内存里。
-            val retainTo = start + chunkBytes + windowBytes
-            chunks.keys.removeAll { chunk -> chunk < start || chunk >= retainTo }
+            chunks.keys.removeAll { chunk -> !isRetainedLocked(chunk) }
             queued.clear()
             var next = from
             val end = minOf(size, from + windowBytes)
@@ -152,20 +151,24 @@ internal class PreviewByteWindow(
         synchronized(lock) {
             if (!queued.remove(start)) return
             if (closed || chunks[start] != null || start in pending) return
-            if (start < anchor || start >= anchor + windowBytes) return
+            if (!isRetainedLocked(start)) return
             pending += start
         }
         val result = runCatching { load(start) }
         synchronized(lock) {
             pending -= start
-            // 关闭后补齐的块不回写：窗口已经废弃，写回只会留下无法回收的字节。
-            if (!closed) {
+            // 关闭后、或读取期间锚点已移走：补齐的块不回写，避免把淘汰掉的块又留回内存。
+            if (!closed && isRetainedLocked(start)) {
                 result.onSuccess { bytes -> chunks[start] = bytes }
                 result.onFailure { failure -> failures[start] = failure.asPreviewReadFailure() }
             }
             lock.notifyAll()
         }
     }
+
+    /** 块是否仍落在锚点窗口内；常驻内存只保留这一段的块。 */
+    private fun isRetainedLocked(start: Long): Boolean =
+        start >= anchor - chunkBytes && start < anchor + windowBytes
 
     private fun chunkStart(position: Long): Long = position - position % chunkBytes
 

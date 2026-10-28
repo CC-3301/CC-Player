@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -139,8 +140,8 @@ class CachedMediaPreviewSource(
     /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
-    /** 正在后台补读时长的缓存键；同键只补读一次。 */
-    private val durationRefills = ConcurrentHashMap.newKeySet<String>()
+    /** 正在后台补读时长的缓存键与那一次的 Job；同键只补读一次。 */
+    private val durationRefills = ConcurrentHashMap<String, Job>()
 
     override suspend fun preview(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.visible(Int.MAX_VALUE - 1))
@@ -215,22 +216,28 @@ class CachedMediaPreviewSource(
         if (cached.durationKnown) return
         // 后台范围已取消（进程收尾）时不再补读，也不登记。
         if (!backgroundScope.isActive) return
-        if (!durationRefills.add(key)) return
-        val job = backgroundScope.launch {
-            try {
-                when (val duration = readLocalDuration(file, key, trigger)) {
-                    is PreviewDuration.Known -> writeDurationSafely(key, duration.millis)
-                    // 确定没有时长：写入后，后续命中不再重读。
-                    PreviewDuration.Unavailable -> writeDurationSafely(key, null)
-                    // 读取失败只影响角标：不落盘，退避后重试。
-                    PreviewDuration.Failed, null -> Unit
-                }
-            } finally {
-                durationRefills.remove(key)
+        // 先占位再启动：占位失败说明同键已在补读，直接放弃这一次。
+        val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
+            when (val duration = readLocalDuration(file, key, trigger)) {
+                is PreviewDuration.Known -> writeDurationSafely(key, duration.millis)
+                // 确定没有时长：写入后，后续命中不再重读。
+                PreviewDuration.Unavailable -> writeDurationSafely(key, null)
+                // 读取失败只影响角标：不落盘，退避后重试。
+                PreviewDuration.Failed, null -> Unit
             }
         }
-        // 范围在 launch 与执行之间被取消时协程体不跑、finally 不执行，这里兜底回滚登记。
-        job.invokeOnCompletion { durationRefills.remove(key) }
+        if (durationRefills.putIfAbsent(key, job) != null) {
+            job.cancel()
+            return
+        }
+        // 完成或被取消都按身份回滚登记：同键可能已被下一轮补读重新登记。
+        job.invokeOnCompletion { finishDurationRefill(key, job) }
+        job.start()
+    }
+
+    /** 只删自己登记的这一次：同键的下一轮补读已重新登记时保留它的登记。 */
+    private fun finishDurationRefill(key: String, job: Job) {
+        durationRefills.compute(key) { _, current -> if (current === job) null else current }
     }
 
     /** 一次读取会话取图与时长；无图条目也记录时长，避免下次重开文件。 */
@@ -684,8 +691,9 @@ private class PrioritySemaphore(private val capacity: Int) {
     private suspend fun acquire(priority: PreviewPriority) {
         val waiter = Waiter(priority, CompletableDeferred())
         try {
-            // 一律先入队；让同一轮下发的请求都进来，再由 rank 决定发放顺序，
-            // 先到的高索引项不因许可空闲越过仍在路上的低索引项。
+            // 一律先入队再发放；这里的 yield 只是给同一轮下发的请求一个入队机会，
+            // 不构成「同轮请求必全部入队」的保证（用立即调度时不让出）。
+            // 顺序由 grantIdleLocked 每次从整队取最小 rank 决定，加上下发按索引升序 start。
             lock.withLock { waiters.addLast(waiter) }
             yield()
             lock.withLock { grantIdleLocked() }

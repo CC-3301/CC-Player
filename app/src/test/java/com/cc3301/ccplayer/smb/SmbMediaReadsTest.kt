@@ -83,22 +83,56 @@ class SmbMediaReadsTest {
 
     @Test
     fun `会话表超过上限时关掉最久未用的`() = runTest {
-        val limited = SmbMediaReads(connector, SmbLocator(sources), maxSessions = 2)
+        var now = 1_000L
+        val limited = SmbMediaReads(connector, SmbLocator(sources), clock = { now }, maxSessions = 2)
         listOf("a", "b", "c").forEach { share ->
             addSource("smb://nas/$share")
             connector.addFile(share, "电影.mkv", payload)
         }
 
-        listOf("a", "b").forEach { share ->
-            limited.openRead("smb://nas/$share/电影.mkv", payload.size.toLong())
-                .use { source -> source.readAt(0, ByteArray(4), 0, 4) }
-        }
-        assertEquals("未超上限不关会话", 0, connector.closeOrder.count { it == "connection" })
+        // 三条会话按不同时刻取用，最久未用的确定为 a。
+        limited.openRead("smb://nas/a/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+        now += 1_000
+        limited.openRead("smb://nas/b/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+        assertEquals("未超上限不关会话", emptyList<String>(), connector.closedShares)
 
-        limited.openRead("smb://nas/c/电影.mkv", payload.size.toLong())
-            .use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+        now += 1_000
+        limited.openRead("smb://nas/c/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
 
-        assertEquals("超出上限关掉最久未用的", 1, connector.closeOrder.count { it == "connection" })
+        assertEquals("超出上限关掉最久未用的 a", listOf("a"), connector.closedShares)
         assertEquals(listOf("a", "b", "c"), connector.shares)
+    }
+
+    @Test
+    fun `淘汰不关还有句柄在用的会话`() = runTest {
+        val limited = SmbMediaReads(connector, SmbLocator(sources), maxSessions = 1)
+        listOf("a", "b").forEach { share ->
+            addSource("smb://nas/$share")
+            connector.addFile(share, "电影.mkv", payload)
+        }
+
+        val holding = limited.openRead("smb://nas/a/电影.mkv", payload.size.toLong())
+        limited.openRead("smb://nas/b/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("a 还有句柄在用，不得被淘汰", emptyList<String>(), connector.closedShares)
+
+        holding.close()
+        assertEquals("句柄关闭后会话仍在，等下一次淘汰", emptyList<String>(), connector.closedShares)
+    }
+
+    @Test
+    fun `还有句柄在用的会话不被闲置关闭`() = runTest {
+        var now = 1_000L
+        val idle = SmbMediaReads(connector, SmbLocator(sources), clock = { now }, idleMillis = 1_000)
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+
+        val holding = idle.openRead(movie, payload.size.toLong())
+        now += 10_000
+        idle.openRead(movie, payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("有句柄在用时重建连", listOf("media"), connector.shares)
+        assertTrue(connector.closedShares.isEmpty())
+        holding.close()
     }
 }

@@ -5,19 +5,20 @@ import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.NetworkMediaReads
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 
-/** 同时保留的 SMB 会话上限；超出时关掉最久未用的，避免长期占用服务器会话。 */
+/** 同时保留的 SMB 会话上限；超出时关掉最久未用且没有句柄在用的会话。 */
 private const val MAX_SESSIONS = 8
 
-/** 会话闲置上限：超过该时长未再取用就关闭，下次读取重新建连。 */
+/** 会话闲置上限：超过该时长没有句柄在用时关闭，下次读取重新建连。 */
 private const val SESSION_IDLE_MILLIS = 10 * 60 * 1000L
 
 /**
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
  * 同一共享的会话复用：抽帧只为条目打开文件句柄，句柄关闭不关会话，下一条目沿用同一会话。
- * 打开或读取失败时丢弃该会话；会话闲置超过上限或表满时也会被关掉，下次读取重新建连。
+ * 打开或读取失败时丢弃该会话；闲置超时或超出上限时才会关闭，且只在没有句柄在用时关闭。
  */
 class SmbMediaReads(
     private val connector: SmbConnector,
@@ -29,38 +30,48 @@ class SmbMediaReads(
 
     private val lock = Any()
 
-    /** 按共享复用的会话，记录最近取用时间用于淘汰；主机、端口、共享名与凭据相同即同一会话。 */
+    /** 按共享复用的会话，记录最近取用时间与在用句柄数；主机、端口、共享名与凭据相同即同一会话。 */
     private val sessions = HashMap<SessionKey, Session>()
 
     override suspend fun openRead(location: String, size: Long): ByteSource {
         val target = locator.locate(location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
         val key = SessionKey.of(target)
-        val connection = sessionFor(key, target)
+        val session = sessionFor(key, target)
         return try {
-            SmbSessionSource(handle = connection.openRead(target.path)) { drop(key, connection) }
+            SmbSessionSource(
+                handle = session.connection.openRead(target.path),
+                onClose = { release(session) },
+                onFailure = { drop(key, session) },
+            )
         } catch (cancellation: CancellationException) {
+            release(session)
             throw cancellation
         } catch (failure: Exception) {
-            drop(key, connection)
+            drop(key, session)
+            release(session)
             throw failure
         }
     }
 
-    /** 取该共享可用的会话；闲置超时或没有时新建，并发建连只留第一条。 */
-    private suspend fun sessionFor(key: SessionKey, target: SmbTarget): SmbConnection {
+    /** 取该共享可用的会话并占一个句柄；闲置超时且没有句柄在用、或没有会话时新建。 */
+    private suspend fun sessionFor(key: SessionKey, target: SmbTarget): Session {
         val now = clock()
-        val expired = synchronized(lock) {
-            val existing = sessions[key] ?: return@synchronized null
-            if (now - existing.lastUsedAt > idleMillis) {
-                sessions.remove(key)
-                existing
-            } else {
-                existing.lastUsedAt = now
-                return existing.connection
+        val stale = ArrayList<SmbConnection>()
+        synchronized(lock) {
+            val existing = sessions[key]
+            if (existing != null) {
+                if (now - existing.lastUsedAt > idleMillis && existing.inUse == 0) {
+                    sessions.remove(key)
+                    stale += existing.connection
+                } else {
+                    existing.lastUsedAt = now
+                    existing.inUse++
+                    return existing
+                }
             }
         }
-        expired?.let { session -> close(session.connection) }
+        stale.forEach(::close)
         val created = connector.connect(
             host = target.host,
             port = target.port,
@@ -68,45 +79,86 @@ class SmbMediaReads(
             username = target.username,
             password = target.password,
         )
-        val evicted = ArrayList<SmbConnection>()
-        val existing = synchronized(lock) {
+        val unused = ArrayList<SmbConnection>()
+        val session = synchronized(lock) {
             val current = sessions[key]
             if (current != null) {
+                // 并发建连：留先登记的那条，自己这条没用上。
                 current.lastUsedAt = now
-                current.connection
+                current.inUse++
+                unused += created
+                current
             } else {
-                sessions[key] = Session(created, now)
-                evicted += evictBeyondLimitLocked()
-                created
+                val fresh = Session(created, now)
+                fresh.inUse = 1
+                sessions[key] = fresh
+                unused += evictBeyondLimitLocked(exclude = key)
+                fresh
             }
         }
-        if (existing !== created) close(created)
-        evicted.forEach(::close)
-        return existing
+        unused.forEach(::close)
+        return session
     }
 
-    /** 丢弃会话；当前登记的还是这一条时才关闭，避免关掉并发建好的新会话。 */
-    private fun drop(key: SessionKey, connection: SmbConnection) {
-        val removed = synchronized(lock) {
-            if (sessions[key]?.connection === connection) sessions.remove(key)?.connection else null
+    /** 句柄关闭：计数归零时，已被摘掉的会话才真正关闭连接。 */
+    private fun release(session: Session) {
+        val closeable = synchronized(lock) {
+            session.inUse = (session.inUse - 1).coerceAtLeast(0)
+            if (session.inUse == 0 && session.detached) {
+                session.detached = false
+                session.connection
+            } else {
+                null
+            }
         }
-        removed?.let(::close)
+        closeable?.let(::close)
     }
 
-    /** 会话表超过上限时摘出最久未用的一条，由调用方在锁外关闭。 */
-    private fun evictBeyondLimitLocked(): List<SmbConnection> {
-        if (sessions.size <= maxSessions) return emptyList()
-        val oldest = sessions.entries.minByOrNull { entry -> entry.value.lastUsedAt } ?: return emptyList()
-        sessions.remove(oldest.key)
-        return listOf(oldest.value.connection)
+    /** 摘掉会话；还有句柄在用时留给最后一个句柄关闭时收尾，不在这里关。 */
+    private fun drop(key: SessionKey, session: Session) {
+        val closeable = synchronized(lock) {
+            if (sessions[key] === session) sessions.remove(key)
+            if (session.inUse == 0) {
+                session.detached = false
+                session.connection
+            } else {
+                session.detached = true
+                null
+            }
+        }
+        closeable?.let(::close)
+    }
+
+    /**
+     * 会话表超过上限时摘出最久未用且没有句柄在用的会话，当前这条永不入选，由调用方在锁外关闭。
+     * 全都在用时宁可暂时超出上限，也不关正在读的会话。
+     */
+    private fun evictBeyondLimitLocked(exclude: SessionKey): List<SmbConnection> {
+        val evicted = ArrayList<SmbConnection>()
+        while (sessions.size > maxSessions) {
+            val oldest = sessions.entries
+                .filter { entry -> entry.key != exclude && entry.value.inUse == 0 }
+                .minByOrNull { entry -> entry.value.lastUsedAt }
+                ?: return evicted
+            sessions.remove(oldest.key)
+            evicted += oldest.value.connection
+        }
+        return evicted
     }
 
     private fun close(connection: SmbConnection) {
         runCatching { connection.close() }
     }
 
-    /** 会话的登记：连接与最近一次取用的时刻。 */
-    private class Session(val connection: SmbConnection, var lastUsedAt: Long)
+    /** 会话的登记：连接、最近一次取用的时刻、在用句柄数。 */
+    private class Session(val connection: SmbConnection, var lastUsedAt: Long) {
+
+        /** 还在用的读句柄数；不为 0 时不得关闭。 */
+        var inUse = 0
+
+        /** 已从表里摘掉但还有句柄在用，等最后一个句柄关闭时再关连接。 */
+        var detached = false
+    }
 
     private data class SessionKey(
         val host: String,
@@ -130,11 +182,14 @@ class SmbMediaReads(
     }
 }
 
-/** 复用会话的随机读句柄：关闭只关文件句柄，会话留给下一条目；读取失败时由调用方丢弃会话。 */
+/** 复用会话的随机读句柄：关闭只关文件句柄并交还会话占用；读取失败时由调用方丢弃会话。 */
 private class SmbSessionSource(
     private val handle: SmbReadHandle,
+    private val onClose: () -> Unit,
     private val onFailure: () -> Unit,
 ) : ByteSource {
+
+    private val closed = AtomicBoolean(false)
 
     override val size: Long get() = handle.size
 
@@ -146,6 +201,8 @@ private class SmbSessionSource(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
         runCatching { handle.close() }
+        onClose()
     }
 }

@@ -12,6 +12,9 @@ class WebDavRangeUnsupportedException(message: String) : IOException(message)
 
 /** 把 OkHttp 抛出的异常归到界面可读的来源失败原因。 */
 fun webdavFailureOf(failure: Throwable): MediaFailure = when (failure) {
+    // 区间不支持是协议能力问题，不是连不上：先于通用 IOException 归因。
+    is WebDavRangeUnsupportedException -> MediaFailure.Unknown
+
     is UnknownHostException, is ConnectException, is NoRouteToHostException,
     is SocketTimeoutException, is IOException,
     -> MediaFailure.Unreachable

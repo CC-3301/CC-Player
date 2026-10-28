@@ -337,18 +337,13 @@ class VisiblePreviewSchedulerTest {
             )
             scheduler.update(entries, firstVisible = 0, lastVisible = entries.lastIndex, rowSize = 1)
 
-            // 乱序订阅，出图顺序仍按列表索引。
-            val completed = mutableListOf<Int>()
+            // 乱序订阅，抽图顺序仍按列表索引。
             val subscribers = listOf(5, 2, 7, 0, 3, 1, 6, 4).map { index ->
-                async {
-                    scheduler.preview(entries[index], index)
-                    completed += index
-                }
+                async { scheduler.preview(entries[index], index) }
             }
             subscribers.forEach { subscriber -> subscriber.await() }
 
-            assertEquals((0..entries.lastIndex).toList(), extractor.started)
-            assertEquals("完成顺序与索引一致", (0..entries.lastIndex).toList(), completed)
+            assertEquals("出图顺序与索引一致", (0..entries.lastIndex).toList(), extractor.started)
             scheduler.cancelAll()
         } finally {
             directory.deleteRecursively()

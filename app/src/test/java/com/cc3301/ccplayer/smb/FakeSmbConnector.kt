@@ -27,6 +27,9 @@ class FakeSmbConnector : SmbConnector {
     /** 连接与句柄的关闭顺序。 */
     val closeOrder = mutableListOf<String>()
 
+    /** 被关掉的连接属于哪个共享，用来断言淘汰选中了哪一条会话。 */
+    val closedShares = mutableListOf<String>()
+
     fun addDirectory(share: String, path: String, vararg children: SmbEntry): FakeSmbConnector {
         childrenByPath["$share/$path"] = children.toList()
         return this
@@ -58,7 +61,7 @@ class FakeSmbConnector : SmbConnector {
         failure?.let { throw it }
         logins += username to password
         shares += share
-        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder)
+        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder, closedShares)
     }
 }
 
@@ -68,6 +71,7 @@ private class FakeSmbConnection(
     private val bytesByPath: Map<String, ByteArray>,
     private val handles: MutableMap<String, RecordingSmbHandle>,
     private val closeOrder: MutableList<String>,
+    private val closedShares: MutableList<String>,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
@@ -80,6 +84,7 @@ private class FakeSmbConnection(
 
     override fun close() {
         closeOrder += "connection"
+        closedShares += share
     }
 }
 
