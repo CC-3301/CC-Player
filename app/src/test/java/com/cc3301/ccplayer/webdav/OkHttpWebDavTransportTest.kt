@@ -17,7 +17,24 @@ import java.util.concurrent.atomic.AtomicReference
 
 class OkHttpWebDavTransportTest {
 
+    private companion object {
+        /** 关闭后等待阻塞读退出的预算：远小于读超时，又给负载下的线程调度留余量。 */
+        const val CLOSE_UNBLOCK_BUDGET_MILLIS = 10_000L
+
+        /** 阻塞读用例的读超时，取比预算大一个量级，用来区分「关闭生效」与「读超时兜底」。 */
+        const val READ_TIMEOUT_FOR_BLOCKING_TEST_SECONDS = 120L
+    }
+
     private val transport = OkHttpWebDavTransport()
+
+    /**
+     * 读超时远大于 [CLOSE_UNBLOCK_BUDGET_MILLIS]：关闭阻塞读若失效，读取要等满读超时才退出，断言即可区分。
+     */
+    private fun blockingTransport(): OkHttpWebDavTransport = OkHttpWebDavTransport(
+        OkHttpWebDavTransport.defaultClient().newBuilder()
+            .readTimeout(READ_TIMEOUT_FOR_BLOCKING_TEST_SECONDS, TimeUnit.SECONDS)
+            .build(),
+    )
 
     private val payload = ByteArray(4096) { (it % 241).toByte() }
 
@@ -174,7 +191,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `关闭句柄后阻塞读取快速失败且不再发起请求`() = runTest {
         FakeWebDavServer(bytes = payload, stallBody = true).use { server ->
-            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
+            val handle = blockingTransport().openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
             // 首个 GET 已发出响应头并停在正文前。
             assertTrue("首个 GET 应停在正文前", server.awaitStalledBody(1))
 
@@ -186,16 +203,11 @@ class OkHttpWebDavTransportTest {
             reading.start()
             assertTrue("第二个 GET 的响应头应已发出", server.awaitStalledBody(2))
 
-            val startedAt = System.nanoTime()
             handle.close()
-            reading.join(TimeUnit.SECONDS.toMillis(2))
+            reading.join(CLOSE_UNBLOCK_BUDGET_MILLIS)
 
             assertFalse("关闭后阻塞读取应立即退出", reading.isAlive)
             assertNotNull("关闭后的读取应失败", failure.get())
-            assertTrue(
-                "关闭不应等待读取超时",
-                System.nanoTime() - startedAt < TimeUnit.SECONDS.toNanos(2),
-            )
 
             val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
             assertNotNull("关闭后读取必须直接失败", afterClose)
@@ -206,7 +218,7 @@ class OkHttpWebDavTransportTest {
     @Test
     fun `等响应头时关闭句柄能快速退出且不再发起请求`() = runTest {
         FakeWebDavServer(bytes = payload, stallHeadersAfterFirst = true).use { server ->
-            val handle = transport.openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
+            val handle = blockingTransport().openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
             val failure = AtomicReference<Throwable?>()
             val reading = Thread {
                 // 跳读会发第二个 GET，服务器迟迟不回响应头，读线程停在等响应头。
@@ -215,16 +227,11 @@ class OkHttpWebDavTransportTest {
             reading.start()
             assertTrue("第二个 GET 应已到达并等响应头", server.awaitStalledHeaders(1))
 
-            val startedAt = System.nanoTime()
             handle.close()
-            reading.join(TimeUnit.SECONDS.toMillis(2))
+            reading.join(CLOSE_UNBLOCK_BUDGET_MILLIS)
 
             assertFalse("关闭后等响应头的读取应立即退出", reading.isAlive)
             assertNotNull("关闭后的读取应失败", failure.get())
-            assertTrue(
-                "关闭不应等待读超时",
-                System.nanoTime() - startedAt < TimeUnit.SECONDS.toNanos(2),
-            )
 
             val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
             assertNotNull("关闭后读取必须直接失败", afterClose)
