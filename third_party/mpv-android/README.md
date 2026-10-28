@@ -12,4 +12,4 @@
 ## 源码
 
 - `app/src/main/java/is/xyz/mpv/MPVLib.kt`：官方 `MPVLib.kt` 原样复制，JNI 方法名必须与 `libplayer.so` 的符号一致
-- `app/src/main/java/com/cc3301/ccplayer/ui/MpvSurfaceView.kt`：按官方 `BaseMPVView.kt` 的 Surface 挂载顺序改写；播放画面由 `MPVLib.attachSurface` 交给 libmpv 渲染，即官方 `MPVView` 的渲染职责
+- `app/src/main/java/com/cc3301/ccplayer/ui/MpvSurfaceView.kt`：只把 SurfaceHolder 回调转发给播放引擎，本身不做渲染；播放画面由 `MPVLib.attachSurface` 交给 libmpv，承担官方 `MPVView` 的渲染职责。挂载与分离的顺序、触发点以 `docs/adr/0019-libmpv-integration.md` 为准
