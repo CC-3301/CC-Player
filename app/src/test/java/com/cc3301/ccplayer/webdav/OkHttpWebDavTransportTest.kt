@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -30,6 +31,15 @@ class OkHttpWebDavTransportTest {
     /**
      * 读超时远大于 [CLOSE_UNBLOCK_BUDGET_MILLIS]：关闭阻塞读若失效，读取要等满读超时才退出，断言即可区分。
      */
+    /** 等读线程退出；超时时把该线程的栈打进断言信息，便于区分卡在 socket、锁还是排队。 */
+    private fun awaitReadThreadExit(reading: Thread, what: String) {
+        reading.join(CLOSE_UNBLOCK_BUDGET_MILLIS)
+        assertFalse(
+            what + "；读线程栈：\n" + reading.stackTrace.joinToString("\n") { "  at $it" },
+            reading.isAlive,
+        )
+    }
+
     private fun blockingTransport(): OkHttpWebDavTransport = OkHttpWebDavTransport(
         OkHttpWebDavTransport.defaultClient().newBuilder()
             .readTimeout(READ_TIMEOUT_FOR_BLOCKING_TEST_SECONDS, TimeUnit.SECONDS)
@@ -196,17 +206,18 @@ class OkHttpWebDavTransportTest {
             assertTrue("首个 GET 应停在正文前", server.awaitStalledBody(1))
 
             val failure = AtomicReference<Throwable?>()
+            val enteredRead = CountDownLatch(1)
             val reading = Thread {
                 // 跳读会发第二个 GET；第二个响应也停在正文前，读线程阻塞在这里。
+                enteredRead.countDown()
                 failure.set(runCatching { handle.readAt(2000, ByteArray(16), 0, 16) }.exceptionOrNull())
             }
             reading.start()
             assertTrue("第二个 GET 的响应头应已发出", server.awaitStalledBody(2))
+            assertTrue("读线程应先进入读取", enteredRead.await(CLOSE_UNBLOCK_BUDGET_MILLIS, TimeUnit.MILLISECONDS))
 
             handle.close()
-            reading.join(CLOSE_UNBLOCK_BUDGET_MILLIS)
-
-            assertFalse("关闭后阻塞读取应立即退出", reading.isAlive)
+            awaitReadThreadExit(reading, "关闭后阻塞读取应立即退出")
             assertNotNull("关闭后的读取应失败", failure.get())
 
             val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
@@ -220,17 +231,18 @@ class OkHttpWebDavTransportTest {
         FakeWebDavServer(bytes = payload, stallHeadersAfterFirst = true).use { server ->
             val handle = blockingTransport().openRead("${server.root}/电影.mkv", "cc", "secret", size = 0)
             val failure = AtomicReference<Throwable?>()
+            val enteredRead = CountDownLatch(1)
             val reading = Thread {
                 // 跳读会发第二个 GET，服务器迟迟不回响应头，读线程停在等响应头。
+                enteredRead.countDown()
                 failure.set(runCatching { handle.readAt(2000, ByteArray(16), 0, 16) }.exceptionOrNull())
             }
             reading.start()
             assertTrue("第二个 GET 应已到达并等响应头", server.awaitStalledHeaders(1))
+            assertTrue("读线程应先进入读取", enteredRead.await(CLOSE_UNBLOCK_BUDGET_MILLIS, TimeUnit.MILLISECONDS))
 
             handle.close()
-            reading.join(CLOSE_UNBLOCK_BUDGET_MILLIS)
-
-            assertFalse("关闭后等响应头的读取应立即退出", reading.isAlive)
+            awaitReadThreadExit(reading, "关闭后等响应头的读取应立即退出")
             assertNotNull("关闭后的读取应失败", failure.get())
 
             val afterClose = runCatching { handle.readAt(4000, ByteArray(16), 0, 16) }.exceptionOrNull()
