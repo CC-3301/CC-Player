@@ -99,36 +99,39 @@ class SeekBarStateTest {
     }
 
     @Test
-    fun `末次预览在位置到达目标附近后清除`() {
-        assertTrue(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
-        // 到达窗口：目标 -50ms 到 +1500ms。
-        assertFalse(shouldKeepSeekPreview(44_950L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(50_000L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
-        assertTrue(shouldKeepSeekPreview(80_000L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(46_500L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(20_000L, null, 10_000L, mediaChanged = false, timedOut = false))
+    fun `位置到达目标后清除保持值`() {
+        // 正向跳转：位置到达目标即清除，越过目标同样清除。
+        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 10_000L))
+        assertFalse(shouldKeepSeekPreview(50_000L, 45_000L, 10_000L))
+        // 反向跳转：位置降到目标即清除。
+        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 90_000L))
+        assertFalse(shouldKeepSeekPreview(44_722L, 45_000L, 90_000L))
     }
 
     @Test
-    fun `位置还停在拖动起点时不判为到达`() {
-        // 小幅度反向拖动：起点 45_200 落在目标 +1.5 秒内，松手首帧位置仍等于起点。
-        assertTrue(shouldKeepSeekPreview(45_200L, 45_000L, 45_200L, mediaChanged = false, timedOut = false))
-        // 原地松手（目标就是起点）没有可等的位置，立即清除。
-        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 45_000L, mediaChanged = false, timedOut = false))
+    fun `位置仍在起点与目标之间时保留`() {
+        // 落定 seek 从目标前的关键帧起解，位置先报告目标之前，此时不能清。
+        assertTrue(shouldKeepSeekPreview(44_722L, 45_000L, 10_000L))
+        assertTrue(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L))
+        // 反向跳转还没降下来时同样保留。
+        assertTrue(shouldKeepSeekPreview(80_000L, 45_000L, 90_000L))
+        assertTrue(shouldKeepSeekPreview(46_600L, 45_000L, 90_000L))
     }
 
     @Test
-    fun `seek 途中引擎退回目标之前不撤掉保持值`() {
-        // 落定 seek 从目标前的关键帧起解，位置会先报告目标前约 278ms。
-        assertTrue(shouldKeepSeekPreview(44_722L, 45_000L, 10_000L, mediaChanged = false, timedOut = false))
-        // 反向跳转：位置还没降到目标 +1.5 秒以内时继续保留。
-        assertTrue(shouldKeepSeekPreview(46_600L, 45_000L, 90_000L, mediaChanged = false, timedOut = false))
+    fun `小幅跳转在起点附近来回一帧也不提前清除`() {
+        // 反向小幅拖动：起点只比目标大 200ms，首帧与下一帧 tick 都落在起点与目标之间。
+        assertTrue(shouldKeepSeekPreview(45_200L, 45_000L, 45_200L))
+        assertTrue(shouldKeepSeekPreview(45_190L, 45_000L, 45_200L))
+        assertTrue(shouldKeepSeekPreview(45_010L, 45_000L, 45_200L))
+        // 正向小幅拖动同理。
+        assertTrue(shouldKeepSeekPreview(45_000L, 45_200L, 45_000L))
+        assertTrue(shouldKeepSeekPreview(45_080L, 45_200L, 45_000L))
     }
 
     @Test
-    fun `末次预览在切集或超时后清除`() {
-        assertFalse(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L, mediaChanged = true, timedOut = false))
-        assertFalse(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L, mediaChanged = false, timedOut = true))
+    fun `目标就是起点时立即清除`() {
+        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 45_000L))
     }
 
     @Test

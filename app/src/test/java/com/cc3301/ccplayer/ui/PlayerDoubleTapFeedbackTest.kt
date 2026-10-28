@@ -91,6 +91,14 @@ class PlayerDoubleTapFeedbackTest {
     }
 
     @Test
+    fun `不产生涟漪时只累计秒数`() {
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L, ripple = false)
+
+        assertEquals(10_000L, feedback.right?.accumulatedMillis)
+        assertEquals(emptyList<DoubleTapRipple>(), feedback.ripples)
+    }
+
+    @Test
     fun `累计使用夹取后的实际位移`() {
         feedback.onDoubleTap(DoubleTapSide.Right, 3_000L)
 

@@ -37,14 +37,17 @@ class PlayerDoubleTapFeedback(
 
     private var nextRippleId = 1L
 
-    fun onDoubleTap(side: DoubleTapSide, deltaMillis: Long) {
+    /** 记录一次双击；[ripple] 为假时只累计秒数，不产生边缘涟漪。 */
+    fun onDoubleTap(side: DoubleTapSide, deltaMillis: Long, ripple: Boolean = true) {
         val now = elapsedMillis()
         expire(now)
         val previous = hint(side)
         val accumulated = (previous?.accumulatedMillis ?: 0L) + abs(deltaMillis)
         setHint(side, DoubleTapHintState(accumulated, now))
-        ripples = ripples + DoubleTapRipple(nextRippleId, side)
-        nextRippleId += 1
+        if (ripple) {
+            ripples = ripples + DoubleTapRipple(nextRippleId, side)
+            nextRippleId += 1
+        }
     }
 
     /** 一条涟漪动画结束后移除；不影响其它仍在扩散的涟漪。 */

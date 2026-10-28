@@ -332,23 +332,26 @@ fun seekBarDownMillis(
 }
 
 /**
- * 末次拖动预览是否继续保留：未切媒体、未超时，且播放位置尚未到达目标。
- * 只有位置真正进入目标附近（[SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 到
- * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS]）才停止保留：seek 途中位置会先退回目标之前，
- * 按差值判定会误清并让圆球回跳。位置仍停在 [baseMillis]（拖动起点）时落定 seek 尚未生效，同样保留；
- * 按起点判断方向，位置越过目标时停止保留。
+ * 末次拖动预览是否继续保留。
+ * 位置还在 [baseMillis]（拖动起点）与 [heldMillis]（预览目标）之间时一律保留：落定 seek 尚未生效或还没到目标，
+ * 此时位置靠近目标不代表已到达。离开这一段后按到达判据：位置仍在目标之前（反向为目标之上）就保留，
+ * 进入 [SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 到 [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS] 的目标附近或越过目标即清除。
  */
 fun shouldKeepSeekPreview(
     positionMillis: Long,
-    heldMillis: Long?,
+    heldMillis: Long,
     baseMillis: Long,
-    mediaChanged: Boolean,
-    timedOut: Boolean,
 ): Boolean {
-    if (heldMillis == null || mediaChanged || timedOut) return false
-    // 位置还停在拖动起点、且目标与起点不同：落定 seek 尚未生效，不判为到达。
-    if (positionMillis == baseMillis && baseMillis != heldMillis) return true
-    return if (heldMillis >= baseMillis) {
+    // 目标就是起点：没有可等的位置。
+    if (baseMillis == heldMillis) return false
+    // 起点与目标之间含起点、不含目标：位置走到目标上才算到达。
+    val betweenTarget = if (heldMillis > baseMillis) {
+        positionMillis >= baseMillis && positionMillis < heldMillis
+    } else {
+        positionMillis <= baseMillis && positionMillis > heldMillis
+    }
+    if (betweenTarget) return true
+    return if (heldMillis > baseMillis) {
         positionMillis < heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS
     } else {
         positionMillis > heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS

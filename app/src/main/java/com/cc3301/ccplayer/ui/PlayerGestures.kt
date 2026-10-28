@@ -60,23 +60,54 @@ sealed interface DoubleTapAction {
     data object TogglePlayPause : DoubleTapAction
 }
 
-/** 双击后显示的界面元素。 */
-enum class DoubleTapHint {
-    /** 不显示任何元素。 */
-    None,
+/** 手势显示的提示元素。 */
+enum class GestureHint {
+    /** 该侧箭头与 3 秒内累计秒数。 */
+    DoubleTapSide,
 
-    /** 只显示该侧箭头与累计秒数。 */
-    Side,
+    /** 从该侧屏幕边缘向内扩散的涟漪。 */
+    DoubleTapRipple,
+
+    /** 屏幕正中的目标时间与增减量。 */
+    SeekTarget,
+
+    /** 音量百分比。 */
+    VolumePercent,
 }
 
-/** 双击的提示元素：暂停/继续不显示任何元素，±10 秒只显示该侧箭头与累计秒数。 */
-fun doubleTapHint(action: DoubleTapAction): DoubleTapHint = when (action) {
-    is DoubleTapAction.Seek -> DoubleTapHint.Side
-    DoubleTapAction.TogglePlayPause -> DoubleTapHint.None
+/** 产生提示的手势。 */
+enum class GestureHintSource {
+    /** 拖动进度与滚轮调时长。 */
+    Seek,
+
+    /** 两侧竖条上下拖动调音量。 */
+    Volume,
+
+    /** 中间双击暂停/继续。 */
+    DoubleTapPause,
+
+    /** 左右双击 ±10 秒。 */
+    DoubleTapSeek,
 }
 
-/** 拖动与滚轮的目标时间提示是否显示：控制层隐藏时手势不唤出控制层，也不显示该提示。 */
-fun seekTargetHintVisible(controlsVisible: Boolean): Boolean = controlsVisible
+/**
+ * 该手势此刻显示的提示元素。控制层隐藏时只保留双击 ±10 秒的该侧箭头与累计秒数，
+ * 目标时间、音量百分比与涟漪都随控制层一起隐藏；双击暂停/继续不显示任何元素。
+ */
+fun shownGestureHints(controlsVisible: Boolean, source: GestureHintSource): Set<GestureHint> = when (source) {
+    GestureHintSource.Seek -> if (controlsVisible) setOf(GestureHint.SeekTarget) else emptySet()
+    GestureHintSource.Volume -> if (controlsVisible) setOf(GestureHint.VolumePercent) else emptySet()
+    GestureHintSource.DoubleTapPause -> emptySet()
+    GestureHintSource.DoubleTapSeek ->
+        if (controlsVisible) setOf(GestureHint.DoubleTapSide, GestureHint.DoubleTapRipple)
+        else setOf(GestureHint.DoubleTapSide)
+}
+
+/** 双击对应的提示来源：暂停/继续没有提示元素，±10 秒显示该侧箭头、累计秒数与涟漪。 */
+fun doubleTapHintSource(action: DoubleTapAction): GestureHintSource = when (action) {
+    is DoubleTapAction.Seek -> GestureHintSource.DoubleTapSeek
+    DoubleTapAction.TogglePlayPause -> GestureHintSource.DoubleTapPause
+}
 
 /** 拖动进入的手势：音量或跳转。 */
 sealed interface DragGesture {
