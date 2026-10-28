@@ -9,6 +9,10 @@ import com.cc3301.ccplayer.streaming.ByteSource
  */
 fun interface NetworkMediaReads {
 
-    /** 打开 [location] 的随机读句柄；调用方负责关闭。位置不属于任何网络源时抛出来源失败异常。 */
-    suspend fun openRead(location: String): ByteSource
+    /**
+     * 打开 [location] 的随机读句柄；调用方负责关闭。
+     * [size] 取自目录列表（0 表示未知），句柄长度直接用它，不再为取长度单独发请求。
+     * 位置不属于任何网络源时抛出来源失败异常。
+     */
+    suspend fun openRead(location: String, size: Long): ByteSource
 }

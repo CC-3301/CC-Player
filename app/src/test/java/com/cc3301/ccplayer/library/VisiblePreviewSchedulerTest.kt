@@ -180,13 +180,16 @@ class VisiblePreviewSchedulerTest {
         scheduler.update(entries, firstVisible = -1, lastVisible = -1, rowSize = 1)
         runCurrent()
 
-        assertEquals(listOf(0, 1, 2), source.cancelled.sorted())
-        assertEquals(listOf(0, 1, 2), source.started)
+        // 可见请求逐条下发，空范围只暂停当前这一条，其余尚未开始。
+        assertEquals(listOf(0), source.cancelled)
+        assertEquals(listOf(0), source.started)
         assertTrue(source.windows.getValue("visible").isEmpty())
         assertTrue(source.windows.getValue("prefetch").isEmpty())
 
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
         runCurrent()
+        // 回屏后只重新下发第 0 条，它仍压在闸门上。
+        assertEquals(listOf(0, 0), source.started)
         source.gate?.complete(Unit)
         runCurrent()
         assertEquals(listOf(1L, 2L, 3L), requests.map { request -> request.await().durationMillis })
@@ -262,14 +265,16 @@ class VisiblePreviewSchedulerTest {
         runCurrent()
         assertEquals(listOf(0), source.cancelled)
 
-        // 快速回屏：新 attempt 先下发并等待 secondGate。
+        // 快速回屏：旧 attempt 收尾前不放下一条，收尾后才重新下发。
         scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        runCurrent()
+        assertEquals(listOf(0), source.started)
+
+        source.cancelGate.complete(Unit)
         runCurrent()
         assertEquals(listOf(0, 0), source.started)
 
-        // 旧 attempt 在新 attempt 之后收尾，不得回填占位图或移除新请求。
-        source.cancelGate.complete(Unit)
-        runCurrent()
+        // 旧 attempt 的收尾不得回填占位图或顶替新结果。
         source.secondGate.complete(Unit)
         runCurrent()
 
@@ -288,7 +293,8 @@ class VisiblePreviewSchedulerTest {
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
         try {
             repeat(200) {
-                val entered = CountDownLatch(entries.size)
+                // 可见请求按索引逐条下发，同一时刻只有一条在抽取。
+                val entered = CountDownLatch(1)
                 val gate = CompletableDeferred<Unit>()
                 val source = CompletionGateSource(entered, gate)
                 val scheduler = VisiblePreviewScheduler(

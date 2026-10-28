@@ -14,6 +14,9 @@ class FakeWebDavTransport : WebDavTransport {
     /** 每次列目录用到的地址。 */
     val listings = mutableListOf<String>()
 
+    /** 每次打开读句柄时给出的文件大小。 */
+    val openedSizes = mutableListOf<Long>()
+
     private val childrenByUrl = mutableMapOf<String, List<WebDavEntry>>()
     private val bytesByUrl = mutableMapOf<String, ByteArray>()
 
@@ -37,9 +40,10 @@ class FakeWebDavTransport : WebDavTransport {
         return childrenByUrl[url].orEmpty()
     }
 
-    override suspend fun openRead(url: String, username: String, password: String?): WebDavReadHandle {
+    override suspend fun openRead(url: String, username: String, password: String?, size: Long): WebDavReadHandle {
         failure?.let { throw it }
         logins += username to password
+        openedSizes += size
         val bytes = bytesByUrl[url] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$url")
         return RecordingWebDavHandle(bytes).also { handles[url] = it }
     }

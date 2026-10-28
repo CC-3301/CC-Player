@@ -11,8 +11,8 @@ import kotlinx.coroutines.yield
 /**
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
- * 可见请求按列表索引从上到下下发。离屏只暂停抽取、保留待调度请求；
- * 条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
+ * 可见请求严格按列表索引下发：前一条收尾后才放下一条，后到的高索引项不会越过低索引项。
+ * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
  * 状态不变量：
@@ -198,6 +198,8 @@ class VisiblePreviewScheduler(
             }
             attempt.job.invokeOnCompletion { finishAttempt(attempt) }
             attempt.job.start()
+            // 严格按列表索引下发：这一条收尾后才放下一条。
+            attempt.job.join()
         }
     }
 

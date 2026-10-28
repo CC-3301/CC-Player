@@ -32,7 +32,7 @@ class SmbMediaReadsTest {
         connector.addFile("media", "电影.mkv", payload)
 
         val head = ByteArray(16)
-        val read = reads.openRead(movie).use { source -> source.readAt(0, head, 0, head.size) }
+        val read = reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, head, 0, head.size) }
 
         assertEquals(16, read)
         assertArrayEquals(payload.copyOfRange(0, 16), head)
@@ -42,8 +42,24 @@ class SmbMediaReadsTest {
 
     @Test
     fun `位置不属于书签时给出来源失败`() = runTest {
-        val exception = runCatching { reads.openRead(movie) }.exceptionOrNull()
+        val exception = runCatching { reads.openRead(movie, payload.size.toLong()) }.exceptionOrNull()
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
+    }
+
+    @Test
+    fun `抽帧复用同一会话，不因每个条目重新建连`() = runTest {
+        addSource(root)
+        val second = "$root/第二集.mkv"
+        connector.addFile("media", "电影.mkv", payload)
+        connector.addFile("media", "第二集.mkv", payload)
+
+        reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+        reads.openRead(second, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("两个条目共用一条会话", listOf("media"), connector.shares)
+        assertEquals(listOf("cc" to "secret"), connector.logins)
+        assertTrue(connector.handles.getValue("media/电影.mkv").closed)
+        assertTrue(connector.handles.getValue("media/第二集.mkv").closed)
     }
 }

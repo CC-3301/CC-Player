@@ -21,8 +21,9 @@ fun interface NetworkPreviewDecoder {
 }
 
 /**
- * 网络预览取图：打开随机读句柄后交给 [decoder]，只在需要时读字节范围。
+ * 网络预览取图：打开随机读句柄后用 [PreviewByteWindow] 包成本地字节，再交给 [decoder]。
  *
+ * 句柄长度取自目录列表，打开时不发请求取长度；解码只读本地字节，缺失的块由窗口按上限预读补齐。
  * 句柄无论解码成功与否都会关闭；取消或超时时先关闭句柄，让阻塞中的传输读取退出。
  * 读取按 [readPriority] 让出给播放读取。打开或解码失败抛出异常，由上层保持占位图并退避重试。
  */
@@ -35,22 +36,24 @@ class NetworkPreviewExtractor(
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
         withContext(Dispatchers.IO) {
             val kind = mediaKindOf(file.name) ?: return@withContext null
-            val source = readPriority.wrap(reads.openRead(file.location), ReadKind.Thumbnail)
+            val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail)
+            // 解码只读本地字节：当前块由解码线程补齐，后续块由预读线程补齐。
+            val window = PreviewByteWindow(source)
             try {
-                decode(source, kind, targetWidth)
+                decode(window, kind, targetWidth)
             } finally {
-                runCatching { source.close() }
+                runCatching { window.close() }
             }
         }
 
     /** 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。 */
-    private suspend fun decode(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
+    private suspend fun decode(window: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
         coroutineScope {
-            val decoding = async { decoder.imageBytes(source, kind, targetWidth) }
+            val decoding = async { decoder.imageBytes(window, kind, targetWidth) }
             try {
                 decoding.await()
             } catch (cancellation: CancellationException) {
-                runCatching { source.close() }
+                runCatching { window.close() }
                 throw cancellation
             }
         }
