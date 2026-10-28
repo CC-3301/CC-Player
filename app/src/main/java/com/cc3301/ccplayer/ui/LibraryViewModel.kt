@@ -676,7 +676,7 @@ class LibraryViewModel(
                 return
             }
             NavigationSnapshotLoad.Unreadable -> {
-                navigation.discardColdStart("导航快照不可用")
+                navigation.failColdStart("导航快照不可用")
                 return
             }
         }
@@ -701,7 +701,7 @@ class LibraryViewModel(
             }
             // 来处记录成设置页，属快照内容非法。
             AppScreen.Settings -> {
-                navigation.discardColdStart("上次停留界面是设置页，来处非法")
+                navigation.failColdStart("上次停留界面是设置页，来处非法")
                 return
             }
         }

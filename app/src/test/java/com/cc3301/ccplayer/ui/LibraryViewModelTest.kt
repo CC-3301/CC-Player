@@ -1442,7 +1442,11 @@ class LibraryViewModelTest {
 
         assertFalse(coldNavigation.coldStartPending.value)
         assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
-        assertTrue(diagnostics.messages.any { it.contains("导航快照不可用") && it.contains("回首页") })
+        assertTrue(
+            diagnostics.messages.any {
+                it.contains("导航恢复失败") && it.contains("导航快照不可用") && it.contains("回首页")
+            },
+        )
     }
 
     @Test
@@ -1466,7 +1470,7 @@ class LibraryViewModelTest {
 
         assertFalse(coldNavigation.coldStartPending.value)
         assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
-        assertTrue(diagnostics.messages.any { it.contains("来处非法") })
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("来处非法") })
     }
 
     @Test
