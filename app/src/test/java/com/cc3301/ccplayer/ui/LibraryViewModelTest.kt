@@ -1689,7 +1689,7 @@ class LibraryViewModelTest {
     }
 
     @Test
-    fun `进程恢复停在设置页时库页面目录已准备好返回`() = runTest {
+    fun `进程重建时设置页按来处回到库页面并已备好目录`() = runTest {
         val series = testDirectory("剧集", "content://root/媒体/剧集")
         tree.addDirectory(localRoot, series)
         tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
@@ -1705,45 +1705,14 @@ class LibraryViewModelTest {
         val restored = createViewModel(navigation = restoredNavigation)
         advanceUntilIdle()
 
-        assertEquals(AppScreen.Settings, restoredNavigation.state.value.screen)
+        assertEquals(AppScreen.Library, restoredNavigation.state.value.screen)
         assertEquals("剧集", restored.state.value.currentDirectory?.name)
         assertEquals(listOf("第01集.mkv"), restored.state.value.entries.map { it.name })
-
-        restoredNavigation.closeSettings()
-        assertEquals(AppScreen.Library, restoredNavigation.state.value.screen)
 
         restored.navigateUp()
         advanceUntilIdle()
         assertEquals("媒体", restored.state.value.currentDirectory?.name)
         assertEquals(listOf("剧集"), restored.state.value.entries.map { it.name })
-    }
-
-    @Test
-    fun `设置页来处为库页面时恢复失败关闭设置回首页`() = runTest {
-        val series = testDirectory("剧集", "content://root/媒体/剧集")
-        tree.addDirectory(localRoot, series)
-        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
-        settings.addRoot(localRoot.location)
-        advanceUntilIdle()
-        viewModel.openSource(viewModel.sourcesState.value.local.single())
-        advanceUntilIdle()
-        viewModel.enter(series)
-        advanceUntilIdle()
-        navigation.openSettings()
-        tree.markUnreadable(series.location)
-
-        val recoveryLog = RecordingLibraryDiagnostics()
-        val restoredNavigation = restoredNavigation(diagnostics = recoveryLog)
-        createViewModel(navigation = restoredNavigation)
-        advanceUntilIdle()
-
-        assertEquals(AppScreen.Settings, restoredNavigation.state.value.screen)
-        assertEquals(AppScreen.Home, restoredNavigation.state.value.settingsReturn)
-        assertNull(restoredNavigation.state.value.library)
-        assertTrue(recoveryLog.messages.any { it.contains("关闭设置后回首页") })
-
-        restoredNavigation.closeSettings()
-        assertEquals(AppScreen.Home, restoredNavigation.state.value.screen)
     }
 
     @Test
