@@ -203,6 +203,23 @@ class NavigationViewModel(
         return true
     }
 
+    /**
+     * 冷启动恢复源列表：只在仍停在首页时生效。
+     * 返回是否恢复；用户已先导航时丢弃本次恢复。
+     */
+    fun restoreColdStartSources(sourcesProtocol: SourceProtocol): Boolean {
+        if (!_coldStartPending.value) return false
+        if (_state.value.screen != AppScreen.Home) {
+            _coldStartPending.value = false
+            diagnostics.log { "导航恢复: 当前已离开首页，忽略冷启动恢复" }
+            return false
+        }
+        update { it.copy(screen = AppScreen.Sources, sourcesProtocol = sourcesProtocol, library = null) }
+        _coldStartPending.value = false
+        diagnostics.log { "导航恢复: 冷启动恢复源列表" }
+        return true
+    }
+
     /** 放弃冷启动恢复；[reason] 非空时记录可解释的原因。 */
     fun discardColdStart(reason: String? = null) {
         if (!_coldStartPending.value) return

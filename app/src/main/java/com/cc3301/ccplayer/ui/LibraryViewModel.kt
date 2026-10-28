@@ -666,9 +666,29 @@ class LibraryViewModel(
             navigation.discardColdStart()
             return
         }
-        if (snapshot.screen != AppScreen.Library) {
-            navigation.discardColdStart("上次停留界面不是库页面")
-            return
+        // 设置页不是恢复目标：按设置页来处决定落点。
+        val target = if (snapshot.screen == AppScreen.Settings) snapshot.settingsReturn else snapshot.screen
+        when (target) {
+            AppScreen.Library -> Unit
+            AppScreen.Sources -> {
+                // 来处是源列表时回到该协议源列表；直接停在源列表不属于恢复目标。
+                if (snapshot.screen == AppScreen.Settings) {
+                    navigation.restoreColdStartSources(snapshot.sourcesProtocol)
+                } else {
+                    navigation.discardColdStart("上次停留界面不是库页面")
+                }
+                return
+            }
+            AppScreen.Home, AppScreen.Settings -> {
+                navigation.discardColdStart(
+                    if (snapshot.screen == AppScreen.Settings && target == AppScreen.Home) {
+                        "上次停留界面是设置页，来处是首页"
+                    } else {
+                        "上次停留界面不是库页面"
+                    },
+                )
+                return
+            }
         }
         val sourceLocation = snapshot.librarySource
         if (sourceLocation.isNullOrBlank() || snapshot.libraryStack.isEmpty()) {

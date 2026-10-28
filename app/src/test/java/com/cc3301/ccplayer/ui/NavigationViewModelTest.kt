@@ -276,6 +276,29 @@ class NavigationViewModelTest {
     }
 
     @Test
+    fun `冷启动恢复源列表后放行界面`() = runTest {
+        val applied = navigation.restoreColdStartSources(SourceProtocol.WebDav)
+        advanceUntilIdle()
+
+        assertTrue(applied)
+        assertFalse(navigation.coldStartPending.value)
+        assertEquals(AppScreen.Sources, navigation.state.value.screen)
+        assertEquals(SourceProtocol.WebDav, navigation.state.value.sourcesProtocol)
+        assertNull(navigation.state.value.library)
+    }
+
+    @Test
+    fun `冷启动源列表恢复前用户已导航时不再应用`() {
+        navigation.openProtocol(SourceProtocol.Local)
+
+        val applied = navigation.restoreColdStartSources(SourceProtocol.WebDav)
+
+        assertFalse(applied)
+        assertEquals(AppScreen.Sources, navigation.state.value.screen)
+        assertEquals(SourceProtocol.Local, navigation.state.value.sourcesProtocol)
+    }
+
+    @Test
     fun `冷启动判定停在首页后放行界面`() {
         navigation.discardColdStart("上次停留界面不是库页面")
 

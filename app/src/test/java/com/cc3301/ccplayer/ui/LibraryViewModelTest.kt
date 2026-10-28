@@ -1279,6 +1279,100 @@ class LibraryViewModelTest {
     }
 
     @Test
+    fun `上次停在设置页时按来处恢复库页面目录`() = runTest {
+        val series = testDirectory("剧集", "content://root/媒体/剧集")
+        tree.addDirectory(localRoot, series)
+        tree.addDirectory(series, testVideo("第01集.mkv", "content://root/媒体/剧集/第01集.mkv"))
+        settings.addRoot(localRoot.location)
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Settings,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = localRoot.location,
+                libraryStack = listOf(localRoot, series),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertFalse(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Library, coldNavigation.state.value.screen)
+        assertEquals(listOf("媒体", "剧集"), coldNavigation.state.value.library?.stack?.map { it.name })
+        assertEquals(series.location, restored.state.value.currentDirectory?.location)
+        assertEquals(listOf("第01集.mkv"), restored.state.value.entries.map { it.name })
+    }
+
+    @Test
+    fun `上次停在设置页时按来处恢复源列表`() = runTest {
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Settings,
+                sourcesProtocol = SourceProtocol.Smb,
+                settingsReturn = AppScreen.Sources,
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        val restored = createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertFalse(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Sources, coldNavigation.state.value.screen)
+        assertEquals(SourceProtocol.Smb, coldNavigation.state.value.sourcesProtocol)
+        assertNull(coldNavigation.state.value.library)
+        assertEquals("", restored.state.value.sourceLocation)
+    }
+
+    @Test
+    fun `上次停在设置页且来处是首页时冷启动回首页`() = runTest {
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Settings,
+                sourcesProtocol = SourceProtocol.WebDav,
+                settingsReturn = AppScreen.Home,
+            ),
+        )
+        val coldNavigation = NavigationViewModel(SavedStateHandle(), snapshots = snapshots)
+
+        createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertFalse(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+    }
+
+    @Test
+    fun `上次停在设置页且来处目录的连接源已删除时冷启动回首页并记录日志`() = runTest {
+        val diagnostics = RecordingLibraryDiagnostics()
+        snapshots.save(
+            NavigationSnapshot(
+                screen = AppScreen.Settings,
+                sourcesProtocol = SourceProtocol.Local,
+                settingsReturn = AppScreen.Library,
+                librarySource = "content://root/已删除",
+                libraryStack = listOf(testDirectory("已删除", "content://root/已删除")),
+            ),
+        )
+        val coldNavigation = NavigationViewModel(
+            SavedStateHandle(),
+            snapshots = snapshots,
+            diagnostics = diagnostics,
+        )
+
+        createViewModel(navigation = coldNavigation)
+        advanceUntilIdle()
+
+        assertFalse(coldNavigation.coldStartPending.value)
+        assertEquals(AppScreen.Home, coldNavigation.state.value.screen)
+        assertNull(coldNavigation.state.value.library)
+        assertTrue(diagnostics.messages.any { it.contains("导航恢复失败") && it.contains("连接源") })
+    }
+
+    @Test
     fun `上次的连接源已删除时冷启动回首页并记录日志`() = runTest {
         tree.addDirectory(localRoot)
         val diagnostics = RecordingLibraryDiagnostics()
