@@ -72,6 +72,8 @@ class FakePlaybackEngine : PlaybackEngine {
         startedPaused += paused
         startedPositions += startPositionMillis
         currentTargetUrl = url
+        // 与真实引擎一致：每次加载把 seek 序号归零。
+        currentSeekSerial = 0
         return ++currentLoadToken
     }
 

@@ -76,8 +76,11 @@ class PlaybackController(
     private val _settledSeekMillis = MutableStateFlow<Long?>(null)
     val settledSeekMillis: StateFlow<Long?> = _settledSeekMillis.asStateFlow()
 
-    /** 在途预览 seek 的序号；同一时刻最多一个，期间的新目标只覆盖待发目标。 */
-    private var previewSeekInFlightSerial: Int? = null
+    /** 在途 seek 的序号（预览与落定共用）；同一时刻最多一个，期间的新预览目标只覆盖待发目标。 */
+    private var inFlightSeekSerial: Int? = null
+
+    /** 在途 seek 的下发时刻；回执丢失时按超时放开，避免整段手势停在第一帧。 */
+    private var inFlightSeekAtMillis = 0L
 
     /** 在途期间被覆盖的最新预览目标；回执到达后才下发。 */
     private var pendingPreviewTargetMillis: Long? = null
@@ -593,6 +596,7 @@ class PlaybackController(
         updateState(PlaybackState.Loading)
         beginBufferingIndicator()
         beginLoadWatchdog()
+        beginSeekSerialGeneration()
         expectedLoadToken = engine.start(media.playbackLocation, paused = false)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
@@ -772,6 +776,7 @@ class PlaybackController(
     /** 用当前目标向引擎下发 loadfile；抓帧任务与切集重定向共用。 */
     private fun startSwitchTarget() {
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
+        beginSeekSerialGeneration()
         expectedLoadToken = engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(loadTargetIndex, media)
@@ -944,13 +949,21 @@ class PlaybackController(
     /** 预览的唯一写入入口：不允许预览时连标志都不写。返回是否进入了预览。 */
     private fun previewTo(positionMillis: Long): Boolean {
         if (!active || !previewSeekAllowed()) return false
+        // 新的拖动接管进度显示：上一次落定的等待与兜底一起结束，旧目标不再回写界面。
+        if (landingSeek != null) clearLandingSeek()
         val target = positionMillis.coerceAtLeast(0)
         _seekPreviewMillis.value = target
         // 在途只留最后一个目标：seek 队列恒不超过一个，画面才跟得上手指。
-        if (previewSeekInFlightSerial != null) {
+        if (
+            inFlightSeekSerial != null &&
+            nowMillis() - inFlightSeekAtMillis < PREVIEW_SEEK_TIMEOUT_MILLIS
+        ) {
             pendingPreviewTargetMillis = target
             return true
         }
+        // 回执丢失时按超时放开，免得整段手势停在第一帧。
+        inFlightSeekSerial = null
+        pendingPreviewTargetMillis = null
         issuePreviewSeek(target)
         return true
     }
@@ -967,7 +980,8 @@ class PlaybackController(
         _settledSeekMillis.value = null
         lastPreviewSeekTargetMillis = target
         lastSeekIssuedSerial = engine.seekTo(target)
-        previewSeekInFlightSerial = lastSeekIssuedSerial
+        inFlightSeekSerial = lastSeekIssuedSerial
+        inFlightSeekAtMillis = nowMillis()
     }
 
     /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
@@ -993,13 +1007,15 @@ class PlaybackController(
         val target = commitTarget ?: _seekPreviewMillis.value
         val muted = previewMuted
         val lastIssuedTarget = lastPreviewSeekTargetMillis
+        // 收尾 seek 沿用预览的在途槽位：紧接着的拖动不会与它在引擎里排队。
+        val inFlight = inFlightSeekSerial
         _seekPreviewMillis.value = null
         previewMuted = false
         pendingPreviewTargetMillis = null
-        previewSeekInFlightSerial = null
         lastPreviewSeekTargetMillis = null
         if (!commit) clearLandingSeek()
         if (!active || target == null) {
+            inFlightSeekSerial = null
             if (muted) engine.setAudioMuted(false)
             return
         }
@@ -1007,9 +1023,17 @@ class PlaybackController(
             clearRestoreHoldOnUserAction()
             // 用户主动跳转后不再算停在片尾。
             pausedAtEpisodeEnd = false
-            // 收尾目标与最后一次预览 seek 相同就不再下发：同一目标连跳两次会让画面清空重解码，先闪一下才落定。
-            if (target != lastIssuedTarget) lastSeekIssuedSerial = engine.seekTo(target)
+            if (target != lastIssuedTarget) {
+                // 收尾目标与最后一次预览 seek 相同就不再下发：同一目标连跳两次会让画面清空重解码，先闪一下才落定。
+                lastSeekIssuedSerial = engine.seekTo(target)
+                inFlightSeekSerial = lastSeekIssuedSerial
+                inFlightSeekAtMillis = nowMillis()
+            } else {
+                inFlightSeekSerial = inFlight
+            }
             landSeek(target)
+        } else {
+            inFlightSeekSerial = null
         }
         if (muted) engine.setAudioMuted(false)
         if (commit) engine.fadeInAudio(FADE_IN_MILLIS)
@@ -1017,7 +1041,8 @@ class PlaybackController(
 
     /**
      * 登记落定 seek：进度先停在目标上，迟到的旧位置样本不改写它，圆球不回跳。
-     * 回执（同一序号）、位置越过目标连续两个样本、或兜底超时才结束等待。
+     * 以下任一条件结束等待：播放核心回执同一序号、位置越过目标连续两个样本、
+     * 该序号此前已经回执过（同目标的预览 seek 先完成）、或兜底超时。
      */
     private fun landSeek(targetMillis: Long) {
         // 方向按落定前的位置判定：只有越过目标那一侧的位置样本才算到达。
@@ -1025,10 +1050,16 @@ class PlaybackController(
         _settledSeekMillis.value = null
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
-        landingSeek = LandingSeek(lastSeekIssuedSerial, targetMillis, forward)
+        landingSeek = LandingSeek(
+            serial = lastSeekIssuedSerial,
+            targetMillis = targetMillis,
+            arrival = SeekArrival(targetMillis, forward),
+        )
         landingTimeoutJob?.cancel()
         landingTimeoutJob = scope.launch {
             delay(SEEK_SETTLE_TIMEOUT_MILLIS)
+            // 先摘掉自己的登记，settleLanding 才不会取消正在结束的计时。
+            landingTimeoutJob = null
             settleLanding()
         }
         // 同目标的预览 seek 已经回执过：不必再等。
@@ -1052,27 +1083,16 @@ class PlaybackController(
         _settledSeekMillis.value = null
     }
 
-    /**
-     * 记一个位置样本：越过目标时累计，退回目标一侧就清零。
-     * 返回是否已连续两个样本越过目标；单个样本（例如引擎下发 seek 时的乐观写回）不算到达。
-     */
-    private fun noteLandingSample(positionMillis: Long): Boolean {
-        val landing = landingSeek ?: return false
-        val crossed = if (landing.forward) {
-            positionMillis >= landing.targetMillis
-        } else {
-            positionMillis <= landing.targetMillis
-        }
-        landing.crossedSamples = if (crossed) landing.crossedSamples + 1 else 0
-        return landing.crossedSamples >= LANDING_CROSSED_SAMPLES
-    }
+    /** 记一个位置样本；返回是否已连续足够多的样本越过目标。 */
+    private fun noteLandingSample(positionMillis: Long): Boolean =
+        landingSeek?.arrival?.onPosition(positionMillis) ?: false
 
-    /** 播放核心回执一次 seek：结束在途预览并下发被覆盖的最后一个目标，落定等待同步结束。 */
+    /** 播放核心回执一次 seek：结束在途 seek 并下发被覆盖的最后一个预览目标，落定等待同步结束。 */
     private fun acknowledgeSeek(seekSerial: Int) {
         if (seekSerial > acknowledgedSeekSerial) acknowledgedSeekSerial = seekSerial
-        val inFlight = previewSeekInFlightSerial
+        val inFlight = inFlightSeekSerial
         if (inFlight != null && seekSerial >= inFlight) {
-            previewSeekInFlightSerial = null
+            inFlightSeekSerial = null
             val pending = pendingPreviewTargetMillis
             pendingPreviewTargetMillis = null
             if (pending != null && _seekPreviewMillis.value != null) issuePreviewSeek(pending)
@@ -1081,14 +1101,12 @@ class PlaybackController(
         if (landing != null && seekSerial >= landing.serial) settleLanding()
     }
 
-    /** 已下发的落定 seek：序号、目标与方向；[crossedSamples] 统计连续越过目标的样本。 */
+    /** 已下发的落定 seek：序号、目标与到达判据。 */
     private class LandingSeek(
         val serial: Int,
         val targetMillis: Long,
-        val forward: Boolean,
-    ) {
-        var crossedSamples = 0
-    }
+        val arrival: SeekArrival,
+    )
 
     /** 预览 seek 只在正常播放中下发；加载阶段与时长未知时保持原行为。 */
     private fun previewSeekAllowed(): Boolean =
@@ -1192,14 +1210,14 @@ class PlaybackController(
         loadToken: Int,
     ) {
         if (!active || !mediaLoaded) return
-        // 播放核心回执一次 seek：在途预览与落定等待都在这里结束。
-        acknowledgeSeek(seekSerial)
-        val phase = loadPhase
-        if (phase == LoadPhase.None) return
-        // 同一 URL 重载时只有当前代际的信号有效。
+        // 同一 URL 重载时只有当前代际的信号有效；旧集的迟到回执不得抬高本代的 seek 回执基线。
         if (loadToken != expectedLoadToken) return
         // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
         if (targetUrl != null && targetUrl != loadTargetUrl) return
+        // 播放核心回执一次 seek：在途 seek 与落定等待都在这里结束。
+        acknowledgeSeek(seekSerial)
+        val phase = loadPhase
+        if (phase == LoadPhase.None) return
         if (!resumeLookupDone) {
             // 期间若已收到无需确认的首帧，它是更强的信号，不能被后续重配覆盖。
             if (deferredReadyNeedsFrame != false) {
@@ -1400,6 +1418,7 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
+        clearLandingSeek()
         active = false
         updateState(PlaybackState.Ended)
     }
@@ -1632,6 +1651,7 @@ class PlaybackController(
         beginLoadWatchdog()
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
+        beginSeekSerialGeneration()
         expectedLoadToken = engine.start(
             origin.playbackLocation,
             paused = true,
@@ -1858,6 +1878,7 @@ class PlaybackController(
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
+        beginSeekSerialGeneration()
         resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
@@ -1879,6 +1900,20 @@ class PlaybackController(
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
+    }
+
+    /**
+     * 播放核心每次加载都把 seek 序号归零：控制层的回执基线跟着换代，
+     * 否则上一集的序号会让新一集的落定在登记瞬间就被当成已完成。
+     */
+    private fun beginSeekSerialGeneration() {
+        lastSeekIssuedSerial = 0
+        acknowledgedSeekSerial = 0
+        inFlightSeekSerial = null
+        inFlightSeekAtMillis = 0L
+        pendingPreviewTargetMillis = null
+        // 上一代的落定等待与兜底一并作废，新加载不会回写旧目标。
+        clearLandingSeek()
     }
 
     /** 进入一轮加载，并清掉上一轮的新帧等待。 */
@@ -2044,11 +2079,14 @@ class PlaybackController(
         /** 预览 seek 的死区：与上一次下发的目标相差不足这段时长就不再重发。 */
         const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
 
-        /** 落定 seek 的回执兜底：超时只放开进度跟随，不再等播放核心。 */
+        /** 在途 seek 的回执超时：这么久没有回执就放开槽位，避免一段手势停在第一帧。 */
+        const val PREVIEW_SEEK_TIMEOUT_MILLIS = 1_000L
+
+        /** 落定 seek 的回执兜底：超时只放开进度跟随，不再等播放核心；界面另有一段更长的保持值兜底。 */
         const val SEEK_SETTLE_TIMEOUT_MILLIS = 2_000L
 
-        /** 落定后判定到达所需的连续越过目标样本数。 */
-        private const val LANDING_CROSSED_SAMPLES = 2
+        /** 落定后判定到达所需的连续越过目标样本数；单个样本可能只是引擎下发 seek 时的乐观写回。 */
+        const val LANDING_CROSSED_SAMPLES = 2
 
         /** 拖动预览的心跳周期；界面在拖动期间按此周期通知控制层。 */
         const val PREVIEW_HEARTBEAT_MILLIS = 1_000L
@@ -2134,5 +2172,29 @@ internal class ResumeActivityGate {
     private companion object {
         /** 一次 resume 最多吞掉的回声事件数；超出后按真实事件刷新窗口。 */
         const val MAX_RESUME_ECHOES = 3
+    }
+}
+
+/**
+ * 落定 seek 的到达判据：位置越过目标，且连续 [requiredSamples] 个样本都在目标之外。
+ * 单个样本不算到达：引擎下发 seek 时会把位置乐观写成目标，随后迟到的旧位置样本才落盘。
+ */
+internal class SeekArrival(
+    private val targetMillis: Long,
+    private val forward: Boolean,
+    private val requiredSamples: Int = PlaybackController.LANDING_CROSSED_SAMPLES,
+) {
+
+    private var crossedSamples = 0
+
+    /** 记一个位置样本；越过目标时累计，退回目标一侧就清零。返回是否已连续足够多的样本越过目标。 */
+    fun onPosition(positionMillis: Long): Boolean {
+        val crossed = if (forward) {
+            positionMillis >= targetMillis
+        } else {
+            positionMillis <= targetMillis
+        }
+        crossedSamples = if (crossed) crossedSamples + 1 else 0
+        return crossedSamples >= requiredSamples
     }
 }

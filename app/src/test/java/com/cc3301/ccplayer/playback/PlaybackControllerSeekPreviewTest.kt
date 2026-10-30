@@ -462,6 +462,116 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true, false), engine.muteCalls)
     }
 
+
+    @Test
+    fun `收尾 seek 也占住在途槽位`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(70_000)
+        controller.updateSeekPreview(90_000)
+        controller.commitSeekPreview()
+        assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
+
+        // 收尾 seek 还没回执：紧接着的拖动只覆盖待发目标，引擎里不会排两个 seek。
+        controller.updateSeekPreview(120_000)
+        assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
+
+        engine.reportFirstFrameReady()
+        assertEquals(listOf(70_000L, 90_000L, 120_000L), engine.seekPositions)
+    }
+
+    @Test
+    fun `在途 seek 回执丢失时按超时放开预览`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(70_000)
+        controller.updateSeekPreview(90_000)
+        assertEquals(listOf(70_000L), engine.seekPositions)
+
+        advanceTimeBy(PlaybackController.PREVIEW_SEEK_TIMEOUT_MILLIS + 1)
+        controller.updateSeekPreview(120_000)
+
+        // 回执丢了也不能让画面停在第一帧：超时后按新目标重新下发。
+        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+    }
+
+    @Test
+    fun `回执与位置都不到时按超时放开进度`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(120_000)
+        controller.commitSeekPreview()
+        assertNull(controller.settledSeekMillis.value)
+
+        advanceTimeBy(PlaybackController.SEEK_SETTLE_TIMEOUT_MILLIS + 1)
+
+        // 兜底只放开跟随，不把进度改写回旧值。
+        assertEquals(120_000L, controller.settledSeekMillis.value)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        engine.reportPositionChanged(120_500, 600_000)
+        assertEquals(120_500L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `反向拖动的落定也按目标一侧判定到达`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(100_000, 600_000)
+        controller.updateSeekPreview(80_000)
+        controller.commitSeekPreview()
+
+        // 单个样本（引擎下发 seek 时的乐观写回）不算到达。
+        engine.reportPositionChanged(80_000, 600_000)
+        assertNull(controller.settledSeekMillis.value)
+
+        engine.reportPositionChanged(79_900, 600_000)
+        assertEquals(80_000L, controller.settledSeekMillis.value)
+    }
+
+    @Test
+    fun `切集后新的拖动落定仍要等回执`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(120_000)
+        controller.commitSeekPreview()
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.settledSeekMillis.value)
+
+        // 切到第二集：引擎的 seek 序号按加载归零，控制层的回执基线也要换代。
+        controller.next()
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(10_000, 600_000)
+
+        controller.updateSeekPreview(100_000)
+        controller.commitSeekPreview()
+
+        // 新一集的落定不能沿用上一集的序号直接算完成。
+        assertNull(controller.settledSeekMillis.value)
+        engine.reportFirstFrameReady()
+        assertEquals(100_000L, controller.settledSeekMillis.value)
+    }
+
+    @Test
+    fun `旧代际的迟到回执不能结束落定`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val previousToken = engine.currentLoadToken
+
+        controller.next()
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(10_000, 600_000)
+        controller.updateSeekPreview(100_000)
+        controller.commitSeekPreview()
+
+        engine.reportFirstFrameReady(loadToken = previousToken)
+        assertNull(controller.settledSeekMillis.value)
+
+        engine.reportFirstFrameReady()
+        assertEquals(100_000L, controller.settledSeekMillis.value)
+    }
+
     private fun TestScope.controller(): PlaybackController = PlaybackController(
         engine,
         progress,
