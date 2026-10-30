@@ -27,8 +27,8 @@ import kotlinx.coroutines.yield
  * 5. 只有最后一个订阅者取消时才取消（异常完成）deferred 并移除请求。
  * 6. [cancelAll] 先在锁内快照并作废全部 attempt 与重试计时，再在锁外逐个取消 Job，
  *    完成回调不会遍历正在被修改的集合。
- * 7. 离屏、空窗口与 [reset] 同时清掉待重试标记并取消重试计时；再次可见时立即参与下发。
- * 8. 重试计时由 attempt 收尾直接安排，不依赖 [dispatch] 的收尾分支；
+ * 7. 离屏、空窗口与 [reset] 取消重试计时但保留待重试标记；再次可见时按当前间隔重新计时。
+ * 8. 重试计时由 attempt 收尾与订阅收尾直接安排，不依赖 [dispatch] 的收尾分支；
  *    等批次收尾由信号唤醒，不轮询。
  */
 class VisiblePreviewScheduler(
@@ -108,6 +108,8 @@ class VisiblePreviewScheduler(
                 // 只有最后一个订阅者取消时才移除；晚到的新请求不会被旧请求的清理误删。
                 if (cancelled && request.subscribers <= 0) removeRequestLocked(request, cancelDeferred = true)
             }
+            // 移除会让首轮项消失：重试计时与等批次的计时器要跟着重新评估，不能只靠 dispatch 的收尾分支。
+            resumeAfterAttempt()
         }
     }
 
@@ -162,12 +164,14 @@ class VisiblePreviewScheduler(
         requests.values.forEach(::pauseLocked)
     }
 
-    /** 作废当前 attempt 并取消 Job；离屏也不再等重试计时，请求与 deferred 保留到再次可见。 */
+    /**
+     * 作废当前 attempt 并取消 Job；离屏也不再跑重试计时，但保留待重试标记。
+     * 再次可见时重新按当前间隔计时，不会回到可见就 0 秒重试。
+     */
     private fun pauseLocked(request: Request) {
         invalidateAttemptLocked(request)?.cancel()
         request.retryTimer?.cancel()
         request.retryTimer = null
-        request.retryPending = false
     }
 
     /** 作废当前 attempt，返回被取消的 Job；回调随后会因令牌或 Job 身份不符而退出。 */

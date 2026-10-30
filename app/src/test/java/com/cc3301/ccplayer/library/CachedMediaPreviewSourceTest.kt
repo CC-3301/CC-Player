@@ -13,6 +13,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
@@ -20,6 +21,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -1658,11 +1660,11 @@ class CachedMediaPreviewSourceTest {
         )
         val prefetches = prefetched.map { file -> async { bounded.prefetch(file) } }
         runCurrent()
-        assertEquals("预取最多占 3 个名额，留 1 个给可见项", 3, slotExtractor.started.size)
+        assertEquals("预取最多占 2 个名额，留 2 个给可见项", 2, slotExtractor.started.size)
 
         val visible = async { bounded.visiblePreview(network("可见.mkv"), 9) }
         runCurrent()
-        assertEquals("可见项不用等预取释放名额", 4, slotExtractor.started.size)
+        assertEquals("可见项不用等预取释放名额", 3, slotExtractor.started.size)
         assertTrue(slotExtractor.started.contains("smb://nas/media/可见.mkv"))
 
         slotExtractor.gate.complete(Unit)
@@ -1724,6 +1726,29 @@ class CachedMediaPreviewSourceTest {
         runCurrent()
         assertNotNull(blocked[0].await().image)
         assertNotNull(later.await().image)
+    }
+
+    @Test
+    fun `打开超时放弃后迟到的句柄由打开方关闭一次`() = runTest {
+        val late = UninterruptibleOpenExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = late,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val request = async { bounded.visiblePreview(network("迟到.mkv"), 0) }
+        runCurrent()
+        assertEquals(1, late.started.size)
+
+        // 打开一直不返回：超时只停止等待，请求按失败收尾。
+        advanceTimeBy(15_000)
+        runCurrent()
+        assertTrue(request.await().retryable)
+
+        // 迟到的打开终于返回：没人接手，由打开方关闭，恰好一次。
+        late.gate.complete(Unit)
+        runCurrent()
+        assertEquals("迟到的句柄要关一次", 1, late.closed.size)
     }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
@@ -1921,6 +1946,30 @@ private class PreparedSlotExtractor : MediaPreviewExtractor {
                 decodeGate.await()
                 byteArrayOf(1)
             },
+            closeBlock = { closed += file.location },
+        )
+    }
+}
+
+/** 打开不可取消：等待期间取消打不断它，迟到的句柄只能由打开方关闭。 */
+private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
+
+    /** 迟到的打开在这里放行。 */
+    val gate = CompletableDeferred<Unit>()
+
+    val started = mutableListOf<String>()
+    val closed = mutableListOf<String>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+        started += file.location
+        // 等待放在 NonCancellable 里：等价于取消打不断的阻塞打开。
+        withContext(NonCancellable) { gate.await() }
+        return NetworkPreviewPreparation(
+            decodeBlock = { byteArrayOf(1) },
             closeBlock = { closed += file.location },
         )
     }

@@ -450,7 +450,7 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `失败项离屏后取消重试计时，回屏立即重试`() = runTest {
+    fun `失败项离屏后重按当前间隔计时，回屏不 0 秒重试`() = runTest {
         val times = mutableListOf<Long>()
         val attempts = mutableMapOf<Int, Int>()
         val source = object : MediaPreviewSource {
@@ -483,7 +483,43 @@ class VisiblePreviewSchedulerTest {
         runCurrent()
 
         assertNull(requests[0].await().image)
-        assertEquals("回屏立即重试，不等满 1s", listOf(0L, 0L, 500L), times)
+        assertEquals("回屏按当前间隔重试，不 0 秒重试", listOf(0L, 0L, 1_500L), times)
+    }
+
+    @Test
+    fun `最后一个订阅者取消后失败项的重试计时仍会启动`() = runTest {
+        val times = mutableListOf<Long>()
+        val gate = CompletableDeferred<Unit>()
+        var attempts = 0
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                if (index == 0) {
+                    attempts++
+                    times += testScheduler.currentTime
+                    return MediaPreview(null, null, retryable = attempts == 1)
+                }
+                gate.await()
+                return MediaPreview(null, 1L)
+            }
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        val failed = async { scheduler.preview(entries[0], 0) }
+        val fresh = async { scheduler.preview(entries[1], 1) }
+        runCurrent()
+        assertEquals("0 先失败跳过", listOf(0L), times)
+
+        // 唯一的首轮项退了订阅：失败项的重试计时还没起，要靠这次收尾补上。
+        fresh.cancel()
+        runCurrent()
+        assertEquals("取消首轮项不触发重试", listOf(0L), times)
+
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals("订阅收尾后重试计时照常启动", listOf(0L, 1_000L), times)
+        assertNull(failed.await().image)
     }
 }
 

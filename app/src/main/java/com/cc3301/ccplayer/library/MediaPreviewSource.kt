@@ -10,6 +10,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -114,7 +115,7 @@ data class ThumbnailPolicy(
  * 缓存键包含位置、大小、修改时间、策略版本与目标宽度；修改时间缺失时退化为大小与有效期。
  * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。底层取帧是阻塞的原生调用且取消不掉，
  * 同一时刻只跑一路；许可按列表索引发给排队的可见请求，许可空闲也不让后来者越过排队者。
- * 网络句柄名额同样按索引优先给可见项，预取占不满全部名额。
+ * 网络条目名额（只算已开好、准备交给解码的句柄）同样按索引优先给可见项，预取占不到全部名额。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
  * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，预取失败不写退避。
@@ -136,8 +137,9 @@ class CachedMediaPreviewSource(
     private val permits = PrioritySemaphore(EXTRACTION_CONCURRENCY)
 
     /**
-     * 已开句柄、已起预读的条目名额：限制同屏并发句柄数。
-     * 可见项优先取得；预取最多占用预留名额之外的部分，占不满全部名额。
+     * 网络条目名额：限制同时处于「句柄已开、准备交给解码」状态的条目数，一条目占两条句柄。
+     * 可见项优先取得；预取最多占用预留名额之外的部分。
+     * 名额只界定已经交付的句柄：正在打开的不计入，超时归还名额后仍可能有阻塞的打开在后台收尾。
      */
     private val preparedSlots = PrioritySemaphore(
         capacity = MAX_PREPARED_PREVIEWS,
@@ -461,7 +463,7 @@ class CachedMediaPreviewSource(
             val result = try {
                 Result.success(extractor.prepareNetworkPreview(file))
             } catch (cancellation: CancellationException) {
-                opened.cancel(cancellation)
+                opened.completeExceptionally(cancellation)
                 return@launch
             } catch (failure: Throwable) {
                 Result.failure(failure)
@@ -472,16 +474,33 @@ class CachedMediaPreviewSource(
         val settled = try {
             withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { opened.await() }
         } catch (failure: Throwable) {
-            opened.cancel(CancellationException("网络预览打开已放弃"))
-            opening.cancel()
+            abandonOpen(opened, opening, CancellationException("网络预览打开已放弃"))
             throw failure
         }
         if (settled == null) {
-            opened.cancel(CancellationException("网络预览打开超时"))
-            opening.cancel()
+            abandonOpen(opened, opening, CancellationException("网络预览打开超时"))
             throw IllegalStateException("网络预览打开超时")
         }
         return settled.getOrThrow()
+    }
+
+    /**
+     * 放弃等待这次打开。
+     *
+     * 先用 [CompletableDeferred.completeExceptionally] 争这次交接的收尾权：
+     * 争到（返回 true）说明子方还没交付，它随后的 complete 会返回 false 并自己关句柄；
+     * 争不到（返回 false）说明子方已经交付，这一次成功打开的结果由父方接手关闭，不能丢。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun abandonOpen(
+        opened: CompletableDeferred<Result<NetworkPreviewPreparation?>>,
+        opening: Job,
+        reason: CancellationException,
+    ) {
+        if (!opened.completeExceptionally(reason)) {
+            runCatching { opened.getCompleted().getOrNull()?.close() }
+        }
+        opening.cancel()
     }
 
     /**
@@ -627,15 +646,18 @@ class CachedMediaPreviewSource(
 
         /**
          * 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。
-         * 打开超时只放弃等待，阻塞中的原生打开由传输层超时收尾。
+         * 打开超时只放弃等待并归还名额，阻塞中的原生打开留在后台，由传输层超时收尾。
          */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
 
-        /** 同时处于「已开句柄、已起预读」状态的网络条目上限；一条目占两条句柄。 */
+        /**
+         * 同时处于「句柄已开、准备交给解码」状态的网络条目上限；一条目占两条句柄。
+         * 正在打开的不计入；超时归还名额后，后台可能还留着没返回的打开。
+         */
         private const val MAX_PREPARED_PREVIEWS = 4
 
-        /** 预取不得占用的句柄名额：预取占满其余名额时，可见项仍有一个可以直接打开。 */
-        private const val VISIBLE_RESERVED_PREPARED_SLOTS = 1
+        /** 预取不得占用的名额：预取占满其余名额时，可见项仍有这么多格可以直接打开。 */
+        private const val VISIBLE_RESERVED_PREPARED_SLOTS = 2
 
         /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
         private const val DURATION_RETRY_BASE_MILLIS = 30_000L
