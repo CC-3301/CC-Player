@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -84,9 +85,9 @@ class MpvPlaybackEngine(
         Thread(runnable, "mpv-video-output").apply { isDaemon = true }
     }
 
-    /** 视频输出属性的下发序号：拆挂时递增，让排队中的开输出作废。 */
+    /** 视频输出属性的下发序号：拆挂或释放时递增，让排队中的任务作废。原子递增，释放路径不必取锁。 */
     private val videoOutputLock = Any()
-    private var videoOutputGeneration = 0
+    private val videoOutputGeneration = AtomicInteger(0)
 
     /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
     private val seekTimeoutLock = Any()
@@ -392,7 +393,7 @@ class MpvPlaybackEngine(
         if (released || attachedSurface == null) return
         awaitingSurfaceFrame = false
         synchronized(videoOutputLock) {
-            videoOutputGeneration++
+            videoOutputGeneration.incrementAndGet()
             MPVLib.setPropertyString("vo", "null")
             MPVLib.setOptionString("force-window", "no")
             MPVLib.detachSurface()
@@ -404,12 +405,12 @@ class MpvPlaybackEngine(
     /** 把视频输出属性交给专用线程；拆挂之后到点的任务按序号作废，释放后不再受理。 */
     private fun postVideoOutput(task: () -> Unit) {
         if (released) return
-        val generation = synchronized(videoOutputLock) { videoOutputGeneration }
+        val generation = videoOutputGeneration.get()
         // 释放与投递之间仍可能关线程：这里只丢弃，不能把拒绝执行抛给调用方。
         runCatching {
             videoOutputExecutor.execute {
                 synchronized(videoOutputLock) {
-                    if (generation == videoOutputGeneration) task()
+                    if (generation == videoOutputGeneration.get()) task()
                 }
             }
         }
@@ -437,10 +438,9 @@ class MpvPlaybackEngine(
         // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
         // 闸门在 [VIDEO_OUTPUT_RELEASE_WAIT_MILLIS] 内没跑到，说明重建还没结束：
         // 此时放弃销毁，晚到的属性调用不会踩到已销毁的实例，实例随进程退出回收。
+        // 序号原子递增：释放路径不取视频输出锁，唯一的等待就是下面有上限的闸门。
         val drained = CountDownLatch(1)
-        synchronized(videoOutputLock) {
-            videoOutputGeneration++
-        }
+        videoOutputGeneration.incrementAndGet()
         val queued = runCatching {
             videoOutputExecutor.execute { drained.countDown() }
             true
