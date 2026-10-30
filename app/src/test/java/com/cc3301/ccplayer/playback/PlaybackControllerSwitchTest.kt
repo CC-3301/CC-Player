@@ -1734,6 +1734,27 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `续播 seek 之后再有一跳 seek，就绪仍然发生`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+
+        controller.next()
+        engine.reportFileLoaded()
+        assertEquals(20_000L, engine.seekPositions.last())
+
+        // 续播那一跳之后用户又跳了一跳：命令序号更大。
+        controller.seekTo(30_000)
+        assertEquals(30_000L, engine.pendingSeekMillis)
+
+        // 两跳先后执行，ready 带回的是后一跳的序号：不早于续播 seek，也算就绪。
+        engine.reportSeekExecuted()
+        engine.reportFirstFrameReady()
+
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
     fun `a real ready after the resume seek timed out still counts as ready`() = runTest {
         progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
         val controller = playingController()

@@ -134,6 +134,22 @@ fun dragBeyondDeadZone(previousPx: Float?, currentPx: Float, deadZonePx: Float):
     previousPx == null || abs(currentPx - previousPx) >= deadZonePx
 
 /**
+ * 预览 seek 的下发判定：手指位移越过像素死区，或目标与最后一次下发相差超过目标死区，就重发。
+ * 像素不动而目标漂移超过目标死区时也要补跳，避免画面长时间停在旧目标上。
+ */
+fun seekBeyondDeadZone(
+    previousPx: Float?,
+    currentPx: Float,
+    deadZonePx: Float,
+    lastIssuedTargetMillis: Long?,
+    targetMillis: Long,
+    targetDeadZoneMillis: Long,
+): Boolean =
+    dragBeyondDeadZone(previousPx, currentPx, deadZonePx) ||
+        lastIssuedTargetMillis == null ||
+        abs(targetMillis - lastIssuedTargetMillis) > targetDeadZoneMillis
+
+/**
  * 中间区域拖动跳转：拖动中恒按手指当前位置产出目标，松手调用 [finish] 提交同一套位置。
  * 是否重发 seek 由调用方按像素死区判定，本类不做过滤。时长未知时不预览也不提交。
  */

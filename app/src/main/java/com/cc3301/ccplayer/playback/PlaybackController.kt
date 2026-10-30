@@ -331,7 +331,7 @@ class PlaybackController(
     /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
     private var seekPendingForReady = false
 
-    /** 续播 seek 在本代加载内的序号；ready 带回的序号与它相等才算这一跳之后的信号。 */
+    /** 续播 seek 在本代加载内的序号；ready 带回的序号不小于它才算这一跳之后的信号。 */
     private var requiredSeekSerial = 0
 
     /** 续播位置是否已查明（或本次从开始位置播放，无需查询）；未查明前不能判定就绪。 */
@@ -932,15 +932,17 @@ class PlaybackController(
         return target
     }
 
-    /** 松手或取消拖动：落定到预览位置，声音在这一跳被执行后恢复并淡入；没有预览时不动作。 */
-    fun commitSeekPreview() {
-        endSeekPreview(commit = true)
+    /** 松手或取消拖动：按 [positionMillis]（省略时为最后一次预览位置）落定，声音在这一跳被执行后恢复并淡入；没有预览时不动作。 */
+    fun commitSeekPreview(positionMillis: Long? = null) {
+        // 从未进入预览（加载期或时长未知）：不补落定。
+        if (_seekPreviewMillis.value == null) return
+        endSeekPreview(commit = true, commitTarget = positionMillis)
     }
 
-    /** 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入；加载期不下发。 */
+    /** 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入；加载期照常下发。 */
     fun seekTo(positionMillis: Long) {
-        if (!active || loadPhase != LoadPhase.None) return
-        endSeekPreview(commit = true, commitTarget = positionMillis)
+        if (!active) return
+        endSeekPreview(commit = true, commitTarget = positionMillis, external = true)
     }
 
     /** 预览的唯一写入入口：不允许预览时连标志都不写。返回是否进入了预览。 */
@@ -974,11 +976,12 @@ class PlaybackController(
 
     /**
      * 预览的唯一结束入口：收起预览位置与兜底计时。
-     * [commit] 为真时把落定目标交给引擎：与最后一次下发相差不足死区就复用，否则补一跳精确 seek；
+     * [commit] 为真时把落定目标交给引擎：与最后一次下发的目标完全相同时复用，否则补一跳精确 seek；
      * 声音在播放核心回报这一跳执行完之后恢复并淡入，避免落定前的旧位置以满音量播出。
      * [commitTarget] 为外部跳转的目标，省略时落定到预览位置。
+     * [external] 为真表示外部跳转：不受加载期闸门约束。
      */
-    private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null) {
+    private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null, external: Boolean = false) {
         previewEndJob?.cancel()
         previewEndJob = null
         val target = commitTarget ?: _seekPreviewMillis.value
@@ -1000,18 +1003,16 @@ class PlaybackController(
         }
         // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复。
         if (target == null) return
-        // 加载期不再下发 seek：会推走本代的续播序号，落定等不到回执。
-        if (loadPhase != LoadPhase.None) {
+        // 预览落定的加载期闸门：会推走本代的续播序号，落定等不到回执；外部跳转照常下发。
+        if (!external && loadPhase != LoadPhase.None) {
             releasePreviewMute()
             return
         }
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
-        // 同一目标再下发一次会让画面先闪一下再落定：相差不足死区就复用最后一跳。
-        val seekId = if (lastIssuedTarget != null && lastIssuedSeekId != null &&
-            abs(target - lastIssuedTarget) < PREVIEW_SEEK_DEAD_ZONE_MILLIS
-        ) {
+        // 同一目标再下发一次会让画面先闪一下再落定：目标完全相同时复用最后一跳，否则落点会停在旧目标上。
+        val seekId = if (lastIssuedTarget != null && lastIssuedSeekId != null && target == lastIssuedTarget) {
             lastIssuedSeekId
         } else {
             engine.seekTo(target).seekId
@@ -1156,7 +1157,7 @@ class PlaybackController(
     /**
      * 首帧可显示后才算就绪。播放中加载以 PLAYBACK_RESTART 为准；
      * 暂停态只有 VIDEO_RECONFIG，它可能早于首帧上屏，切集要等播放位置真正前进才算数。
-     * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号等于该 seek 的信号，
+     * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号不小于该 seek 的信号，
      * 就绪判定按加载代际与该代序号，不与 seekId 混用。
      * 真正就绪时才停掉缓冲计时并撤冻结层；等待出帧不设独立短超时。
      */
@@ -1181,8 +1182,8 @@ class PlaybackController(
             return
         }
         if (seekPendingForReady) {
-            // 只认续播那一跳自己的序号：更早的加载 ready 与更晚的 seek 都不算就绪。
-            if (seekSerial != requiredSeekSerial) return
+            // 不早于续播那一跳的命令序号才算数：更早的信号不能就绪，之后的 seek 也照常接受。
+            if (seekSerial < requiredSeekSerial) return
             seekPendingForReady = false
         }
         handleReadySignal(phase, needsFrameConfirmation)
@@ -1922,7 +1923,7 @@ class PlaybackController(
         }
     }
 
-    /** 续播 seek 必须在就绪前发出；发出后只认序号等于它的 ready，更晚的 seek 不能顶替。 */
+    /** 续播 seek 必须在就绪前发出；发出后只认序号不小于它的 ready，之后的 seek 照常接受。 */
     private fun applyResumePosition() {
         if (!resumeLookupDone) return
         val position = resumePositionMillis ?: return
@@ -2050,7 +2051,7 @@ class PlaybackController(
         /** 起播与跳转后的音频淡入时长，固定值。 */
         const val FADE_IN_MILLIS = 500L
 
-        /** 收尾目标与最后一次下发的预览 seek 相差不足这段时长就视为同一目标，不再重复下发。 */
+        /** 拖动预览重发 seek 的目标差阈值：目标与最后一次下发相差超过这段时长就补一跳。 */
         const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
 
         /** 落定通知的进程级序号：跨控制器实例也单调，界面据此只撤掉比它旧的保持值。 */

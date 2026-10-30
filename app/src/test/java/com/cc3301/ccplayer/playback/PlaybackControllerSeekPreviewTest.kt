@@ -258,20 +258,22 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `加载期跳转不下发 seek`() = runTest {
+    fun `加载期跳转照常下发 seek`() = runTest {
         val controller = controller()
         open(controller)
 
         controller.seekTo(200_000)
 
-        // 加载期下发会推走本代的续播序号，让就绪判定等不到回执。
-        assertTrue(engine.seekPositions.isEmpty())
-        assertNull(controller.seekSettlement.value)
-        assertEquals(0L, controller.progress.value.positionMillis)
+        // 外部跳转不受预览闸门约束：加载期也照常下发并登记落定。
+        assertEquals(listOf(200_000L), engine.seekPositions)
+        assertEquals(200_000L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(200_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
-    fun `切集期跳转与收尾都不下发 seek`() = runTest {
+    fun `切集期跳转照常下发，收尾仍不下发`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.next()
@@ -280,8 +282,7 @@ class PlaybackControllerSeekPreviewTest {
         controller.seekTo(200_000)
         controller.commitSeekPreview()
 
-        assertTrue(engine.seekPositions.isEmpty())
-        assertEquals(60_000L, controller.progress.value.positionMillis)
+        assertEquals(listOf(200_000L), engine.seekPositions)
         assertTrue(engine.muteCalls.isEmpty())
     }
 
@@ -677,22 +678,24 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `停手不动再松手不重发 seek，落定仍等引擎执行回报`() = runTest {
+    fun `停手不动再松手时目标不同必多一跳，落点等于手指目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        // 手指停在死区内：显示目标继续跟随真实位置，但不再下发。
+        engine.reportFirstFrameReady()
+        // 手指停在像素死区内：显示目标继续跟随真实位置，但不再下发。
         controller.updateSeekPreview(requestSeek = false, positionMillis = 120_400)
         assertEquals(listOf(120_000L), engine.seekPositions)
 
         controller.commitSeekPreview()
-        // 目标与最后一次下发相差不足死区：复用，不再补一次收尾 seek。
-        assertEquals(listOf(120_000L), engine.seekPositions)
-        assertNull(controller.seekSettlement.value)
+        // 目标不同必补一跳：落定不允许停在旧目标上。
+        assertEquals(listOf(120_000L, 120_400L), engine.seekPositions)
+        assertEquals(120_400L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(120_400L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(120_400L, controller.progress.value.positionMillis)
     }
 
     @Test
@@ -704,10 +707,41 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportFirstFrameReady()
         controller.updateSeekPreview(requestSeek = false, positionMillis = 120_500)
         controller.commitSeekPreview()
+        assertEquals(listOf(120_000L, 120_500L), engine.seekPositions)
 
-        // 死区不参与落点：进度停在手指当前位置，与它相差 0。
+        // 死区不参与落点：进度停在手指当前位置，落定等补发的那一跳回报。
         assertEquals(120_500L, controller.progress.value.positionMillis)
+        engine.reportFirstFrameReady()
         assertEquals(120_500L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(120_500L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `收尾带显式目标时按它落定，不依赖预览值`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportFirstFrameReady()
+        controller.commitSeekPreview(120_500)
+
+        assertEquals(listOf(120_000L, 120_500L), engine.seekPositions)
+        assertEquals(120_500L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(120_500L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `没有预览时带目标的收尾不下发 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.commitSeekPreview(200_000)
+
+        assertTrue(engine.seekPositions.isEmpty())
+        assertNull(controller.seekSettlement.value)
+        assertEquals(60_000L, controller.progress.value.positionMillis)
     }
 
     @Test

@@ -454,7 +454,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onSeekPreview = { position, requestSeek ->
                                 playback?.controller?.updateSeekPreview(position, requestSeek)
                             },
-                            onSeekCommit = { playback?.controller?.commitSeekPreview() },
+                            onSeekCommit = { target -> playback?.controller?.commitSeekPreview(target) },
                             onSeekBy = { seekBy(it) },
                             onSeekStep = { playback?.controller?.updateSeekPreviewBy(it) },
                             onSeekHeartbeat = { playback?.controller?.seekPreviewHeartbeat() },
