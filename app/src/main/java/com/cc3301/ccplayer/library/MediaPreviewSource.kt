@@ -18,7 +18,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -133,6 +135,9 @@ class CachedMediaPreviewSource(
     /** 抽帧许可：容量为 1，本地与网络共用；可见项优先于预取取得。 */
     private val permits = PrioritySemaphore(EXTRACTION_CONCURRENCY)
 
+    /** 已开句柄、已起预读的条目名额：限制同屏并发句柄数。 */
+    private val preparedSlots = Semaphore(MAX_PREPARED_PREVIEWS)
+
     /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
     private val noImage = NoImageMemory()
 
@@ -143,9 +148,7 @@ class CachedMediaPreviewSource(
     /** 同一缓存键正在进行的抽取；等待者共享同一次结果。 */
     private val inFlight = ConcurrentHashMap<String, InFlight>()
 
-
-
-    /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
+    /** 命中后补读时长失败后的退避记录。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
     /** 正在后台补读时长的缓存键与那一次的 Job；同键只补读一次。 */
@@ -174,10 +177,6 @@ class CachedMediaPreviewSource(
 
     private suspend fun preview(file: MediaFile, priority: PreviewPriority): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
-        // 入队即记：没有这一行说明请求根本没进来，可与后续的排队、等播放读区分。
-        if (priority.isVisible && file.source == MediaSource.Network) {
-            diagnostics.log { "网络封面: ${file.name} 入队" }
-        }
         val targetWidth = previewTargetWidth(file, policy)
         val key = thumbnailCacheKey(file, policy, targetWidth)
         return when (file.source) {
@@ -211,7 +210,8 @@ class CachedMediaPreviewSource(
             priority = priority,
             load = { extractLocal(file, key, targetWidth, priority) },
         )
-        return loaded.toPreview()
+        // 本地失败不进重试队列：本次运行按无图处理，重进目录再确认。
+        return MediaPreview(loaded.image, loaded.durationMillis)
     }
 
     /** 抽取结果转成卡片预览：失败的结果带上可重试标记。 */
@@ -367,57 +367,80 @@ class CachedMediaPreviewSource(
             if (cached.file != null) forgetNoImage(key)
             return LoadedPreview(image = cached.file, durationMillis = null)
         }
+        // 入队即记：没有这一行说明请求根本没进来，可与后续的取许可等待、等播放读区分。
+        if (priority.isVisible) diagnostics.log { "网络封面: ${file.name} 入队" }
         val loaded = cachedOrLoad(
             file = file,
             key = key,
             priority = priority,
             load = {
-                // 许可只约束解码：先打开句柄并起定点预读，预读在许可外与解码并发跑。
-                val prepared = extractor.prepareNetworkPreview(file)
-                try {
-                    // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
-                    val requestedAt = monotonicClockMillis()
-                    var queuedMillis = 0L
-                    val attempt = permits.withPermit(priority) {
-                        queuedMillis = monotonicClockMillis() - requestedAt
-                        if (!mayExtract(file.location, priority)) {
-                            null
-                        } else {
-                            var decoded: ByteArray? = null
-                            val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                                decoded = prepared?.decode(targetWidth) ?: extractor.imageBytes(file, targetWidth)
-                                true
-                            } ?: false
-                            done to decoded
-                        }
-                    }
-                    val total = monotonicClockMillis() - requestedAt
-                    if (attempt == null) {
-                        // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
-                        LoadedPreview(image = null, durationMillis = null, abandoned = true)
-                    } else {
-                        diagnostics.log { "网络封面: ${file.name} 取许可等待 ${queuedMillis}ms 解码 ${total - queuedMillis}ms" }
-                        // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
-                        currentCoroutineContext().ensureActive()
-                        val (completed, bytes) = attempt
-                        if (!completed) throw IllegalStateException("网络预览超时")
-                        if (bytes == null) {
-                            // 无图只在本次运行内记住；不写缓存，重启后重新确认。
-                            rememberNoImage(key)
-                            LoadedPreview(image = null, durationMillis = null)
-                        } else {
-                            forgetNoImage(key)
-                            // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
-                            LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
-                        }
-                    }
-                } finally {
-                    // 句柄无论解码成功、失败还是取消都要关。
-                    prepared?.close()
+                // 范围判定前置：离屏预取不再白开两条句柄、白读头尾。
+                if (!mayExtract(file.location, priority)) {
+                    LoadedPreview(image = null, durationMillis = null, abandoned = true)
+                } else {
+                    preparedSlots.withPermit { prepareAndDecode(file, key, targetWidth, priority) }
                 }
             },
         )
         return loaded
+    }
+
+    /**
+     * 打开句柄并起预读（占一个准备名额），再等解码许可、在许可内解码。
+     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束：建连或打开挂起时也会超时并按失败收尾。
+     */
+    private suspend fun prepareAndDecode(
+        file: MediaFile,
+        key: String,
+        targetWidth: Int,
+        priority: PreviewPriority,
+    ): LoadedPreview {
+        var prepared: NetworkPreviewPreparation? = null
+        try {
+            val opened = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                prepared = extractor.prepareNetworkPreview(file)
+                true
+            } ?: false
+            if (!opened) throw IllegalStateException("网络预览打开超时")
+            // 排队时间不计入解码超时；阻塞中的网络读由各自的传输层超时兜底。
+            val requestedAt = monotonicClockMillis()
+            var queuedMillis = 0L
+            val attempt = permits.withPermit(priority) {
+                queuedMillis = monotonicClockMillis() - requestedAt
+                if (!mayExtract(file.location, priority)) {
+                    null
+                } else {
+                    var decoded: ByteArray? = null
+                    val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                        decoded = prepared?.decode(targetWidth) ?: extractor.imageBytes(file, targetWidth)
+                        true
+                    } ?: false
+                    done to decoded
+                }
+            }
+            val total = monotonicClockMillis() - requestedAt
+            if (attempt == null) {
+                // 已离开可见与预取范围：不抽取、不落盘、不计失败。
+                return LoadedPreview(image = null, durationMillis = null, abandoned = true)
+            }
+            diagnostics.log { "网络封面: ${file.name} 取许可等待 ${queuedMillis}ms 解码 ${total - queuedMillis}ms" }
+            // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
+            currentCoroutineContext().ensureActive()
+            val (completed, bytes) = attempt
+            if (!completed) throw IllegalStateException("网络预览超时")
+            return if (bytes == null) {
+                // 无图只在本次运行内记住；不写缓存，重启后重新确认。
+                rememberNoImage(key)
+                LoadedPreview(image = null, durationMillis = null)
+            } else {
+                forgetNoImage(key)
+                // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
+                LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
+            }
+        } finally {
+            // 句柄无论解码成功、失败还是取消都要关。
+            prepared?.close()
+        }
     }
 
     /**
@@ -561,8 +584,11 @@ class CachedMediaPreviewSource(
         /** 抽帧许可容量：本地与网络共用同一个，同一时刻只有一路在取帧。 */
         private const val EXTRACTION_CONCURRENCY = 1
 
-        /** 单次网络提取的等待上限；排队时间不计入。 */
+        /** 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
+
+        /** 同时处于「已开句柄、已起预读」状态的网络条目上限；一条目占两条句柄。 */
+        private const val MAX_PREPARED_PREVIEWS = 4
 
         /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
         private const val DURATION_RETRY_BASE_MILLIS = 30_000L

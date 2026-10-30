@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.library
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -15,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
@@ -1582,6 +1584,62 @@ class CachedMediaPreviewSourceTest {
         release.complete(Unit)
         first.await()
         second.await()
+    }
+
+    @Test
+    fun `本地抽取失败不进重试队列`() = runTest {
+        extractor.imageFailure = IOException("读取失败")
+
+        val preview = source.preview(local("坏文件.mkv"))
+
+        assertNull(preview.image)
+        assertFalse("本地失败按无图处理，不交给调度器重试", preview.retryable)
+    }
+
+    @Test
+    fun `离屏预取不开句柄`() = runTest {
+        var prepares = 0
+        val extractor = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = ByteArray(1)
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? {
+                prepares++
+                return NetworkPreviewPreparation({ ByteArray(1) }, {})
+            }
+        }
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+
+        assertNull(source.prefetch(network("离屏.mkv")).image)
+        assertEquals("离屏预取不该打开句柄", 0, prepares)
+    }
+
+    @Test
+    fun `打开挂起超过超时时间按失败收尾`() = runTest {
+        val extractor = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = null
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? =
+                awaitCancellation()
+        }
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+
+        val request = async { source.visiblePreview(network("打开挂起.mkv"), 0) }
+        advanceUntilIdle()
+
+        assertTrue("打开挂起要按失败收尾，不能永久占位", request.await().retryable)
     }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =

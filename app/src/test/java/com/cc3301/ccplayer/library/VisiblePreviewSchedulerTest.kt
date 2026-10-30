@@ -19,6 +19,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -363,6 +364,61 @@ class VisiblePreviewSchedulerTest {
 
         assertNull(request.await().durationMillis)
         assertTrue(source.started.isEmpty())
+    }
+
+    @Test
+    fun `失败项的重试排在可见项全部出图之后`() = runTest {
+        val order = mutableListOf<Int>()
+        var firstAttempts = 0
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                order += index
+                val fails = index == 0 && firstAttempts++ < 2
+                return MediaPreview(image = null, durationMillis = null, retryable = fails)
+            }
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+
+        val requests = (0..2).map { index -> async { scheduler.preview(entries[index], index) } }
+        advanceUntilIdle()
+        requests.forEach { it.await() }
+
+        assertEquals("先出 1、2，再重试 0", listOf(0, 1, 2, 0, 0), order)
+    }
+
+    @Test
+    fun `失败项不越过仍在出图的可见项`() = runTest {
+        val order = mutableListOf<Int>()
+        val gate = CompletableDeferred<Unit>()
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                order += index
+                when (index) {
+                    0 -> return MediaPreview(image = null, durationMillis = null, retryable = true)
+                    1 -> gate.await()
+                }
+                return MediaPreview(null, null)
+            }
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+
+        val requests = (0..2).map { index -> async { scheduler.preview(entries[index], index) } }
+        // 重试计时早到，但 1 还没出图：失败项不得插到前面。
+        advanceTimeBy(5_000)
+        assertEquals(listOf(0, 1, 2), order)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        requests.forEach { it.await() }
+
+        assertEquals("1 出图后才轮到 0 的重试", 0, order.last())
+        assertEquals("首次一次加 5 次重试", 6, order.count { it == 0 })
     }
 
     @Test

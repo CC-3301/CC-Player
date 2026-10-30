@@ -179,6 +179,34 @@ class PreviewByteWindowTest {
     }
 
     @Test
+    fun `尾部按块对齐后与头部同块时整段都读到`() {
+        val size = 1100 * 1024
+        val origin = RecordingOrigin(payload(size))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+
+        source.startMetadataReadAhead()
+        executor.runAll()
+
+        assertEquals("头尾落在同一块时一次读完", size, origin.reads.sumOf { it.second })
+        assertTrue("覆盖到文件末尾", origin.reads.last().let { it.first + it.second >= size })
+    }
+
+    @Test
+    fun `已排队的块只向底层读一次`() {
+        val bytes = payload(10_000)
+        val origin = RecordingOrigin(bytes)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk)
+
+        read(source, 0, 4)
+        // 64 这块已排进预读：解码接手，预读任务退出，同一段字节不读两遍。
+        assertArrayEquals(bytes.copyOfRange(64, 68), read(source, 64, 4))
+
+        assertEquals(1, origin.reads.count { it.first == 64L })
+        source.close()
+    }
+
+    @Test
     fun `预读走独立字节源`() {
         val decodeOrigin = RecordingOrigin(payload(1000))
         val readAheadOrigin = RecordingOrigin(payload(1000))

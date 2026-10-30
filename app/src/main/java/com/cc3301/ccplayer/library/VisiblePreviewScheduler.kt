@@ -188,7 +188,12 @@ class VisiblePreviewScheduler(
                     dispatching = false
                     hasDispatchableLocked()
                 }
-                if (again) dispatch()
+                if (again) {
+                    dispatch()
+                } else {
+                    // 可见项都出完（或都失败待重试）才安排失败项的重试。
+                    scheduleRetries()
+                }
             }
         }
     }
@@ -203,10 +208,7 @@ class VisiblePreviewScheduler(
             val attempt = synchronized(lock) {
                 if (generation != drainGeneration) return
                 if (!windowKnown || visibleLocations.isEmpty()) return
-                val next = requests.values
-                    .filter { request -> request.isDispatchableLocked() && request.file.location in visibleLocations }
-                    .minByOrNull(Request::index)
-                    ?: return
+                val next = nextDispatchableLocked() ?: return
                 val attemptId = ++next.attemptId
                 // 先建 Job 并登记，再启动：reset/pause 在两步之间也能取消到它。
                 val job = scope.launch(start = CoroutineStart.LAZY) { runRequest(next, attemptId) }
@@ -228,35 +230,93 @@ class VisiblePreviewScheduler(
             // Error 也按失败收尾，避免 attempt 卡住、结果永不完成。
             EMPTY_PREVIEW
         }
-        val retryAfter: Long? = synchronized(lock) {
+        synchronized(lock) {
             if (!isCurrentAttemptLocked(request, attemptId)) return
             request.attemptId++
             request.job = null
             if (preview.retryable && request.retryAttempts < VISIBLE_RETRY_MAX_ATTEMPTS) {
-                // 失败项先跳过：保留 deferred 与订阅，等可见项出完后按递进间隔重试。
+                // 失败项先跳过：保留 deferred 与订阅，等可见项全部出图后再按递进间隔重试。
                 request.retryAttempts++
                 request.retryPending = true
-                VISIBLE_RETRY_STEP_MILLIS * request.retryAttempts
             } else {
                 // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
                 if (requests[request.file.location] === request) requests.remove(request.file.location)
                 if (!request.deferred.isCompleted) request.deferred.complete(preview)
-                null
             }
         }
-        if (retryAfter != null) scheduleRetry(request, retryAfter)
+        // 重新走一轮下发：失败项要靠这一轮排空后才安排重试计时。
+        dispatch()
     }
 
-    /** 失败项的重试：等 [delayMillis] 后重新可下发；离屏或订阅取消时不再重试。 */
-    private fun scheduleRetry(request: Request, delayMillis: Long) {
-        scope.launch {
-            delay(delayMillis)
-            synchronized(lock) {
-                request.retryPending = false
-                if (closed || request.deferred.isCompleted) return@launch
-            }
-            dispatch()
+    /**
+     * 下一项要下发的请求：先按索引发首次尝试的可见项；全部出图后（没有首次尝试在跑）
+     * 才轮到失败项的重试，重试不得越过仍在等出图的可见项。
+     */
+    private fun nextDispatchableLocked(): Request? {
+        val candidates = requests.values.filter { request ->
+            request.isDispatchableLocked() && request.file.location in visibleLocations
         }
+        if (candidates.isEmpty()) return null
+        val fresh = candidates.filter { it.retryAttempts == 0 }
+        if (fresh.isNotEmpty()) return fresh.minByOrNull(Request::index)
+        val freshRunning = requests.values.any { request ->
+            request.job != null && request.retryAttempts == 0 && request.file.location in visibleLocations
+        }
+        return if (freshRunning) null else candidates.minByOrNull(Request::index)
+    }
+
+    /** 可见项全部出图后为每个失败项安排重试计时：第 n 次重试等 n 秒。 */
+    private fun scheduleRetries() {
+        val starters = ArrayList<Pair<Request, Job>>()
+        synchronized(lock) {
+            if (closed || dispatching) return
+            // 还有可见项没出图（在跑或可下发）时不安排重试。
+            if (requests.values.any { request ->
+                    request.retryAttempts == 0 &&
+                        request.file.location in visibleLocations &&
+                        (request.job != null || request.isDispatchableLocked())
+                }
+            ) {
+                return
+            }
+            requests.values
+                .filter { request ->
+                    request.retryPending && request.retryTimer == null && request.file.location in visibleLocations
+                }
+                .forEach { request ->
+                    val job = scope.launch(start = CoroutineStart.LAZY) { awaitRetry(request) }
+                    request.retryTimer = job
+                    starters += request to job
+                }
+        }
+        starters.forEach { (request, job) ->
+            job.invokeOnCompletion {
+                synchronized(lock) { if (request.retryTimer === job) request.retryTimer = null }
+            }
+            job.start()
+        }
+    }
+
+    /** 等满递进间隔后把失败项重新排上；期间离屏或取消就不再重试。 */
+    private suspend fun awaitRetry(request: Request) {
+        delay(VISIBLE_RETRY_STEP_MILLIS * request.retryAttempts)
+        // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。
+        while (true) {
+            val batchRunning = synchronized(lock) {
+                if (closed || request.deferred.isCompleted) return
+                requests.values.any { other ->
+                    other !== request && other.retryAttempts == 0 && other.file.location in visibleLocations
+                }
+            }
+            if (!batchRunning) break
+            delay(VISIBLE_RETRY_POLL_MILLIS)
+        }
+        val again = synchronized(lock) {
+            if (closed || request.deferred.isCompleted) return
+            request.retryPending = false
+            request.file.location in visibleLocations
+        }
+        if (again) dispatch()
     }
 
     /** 取消或未正常返回的 attempt 在这里收尾；令牌或 Job 身份不符时不得改状态。 */
@@ -270,14 +330,14 @@ class VisiblePreviewScheduler(
             if (requests[request.file.location] === request) requests.remove(request.file.location)
             if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
         }
+        dispatch()
     }
 
     private fun isCurrentAttemptLocked(request: Request, attemptId: Long): Boolean =
         !request.deferred.isCompleted && request.attemptId == attemptId
 
     private fun hasDispatchableLocked(): Boolean =
-        visibleLocations.isNotEmpty() &&
-            requests.values.any { request -> request.isDispatchableLocked() && request.file.location in visibleLocations }
+        visibleLocations.isNotEmpty() && nextDispatchableLocked() != null
 
     private class Request(
         val file: MediaFile,
@@ -290,6 +350,8 @@ class VisiblePreviewScheduler(
         var retryAttempts: Int = 0,
         /** 正在等重试计时；期间不参与下发。 */
         var retryPending: Boolean = false,
+        /** 正在跑的重试计时任务。 */
+        var retryTimer: Job? = null,
     ) {
 
         /** 没有在跑的 attempt，也没有在等重试计时，才算可下发。 */
@@ -310,5 +372,8 @@ class VisiblePreviewScheduler(
 
         /** 单个条目的失败重试上限。 */
         const val VISIBLE_RETRY_MAX_ATTEMPTS = 5
+
+        /** 等可见项出完的轮询间隔。 */
+        const val VISIBLE_RETRY_POLL_MILLIS = 20L
     }
 }

@@ -20,8 +20,9 @@ class NetworkReadPriority {
     /** 正在进行的播放读取数；缩略图读取至少要让出这些读取。 */
     private var playbackReads = 0
 
-    /** 把 [source] 包装成按 [kind] 排队的字节源。 */
-    fun wrap(source: ByteSource, kind: ReadKind): PriorityByteSource = PriorityByteSource(source, this, kind)
+    /** 把 [source] 包装成按 [kind] 排队的字节源；[onWait] 上报每次让给播放读取的时长。 */
+    fun wrap(source: ByteSource, kind: ReadKind, onWait: (Long) -> Unit = {}): ByteSource =
+        PriorityByteSource(source, this, kind, onWait)
 
     internal fun <T> playback(block: () -> T): T {
         lock.lock()
@@ -80,18 +81,14 @@ class NetworkReadPriority {
  * 按优先级读的字节源包装：只改变读取排队，不改变读取位置与长度。
  * 关闭标记先于底层关闭生效，避免等待中的读取在关闭后继续进入底层。
  */
-class PriorityByteSource(
+private class PriorityByteSource(
     private val source: ByteSource,
     private val priority: NetworkReadPriority,
     private val kind: ReadKind,
+    private val onWait: (Long) -> Unit,
 ) : ByteSource {
 
     private val closed = AtomicBoolean(false)
-
-    /** 这条读取让给播放读取的累计时长，只用于诊断。 */
-    @Volatile
-    var waitedMillis: Long = 0L
-        private set
 
     override val size: Long get() = source.size
 
@@ -101,9 +98,7 @@ class PriorityByteSource(
         if (closed.get()) return 0
         return when (kind) {
             ReadKind.Playback -> priority.playback { source.readAt(position, buffer, offset, length) }
-            ReadKind.Thumbnail -> priority.thumbnail({ closed.get() }, onWait = { millis ->
-                waitedMillis += millis
-            }) {
+            ReadKind.Thumbnail -> priority.thumbnail({ closed.get() }, onWait) {
                 source.readAt(position, buffer, offset, length)
             }
         }

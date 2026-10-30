@@ -28,6 +28,9 @@ private const val FOLLOW_READ_AHEAD_CHUNKS = 2
  * 换锚点不丢弃已读到的块：常驻块按最近使用淘汰，总量不超过窗口上限。
  * 底层读取最多两路：解码线程补齐当前块，预读线程补齐后续块；预读可用独立字节源，
  * 避免与解码在同一条流上交替位置。关闭后不再补齐、不再回写，读取一律失败。
+ *
+ * 已知限制：预读只有进程内一条线程，多条目的预读排队串行，不因摘出解码许可而并行；
+ * 解码缺块仍由解码线程在许可内补齐（预读没覆盖到那段时才走这条路径，补完才继续解码）。
  */
 internal class PreviewByteWindow(
     private val origin: ByteSource,
@@ -88,13 +91,14 @@ internal class PreviewByteWindow(
         val total = size
         if (total <= 0) return
         val headEnd = minOf(total, PREVIEW_METADATA_HEAD_BYTES.toLong())
-        val tailStart = total - PREVIEW_METADATA_TAIL_BYTES
-        if (headEnd >= tailStart) {
+        // 尾部按块对齐后可能与头部落在同一块：这时一次读完，避免块头剩下的那段被跳过。
+        val tailStart = chunkStart(maxOf(0L, total - PREVIEW_METADATA_TAIL_BYTES))
+        if (tailStart <= headEnd) {
             queueMetadata(0, total)
             return
         }
         queueMetadata(0, headEnd)
-        queueMetadata(chunkStart(tailStart), total)
+        queueMetadata(tailStart, total)
     }
 
     override fun close() {
@@ -126,6 +130,9 @@ internal class PreviewByteWindow(
                     residentBytes -= cached.size
                 }
                 failures[start]?.let { throw it }
+                // 已排队但还没开始的块由解码接手：预读任务随后因不在队列里直接退出，
+                // 同一段字节不会向底层读两遍。正在读的块照旧等它回写。
+                queued.remove(start)
                 if (start in pending) {
                     lock.wait()
                 } else {
@@ -208,6 +215,8 @@ internal class PreviewByteWindow(
     private fun readAheadChunk(chunk: Long, to: Long) {
         synchronized(lock) {
             if (!queued.remove(chunk)) return
+            // 唤醒等着这块的读取：他们要么等到回写，要么接手自己补。
+            lock.notifyAll()
             if (closed || chunk in pending) return
             if (chunks[chunk]?.let { it.size >= to - chunk } == true) return
             pending += chunk

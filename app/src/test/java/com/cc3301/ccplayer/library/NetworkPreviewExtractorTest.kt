@@ -3,6 +3,7 @@ package com.cc3301.ccplayer.library
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.CancellationException
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -145,6 +146,41 @@ class NetworkPreviewExtractorTest {
             // 预期失败路径。
         }
         assertTrue(reads.sources.all { source -> source.closed })
+    }
+
+    @Test
+    fun `预读句柄打开被取消时关闭已经打开的句柄`() = runTest {
+        var primaryClosed = false
+        var opens = 0
+        val reads = object : NetworkMediaReads {
+            override suspend fun openRead(location: String, size: Long): ByteSource {
+                opens++
+                if (opens == 1) {
+                    return object : ByteSource {
+                        override val size: Long = payload.size.toLong()
+
+                        override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+                        override fun close() {
+                            primaryClosed = true
+                        }
+                    }
+                }
+                throw CancellationException("取消")
+            }
+        }
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+        )
+
+        try {
+            extractor.prepare(movie)
+            fail("应向上抛出取消")
+        } catch (expected: CancellationException) {
+            // 预期路径。
+        }
+        assertTrue("已打开的第一条句柄必须关闭", primaryClosed)
     }
 
     @Test
