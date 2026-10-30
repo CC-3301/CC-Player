@@ -615,7 +615,13 @@ class PlaybackController(
         beginLoadWatchdog()
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
-        captureThenStartSwitch()
+        // 片尾切集不抓帧：原片已停在末帧，取帧只会把加载往后拖；此时界面按黑底等待。
+        if (originAtEnd) {
+            cancelSwitchCapture()
+            startSwitchTarget()
+        } else {
+            captureThenStartSwitch()
+        }
     }
 
     /** 切集目标切换时共用的状态重置；抓帧与缓冲计时由调用方决定。 */
