@@ -739,9 +739,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         binder?.controller?.commitSeekPreview()
         // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
         binder?.controller?.beginBackgroundCapture()
-        // 后台已暂停时底层连接可能失效：丢弃已建立的字节源，之后的请求重新建立。
-        // 播放中（含加载中）不能丢：当前响应正踩在这些源上。
-        if (playback?.controller?.state?.value == PlaybackState.Paused) {
+        // 后台播放关闭时播放已暂停：底层连接可能失效，丢弃已建立的字节源，之后的请求重新建立。
+        // 加载中不能丢：当前响应正踩在这些源上。
+        if (binder?.blocksBackgroundPlayback == true &&
+            binder.controller.state.value != PlaybackState.Loading
+        ) {
             streams?.discardByteSources()
         }
     }
