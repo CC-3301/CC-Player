@@ -392,6 +392,10 @@ fun PlayerScreen(
     LaunchedEffect(controlsVisible, locked) {
         panels.closeWhenControlsUnavailable(controlsVisible, locked)
     }
+    // 控制层隐藏后涟漪不再渲染：清掉未播完的条目，重新显示时不重播。
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible) doubleTapFeedback.clearRipples()
+    }
     LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
         // 加载全程不自动隐藏，避免切集期间控制条消失。
         val holdVisible = switching || initialLoading
