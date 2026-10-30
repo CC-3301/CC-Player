@@ -26,6 +26,14 @@ interface DiagnosticsLog {
 
     /** 诊断由关闭变为开启时回调一次；返回注销句柄。 */
     fun onEnabled(listener: () -> Unit): () -> Unit = {}
+
+    /**
+     * 写出已经判定过开关的日志：写入时不再复查开关。
+     * 补写暂存日志时用，避免与并发关停交错时把已取出的行丢掉。
+     */
+    fun logAccepted(message: String) {
+        log(message)
+    }
 }
 
 /** 不写日志的实现，供不需要诊断的构造使用。 */
@@ -69,6 +77,11 @@ class Diagnostics(
 
     override fun log(message: String) {
         if (!enabled) return
+        scope.launch { runCatching { sink.write(redactSecrets(message)) } }
+    }
+
+    /** 已经判定开关打开的消息直接写出：与并发关停交错时也不复查，补写不丢行。 */
+    override fun logAccepted(message: String) {
         scope.launch { runCatching { sink.write(redactSecrets(message)) } }
     }
 

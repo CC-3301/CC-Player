@@ -99,6 +99,17 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun `已判定写出的日志不再复查开关`() {
+        diagnostics.enabled = true
+        diagnostics.enabled = false
+
+        // 补写暂存日志时开关可能已关：已判定写出的行照样落盘，不会被再次拦掉。
+        diagnostics.logAccepted("补写")
+
+        assertEquals(listOf("补写"), sink.lines)
+    }
+
+    @Test
     fun `脱敏 URL userinfo、认证头、全角与 JSON 键`() {
         diagnostics.enabled = true
 
