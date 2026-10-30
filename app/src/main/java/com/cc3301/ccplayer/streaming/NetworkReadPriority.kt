@@ -87,6 +87,8 @@ private class PriorityByteSource(
 
     override val size: Long get() = source.size
 
+    override val maxReadBytes: Int get() = source.maxReadBytes
+
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (closed.get()) return 0
         return when (kind) {

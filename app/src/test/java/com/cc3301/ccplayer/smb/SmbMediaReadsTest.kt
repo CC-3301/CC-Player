@@ -41,6 +41,20 @@ class SmbMediaReadsTest {
     }
 
     @Test
+    fun `读尺寸按服务器协商上限给出`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.maxReadSize = 64 * 1024
+
+        val source = reads.openRead(movie, payload.size.toLong())
+        try {
+            assertEquals(64 * 1024, source.maxReadBytes)
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
     fun `位置不属于书签时给出来源失败`() = runTest {
         val exception = runCatching { reads.openRead(movie, payload.size.toLong()) }.exceptionOrNull()
 

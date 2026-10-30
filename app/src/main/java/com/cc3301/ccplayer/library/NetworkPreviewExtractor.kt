@@ -40,7 +40,8 @@ class NetworkPreviewExtractor(
             val kind = mediaKindOf(file.name) ?: return@withContext null
             val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail)
             // 解码只读本地字节：当前块由解码线程补齐，后续块由预读线程补齐。
-            val window = PreviewByteWindow(source)
+            // 元数据阶段只定点取文件头与文件末尾，解码缺块时再按块补齐。
+            val window = PreviewByteWindow(source).also { it.startMetadataReadAhead() }
             try {
                 decode(window, kind, targetWidth)
             } finally {

@@ -193,6 +193,8 @@ private class SmbSessionSource(
 
     override val size: Long get() = handle.size
 
+    override val maxReadBytes: Int get() = handle.maxReadSize
+
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = try {
         handle.readAt(position, buffer, offset, length)
     } catch (failure: IOException) {
