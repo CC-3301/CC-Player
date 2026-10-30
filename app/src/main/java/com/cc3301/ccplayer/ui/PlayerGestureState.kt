@@ -134,14 +134,13 @@ fun dragBeyondDeadZone(previousPx: Float?, currentPx: Float, deadZonePx: Float):
     previousPx == null || abs(currentPx - previousPx) >= deadZonePx
 
 /**
- * 中间区域拖动跳转：拖动中按死区过滤预览，松手调用 [finish] 才产出提交位置。
- * 死区内的抖动不更新预览目标；松手总是按手指真实位置结算。时长未知时不预览也不提交。
+ * 中间区域拖动跳转：拖动中恒按手指当前位置产出目标，松手调用 [finish] 提交同一套位置。
+ * 是否重发 seek 由调用方按像素死区判定，本类不做过滤。时长未知时不预览也不提交。
  */
 class PlayerSeekDrag(
     val baseMillis: Long,
     private val durationMillis: Long,
     private val width: Int,
-    private val deadZonePx: Float = 0f,
 ) {
     var previewMillis: Long? = null
         private set
@@ -151,10 +150,9 @@ class PlayerSeekDrag(
 
     private var lastPreviewX: Float? = null
 
-    /** 拖动中：位移没过死区时保持上一次目标，返回 null 表示不更新预览。 */
+    /** 拖动中：返回手指当前位置对应的目标，不做死区过滤。 */
     fun preview(dragX: Float): Long? {
         if (durationMillis <= 0) return null
-        if (!dragBeyondDeadZone(lastPreviewX, dragX, deadZonePx)) return null
         lastPreviewX = dragX
         previewMillis = targetAt(dragX)
         return previewMillis

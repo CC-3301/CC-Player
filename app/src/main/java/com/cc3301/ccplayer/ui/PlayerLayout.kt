@@ -256,11 +256,18 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 拖动跳转的像素死区：位移达到它才算越过死区，未越过时沿用上一次预览目标，手指停下后的抖动不再造新目标。 */
+/** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
 val PlayerSeekDragDeadZone = 3.dp
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
+
+/**
+ * 落定通知是否该撤掉界面的进度保持值：只有比已处理过的通知更新的 id 才撤。
+ * 同一目标连续两次落定也能撤；旧代际的迟到通知不会误清新保持值。
+ */
+fun seekSettlementReleasesHold(heldSettlementId: Long, settlementId: Long): Boolean =
+    settlementId > heldSettlementId
 
 /** 进度条视觉轨道的像素范围。 */
 data class SeekBarTrackBounds(val start: Float, val end: Float)

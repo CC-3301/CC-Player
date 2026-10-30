@@ -41,6 +41,7 @@ interface PlaybackEngine {
     /**
      * 跳到指定播放位置，单位毫秒。
      * 返回本次 seek 的序号；之后的 ready 回调带上同一序号，控制层据此只认 seek 之后的信号。
+     * 上一次 seek 尚未就绪时只覆盖待发目标，就绪后再补发一次。
      */
     fun seekTo(positionMillis: Long): Int
 
