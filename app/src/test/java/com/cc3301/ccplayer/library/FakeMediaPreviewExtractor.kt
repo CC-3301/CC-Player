@@ -28,6 +28,13 @@ class FakeMediaPreviewExtractor(
         return imageBytes
     }
 
+    /** 测试用准备：解码时才调用 [imageBytes]，不新开真实句柄。 */
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation =
+        NetworkPreviewPreparation(
+            decodeBlock = { targetWidth -> imageBytes(file, targetWidth) },
+            closeBlock = {},
+        )
+
     override suspend fun durationMillis(file: MediaFile): Long? {
         durationRequests += file.location
         if (durationDelayMillis > 0) delay(durationDelayMillis)

@@ -583,6 +583,12 @@ private class OrderRecordingExtractor : MediaPreviewExtractor {
 
     val started = mutableListOf<Int>()
 
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation =
+        NetworkPreviewPreparation(
+            decodeBlock = { targetWidth -> imageBytes(file, targetWidth) },
+            closeBlock = {},
+        )
+
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         started += file.name.removePrefix("第").substringBefore(' ').toInt()
         return byteArrayOf(1)
