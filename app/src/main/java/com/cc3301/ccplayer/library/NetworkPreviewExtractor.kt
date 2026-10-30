@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.library
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
 import com.cc3301.ccplayer.streaming.ReadKind
@@ -55,6 +57,7 @@ class NetworkPreviewExtractor(
     private val readPriority: NetworkReadPriority = NetworkReadPriority.shared,
     private val decoder: NetworkPreviewDecoder,
     private val readAheadExecutor: Executor = PreviewByteWindow.previewReadAheadExecutor,
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
 
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
@@ -81,7 +84,14 @@ class NetworkPreviewExtractor(
         )
         window.startMetadataReadAhead()
         NetworkPreviewPreparation(
-            decodeBlock = { targetWidth -> decode(window, kind, targetWidth) },
+            decodeBlock = { targetWidth ->
+                try {
+                    decode(window, kind, targetWidth)
+                } finally {
+                    // 让给播放读取的时长：与许可等待分开记，能区分「排队」与「等播放读」。
+                    diagnostics.log { "网络封面: ${file.name} 等播放读 ${source.waitedMillis}ms" }
+                }
+            },
             closeBlock = { runCatching { window.close() } },
         )
     }

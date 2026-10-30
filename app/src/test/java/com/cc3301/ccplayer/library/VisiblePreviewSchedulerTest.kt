@@ -19,6 +19,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
@@ -362,6 +363,34 @@ class VisiblePreviewSchedulerTest {
 
         assertNull(request.await().durationMillis)
         assertTrue(source.started.isEmpty())
+    }
+
+    @Test
+    fun `失败先跳过，可见项出完后按 1 到 5 秒递进重试且最多 5 次`() = runTest {
+        val times = mutableListOf<Long>()
+        var attempts = 0
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                attempts++
+                times += testScheduler.currentTime
+                return MediaPreview(image = null, durationMillis = null, retryable = true)
+            }
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(listOf(entries[0]), firstVisible = 0, lastVisible = 0, rowSize = 1)
+
+        val request = async { scheduler.preview(entries[0], 0) }
+        advanceUntilIdle()
+        assertNull(request.await().image)
+
+        assertEquals("首次一次加 5 次重试", 6, attempts)
+        assertEquals(
+            "递进间隔为 1s、2s、3s、4s、5s",
+            listOf(1_000L, 2_000L, 3_000L, 4_000L, 5_000L),
+            times.zipWithNext { previous, next -> next - previous },
+        )
     }
 }
 

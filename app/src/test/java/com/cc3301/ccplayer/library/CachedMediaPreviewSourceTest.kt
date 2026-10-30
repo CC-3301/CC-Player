@@ -542,100 +542,32 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `整次抽取失败后按退避重试且成功后清理键`() = runTest {
-        var now = 1_000L
+    fun `整次抽取失败不写缓存并标记可重试，成功后恢复`() = runTest {
         val tracker = RetryAfterFailureExtractor()
         val bounded = CachedMediaPreviewSource(
             extractor = tracker,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClockMillis = { now },
         )
         val file = network("电影.mkv")
 
-        assertNull(bounded.preview(file).image)
-        assertEquals(1, tracker.requests)
+        val failed = bounded.preview(file)
 
-        now += 29_999
-        assertNull(bounded.preview(file).image)
+        assertNull(failed.image)
+        assertTrue("失败结果交给调度器重试", failed.retryable)
         assertEquals(1, tracker.requests)
+        assertTrue("失败不落缓存", directory.listFiles().orEmpty().isEmpty())
 
-        now += 1
+        // 重试节奏由可见请求调度器安排，这里再请求就立刻重抽。
         assertNull(bounded.preview(file).image)
         assertEquals(2, tracker.requests)
 
-        // 连续失败后间隔翻倍。
-        now += 59_999
-        assertNull(bounded.preview(file).image)
-        assertEquals(2, tracker.requests)
-
-        now += 1
         tracker.failure = null
         assertNotNull(bounded.preview(file).image)
         assertEquals(3, tracker.requests)
 
-        // 成功后的键已清理，再次请求直接命中缓存。
+        // 成功后命中缓存，不再抽取。
         assertNotNull(bounded.preview(file).image)
         assertEquals(3, tracker.requests)
-    }
-
-    @Test
-    fun `整次抽取失败退避间隔倍增且有上限`() = runTest {
-        var now = 1_000L
-        val tracker = RetryAfterFailureExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = tracker,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClockMillis = { now },
-        )
-        val file = network("上限.mkv")
-
-        assertNull(bounded.preview(file).image)
-        assertEquals(1, tracker.requests)
-
-        val delays = listOf(30_000L, 60_000L, 120_000L, 240_000L, 480_000L, 600_000L)
-        delays.forEachIndexed { index, delay ->
-            now += delay - 1
-            assertNull(bounded.preview(file).image)
-            assertEquals(index + 1, tracker.requests)
-            now += 1
-            assertNull(bounded.preview(file).image)
-            assertEquals(index + 2, tracker.requests)
-        }
-
-        // 上限为十分钟：不足十分钟不重试，满十分钟才重试。
-        now += 599_999
-        assertNull(bounded.preview(file).image)
-        assertEquals(7, tracker.requests)
-        now += 1
-        assertNull(bounded.preview(file).image)
-        assertEquals(8, tracker.requests)
-    }
-
-    @Test
-    fun `退避记录满上限时淘汰最早到期键`() = runTest {
-        var now = 1_000L
-        val tracker = PerKeyFailureExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = tracker,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClockMillis = { now },
-        )
-        val entries = (1..513).map { index ->
-            local("第$index 集.mkv", lastModified = index.toLong())
-        }
-        entries.forEach { file ->
-            now += 1
-            assertNull(bounded.preview(file).image)
-        }
-
-        // 第 1 个键到期最早，第 513 次失败时被淘汰；第 2 个键仍在退避中。
-        val earliest = entries.first()
-        val retained = entries[1]
-        assertNull(bounded.preview(retained).image)
-        assertEquals(1, tracker.requests.getValue(retained.location))
-
-        assertNull(bounded.preview(earliest).image)
-        assertEquals(2, tracker.requests.getValue(earliest.location))
     }
 
     private fun cache(): ThumbnailCache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined)
@@ -1269,38 +1201,6 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `放弃不清除已过期的抽取退避记录`() = runTest {
-        var now = 1_000L
-        val tracker = RetryAfterFailureExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = tracker,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            monotonicClockMillis = { now },
-        )
-        val file = network("退避.mkv")
-
-        assertNull(bounded.preview(file).image)
-        assertEquals(1, tracker.requests)
-
-        // 退避已过期：预取在范围内复查时被放弃，但既有记录不能被清掉。
-        now += 30_000
-        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
-        assertNull(bounded.prefetch(file).image)
-        assertEquals(1, tracker.requests)
-
-        // 下一次真实失败按 attempts=2 退避 60 秒，而不是重新从 30 秒开始。
-        now += 1
-        assertNull(bounded.preview(file).image)
-        assertEquals(2, tracker.requests)
-        now += 59_999
-        assertNull(bounded.preview(file).image)
-        assertEquals(2, tracker.requests)
-        now += 1
-        assertNull(bounded.preview(file).image)
-        assertEquals(3, tracker.requests)
-    }
-
-    @Test
     fun `可见项先于预取项取得许可`() = runTest {
         val tracker = GatedExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1851,19 +1751,6 @@ private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
             },
             isSolid = { true },
         )
-
-    override suspend fun durationMillis(file: MediaFile): Long? = null
-}
-
-/** 每个位置都抽取失败，并按位置记录请求次数，用来验证退避记录上限。 */
-private class PerKeyFailureExtractor : MediaPreviewExtractor {
-
-    val requests = mutableMapOf<String, Int>()
-
-    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
-        requests[file.location] = (requests[file.location] ?: 0) + 1
-        throw IllegalStateException("抽取失败")
-    }
 
     override suspend fun durationMillis(file: MediaFile): Long? = null
 }

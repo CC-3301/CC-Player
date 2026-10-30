@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.library
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -70,6 +71,36 @@ class NetworkPreviewExtractorTest {
         assertEquals("解码与预读各开一条句柄", 2, reads.opened.size)
         assertTrue("解码只吃预读拉进来的本地字节", reads.sources[0].reads.isEmpty())
         assertEquals("预读取文件头", listOf(0L), reads.sources[1].reads)
+    }
+
+    @Test
+    fun `等播放读时长单独记一行`() = runTest {
+        val lines = mutableListOf<String>()
+        val diagnostics = object : DiagnosticsLog {
+            override val enabled = true
+
+            override fun log(message: String) {
+                lines += message
+            }
+        }
+        val executor = StepExecutor()
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { opened, _, _ ->
+                val buffer = ByteArray(8)
+                opened.readAt(0, buffer, 0, buffer.size)
+                ByteArray(8)
+            },
+            readAheadExecutor = executor,
+            diagnostics = diagnostics,
+        )
+
+        val prepared = extractor.prepare(movie)!!
+        executor.runAll()
+        prepared.decode(NETWORK_TARGET_WIDTH)
+        prepared.close()
+
+        assertTrue("应记等播放读：$lines", lines.any { it.startsWith("网络封面: 电影.mkv 等播放读 ") })
     }
 
     @Test

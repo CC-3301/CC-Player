@@ -48,8 +48,11 @@ interface MediaPreviewSource {
     fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
 }
 
-/** 卡片预览：预览图（null 时界面用占位图）与时长（null 时不显示角标）。 */
-data class MediaPreview(val image: File?, val durationMillis: Long?)
+/**
+ * 卡片预览：预览图（null 时界面用占位图）与时长（null 时不显示角标）。
+ * [retryable] 表示这次是失败收尾，调度器先跳过该项，等可见项出完后按递进间隔重试。
+ */
+data class MediaPreview(val image: File?, val durationMillis: Long?, val retryable: Boolean = false)
 
 /** 一次读取会话得到的时长结果：已知值、确定没有、读取失败。 */
 sealed interface PreviewDuration {
@@ -140,8 +143,7 @@ class CachedMediaPreviewSource(
     /** 同一缓存键正在进行的抽取；等待者共享同一次结果。 */
     private val inFlight = ConcurrentHashMap<String, InFlight>()
 
-    /** 整次抽取失败后的退避记录；按缓存键分开，成功后清理。 */
-    private val extractionFailures = ConcurrentHashMap<String, RetryState>()
+
 
     /** 命中后补读时长失败后的退避记录；与整次抽取退避分开。 */
     private val durationFailures = ConcurrentHashMap<String, RetryState>()
@@ -172,14 +174,15 @@ class CachedMediaPreviewSource(
 
     private suspend fun preview(file: MediaFile, priority: PreviewPriority): MediaPreview {
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
+        // 入队即记：没有这一行说明请求根本没进来，可与后续的排队、等播放读区分。
+        if (priority.isVisible && file.source == MediaSource.Network) {
+            diagnostics.log { "网络封面: ${file.name} 入队" }
+        }
         val targetWidth = previewTargetWidth(file, policy)
         val key = thumbnailCacheKey(file, policy, targetWidth)
         return when (file.source) {
             MediaSource.Local -> localPreview(file, key, targetWidth, priority)
-            MediaSource.Network -> MediaPreview(
-                image = networkImage(file, key, targetWidth, priority),
-                durationMillis = null,
-            )
+            MediaSource.Network -> networkImage(file, key, targetWidth, priority).toPreview()
         }
     }
 
@@ -194,7 +197,6 @@ class CachedMediaPreviewSource(
             // 上次运行留下的无图记录只用于复用时长；本次运行仍需重新确认是否有图。
             if (!cached.noImage || isNoImageRemembered(key)) {
                 // 命中缓存立即出图：不排队、不等同键在途抽取，时长未知时在后台补读。
-                extractionFailures.remove(key)
                 if (cached.file != null) forgetNoImage(key)
                 refillDuration(file, key, cached, priority)
                 return MediaPreview(cached.file, cached.durationMillis)
@@ -209,8 +211,11 @@ class CachedMediaPreviewSource(
             priority = priority,
             load = { extractLocal(file, key, targetWidth, priority) },
         )
-        return MediaPreview(loaded.image, loaded.durationMillis)
+        return loaded.toPreview()
     }
+
+    /** 抽取结果转成卡片预览：失败的结果带上可重试标记。 */
+    private fun LoadedPreview.toPreview(): MediaPreview = MediaPreview(image, durationMillis, failed)
 
     /** 命中缓存后先出图；时长未知时在后台补读，排在可见与预取之后，不阻塞本次出图。 */
     private fun refillDuration(
@@ -353,15 +358,14 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
-    ): File? {
+    ): LoadedPreview {
         // 本次运行已确认无图：不再重复抽取，重启后重新确认。
-        if (isNoImageRemembered(key)) return null
+        if (isNoImageRemembered(key)) return LoadedPreview(image = null, durationMillis = null)
         val cached = cache.entry(key, cacheMaxAge(file))
         if (cached != null) {
             // 命中缓存立即出图，不等同键在途抽取；网络条目不显示时长，命中不补读。
-            extractionFailures.remove(key)
             if (cached.file != null) forgetNoImage(key)
-            return cached.file
+            return LoadedPreview(image = cached.file, durationMillis = null)
         }
         val loaded = cachedOrLoad(
             file = file,
@@ -392,7 +396,7 @@ class CachedMediaPreviewSource(
                         // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
                         LoadedPreview(image = null, durationMillis = null, abandoned = true)
                     } else {
-                        diagnostics.log { "网络封面: ${file.name} 排队 ${queuedMillis}ms 预读解码 ${total - queuedMillis}ms" }
+                        diagnostics.log { "网络封面: ${file.name} 取许可等待 ${queuedMillis}ms 解码 ${total - queuedMillis}ms" }
                         // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
                         currentCoroutineContext().ensureActive()
                         val (completed, bytes) = attempt
@@ -413,7 +417,7 @@ class CachedMediaPreviewSource(
                 }
             },
         )
-        return loaded.image
+        return loaded
     }
 
     /**
@@ -463,11 +467,11 @@ class CachedMediaPreviewSource(
             if (inFlight.putIfAbsent(key, entry) != null) continue
             try {
                 val loaded = try {
-                    loadWithBackoff(file, key, priority, load)
+                    loadOnce(file, load)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
-                    LoadedPreview(image = null, durationMillis = null)
+                    LoadedPreview(image = null, durationMillis = null, failed = true)
                 }
                 if (loaded.abandoned) {
                     // 先移出再取消：等待者不会取到已取消的 Deferred 空转。
@@ -499,39 +503,20 @@ class CachedMediaPreviewSource(
         noImage.forget(key)
     }
 
-    /** 整次抽取失败后按键退避；退避到期才允许下一次真正重试。预取失败不写退避。 */
-    private suspend fun loadWithBackoff(
+    /**
+     * 抽取一次：失败不落缓存、只标记可重试，重试节奏与次数由可见请求调度器安排。
+     * 预取失败同样标记可重试，预取本身不重试，等可见请求到达时再抽。
+     */
+    private suspend fun loadOnce(
         file: MediaFile,
-        key: String,
-        priority: PreviewPriority,
         load: suspend () -> LoadedPreview,
-    ): LoadedPreview {
-        val now = monotonicClockMillis()
-        val previous = extractionFailures[key]
-        if (previous != null && now < previous.retryAtMillis) {
-            return LoadedPreview(image = null, durationMillis = null)
-        }
-        val loaded = try {
-            load()
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Exception) {
-            diagnostics.log { "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName})" }
-            if (priority.isVisible) {
-                val attempts = (previous?.attempts ?: 0) + 1
-                val failedAt = monotonicClockMillis()
-                recordRetry(
-                    failures = extractionFailures,
-                    key = key,
-                    state = RetryState(attempts, failedAt + extractionRetryDelay(attempts)),
-                    now = failedAt,
-                )
-            }
-            return LoadedPreview(image = null, durationMillis = null)
-        }
-        // 放弃不算失败，也不清掉既有退避记录。
-        if (!loaded.abandoned) extractionFailures.remove(key)
-        return loaded
+    ): LoadedPreview = try {
+        load()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Exception) {
+        diagnostics.log { "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName})" }
+        LoadedPreview(image = null, durationMillis = null, failed = true)
     }
 
     /** 记录失败退避；记录数达到上限时先清掉已过期的，再淘汰最早到期的键。 */
@@ -551,12 +536,6 @@ class CachedMediaPreviewSource(
         failures[key] = state
     }
 
-    /** 连续失败按倍数退避，上限为十分钟。 */
-    private fun extractionRetryDelay(attempts: Int): Long {
-        val shift = (attempts - 1).coerceIn(0, 6)
-        return (EXTRACTION_RETRY_BASE_MILLIS shl shift).coerceAtMost(EXTRACTION_RETRY_MAX_MILLIS)
-    }
-
     private data class RetryState(val attempts: Int, val retryAtMillis: Long)
 
     private data class LoadedPreview(
@@ -564,6 +543,8 @@ class CachedMediaPreviewSource(
         val durationMillis: Long?,
         /** 本次结果只给本次调用者，不作为成功结果共享给同键等待者（离屏放弃或时长补读放弃）。 */
         val abandoned: Boolean = false,
+        /** 这一次是失败收尾：不落缓存，交给调度器递进重试。 */
+        val failed: Boolean = false,
     )
 
     /** 同键在途请求：等待者共享同一次抽取结果；可见请求可取消预取 owner。 */
@@ -582,12 +563,6 @@ class CachedMediaPreviewSource(
 
         /** 单次网络提取的等待上限；排队时间不计入。 */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
-
-        /** 整次抽取失败后的首次重试间隔；连续失败按倍数退避。 */
-        private const val EXTRACTION_RETRY_BASE_MILLIS = 30_000L
-
-        /** 整次抽取失败后的最大重试间隔。 */
-        private const val EXTRACTION_RETRY_MAX_MILLIS = 10 * 60 * 1000L
 
         /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
         private const val DURATION_RETRY_BASE_MILLIS = 30_000L
@@ -608,7 +583,7 @@ class CachedMediaPreviewSource(
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
             return CachedMediaPreviewSource(
-                extractor = AndroidMediaPreviewExtractor(appContext, networkReads),
+                extractor = AndroidMediaPreviewExtractor(appContext, networkReads, diagnostics),
                 cache = thumbnailCache(appContext),
                 policy = policy,
                 diagnostics = diagnostics,

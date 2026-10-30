@@ -5,6 +5,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 
@@ -12,6 +13,7 @@ import kotlinx.coroutines.yield
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
  * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
+ * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
@@ -202,7 +204,7 @@ class VisiblePreviewScheduler(
                 if (generation != drainGeneration) return
                 if (!windowKnown || visibleLocations.isEmpty()) return
                 val next = requests.values
-                    .filter { request -> request.job == null && request.file.location in visibleLocations }
+                    .filter { request -> request.isDispatchableLocked() && request.file.location in visibleLocations }
                     .minByOrNull(Request::index)
                     ?: return
                 val attemptId = ++next.attemptId
@@ -226,13 +228,34 @@ class VisiblePreviewScheduler(
             // Error 也按失败收尾，避免 attempt 卡住、结果永不完成。
             EMPTY_PREVIEW
         }
-        synchronized(lock) {
+        val retryAfter: Long? = synchronized(lock) {
             if (!isCurrentAttemptLocked(request, attemptId)) return
-            // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
             request.attemptId++
             request.job = null
-            if (requests[request.file.location] === request) requests.remove(request.file.location)
-            if (!request.deferred.isCompleted) request.deferred.complete(preview)
+            if (preview.retryable && request.retryAttempts < VISIBLE_RETRY_MAX_ATTEMPTS) {
+                // 失败项先跳过：保留 deferred 与订阅，等可见项出完后按递进间隔重试。
+                request.retryAttempts++
+                request.retryPending = true
+                VISIBLE_RETRY_STEP_MILLIS * request.retryAttempts
+            } else {
+                // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
+                if (requests[request.file.location] === request) requests.remove(request.file.location)
+                if (!request.deferred.isCompleted) request.deferred.complete(preview)
+                null
+            }
+        }
+        if (retryAfter != null) scheduleRetry(request, retryAfter)
+    }
+
+    /** 失败项的重试：等 [delayMillis] 后重新可下发；离屏或订阅取消时不再重试。 */
+    private fun scheduleRetry(request: Request, delayMillis: Long) {
+        scope.launch {
+            delay(delayMillis)
+            synchronized(lock) {
+                request.retryPending = false
+                if (closed || request.deferred.isCompleted) return@launch
+            }
+            dispatch()
         }
     }
 
@@ -254,7 +277,7 @@ class VisiblePreviewScheduler(
 
     private fun hasDispatchableLocked(): Boolean =
         visibleLocations.isNotEmpty() &&
-            requests.values.any { request -> request.job == null && request.file.location in visibleLocations }
+            requests.values.any { request -> request.isDispatchableLocked() && request.file.location in visibleLocations }
 
     private class Request(
         val file: MediaFile,
@@ -263,7 +286,15 @@ class VisiblePreviewScheduler(
         var subscribers: Int = 0,
         var attemptId: Long = 0,
         var job: Job? = null,
-    )
+        /** 已安排的失败重试次数，上限 [VISIBLE_RETRY_MAX_ATTEMPTS]。 */
+        var retryAttempts: Int = 0,
+        /** 正在等重试计时；期间不参与下发。 */
+        var retryPending: Boolean = false,
+    ) {
+
+        /** 没有在跑的 attempt，也没有在等重试计时，才算可下发。 */
+        fun isDispatchableLocked(): Boolean = job == null && !retryPending
+    }
 
     private class Attempt(
         val request: Request,
@@ -273,5 +304,11 @@ class VisiblePreviewScheduler(
 
     private companion object {
         val EMPTY_PREVIEW = MediaPreview(image = null, durationMillis = null)
+
+        /** 失败重试的递进步长：第 n 次重试等 n 秒。 */
+        const val VISIBLE_RETRY_STEP_MILLIS = 1_000L
+
+        /** 单个条目的失败重试上限。 */
+        const val VISIBLE_RETRY_MAX_ATTEMPTS = 5
     }
 }

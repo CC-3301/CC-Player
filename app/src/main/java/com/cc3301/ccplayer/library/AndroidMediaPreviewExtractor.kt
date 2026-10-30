@@ -8,6 +8,8 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.core.graphics.get
 import androidx.core.graphics.scale
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -25,10 +27,11 @@ import kotlinx.coroutines.withContext
 class AndroidMediaPreviewExtractor(
     private val context: Context,
     networkReads: NetworkMediaReads? = null,
+    diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : MediaPreviewExtractor {
 
     private val networkPreview = networkReads?.let { reads ->
-        NetworkPreviewExtractor(reads, decoder = AndroidNetworkPreviewDecoder())
+        NetworkPreviewExtractor(reads, decoder = AndroidNetworkPreviewDecoder(), diagnostics = diagnostics)
     }
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = withContext(Dispatchers.IO) {
