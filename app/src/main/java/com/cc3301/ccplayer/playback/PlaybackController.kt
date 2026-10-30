@@ -618,6 +618,8 @@ class PlaybackController(
         // 片尾切集不抓帧：原片已停在末帧，取帧只会把加载往后拖；此时界面按黑底等待。
         if (originAtEnd) {
             cancelSwitchCapture()
+            // 上一条切换遗留的冻结画面要撤掉，否则片尾切集会停在前一集的旧帧上。
+            replaceFreezeFrame(null)
             startSwitchTarget()
         } else {
             captureThenStartSwitch()

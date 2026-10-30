@@ -287,6 +287,26 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a natural end switch drops the stale freeze frame`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        // 新帧还没上屏：上一条切换抓到的冻结画面仍在屏幕上。
+        assertSame(frame, controller.freezeFrame.value)
+        assertFalse(controller.switching.value)
+
+        engine.reportPlaybackEnded()
+
+        // 片尾没有可抓的帧：旧冻结画面撤掉，界面按黑底等待，不停在前一集的旧帧上。
+        assertNull(controller.freezeFrame.value)
+        assertTrue(controller.switching.value)
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
     fun `the target stays paused until its first frame is ready`() = runTest {
         val controller = playingController()
 
