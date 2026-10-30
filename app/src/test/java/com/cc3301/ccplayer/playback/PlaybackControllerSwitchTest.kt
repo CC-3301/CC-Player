@@ -1403,11 +1403,11 @@ class PlaybackControllerSwitchTest {
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
-        // 暂停态已加载的文件也按暂停收尾，冻结画面继续保留。
+        // 暂停态已加载的文件也按暂停收尾；没有后续位置事件，就绪即撤冻结画面。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
-        assertSame(frame, controller.freezeFrame.value)
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test
