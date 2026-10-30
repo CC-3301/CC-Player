@@ -258,6 +258,34 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `加载期跳转不下发 seek`() = runTest {
+        val controller = controller()
+        open(controller)
+
+        controller.seekTo(200_000)
+
+        // 加载期下发会推走本代的续播序号，让就绪判定等不到回执。
+        assertTrue(engine.seekPositions.isEmpty())
+        assertNull(controller.seekSettlement.value)
+        assertEquals(0L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `切集期跳转与收尾都不下发 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.next()
+        assertTrue(controller.switching.value)
+
+        controller.seekTo(200_000)
+        controller.commitSeekPreview()
+
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(60_000L, controller.progress.value.positionMillis)
+        assertTrue(engine.muteCalls.isEmpty())
+    }
+
+    @Test
     fun `dragging during the first load does not preview`() = runTest {
         val controller = controller()
         open(controller)

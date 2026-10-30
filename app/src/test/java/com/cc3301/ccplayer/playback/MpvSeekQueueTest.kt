@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.playback
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -24,11 +25,16 @@ class MpvSeekQueueTest {
         cancelTimeout = { timeoutTask = null },
     )
 
-    /** 在命令线程上执行排队中的下发任务：只有仍是当前在途的那一跳才真正下发。 */
-    private fun runCommandThread() {
+    /** 取走交给命令线程的下发任务；测试自己决定何时执行。 */
+    private fun takeCommands(): List<Pair<Long, Long>> {
         val tasks = commands.toList()
         commands.clear()
-        tasks.forEach { (seekId, _) ->
+        return tasks
+    }
+
+    /** 在命令线程上执行排队中的下发任务：只有仍是当前在途的那一跳才真正下发。 */
+    private fun runCommandThread() {
+        takeCommands().forEach { (seekId, _) ->
             queue.issueIfCurrent(seekId) { issued += seekId }
         }
     }
@@ -167,6 +173,49 @@ class MpvSeekQueueTest {
         staleTimeout?.invoke()
 
         assertEquals(listOf(1L to 1_000L), executed)
+    }
+
+    @Test
+    fun `命令抛异常时这一跳被结清，后续 seek 能继续下发`() {
+        queue.seek(1, 1, 1_000)
+        queue.seek(2, 2, 2_000)
+        val failing = takeCommands()
+
+        // mpv 命令抛异常：这一跳不可能再有回执，按执行完结清，异常照常交给调用方。
+        try {
+            queue.issueIfCurrent(failing.single().first) { throw IllegalStateException("命令失败") }
+        } catch (_: IllegalStateException) {
+        }
+
+        assertEquals(listOf(1L to 1_000L), executed)
+        // 待执行那一跳已补发，不会再卡在「在途但未下发」。
+        val next = takeCommands()
+        assertEquals(listOf(2L), next.map { it.first })
+
+        // 后续 seek 照常下发并按自己的回执结算，落定有出口。
+        queue.issueIfCurrent(next.single().first) { issued += 2L }
+        assertEquals(listOf(2L), issued)
+        assertEquals(2L, queue.onReceipt(2))
+        assertEquals(listOf(1L to 1_000L, 2L to 2_000L), executed)
+    }
+
+    @Test
+    fun `计时器到点时命令还没下发，重新计时且下发后不再补计时器`() {
+        queue.seek(1, 1, 1_000)
+        val beforeIssue = timeoutTask
+
+        // 命令线程还没跑到：到点的计时器不结算这一跳，重新计时等它下发。
+        beforeIssue?.invoke()
+        assertEquals(emptyList<Pair<Long, Long>>(), executed)
+        assertTrue(timeoutTask != null && timeoutTask !== beforeIssue)
+
+        runCommandThread()
+        assertEquals(listOf(1L), issued)
+
+        // 命令已下发后到点：按执行完结算，结算之后不再补一个计时器。
+        timeoutTask?.invoke()
+        assertEquals(listOf(1L to 1_000L), executed)
+        assertNull(timeoutTask)
     }
 
     @Test

@@ -929,9 +929,9 @@ class PlaybackController(
         endSeekPreview(commit = true)
     }
 
-    /** 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入。 */
+    /** 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入；加载期不下发。 */
     fun seekTo(positionMillis: Long) {
-        if (!active) return
+        if (!active || loadPhase != LoadPhase.None) return
         endSeekPreview(commit = true, commitTarget = positionMillis)
     }
 
@@ -992,6 +992,11 @@ class PlaybackController(
         }
         // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复。
         if (target == null) return
+        // 加载期不再下发 seek：会推走本代的续播序号，落定等不到回执。
+        if (loadPhase != LoadPhase.None) {
+            releasePreviewMute()
+            return
+        }
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false

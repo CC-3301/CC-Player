@@ -205,7 +205,8 @@ class MpvPlaybackEngine(
 
     /**
      * 命令线程上真正下发一次 seek：这一跳已不是当前在途就丢弃，迟到任务不打到新文件上。
-     * 队列锁内只登记归属并下发命令；属性读取与诊断写盘在锁外做。
+     * 队列锁内只登记归属并下发命令；诊断属性读取与写盘放在 [seekTimeoutLock] 内与释放互斥。
+     * 命令失败时队列已按失败结清这一跳并补发待执行，这里只收回诊断归属，不再向上抛。
      */
     private fun issueSeekCommand(seekId: Long, positionMillis: Long) {
         var registered: MpvSeekDiagnostics.PendingSeek? = null
@@ -218,10 +219,21 @@ class MpvPlaybackEngine(
                 registered = seekDiagnostics.register(positionMillis, entrySerial)
                 MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
             } ?: return
-            seekDiagnostics.logIssued(positionMillis, serial)
+            logSeekIssued(positionMillis, serial)
         } catch (failure: Throwable) {
             registered?.let { seekDiagnostics.discard(it, failure) }
-            throw failure
+        }
+    }
+
+    /**
+     * 读属性写诊断行：与释放共用 [seekTimeoutLock]，锁内复查 [released] 后不再读已销毁的播放核心。
+     * 诊断关闭时不取锁、不读属性。
+     */
+    private fun logSeekIssued(targetMillis: Long, serial: Int) {
+        if (!diagnostics.enabled) return
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekDiagnostics.logIssued(targetMillis, serial)
         }
     }
 
