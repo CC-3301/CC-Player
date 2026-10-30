@@ -351,23 +351,32 @@ class LoopbackStreamServer(
             source?.let { current -> if (!stale) return current }
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
+                // 陈旧标记的唯一消费点：本次请求读到就清掉，并决定建源后是否还要重建一次。
+                var rebuildAfterOpen = consumeStale()
                 source?.let { current ->
-                    if (!stale) return current
-                    // 陈旧：旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
-                    stale = false
+                    if (!rebuildAfterOpen) return current
+                    // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾；紧接着建出来的就是新源。
                     source = null
                     runCatching { current.close() }
+                    rebuildAfterOpen = false
                 }
-                // 建源可能阻塞较久：这期间收到的陈旧请求要在建好后立即作废并重建一次。
+                // 建源可能阻塞较久：建源前或建源期间收到的陈旧请求让这一条立即作废并重建一次；
+                // 重建期间再来的标记不在这里循环，留给下一次请求从同一处消费。
                 var created = open()
-                if (stale) {
-                    stale = false
+                if (rebuildAfterOpen || consumeStale()) {
                     runCatching { created.close() }
                     created = open()
                 }
                 source = created
                 return created
             }
+        }
+
+        /** 消费一次陈旧标记：读到就清掉并返回真。所有路径的陈旧判定都只经过这里。 */
+        private fun consumeStale(): Boolean {
+            if (!stale) return false
+            stale = false
+            return true
         }
 
         /**

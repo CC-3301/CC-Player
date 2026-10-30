@@ -212,11 +212,46 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `二次建源期间再收到丢弃标记，下一次请求消费`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val second = RecordingByteSource(payload)
+        val third = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/二次建源.mkv") {
+            opens++
+            when (opens) {
+                // 首次建源期间落一次丢弃：建好后立即重建一次。
+                1 -> {
+                    server.discardSources()
+                    first
+                }
+                // 二次建源期间再落一次：不在这里循环，留给下一次请求消费。
+                2 -> {
+                    server.discardSources()
+                    second
+                }
+                else -> third
+            }
+        }
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+
+        // 下一次请求消费遗留的标记：关闭二次建出来的源，再建一次。
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(3, opens)
+        assertTrue(second.closed)
+        assertFalse(third.closed)
+    }
+
+    @Test
     fun `读取抛 Error 时不当成源失效，下一次请求沿用同一条源`() {
         var opens = 0
         val target = server.serve("smb://nas/media/错误不失效.mkv") {
             opens++
-            FailingByteSource(AssertionError("读取失败"))
+            FailingByteSource(FakeError("读取失败"))
         }
 
         assertEquals(200, httpRequest(target).statusCode)
@@ -259,7 +294,7 @@ class LoopbackStreamServerTest {
     @Test
     fun `读取抛 Error 后监听仍存活`() {
         val failing = server.serve("smb://nas/media/读取错误.mkv") {
-            FailingByteSource(AssertionError("读取失败"))
+            FailingByteSource(FakeError("读取失败"))
         }
 
         assertEquals(200, httpRequest(failing).statusCode)
@@ -268,7 +303,7 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `连接边界直接调用时运行时异常不逃逸`() {
-        listOf(IllegalStateException("Timeout expired"), AssertionError("读取失败"))
+        listOf(IllegalStateException("Timeout expired"), FakeError("读取失败"))
             .forEachIndexed { index, failure ->
                 val target = server.serve("smb://nas/media/边界-$index.mkv") {
                     FailingByteSource(failure)
@@ -331,7 +366,7 @@ class LoopbackStreamServerTest {
         val fresh = LoopbackStreamServer(
             acceptSocket = {
                 gate.await()
-                throw AssertionError("accept 失败")
+                throw FakeError("accept 失败")
             },
         )
         val address = fresh.serve("key") { RecordingByteSource(payload) }
@@ -608,6 +643,9 @@ class ShortByteSource(private val bytes: ByteArray, private val readable: Int = 
 
     override fun close() = Unit
 }
+
+/** 测试用 Error 子类：与非异常的断言失败区分开。 */
+class FakeError(message: String) : Error(message)
 
 /** 每次读取都抛出指定异常，模拟网络读超时等失败。 */
 class FailingByteSource(private val failure: Throwable) : ByteSource {

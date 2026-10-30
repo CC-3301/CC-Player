@@ -788,6 +788,27 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `放弃落定后普通 seek 落定不额外恢复播放`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // keep-open 播完后引擎回的暂停在落定在途时被吞掉。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 新拖动丢弃这次落定：吞掉的暂停回声随落定一起丢弃。
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
+        controller.seekTo(300_000)
+        engine.reportSeekExecuted()
+        engine.reportSeekExecuted()
+
+        // 普通 seek 的落定不替用户恢复播放。
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
     fun `预览目标落在末尾时收进安全余量`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)

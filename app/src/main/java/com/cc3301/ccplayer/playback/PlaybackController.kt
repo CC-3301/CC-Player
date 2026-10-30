@@ -1077,6 +1077,8 @@ class PlaybackController(
     /** 放弃等待中的落定：新拖动、新加载或停止后不再保留；静音由调用路径统一恢复。 */
     private fun clearLandingSeek() {
         pendingLanding = null
+        // 吞掉的暂停回声属于这条落定：落定被丢弃就一起丢弃，不留到之后的落定里补恢复。
+        ignoredPauseEcho = false
     }
 
     /** 预览静音的唯一写入入口：整段拖动只静音一次，逐次 seek 各自淡入会造成断续爆音。 */
@@ -1441,7 +1443,6 @@ class PlaybackController(
         clearPendingSwitchFrame()
         // 收起预览并恢复静音：进度不再被拖动目标钉住。
         endSeekPreview(commit = false)
-        ignoredPauseEcho = false
         active = false
         updateState(PlaybackState.Ended)
     }
