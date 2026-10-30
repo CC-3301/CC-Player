@@ -73,7 +73,10 @@ data class MediaPreviewExtraction(val imageBytes: ByteArray?, val duration: Prev
  */
 interface MediaPreviewExtractor {
 
-    /** 取预览图字节：视频按策略抽帧，音频是文件内嵌封面；没有可用图时返回 null，读取失败抛出异常。 */
+    /**
+     * 取预览图字节：视频按策略抽帧，音频是文件内嵌封面；没有可用图时返回 null，读取失败抛出异常。
+     * 只用于本地文件；网络条目只走 [prepareNetworkPreview]。
+     */
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray?
 
     /**
@@ -119,9 +122,10 @@ data class ThumbnailPolicy(
  * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
- * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，预取失败不写退避、也不记无图，
+ * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，网络预取失败不写退避、也不记无图，
  * 回到可见后重新抽取。
- * 成功封面落盘复用；可见请求确认的失败与无图结果只在本次运行内记忆，网络预取不记无图。
+ * 成功封面落盘复用；网络路径只有可见请求确认的无图才在本次运行内记忆，预取不记无图；
+ * 本地抽取失败仍按既有规则在本次运行内记住无图。
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,

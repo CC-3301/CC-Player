@@ -35,9 +35,6 @@ class AndroidMediaPreviewExtractor(
     }
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = withContext(Dispatchers.IO) {
-        if (file.source == MediaSource.Network) {
-            return@withContext networkPreview?.imageBytes(file, targetWidth)
-        }
         withRetriever(file) { retriever ->
             when (mediaKindOf(file.name)) {
                 MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
