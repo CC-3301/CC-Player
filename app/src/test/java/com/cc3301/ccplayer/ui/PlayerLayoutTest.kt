@@ -125,9 +125,9 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `缓冲文字 2dp scrim 85 个百分点描边`() {
-        assertEquals(2.dp, PlayerBufferingTextStrokeWidth)
-        assertEquals(0.85f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)
+    fun `缓冲文字 1dp scrim 60 个百分点描边`() {
+        assertEquals(1.dp, PlayerBufferingTextStrokeWidth)
+        assertEquals(0.60f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)
     }
 
     @Test

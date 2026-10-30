@@ -290,7 +290,7 @@ private fun BufferingIndicator(modifier: Modifier = Modifier) {
         )
         val text = stringResource(R.string.player_buffering)
         val style = MaterialTheme.typography.bodyMedium
-        // Stroke 以字形中心为轴，内侧一半会被填充层盖住；按两倍宽度绘制，保证可见描边为 2dp。
+        // Stroke 以字形中心为轴，内侧一半会被填充层盖住；按两倍宽度绘制，露在外侧的可见描边等于常量宽度。
         val strokeWidth = with(LocalDensity.current) { (PlayerBufferingTextStrokeWidth * 2f).toPx() }
         Box(modifier = Modifier.padding(top = AppSpacing.Sm)) {
             // 先画描边层，再画填充层。

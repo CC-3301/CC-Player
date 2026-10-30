@@ -167,11 +167,11 @@ val PlayerPressRippleColor = Color.White
 /** 播放页按压涟漪不透明度。 */
 const val PLAYER_PRESS_RIPPLE_ALPHA = 0.2f
 
-/** 缓冲文字描边宽度；描边以字形中心为轴，绘制时按两倍宽度得到可见外沿。 */
-val PlayerBufferingTextStrokeWidth = 2.dp
+/** 缓冲文字可见描边宽度；描边以字形中心为轴，按两倍宽度绘制，露在字形外侧的即此宽度。 */
+val PlayerBufferingTextStrokeWidth = 1.dp
 
 /** 缓冲文字描边（深色 scrim）不透明度。 */
-const val PLAYER_BUFFERING_TEXT_SCRIM_ALPHA = 0.85f
+const val PLAYER_BUFFERING_TEXT_SCRIM_ALPHA = 0.60f
 
 /** 缓冲文字描边颜色。 */
 val PlayerBufferingTextScrimColor = Color(0xFF020509)
