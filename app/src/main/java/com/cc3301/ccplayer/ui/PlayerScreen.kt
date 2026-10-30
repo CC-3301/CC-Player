@@ -455,19 +455,18 @@ fun PlayerScreen(
             }
         }) {
         val density = LocalDensity.current
+        // 冻结画面保留到新帧上屏；撤帧与换比例同时生效，画面不会先缩回再变一次。
+        val freezeOverlayVisible = showFreezeOverlay(freezeFrame != null, holdBlack)
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
-            // 切集期间新文件比例未知，沿用原片比例，不把视频区铺满全屏。
-            videoAspectRatio = if (switching) {
-                switchFreezeAspectRatio(
-                    videoAspectRatio = videoAspectRatio,
-                    freezeFrameWidth = freezeFrame?.width ?: 0,
-                    freezeFrameHeight = freezeFrame?.height ?: 0,
-                )
-            } else {
-                videoAspectRatio
-            },
+            // 冻结画面在屏上时沿用原片比例，新文件的比例不参与，不把视频区铺满全屏。
+            videoAspectRatio = frozenVideoAspectRatio(
+                videoAspectRatio = videoAspectRatio,
+                freezeOverlayVisible = freezeOverlayVisible,
+                freezeFrameWidth = freezeFrame?.width ?: 0,
+                freezeFrameHeight = freezeFrame?.height ?: 0,
+            ),
         )
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
@@ -503,9 +502,10 @@ fun PlayerScreen(
                     .background(Color.Black),
             )
         }
-        if (switching && freezeFrame != null) {
+        val freezeBitmap = freezeFrame
+        if (freezeOverlayVisible && freezeBitmap != null) {
             Image(
-                bitmap = freezeFrame.asImageBitmap(),
+                bitmap = freezeBitmap.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 // 冻结画面按视频区绘制：保持原片比例，不居中放大。
