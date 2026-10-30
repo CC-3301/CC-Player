@@ -131,7 +131,8 @@ class MpvPlaybackDiagnosticsTest {
         val diagnostics = enabledDiagnostics(sink)
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
 
-        seekDiagnostics.issueSeek(targetMillis = 30_000, serial = 7) {}
+        seekDiagnostics.register(targetMillis = 30_000, serial = 7)
+        seekDiagnostics.logIssued(targetMillis = 30_000, serial = 7)
         seekDiagnostics.onSeekEvent()
         seekDiagnostics.onPlaybackRestart()
 
@@ -159,8 +160,10 @@ class MpvPlaybackDiagnosticsTest {
         val diagnostics = enabledDiagnostics(sink)
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {}
-        seekDiagnostics.issueSeek(targetMillis = 60_000, serial = 2) {}
+        listOf(10_000L to 1, 60_000L to 2).forEach { (target, serial) ->
+            seekDiagnostics.register(targetMillis = target, serial = serial)
+            seekDiagnostics.logIssued(targetMillis = target, serial = serial)
+        }
 
         seekDiagnostics.onSeekEvent()
         val first = sink.lines.last()
@@ -189,11 +192,10 @@ class MpvPlaybackDiagnosticsTest {
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
         var observed: String? = null
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {
-            // 模拟事件线程在命令返回前到达。
-            seekDiagnostics.onSeekEvent()
-            observed = sink.lines.last()
-        }
+        seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        // 模拟事件线程在命令返回前到达。
+        seekDiagnostics.onSeekEvent()
+        observed = sink.lines.last()
 
         assertTrue(observed!!.startsWith("seek 后(SEEK): 目标=10000ms 序号=1"))
         assertTrue(observed!!.contains("排队数=0"))
@@ -205,8 +207,8 @@ class MpvPlaybackDiagnosticsTest {
         val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher())
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {}
-        seekDiagnostics.issueSeek(targetMillis = 20_000, serial = 2) {}
+        seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.register(targetMillis = 20_000, serial = 2)
         diagnostics.enabled = true
 
         seekDiagnostics.onSeekEvent()
@@ -219,17 +221,15 @@ class MpvPlaybackDiagnosticsTest {
     }
 
     @Test
-    fun `下发命令抛异常时回滚登记且下一事件写无对应目标`() {
+    fun `命令失败时回滚登记且下一事件写无对应目标`() {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = enabledDiagnostics(sink)
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
         val original = IllegalStateException("seek 命令失败")
 
-        val thrown = runCatching {
-            seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) { throw original }
-        }.exceptionOrNull()
+        val registered = seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.discard(registered, original)
 
-        assertSame(original, thrown)
         assertTrue(sink.lines.any { it.startsWith("seek 下发失败: 目标=10000ms 序号=1") })
 
         seekDiagnostics.onSeekEvent()
@@ -242,21 +242,17 @@ class MpvPlaybackDiagnosticsTest {
     }
 
     @Test
-    fun `命令内消费后再抛错不回退 restart 归属`() {
+    fun `事件先消费后再回滚不回退 restart 归属`() {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = enabledDiagnostics(sink)
         val seekDiagnostics = newSeekDiagnostics(diagnostics)
         val original = IllegalStateException("seek 命令失败")
 
-        val thrown = runCatching {
-            seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {
-                // SEEK 事件先消费登记项，命令随后才抛错。
-                seekDiagnostics.onSeekEvent()
-                throw original
-            }
-        }.exceptionOrNull()
+        val registered = seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        // SEEK 事件先消费登记项，命令随后才失败。
+        seekDiagnostics.onSeekEvent()
+        seekDiagnostics.discard(registered, original)
 
-        assertSame(original, thrown)
         assertTrue(sink.lines.any { it.startsWith("seek 后(SEEK): 目标=10000ms 序号=1") })
         assertTrue(sink.lines.any { it.startsWith("seek 下发失败: 目标=10000ms 序号=1") })
 
@@ -326,17 +322,19 @@ class MpvPlaybackDiagnosticsTest {
     }
 
     @Test
-    fun `日志写入抛异常不影响 seek 命令执行`() {
-        var commandRan = false
+    fun `日志写入抛异常不外抛`() {
         val seekDiagnostics = MpvSeekDiagnostics(
             diagnostics = ThrowingDiagnosticsLog(),
             snapshot = { AudioDebugSnapshot() },
             durationSeconds = { 120.0 },
         )
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) { commandRan = true }
-
-        assertTrue(commandRan)
+        seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.logIssued(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.discard(
+            seekDiagnostics.register(targetMillis = 20_000, serial = 2),
+            IllegalStateException("seek 命令失败"),
+        )
     }
 
     @Test
@@ -350,7 +348,8 @@ class MpvPlaybackDiagnosticsTest {
             durationSeconds = { durationSeconds },
         )
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {}
+        seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.logIssued(targetMillis = 10_000, serial = 1)
         durationSeconds = 120.0
         seekDiagnostics.onSeekEvent()
 
@@ -380,7 +379,8 @@ class MpvPlaybackDiagnosticsTest {
             },
         )
 
-        seekDiagnostics.issueSeek(targetMillis = 10_000, serial = 1) {}
+        seekDiagnostics.register(targetMillis = 10_000, serial = 1)
+        seekDiagnostics.logIssued(targetMillis = 10_000, serial = 1)
         seekDiagnostics.onSeekEvent()
         seekDiagnostics.onPlaybackRestart()
         seekDiagnostics.reset()

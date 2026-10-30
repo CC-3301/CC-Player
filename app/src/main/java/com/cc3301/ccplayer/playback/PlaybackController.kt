@@ -331,8 +331,8 @@ class PlaybackController(
     /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
     private var seekPendingForReady = false
 
-    /** 续播 seek 的身份；ready 带回的 seekId 不小于它才算这一跳之后的信号。 */
-    private var requiredSeekId = 0L
+    /** 续播 seek 在本代加载内的序号；ready 带回的序号与它相等才算这一跳之后的信号。 */
+    private var requiredSeekSerial = 0
 
     /** 续播位置是否已查明（或本次从开始位置播放，无需查询）；未查明前不能判定就绪。 */
     private var resumeLookupDone = true
@@ -749,7 +749,7 @@ class PlaybackController(
         resumeLookupDone = true
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekId = 0L
+        requiredSeekSerial = 0
         watchedToEnd = false
         pausedAtEpisodeEnd = false
         mediaLoaded = false
@@ -951,7 +951,7 @@ class PlaybackController(
     private fun issuePreviewSeek(target: Long) {
         acquirePreviewMute()
         lastPreviewSeekTargetMillis = target
-        lastPreviewSeekId = engine.seekTo(target)
+        lastPreviewSeekId = engine.seekTo(target).seekId
     }
 
     /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
@@ -985,11 +985,13 @@ class PlaybackController(
             releasePreviewMute()
             return
         }
-        // 没有落点或会话已结束：静音在这里收掉；等待中的落定仍靠它自己的回执放开。
-        if (!active || target == null) {
+        // 会话已结束：没有落定可等，静音在这里收掉。
+        if (!active) {
             releasePreviewMute()
             return
         }
+        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复。
+        if (target == null) return
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
@@ -999,7 +1001,7 @@ class PlaybackController(
         ) {
             lastIssuedSeekId
         } else {
-            engine.seekTo(target)
+            engine.seekTo(target).seekId
         }
         landSeek(target, seekId)
     }
@@ -1141,13 +1143,14 @@ class PlaybackController(
     /**
      * 首帧可显示后才算就绪。播放中加载以 PLAYBACK_RESTART 为准；
      * 暂停态只有 VIDEO_RECONFIG，它可能早于首帧上屏，切集要等播放位置真正前进才算数。
-     * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号不早于该 seek 的信号。
+     * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号等于该 seek 的信号，
+     * 就绪判定按加载代际与该代序号，不与 seekId 混用。
      * 真正就绪时才停掉缓冲计时并撤冻结层；等待出帧不设独立短超时。
      */
     override fun onFirstFrameReady(
         needsFrameConfirmation: Boolean,
         targetUrl: String?,
-        seekId: Long?,
+        seekSerial: Int,
         loadToken: Int,
     ) {
         if (!active || !mediaLoaded) return
@@ -1165,8 +1168,8 @@ class PlaybackController(
             return
         }
         if (seekPendingForReady) {
-            // 只认续播 seek 之后的那一跳：回执身份更早、或这条信号不对应任何 seek，都不算就绪。
-            if (seekId == null || seekId < requiredSeekId) return
+            // 只认续播那一跳自己的序号：更早的加载 ready 与更晚的 seek 都不算就绪。
+            if (seekSerial != requiredSeekSerial) return
             seekPendingForReady = false
         }
         handleReadySignal(phase, needsFrameConfirmation)
@@ -1828,7 +1831,7 @@ class PlaybackController(
         loadTargetUrl = null
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekId = 0L
+        requiredSeekSerial = 0
         resetSeekForNewLoad()
         resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
@@ -1849,7 +1852,7 @@ class PlaybackController(
         loadDurationMillis = 0
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekId = 0L
+        requiredSeekSerial = 0
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
     }
 
@@ -1906,7 +1909,7 @@ class PlaybackController(
         }
     }
 
-    /** 续播 seek 必须在就绪前发出；发出后只接受序号不早于它的 ready。 */
+    /** 续播 seek 必须在就绪前发出；发出后只认序号等于它的 ready，更晚的 seek 不能顶替。 */
     private fun applyResumePosition() {
         if (!resumeLookupDone) return
         val position = resumePositionMillis ?: return
@@ -1916,7 +1919,7 @@ class PlaybackController(
         loadStartPositionMillis = position
         if (loadPhase != LoadPhase.None) {
             seekPendingForReady = true
-            requiredSeekId = engine.seekTo(position)
+            requiredSeekSerial = engine.seekTo(position).serial
         } else {
             engine.seekTo(position)
         }
@@ -1989,11 +1992,11 @@ class PlaybackController(
         override fun onFirstFrameReady(
             needsFrameConfirmation: Boolean,
             targetUrl: String?,
-            seekId: Long?,
+            seekSerial: Int,
             loadToken: Int,
         ) {
             scope.launch {
-                target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekId, loadToken)
+                target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekSerial, loadToken)
             }
         }
 

@@ -812,22 +812,25 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `落定等回执时再次收尾，静音在早退分支收掉`() = runTest {
+    fun `落定等回执期间静音保持，结算时只淡入一次`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
+        val fadesBeforePreview = engine.fadeInDurations.size
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
         controller.commitSeekPreview()
         assertEquals(listOf(true), engine.muteCalls)
 
-        // 没有预览可收尾：静音在这里收掉，等待中的落定仍靠它自己的回执。
+        // 落定还在等回执：再收尾一次没有新落点，不能提前恢复静音让旧位置满音量播出。
         controller.commitSeekPreview()
-        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(listOf(true), engine.muteCalls)
+        assertEquals(fadesBeforePreview, engine.fadeInDurations.size)
         assertNull(controller.seekSettlement.value)
 
         engine.reportFirstFrameReady()
         assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
-        // 结算不重复恢复静音。
+        // 结算才恢复静音并淡入，各一次。
         assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
     }
 
     private fun TestScope.controller(): PlaybackController = PlaybackController(

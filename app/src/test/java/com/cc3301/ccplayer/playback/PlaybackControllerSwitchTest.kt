@@ -1748,6 +1748,31 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a real ready after the resume seek timed out still counts as ready`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        assertEquals(20_000L, engine.seekPositions.last())
+
+        // 续播 seek 超时：引擎按执行完处理并回报，真正的 ready 之后才到。
+        engine.reportSeekExecuted()
+        assertTrue(controller.switching.value)
+
+        // 真实 ready 带的是续播那一跳的序号：不能因为晚于超时就被判失败。
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
     fun `readiness waits for the resume lookup so the seek happens first`() = runTest {
         progress.records["root/ep1.mkv"] = MediaProgress("root/ep1.mkv", 30_000, 600_000, 0)
         progress.holdFinds()
