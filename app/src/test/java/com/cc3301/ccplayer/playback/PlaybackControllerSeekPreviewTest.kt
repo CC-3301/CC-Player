@@ -750,6 +750,44 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `普通 seek 落到片尾仍触发自动连播`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 通知栏或手动跳转不是预览：它的落定在途不能拦住播完判定。
+        controller.seekTo(599_000)
+        assertNull(controller.seekPreviewMillis.value)
+
+        engine.reportPlaybackEnded()
+
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `预览落定期间引擎回的暂停不压成暂停态`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 598_000)
+        controller.commitSeekPreview()
+        val startedLoads = engine.startedUrls.size
+
+        // keep-open 播完后引擎先报 eof，再回一条暂停；这条暂停不是用户意图。
+        engine.reportPlaybackEnded()
+        engine.reportPauseChanged(true)
+
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 落定执行完按播放意图恢复：原本在播放就继续播。
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
     fun `预览目标落在末尾时收进安全余量`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)

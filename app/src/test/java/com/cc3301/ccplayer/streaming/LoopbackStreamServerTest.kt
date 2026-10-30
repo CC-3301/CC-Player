@@ -175,6 +175,58 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `首次请求前丢弃时建好源立即作废并重建一次`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val second = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/首次建源.mkv") {
+            opens++
+            if (opens == 1) first else second
+        }
+
+        // 还没有源时也照打陈旧标记：首次建源与退后台并发不能漏。
+        server.discardSources()
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+    }
+
+    @Test
+    fun `建源期间收到丢弃标记时建好后立即重建一次`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val second = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/建源并发.mkv") {
+            opens++
+            // 模拟首次建源阻塞期间退到后台。
+            if (opens == 1) server.discardSources()
+            if (opens == 1) first else second
+        }
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+    }
+
+    @Test
+    fun `读取抛 Error 时不当成源失效，下一次请求沿用同一条源`() {
+        var opens = 0
+        val target = server.serve("smb://nas/media/错误不失效.mkv") {
+            opens++
+            FailingByteSource(AssertionError("读取失败"))
+        }
+
+        assertEquals(200, httpRequest(target).statusCode)
+        assertEquals(200, httpRequest(target).statusCode)
+
+        // Error 不废弃字节源：下一次请求不再重新建立。
+        assertEquals(1, opens)
+    }
+
+    @Test
     fun `迟到的失败不关掉并发重建出来的新源`() {
         var opens = 0
         lateinit var target: String

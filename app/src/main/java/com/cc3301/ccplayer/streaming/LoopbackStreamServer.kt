@@ -219,7 +219,12 @@ class LoopbackStreamServer(
             val read = try {
                 source.readAt(position, buffer, 0, wanted)
             } catch (failure: Exception) {
+                // 读取失败按原样废弃这条源，异常照旧向上抛。
                 entry.invalidate(source)
+                throw failure
+            } catch (failure: Error) {
+                // Error 不当作源失效：只记一行再抛，避免把 Error 当成源坏。
+                runCatching { System.err.println("回环流读取失败: $failure") }
                 throw failure
             }
             if (read <= 0) {
@@ -353,14 +358,24 @@ class LoopbackStreamServer(
                     source = null
                     runCatching { current.close() }
                 }
-                stale = false
-                return open().also { source = it }
+                // 建源可能阻塞较久：这期间收到的陈旧请求要在建好后立即作废并重建一次。
+                var created = open()
+                if (stale) {
+                    stale = false
+                    runCatching { created.close() }
+                    created = open()
+                }
+                source = created
+                return created
             }
         }
 
-        /** 打陈旧标记：不关闭、不取锁，正在进行的响应不受影响。 */
+        /**
+         * 打陈旧标记：不关闭、不取锁，正在进行的响应不受影响。
+         * 还没有建立源时也照打：首次建源与退后台并发时，这次请求不能漏。
+         */
         fun markStale() {
-            if (source != null) stale = true
+            stale = true
         }
 
         /**
