@@ -528,10 +528,11 @@ class PlaybackControllerSwitchTest {
 
         assertEquals(20_000L, engine.seekPositions.last())
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial - 1)
+        // 这条信号不对应任何 seek：它只是加载自身的结果，不能结束切集。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertTrue(controller.switching.value)
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
     }
@@ -1398,7 +1399,7 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         assertTrue(controller.switching.value)
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -1500,7 +1501,7 @@ class PlaybackControllerSwitchTest {
         controller.next()
         engine.reportFileLoaded()
         engine.reportPositionChanged(20_000, 600_000)
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
 
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
@@ -1516,7 +1517,7 @@ class PlaybackControllerSwitchTest {
         controller.pause()
         engine.reportFileLoaded()
         engine.reportPositionChanged(30_000, 600_000)
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(30_000L, controller.progress.value.positionMillis)
@@ -1734,15 +1735,14 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
 
         assertEquals(20_000L, engine.seekPositions.last())
-        val seekSerial = engine.currentSeekSerial
 
-        // seek 之前的信号序号更小：不能结束加载。
-        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
+        // 这条信号不对应任何 seek：它只是加载自身的结果，不能结束加载。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        // seek 之后引擎会再次上报 PLAYBACK_RESTART，这一条才算就绪。
-        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        // 续播 seek 执行后引擎会再次上报 PLAYBACK_RESTART，这一条才算就绪。
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -1766,13 +1766,13 @@ class PlaybackControllerSwitchTest {
         runCurrent()
 
         assertEquals(30_000L, engine.seekPositions.last())
-        val seekSerial = engine.currentSeekSerial
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
+        // 不对应续播 seek 的信号不算数。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        engine.reportFirstFrameReady()
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
 

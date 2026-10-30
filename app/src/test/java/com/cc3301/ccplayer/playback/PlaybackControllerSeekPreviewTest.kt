@@ -523,12 +523,14 @@ class PlaybackControllerSeekPreviewTest {
         controller.commitSeekPreview()
         assertEquals(listOf(true), engine.muteCalls)
 
-        // 引擎在途超时：视为这一跳已执行并补发待执行目标。
+        // 引擎在途超时：视为这一跳已执行并补发待执行目标，回报带的是那一跳自己的身份。
         engine.reportSeekExecuted()
         assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+        assertEquals(listOf(1L to 70_000L), engine.seekExecutions)
         assertNull(controller.seekSettlement.value)
 
         engine.reportSeekExecuted()
+        assertEquals(listOf(1L to 70_000L, 2L to 120_000L), engine.seekExecutions)
         assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
         assertEquals(listOf(true, false), engine.muteCalls)
         assertNull(engine.pendingSeekMillis)
@@ -623,7 +625,7 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `跨集后引擎序号归零，落定仍按目标毫秒匹配`() = runTest {
+    fun `跨集后落定只认新代自己下发的 seek`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
@@ -631,7 +633,7 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportFirstFrameReady()
         val previous = controller.seekSettlement.value ?: error("第一次落定没有通知")
 
-        // 切到第二集：引擎的 seek 序号按加载归零，落定不能沿用旧回报。
+        // 切到第二集：引擎作废上一代在途与待执行的 seek，落定只认新代自己那一跳。
         controller.next()
         engine.reportMediaLoaded()
         engine.reportPositionChanged(10_000, 600_000)
@@ -696,6 +698,136 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true, false), engine.muteCalls)
         assertEquals(500_000L, controller.progress.value.positionMillis)
         assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
+    fun `拖回同一毫秒重新下发时，旧回报不结算新的一跳`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 第一次拖到 2:00 并让它执行完。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportSeekExecuted()
+        val firstSeekId = engine.seekExecutions.single().first
+
+        // 再拖到 3:00（在途），随后拖回 2:00 松手：目标毫秒与第一次相同，但是新的一跳。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 180_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        assertEquals(listOf(120_000L, 180_000L), engine.seekPositions)
+        assertTrue(engine.currentSeekId > firstSeekId)
+        // 第一跳已经执行完，但落定认的是新的一跳，不能拿旧回报当场结算。
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportSeekExecuted()
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportSeekExecuted()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `不是本代那一跳的回执既不结算也不改写执行身份`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportSeekExecuted()
+
+        // 旧代或旧跳的迟到回执：既不是当前预览那一跳，也不是等待中的落定。
+        engine.reportSeekExecuted(seekId = 99, targetMillis = 500_000)
+        assertNull(controller.seekSettlement.value)
+
+        // 复用的那一跳此前已回报过执行：落定当场结算，说明迟到回执没有改写当前代的执行身份。
+        controller.commitSeekPreview()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(listOf(true, false), engine.muteCalls)
+    }
+
+    @Test
+    fun `切集后到达的旧代回执不结算新代的落定`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        val oldSeekId = engine.currentSeekId
+
+        // 切集插在在途与下发之间：上一代的目标作废，新一集重新拖一次。
+        controller.next()
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(10_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 90_000)
+        controller.commitSeekPreview()
+
+        // 上一代的迟到回执不得结算这一代的落定。
+        engine.reportSeekExecuted(seekId = oldSeekId, targetMillis = 120_000)
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportSeekExecuted()
+        assertEquals(90_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `预览中播放失败会恢复静音，之后的收尾不再重复写`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val fadesBeforePreview = engine.fadeInDurations.size
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 播放中出错：会话结束，声音必须恢复，不能留在静音。
+        engine.reportPlaybackFailed()
+
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(fadesBeforePreview, engine.fadeInDurations.size)
+
+        // 结束后的收尾走同一条出口：不重复恢复，也不落定。
+        controller.commitSeekPreview()
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertNull(controller.seekSettlement.value)
+    }
+
+    @Test
+    fun `旧跳的回执迟到时不结算已下发的新一跳`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 第一跳执行完，记下它的身份。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportSeekExecuted()
+        val oldSeekId = engine.seekExecutions.single().first
+
+        // 新的一跳已下发，落定正在等它自己的回执。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 240_000)
+        controller.commitSeekPreview()
+
+        // 旧跳的回执这时才到：不得结算新一跳的落定。
+        engine.reportSeekExecuted(seekId = oldSeekId, targetMillis = 120_000)
+        assertNull(controller.seekSettlement.value)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        engine.reportSeekExecuted()
+        assertEquals(240_000L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(listOf(true, false), engine.muteCalls)
+    }
+
+    @Test
+    fun `落定等回执时再次收尾，静音在早退分支收掉`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 没有预览可收尾：静音在这里收掉，等待中的落定仍靠它自己的回执。
+        controller.commitSeekPreview()
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+        // 结算不重复恢复静音。
+        assertEquals(listOf(true, false), engine.muteCalls)
     }
 
     private fun TestScope.controller(): PlaybackController = PlaybackController(

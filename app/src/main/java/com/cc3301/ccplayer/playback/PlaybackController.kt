@@ -80,11 +80,14 @@ class PlaybackController(
     /** 最后一次下发的预览 seek 目标；收尾目标与它相差不足死区时复用，不重发。 */
     private var lastPreviewSeekTargetMillis: Long? = null
 
-    /** 播放核心回报的最后一条已执行 seek 目标；落定只按目标毫秒确认，不按 seek 序号。 */
-    private var lastExecutedSeekMillis: Long? = null
+    /** 最后一次下发的预览 seek 身份；死区复用时落定要认的是这一跳。 */
+    private var lastPreviewSeekId: Long? = null
+
+    /** 播放核心回报的最后一条本代 seek 身份；落定只按 seekId 确认，不按目标毫秒。 */
+    private var lastExecutedSeekId: Long? = null
 
     /** 已下发、等播放核心回报执行的收尾 seek；执行前进度停在这个目标上。 */
-    private var landingSeek: LandingSeek? = null
+    private var pendingLanding: LandingSeek? = null
 
     /** 预览 seek 期间音频已静音；进入预览时置位，恢复只走 [releasePreviewMute]。 */
     private var previewMuted = false
@@ -328,8 +331,8 @@ class PlaybackController(
     /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
     private var seekPendingForReady = false
 
-    /** 续播 seek 的序号；ready 的序号不小于它才算 seek 之后的信号。 */
-    private var requiredSeekSerial = 0
+    /** 续播 seek 的身份；ready 带回的 seekId 不小于它才算这一跳之后的信号。 */
+    private var requiredSeekId = 0L
 
     /** 续播位置是否已查明（或本次从开始位置播放，无需查询）；未查明前不能判定就绪。 */
     private var resumeLookupDone = true
@@ -746,7 +749,7 @@ class PlaybackController(
         resumeLookupDone = true
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekSerial = 0
+        requiredSeekId = 0L
         watchedToEnd = false
         pausedAtEpisodeEnd = false
         mediaLoaded = false
@@ -948,7 +951,7 @@ class PlaybackController(
     private fun issuePreviewSeek(target: Long) {
         acquirePreviewMute()
         lastPreviewSeekTargetMillis = target
-        engine.seekTo(target)
+        lastPreviewSeekId = engine.seekTo(target)
     }
 
     /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
@@ -972,46 +975,50 @@ class PlaybackController(
         previewEndJob = null
         val target = commitTarget ?: _seekPreviewMillis.value
         val lastIssuedTarget = lastPreviewSeekTargetMillis
+        val lastIssuedSeekId = lastPreviewSeekId
         _seekPreviewMillis.value = null
         lastPreviewSeekTargetMillis = null
+        lastPreviewSeekId = null
         if (!commit) {
             // 取消或会话结束：落定作废，静音在这里恢复。
             clearLandingSeek()
             releasePreviewMute()
             return
         }
-        // 没有预览可收尾：静音由等待中的落定或播放核心的在途超时收尾，这里不重复写。
-        if (!active || target == null) return
+        // 没有落点或会话已结束：静音在这里收掉；等待中的落定仍靠它自己的回执放开。
+        if (!active || target == null) {
+            releasePreviewMute()
+            return
+        }
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
         // 同一目标再下发一次会让画面先闪一下再落定：相差不足死区就复用最后一跳。
-        val executedTarget = if (lastIssuedTarget != null &&
+        val seekId = if (lastIssuedTarget != null && lastIssuedSeekId != null &&
             abs(target - lastIssuedTarget) < PREVIEW_SEEK_DEAD_ZONE_MILLIS
         ) {
-            lastIssuedTarget
+            lastIssuedSeekId
         } else {
             engine.seekTo(target)
-            target
         }
-        landSeek(target, executedTarget)
+        landSeek(target, seekId)
     }
 
     /**
      * 登记落定：进度先停在目标上，等播放核心回报这一跳已执行后再放开。
-     * 复用那一跳此前已经回报过执行时，落定当场结算。
+     * 复用的那一跳此前已经回报过执行时，落定当场结算。
      */
-    private fun landSeek(targetMillis: Long, executedTargetMillis: Long) {
+    private fun landSeek(targetMillis: Long, seekId: Long) {
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
-        landingSeek = LandingSeek(targetMillis, executedTargetMillis)
-        if (lastExecutedSeekMillis == executedTargetMillis) settleLanding()
+        pendingLanding = LandingSeek(seekId, targetMillis)
+        if (lastExecutedSeekId == seekId) settleLanding()
     }
 
     /** 落定结算：恢复声音并淡入，再按进程级序号通知界面撤掉保持值。 */
     private fun settleLanding() {
-        val landing = landingSeek ?: return
-        landingSeek = null
+        val landing = pendingLanding ?: return
+        pendingLanding = null
         releasePreviewMute()
         engine.fadeInAudio(FADE_IN_MILLIS)
         _seekSettlement.value = SeekSettlement(settlementIds.incrementAndGet(), landing.targetMillis)
@@ -1019,7 +1026,7 @@ class PlaybackController(
 
     /** 放弃等待中的落定：新拖动、新加载或停止后不再保留；静音由调用路径统一恢复。 */
     private fun clearLandingSeek() {
-        landingSeek = null
+        pendingLanding = null
     }
 
     /** 预览静音的唯一写入入口：整段拖动只静音一次，逐次 seek 各自淡入会造成断续爆音。 */
@@ -1036,10 +1043,10 @@ class PlaybackController(
         engine.setAudioMuted(false)
     }
 
-    /** 已下发的落定：界面落点与等回报的执行目标（死区复用时两者可以不同）。 */
+    /** 已下发的落定：认哪一跳 seek，以及界面落点（死区复用时两者可以不同）。 */
     private class LandingSeek(
+        val seekId: Long,
         val targetMillis: Long,
-        val executedTargetMillis: Long,
     )
 
     /** 预览 seek 只在正常播放中下发；加载阶段与时长未知时保持原行为。 */
@@ -1140,7 +1147,7 @@ class PlaybackController(
     override fun onFirstFrameReady(
         needsFrameConfirmation: Boolean,
         targetUrl: String?,
-        seekSerial: Int,
+        seekId: Long?,
         loadToken: Int,
     ) {
         if (!active || !mediaLoaded) return
@@ -1158,17 +1165,21 @@ class PlaybackController(
             return
         }
         if (seekPendingForReady) {
-            if (seekSerial < requiredSeekSerial) return
+            // 只认续播 seek 之后的那一跳：回执身份更早、或这条信号不对应任何 seek，都不算就绪。
+            if (seekId == null || seekId < requiredSeekId) return
             seekPendingForReady = false
         }
         handleReadySignal(phase, needsFrameConfirmation)
     }
 
-    /** 播放核心回报一条 seek 已执行：目标毫秒相等才算这一跳落定，seek 序号归零不影响判定。 */
-    override fun onSeekExecuted(targetMillis: Long) {
-        lastExecutedSeekMillis = targetMillis
-        val landing = landingSeek ?: return
-        if (landing.executedTargetMillis != targetMillis) return
+    /**
+     * 播放核心回报一条 seek 已执行：只有本代自己下发的那一跳才算数。
+     * 旧代或已被覆盖的旧跳的回执直接丢弃，既不结算，也不改写本代的执行身份。
+     */
+    override fun onSeekExecuted(seekId: Long, targetMillis: Long) {
+        if (seekId != pendingLanding?.seekId && seekId != lastPreviewSeekId) return
+        lastExecutedSeekId = seekId
+        if (pendingLanding?.seekId != seekId) return
         settleLanding()
     }
 
@@ -1376,7 +1387,7 @@ class PlaybackController(
         // 预览 seek 挪动的位置不是用户落定的播放位置：不推进度、不落库。
         if (_seekPreviewMillis.value != null) return
         // 落定 seek 未执行完：位置可能还是 seek 前后的旧样本，进度停在目标上不回跳。
-        if (landingSeek != null) return
+        if (pendingLanding != null) return
         // 加载中的位置属于新文件，切集时不能覆盖冻结画面上的原进度；时长要留下供就绪初始化。
         if (loadPhase != LoadPhase.None) {
             if (mediaLoaded && durationMillis > 0) loadDurationMillis = durationMillis
@@ -1682,6 +1693,8 @@ class PlaybackController(
                 if (switchFailureReported) return
                 logLoadFailure("播放失败", source, errorText)
                 clearPendingSwitchFrame()
+                // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音。
+                releasePreviewMute()
                 active = false
                 paused = true
                 updateState(PlaybackState.Ended)
@@ -1815,7 +1828,7 @@ class PlaybackController(
         loadTargetUrl = null
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekSerial = 0
+        requiredSeekId = 0L
         resetSeekForNewLoad()
         resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
@@ -1836,7 +1849,7 @@ class PlaybackController(
         loadDurationMillis = 0
         seekPendingForReady = false
         deferredReadyNeedsFrame = null
-        requiredSeekSerial = 0
+        requiredSeekId = 0L
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
     }
 
@@ -1852,7 +1865,8 @@ class PlaybackController(
         previewEndJob = null
         _seekPreviewMillis.value = null
         lastPreviewSeekTargetMillis = null
-        lastExecutedSeekMillis = null
+        lastPreviewSeekId = null
+        lastExecutedSeekId = null
         releasePreviewMute()
     }
 
@@ -1902,7 +1916,7 @@ class PlaybackController(
         loadStartPositionMillis = position
         if (loadPhase != LoadPhase.None) {
             seekPendingForReady = true
-            requiredSeekSerial = engine.seekTo(position)
+            requiredSeekId = engine.seekTo(position)
         } else {
             engine.seekTo(position)
         }
@@ -1975,16 +1989,16 @@ class PlaybackController(
         override fun onFirstFrameReady(
             needsFrameConfirmation: Boolean,
             targetUrl: String?,
-            seekSerial: Int,
+            seekId: Long?,
             loadToken: Int,
         ) {
             scope.launch {
-                target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekSerial, loadToken)
+                target.onFirstFrameReady(needsFrameConfirmation, targetUrl, seekId, loadToken)
             }
         }
 
-        override fun onSeekExecuted(targetMillis: Long) {
-            scope.launch { target.onSeekExecuted(targetMillis) }
+        override fun onSeekExecuted(seekId: Long, targetMillis: Long) {
+            scope.launch { target.onSeekExecuted(seekId, targetMillis) }
         }
 
         override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {

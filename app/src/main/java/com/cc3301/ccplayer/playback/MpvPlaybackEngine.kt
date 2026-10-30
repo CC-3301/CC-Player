@@ -10,6 +10,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -58,8 +59,8 @@ class MpvPlaybackEngine(
 
     /** seek 队列：恒为「1 执行 + 1 待执行」，在途超时也归它判定。 */
     private val seekQueue = MpvSeekQueue(
-        issue = ::issueSeekCommand,
-        onExecuted = { targetMillis -> listener?.onSeekExecuted(targetMillis) },
+        post = ::postSeekCommand,
+        onExecuted = { seekId, targetMillis -> listener?.onSeekExecuted(seekId, targetMillis) },
         armTimeout = ::armSeekTimeout,
         cancelTimeout = ::cancelSeekTimeout,
     )
@@ -69,12 +70,19 @@ class MpvPlaybackEngine(
         Thread(runnable, "mpv-seek-timeout").apply { isDaemon = true }
     }
 
-    @Volatile
+    /** 下发 seek 命令的唯一线程：计时器线程只投递「这一跳已完成」，mpv 命令一律在这里执行。 */
+    private val seekCommandExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "mpv-seek-command").apply { isDaemon = true }
+    }
+
+    /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
+    private val seekTimeoutLock = Any()
+
     private var seekTimeoutFuture: ScheduledFuture<*>? = null
 
-    /** 最近一次真正下发到 mpv 的 seek 序号；在途期间新目标被合并时返回它。 */
+    /** 已释放：此后不再排计时器、不再投递命令，避免抛 RejectedExecutionException。 */
     @Volatile
-    private var issuedSeekSerial = 0
+    private var released = false
 
     @Volatile
     private var positionSeconds = 0.0
@@ -175,40 +183,63 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
-     * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
+     * seek 后 mpv 会再发 PLAYBACK_RESTART，序号在真正下发时登记。
      * 队列归引擎所有：在途只覆盖待执行目标，执行完（回执或超时）补发。
+     * 返回的 seekId 在这里分配，不随后续加载归零，回执靠它认这一跳。
      */
-    override fun seekTo(positionMillis: Long): Int {
-        seekQueue.seek(positionMillis)
-        return issuedSeekSerial
+    override fun seekTo(positionMillis: Long): Long {
+        val seekId = nextSeekId.incrementAndGet()
+        seekQueue.seek(seekId, positionMillis)
+        return seekId
     }
 
-    /** 真正下发一次 seek：登记序号并执行 mpv 命令。 */
-    private fun issueSeekCommand(positionMillis: Long) {
-        positionSeconds = positionMillis / 1000.0
-        // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
-        positionGate.onSeek(positionMillis)
-        val serial = loadCoordinator.onSeekIssued()
-        issuedSeekSerial = serial
-        seekDiagnostics.issueSeek(positionMillis, serial) {
-            MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+    /** 把这一跳交给命令线程；此时还没有碰 mpv。 */
+    private fun postSeekCommand(seekId: Long, targetMillis: Long) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekCommandExecutor.execute { issueSeekCommand(seekId, targetMillis) }
         }
     }
 
-    /** 给在途这一跳重新计时：超时即按执行完处理，回执丢了也不会卡住队列。 */
+    /** 命令线程上真正下发一次 seek：这一跳已不是当前在途就丢弃，迟到任务不打到新文件上。 */
+    private fun issueSeekCommand(seekId: Long, positionMillis: Long) {
+        seekQueue.issueIfCurrent(seekId) {
+            positionSeconds = positionMillis / 1000.0
+            // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
+            positionGate.onSeek(positionMillis)
+            val serial = loadCoordinator.onSeekIssued()
+            seekDiagnostics.issueSeek(positionMillis, serial) {
+                MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+            }
+        }
+    }
+
+    /** 给在途这一跳重新计时：到点只把「这一跳已完成」投回命令线程，不在计时器线程下发命令。 */
     private fun armSeekTimeout(onTimeout: () -> Unit) {
-        seekTimeoutFuture?.cancel(false)
-        seekTimeoutFuture = seekTimeoutExecutor.schedule(
-            onTimeout,
-            SEEK_IN_FLIGHT_TIMEOUT_MILLIS,
-            TimeUnit.MILLISECONDS,
-        )
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = seekTimeoutExecutor.schedule(
+                { postTimeout(onTimeout) },
+                SEEK_IN_FLIGHT_TIMEOUT_MILLIS,
+                TimeUnit.MILLISECONDS,
+            )
+        }
+    }
+
+    /** 把一个到期任务从计时器线程交回命令线程执行。 */
+    private fun postTimeout(task: () -> Unit) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekCommandExecutor.execute(task)
+        }
     }
 
     private fun cancelSeekTimeout() {
-        seekTimeoutFuture?.cancel(false)
-        seekTimeoutFuture = null
+        synchronized(seekTimeoutLock) {
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = null
+        }
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
@@ -329,8 +360,15 @@ class MpvPlaybackEngine(
     override fun release() {
         MPVLib.removeObserver(this)
         MPVLib.removeLogObserver(errorLog)
+        // 先挡住新的排程与投递再关线程：释放后到点的计时器不能再排任务。
+        synchronized(seekTimeoutLock) {
+            released = true
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = null
+        }
         seekQueue.reset()
         seekTimeoutExecutor.shutdownNow()
+        seekCommandExecutor.shutdownNow()
         loadCoordinator.reset()
         MPVLib.destroy()
     }
@@ -418,12 +456,12 @@ class MpvPlaybackEngine(
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
         // 先确认 ready 属于当前代际再占去重槽：旧代际不吞当前加载的信号。
         val ready = loadCoordinator.acceptReady(needsFrameConfirmation) ?: return
-        // 这一跳已执行完：先回报执行的目标毫秒，再补发在途期间被覆盖的目标。
-        seekQueue.onReceipt()
+        // 这条信号若正是某一跳 seek 的结果，就带着它的身份上报；回报执行后再补发被覆盖的目标。
+        val seekId = seekQueue.onReceipt()
         listener?.onFirstFrameReady(
             needsFrameConfirmation,
             ready.spec.url,
-            ready.serial,
+            seekId,
             ready.spec.token,
         )
     }
@@ -496,6 +534,9 @@ class MpvPlaybackEngine(
     private companion object {
         /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
         const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
+
+        /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
+        val nextSeekId = AtomicLong(0)
 
         const val PAUSE_PROPERTY = "pause"
         const val HWDEC_PROPERTY = "hwdec"

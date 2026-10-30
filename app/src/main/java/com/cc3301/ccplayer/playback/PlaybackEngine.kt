@@ -40,11 +40,12 @@ interface PlaybackEngine {
 
     /**
      * 跳到指定播放位置，单位毫秒。
-     * 返回本次 seek 的序号；之后的 ready 回调带上同一序号，控制层据此只认 seek 之后的信号。
+     * 返回本次 seek 的 seekId：由引擎在进程内分配，单调递增且永不复用，加载归零也不影响它。
+     * 这一跳被合并进待执行槽时返回的仍是它自己的 seekId，随后的 [Listener.onSeekExecuted] 带上同一个身份。
      * 队列归引擎所有：恒为「1 执行 + 1 待执行」，在途期间新目标只覆盖待执行目标；
-     * 在途这一跳执行完（收到回执或超时）后立即补发，并通过 [Listener.onSeekExecuted] 回报执行的目标毫秒。
+     * 在途这一跳执行完（收到回执或超时）后立即补发。
      */
-    fun seekTo(positionMillis: Long): Int
+    fun seekTo(positionMillis: Long): Long
 
     /** 从当前位置起对音频输出做淡入，时长 [durationMillis]；画面不受影响。 */
     fun fadeInAudio(durationMillis: Long)
@@ -101,22 +102,22 @@ interface PlaybackEngine {
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
          * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要等到真正出帧后再算就绪。
          * [targetUrl] 是本次加载的目标，控制层据此丢弃取消/恢复之后迟到的 ready。
-         * [seekSerial] 是本次信号对应的 seek 序号，控制层只接受续播 seek 之后的信号。
+         * [seekId] 是这条信号对应的那一跳 seek 的身份，没有对应 seek 时为 null。
          * [loadToken] 是产生该信号的那次加载，控制层据此丢弃同 URL 重载后的迟到事件。
          * seek 后引擎会再次上报 PLAYBACK_RESTART。
          */
         fun onFirstFrameReady(
             needsFrameConfirmation: Boolean,
             targetUrl: String?,
-            seekSerial: Int,
+            seekId: Long?,
             loadToken: Int,
         )
 
         /**
-         * 一条 seek 已执行完：回报这一跳的目标毫秒。
-         * 回执到达与在途超时都上报；控制层按目标毫秒是否相等确认落定，不按 seek 序号。
+         * 一条 seek 已执行完：回报它自己的 seekId 与目标毫秒。
+         * 回执到达与在途超时都上报；控制层只按 seekId 认自己那一跳，不按目标毫秒。
          */
-        fun onSeekExecuted(targetMillis: Long)
+        fun onSeekExecuted(seekId: Long, targetMillis: Long)
 
         /**
          * 收到任一加载相关事件；用于重置“完全无事件”看门狗。
