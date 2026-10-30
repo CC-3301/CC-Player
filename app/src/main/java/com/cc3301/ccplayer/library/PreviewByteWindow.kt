@@ -5,31 +5,54 @@ import java.io.IOException
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
-/** 字节预读窗口上限：每条目随解码位置预读的字节范围。 */
+/** 字节预读窗口上限：每条目常驻内存的字节上限。 */
 internal const val PREVIEW_READ_WINDOW_BYTES = 8L * 1024 * 1024
 
-/** 字节块粒度：一次底层读取的字节数，窗口上限是它的整数倍。 */
+/** 读取块上限：一次补齐的字节数；底层协商上限更小时按协商上限收窄。 */
 internal const val PREVIEW_READ_CHUNK_BYTES = 256 * 1024
+
+/** 元数据阶段的头部定点读：容器头在文件开头。 */
+internal const val PREVIEW_METADATA_HEAD_BYTES = 64 * 1024
+
+/** 元数据阶段的尾部定点读：容器索引通常在文件末尾。 */
+internal const val PREVIEW_METADATA_TAIL_BYTES = 1024 * 1024
+
+/** 解码命中一块后向后扩的块数。 */
+private const val FOLLOW_READ_AHEAD_CHUNKS = 2
 
 /**
  * 本地字节窗口：解码只读本地字节，缺失的块由本层向底层补齐。
  *
- * 同一时刻最多两路底层读取：解码线程读当前块，后台预读线程读后续块。
- * 预读锚点跟着解码位置走，跳到别处时重置并只预读新位置之后的窗口，不从头重读；
- * 常驻内存只保留锚点窗口内的块，锚点移动时淘汰窗口外的块，窗口到文件末尾时按实际长度收口。
- * 关闭后不再补齐、不再回写，读取一律失败。预读失败不在调用方之外扩散，由下一次读取暴露。
+ * 补齐按块进行：块大小取读取块上限与底层协商上限中较小者，一块正好一次底层读取。
+ * 元数据阶段只定点取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗；解码命中一块后只向后扩 1–2 块。
+ * 换锚点不丢弃已读到的块：常驻块按最近使用淘汰，总量不超过窗口上限。
+ * 底层读取最多两路：解码线程补齐当前块，预读线程补齐后续块；预读可用独立字节源，
+ * 避免与解码在同一条流上交替位置。关闭后不再补齐、不再回写，读取一律失败。
+ *
+ * 已知限制：预读只有进程内一条线程，多条目的预读排队串行，不因摘出解码许可而并行；
+ * 解码缺块仍由解码线程在许可内补齐（预读没覆盖到那段时才走这条路径，补完才继续解码）。
  */
 internal class PreviewByteWindow(
     private val origin: ByteSource,
     private val windowBytes: Long = PREVIEW_READ_WINDOW_BYTES,
-    private val chunkBytes: Int = PREVIEW_READ_CHUNK_BYTES,
+    chunkBytes: Int = PREVIEW_READ_CHUNK_BYTES,
+    readAheadSource: ByteSource? = null,
     private val readAheadExecutor: Executor = previewReadAheadExecutor,
 ) : ByteSource {
 
+    /** 块粒度：不越过底层协商上限，64 KiB 服务器上一块正好一次读取。 */
+    private val chunkBytes: Int = origin.maxReadBytes.takeIf { it in 1 until chunkBytes } ?: chunkBytes
+
+    /** 预读用的字节源；没给独立句柄时与解码共用一条。 */
+    private val readAhead: ByteSource = readAheadSource ?: origin
+
     private val lock = Object()
 
-    /** 已拉进本地的块，按起点索引。 */
-    private val chunks = HashMap<Long, ByteArray>()
+    /** 已拉进本地的块，按起点索引，按最近使用淘汰。 */
+    private val chunks = object : LinkedHashMap<Long, ByteArray>(16, 0.75f, true) {}
+
+    /** 常驻块的字节合计。 */
+    private var residentBytes = 0L
 
     /** 正在向底层读的块起点；同一块只读一次。 */
     private val pending = HashSet<Long>()
@@ -40,11 +63,8 @@ internal class PreviewByteWindow(
     /** 已排队但尚未开始的预读块。 */
     private val queued = LinkedHashSet<Long>()
 
-    /** 预读锚点：最近一次解码读取所在的块起点。 */
-    private var anchor = -1L
-
-    /** 最近一次触发预读的块起点，块内重复读取不重复挂预读。 */
-    private var lastPrefetchChunk = -1L
+    /** 最近一次触发向后读的块起点，块内重复读取不重复挂预读。 */
+    private var lastFollowChunk = -1L
 
     private var closed = false
 
@@ -52,16 +72,33 @@ internal class PreviewByteWindow(
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (length <= 0) return 0
-        val total = size
-        if (position < 0 || position >= total) return 0
+        if (position < 0 || position >= size) return 0
         val start = chunkStart(position)
-        val bytes = chunkAt(start)
+        val bytes = chunkAt(start, position)
         val from = (position - start).toInt()
         if (from >= bytes.size) return 0
         val count = minOf(length, bytes.size - from)
         System.arraycopy(bytes, from, buffer, offset, count)
-        prefetchAfter(start)
+        followReadAhead(start)
         return count
+    }
+
+    /**
+     * 元数据阶段定点读：只取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗预读。
+     * 头尾区间相接的小文件一次读完，避免重复读同一段。
+     */
+    fun startMetadataReadAhead() {
+        val total = size
+        if (total <= 0) return
+        val headEnd = minOf(total, PREVIEW_METADATA_HEAD_BYTES.toLong())
+        // 尾部按块对齐后可能与头部落在同一块：这时一次读完，避免块头剩下的那段被跳过。
+        val tailStart = chunkStart(maxOf(0L, total - PREVIEW_METADATA_TAIL_BYTES))
+        if (tailStart <= headEnd) {
+            queueMetadata(0, total)
+            return
+        }
+        queueMetadata(0, headEnd)
+        queueMetadata(tailStart, total)
     }
 
     override fun close() {
@@ -71,19 +108,32 @@ internal class PreviewByteWindow(
             queued.clear()
             pending.clear()
             chunks.clear()
+            residentBytes = 0
             lock.notifyAll()
         }
         runCatching { origin.close() }
+        if (readAhead !== origin) runCatching { readAhead.close() }
     }
 
-    /** 取块内容；本块缺失时由当前线程补齐，补齐期间其它线程等锁上的通知。 */
-    private fun chunkAt(start: Long): ByteArray {
+    /**
+     * 取块内容；缺失时由当前线程补齐，补齐期间其它线程等锁上的通知。
+     * 定点读只填了块头一段；解码要块内更后面的字节时整块重读，
+     * 256 KiB 的块从块头再读一遍，包含已经读到的前 64 KiB。
+     */
+    private fun chunkAt(start: Long, position: Long): ByteArray {
         synchronized(lock) {
             while (true) {
-                // 关闭优先于一切：已关闭时本地有块也不返回。
                 if (closed) throw IOException("预览读取已取消")
-                chunks[start]?.let { return it }
+                val cached = chunks[start]
+                if (cached != null && position - start < cached.size) return cached
+                if (cached != null) {
+                    chunks.remove(start)
+                    residentBytes -= cached.size
+                }
                 failures[start]?.let { throw it }
+                // 已排队但还没开始的块由解码接手：预读任务随后因不在队列里直接退出，
+                // 同一段字节不会向底层读两遍。正在读的块照旧等它回写。
+                queued.remove(start)
                 if (start in pending) {
                     lock.wait()
                 } else {
@@ -99,7 +149,7 @@ internal class PreviewByteWindow(
             closedWhileLoading = closed
             if (!closedWhileLoading) {
                 result.fold(
-                    onSuccess = { bytes -> chunks[start] = bytes },
+                    onSuccess = { bytes -> putChunkLocked(start, bytes) },
                     onFailure = { failure -> failures[start] = failure.asPreviewReadFailure() },
                 )
             }
@@ -124,60 +174,98 @@ internal class PreviewByteWindow(
         return if (read == limit) bytes else bytes.copyOf(read)
     }
 
-    /** 块变化时重置预读锚点：只预读当前位置之后的窗口，不回头读已经走过的字节。 */
-    private fun prefetchAfter(start: Long) {
-        val from = start + chunkBytes
+    /** 解码命中后向后扩 1–2 块；已在本地或读完的位置不排队。 */
+    private fun followReadAhead(start: Long) {
+        val tasks = ArrayList<Long>()
         synchronized(lock) {
-            if (closed || lastPrefetchChunk == start) return
-            lastPrefetchChunk = start
-            anchor = from
-            // 只保留锚点窗口内的块：跨远距读取不会把走过的字节一直留在内存里。
-            chunks.keys.removeAll { chunk -> !isRetainedLocked(chunk) }
-            queued.clear()
-            var next = from
-            val end = minOf(size, from + windowBytes)
-            while (next < end) {
-                if (chunks[next] == null && next !in pending) queued += next
+            if (closed || lastFollowChunk == start) return
+            lastFollowChunk = start
+            var next = start + chunkBytes
+            repeat(FOLLOW_READ_AHEAD_CHUNKS) {
+                if (next < size && chunks[next] == null && next !in pending && next !in queued) {
+                    queued += next
+                    tasks += next
+                }
                 next += chunkBytes
             }
-            if (queued.isEmpty()) return
-            val tasks = queued.toList()
-            tasks.forEach { task -> readAheadExecutor.execute { readAhead(task) } }
+        }
+        tasks.forEach { chunk ->
+            val to = minOf(size, chunk + chunkBytes)
+            readAheadExecutor.execute { readAheadChunk(chunk, to) }
         }
     }
 
-    /** 后台预读一块；锚点已被重置、块已就绪或正在读取时直接退出。 */
-    private fun readAhead(start: Long) {
+    /**
+     * 按块排队定点读：头 64 KiB 只填块头一段，同一块的后半段等解码用到时整块重读；其余块补齐整块。
+     */
+    private fun queueMetadata(from: Long, to: Long) {
+        val tasks = ArrayList<Pair<Long, Long>>()
         synchronized(lock) {
-            if (!queued.remove(start)) return
-            if (closed || chunks[start] != null || start in pending) return
-            if (!isRetainedLocked(start)) return
-            pending += start
+            if (closed) return
+            var start = chunkStart(from)
+            while (start < to) {
+                if (chunks[start] == null && start !in pending && start !in queued) {
+                    queued += start
+                    tasks += start to minOf(to, start + chunkBytes)
+                }
+                start += chunkBytes
+            }
         }
-        val result = runCatching { load(start) }
+        tasks.forEach { (chunk, end) -> readAheadExecutor.execute { readAheadChunk(chunk, end) } }
+    }
+
+    /** 后台读一块；已排队取消、已关闭、块已就绪或正在读取时直接退出。 */
+    private fun readAheadChunk(chunk: Long, to: Long) {
         synchronized(lock) {
-            pending -= start
-            // 关闭后、或读取期间锚点已移走：补齐的块不回写，避免把淘汰掉的块又留回内存。
-            if (!closed && isRetainedLocked(start)) {
-                result.onSuccess { bytes -> chunks[start] = bytes }
-                result.onFailure { failure -> failures[start] = failure.asPreviewReadFailure() }
+            if (!queued.remove(chunk)) return
+            // 唤醒等着这块的读取：他们要么等到回写，要么接手自己补。
+            lock.notifyAll()
+            if (closed || chunk in pending) return
+            if (chunks[chunk]?.let { it.size >= to - chunk } == true) return
+            pending += chunk
+        }
+        val result = runCatching {
+            val bytes = ByteArray((to - chunk).toInt())
+            var read = 0
+            while (read < bytes.size) {
+                val count = readAhead.readAt(chunk + read, bytes, read, bytes.size - read)
+                if (count <= 0) break
+                read += count
+            }
+            if (read == bytes.size) bytes else bytes.copyOf(read)
+        }
+        synchronized(lock) {
+            pending -= chunk
+            // 关闭后不回写；既有的失败记录由下一次读取暴露。
+            if (!closed) {
+                result.onSuccess { bytes -> if (bytes.isNotEmpty()) putChunkLocked(chunk, bytes) }
             }
             lock.notifyAll()
         }
     }
 
-    /** 块是否仍落在锚点窗口内；常驻内存只保留这一段的块。 */
-    private fun isRetainedLocked(start: Long): Boolean =
-        start >= anchor - chunkBytes && start < anchor + windowBytes
+    /** 写回一块并按最近使用淘汰窗口外的块。 */
+    private fun putChunkLocked(start: Long, bytes: ByteArray) {
+        chunks.remove(start)?.let { residentBytes -= it.size }
+        chunks[start] = bytes
+        residentBytes += bytes.size
+        val iterator = chunks.entries.iterator()
+        while (residentBytes > windowBytes && iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.key == start) continue
+            iterator.remove()
+            residentBytes -= entry.value.size
+        }
+    }
 
     private fun chunkStart(position: Long): Long = position - position % chunkBytes
 
     private fun Throwable.asPreviewReadFailure(): IOException =
         this as? IOException ?: IOException("预览字节读取失败", this)
 
-    private companion object {
+    companion object {
         /** 进程内唯一的预读线程：与解码线程合起来正好两路底层读取。 */
-        val previewReadAheadExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
+        internal val previewReadAheadExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "preview-byte-read-ahead").apply { isDaemon = true }
         }
     }

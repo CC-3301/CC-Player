@@ -18,6 +18,9 @@ class FakeSmbConnector : SmbConnector {
     /** 服务器共享枚举返回的名称。 */
     var shareNames: List<String> = emptyList()
 
+    /** 服务器协商的单次读取上限。 */
+    var maxReadSize: Int = 0
+
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
 
@@ -61,7 +64,7 @@ class FakeSmbConnector : SmbConnector {
         failure?.let { throw it }
         logins += username to password
         shares += share
-        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder, closedShares)
+        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder, closedShares, maxReadSize)
     }
 }
 
@@ -72,13 +75,14 @@ private class FakeSmbConnection(
     private val handles: MutableMap<String, RecordingSmbHandle>,
     private val closeOrder: MutableList<String>,
     private val closedShares: MutableList<String>,
+    private val maxReadSize: Int,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
 
     override suspend fun openRead(path: String): SmbReadHandle {
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
-        return RecordingSmbHandle(bytes) { closeOrder += "handle" }
+        return RecordingSmbHandle(bytes, maxReadSize = maxReadSize) { closeOrder += "handle" }
             .also { handles["$share/$path"] = it }
     }
 
@@ -91,6 +95,7 @@ private class FakeSmbConnection(
 /** 记录是否被关闭的读句柄。 */
 class RecordingSmbHandle(
     private val bytes: ByteArray,
+    override val maxReadSize: Int = 0,
     private val onClose: () -> Unit = {},
 ) : SmbReadHandle, Closeable {
 

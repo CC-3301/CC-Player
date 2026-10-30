@@ -20,8 +20,9 @@ class NetworkReadPriority {
     /** 正在进行的播放读取数；缩略图读取至少要让出这些读取。 */
     private var playbackReads = 0
 
-    /** 把 [source] 包装成按 [kind] 排队的字节源。 */
-    fun wrap(source: ByteSource, kind: ReadKind): ByteSource = PriorityByteSource(source, this, kind)
+    /** 把 [source] 包装成按 [kind] 排队的字节源；[onWait] 上报每次让给播放读取的时长。 */
+    fun wrap(source: ByteSource, kind: ReadKind, onWait: (Long) -> Unit = {}): ByteSource =
+        PriorityByteSource(source, this, kind, onWait)
 
     internal fun <T> playback(block: () -> T): T {
         lock.lock()
@@ -43,7 +44,9 @@ class NetworkReadPriority {
         }
     }
 
-    internal fun <T> thumbnail(closed: () -> Boolean, block: () -> T): T {
+    /** [onWait] 上报这次读取让给播放读取的时长，用于诊断。 */
+    internal fun <T> thumbnail(closed: () -> Boolean, onWait: (Long) -> Unit = {}, block: () -> T): T {
+        val waitedFrom = System.nanoTime()
         lock.lockInterruptibly()
         try {
             while (playbackReads > 0 && !closed()) playbackIdle.await()
@@ -52,6 +55,7 @@ class NetworkReadPriority {
             throw IOException("缩略图读取被中断", interrupted)
         } finally {
             lock.unlock()
+            onWait((System.nanoTime() - waitedFrom) / 1_000_000)
         }
         if (closed()) throw IOException("缩略图读取已取消")
         return block()
@@ -81,17 +85,20 @@ private class PriorityByteSource(
     private val source: ByteSource,
     private val priority: NetworkReadPriority,
     private val kind: ReadKind,
+    private val onWait: (Long) -> Unit,
 ) : ByteSource {
 
     private val closed = AtomicBoolean(false)
 
     override val size: Long get() = source.size
 
+    override val maxReadBytes: Int get() = source.maxReadBytes
+
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (closed.get()) return 0
         return when (kind) {
             ReadKind.Playback -> priority.playback { source.readAt(position, buffer, offset, length) }
-            ReadKind.Thumbnail -> priority.thumbnail({ closed.get() }) {
+            ReadKind.Thumbnail -> priority.thumbnail({ closed.get() }, onWait) {
                 source.readAt(position, buffer, offset, length)
             }
         }

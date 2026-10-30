@@ -25,6 +25,9 @@ interface SmbReadHandle : Closeable {
 
     val size: Long
 
+    /** 服务器协商的单次读取上限；0 表示未知。 */
+    val maxReadSize: Int get() = 0
+
     /** 从 [position] 起读最多 [length] 字节到 [buffer] 的 [offset]；读到末尾返回 0。 */
     fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int
 }

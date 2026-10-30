@@ -52,6 +52,20 @@ class MediaPreviewDiagnosticsTest {
         assertTrue(sink.lines.isEmpty())
     }
 
+    @Test
+    fun `网络封面入队与取许可等待分成两行记`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val source = source(Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true })
+        extractor.imageBytes = byteArrayOf(1, 2, 3)
+
+        source.preview(networkWithCredentials("电影.mkv"))
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue("应记入队：$text", text.contains("网络封面: 电影.mkv 入队"))
+        assertTrue("应记取许可等待：$text", text.contains("网络封面: 电影.mkv 取许可等待 "))
+        assertFalse(text.contains("user:pass"))
+    }
+
     private fun source(diagnostics: Diagnostics): CachedMediaPreviewSource =
         CachedMediaPreviewSource(
             extractor = extractor,

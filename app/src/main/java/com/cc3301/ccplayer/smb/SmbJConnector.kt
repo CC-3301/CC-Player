@@ -143,12 +143,16 @@ private class SmbJConnection(
             throw failure.asSourceFailure("打不开共享内文件：$path")
         }
         try {
-            SmbJReadHandle(file)
+            // 读尺寸按协商上限给出，避免超出后由底层拆成多次 READ。
+            SmbJReadHandle(file, maxReadSize = negotiatedMaxReadSize())
         } catch (failure: Exception) {
             runCatching { file.close() }
             throw failure.asSourceFailure("打不开共享内文件：$path")
         }
     }
+
+    private fun negotiatedMaxReadSize(): Int =
+        runCatching { connection.negotiatedProtocol.maxReadSize }.getOrDefault(0)
 
     override fun close() {
         runCatching { share.close() }
@@ -156,7 +160,10 @@ private class SmbJConnection(
     }
 }
 
-private class SmbJReadHandle(private val file: File) : SmbReadHandle {
+private class SmbJReadHandle(
+    private val file: File,
+    override val maxReadSize: Int = 0,
+) : SmbReadHandle {
 
     private val lock = Any()
 

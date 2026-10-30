@@ -39,11 +39,11 @@ class PreviewByteWindowTest {
         read(source, 63, 4)
 
         assertEquals(1, origin.reads.size)
-        assertEquals(0L, origin.reads.single())
+        assertEquals(0L to chunk, origin.reads.single())
     }
 
     @Test
-    fun `预读把后续块拉进本地，读取不再请求底层`() {
+    fun `命中后向后扩两块，后续读取不再请求底层`() {
         val origin = RecordingOrigin(payload(1000))
         val executor = QueueExecutor()
         val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
@@ -51,7 +51,6 @@ class PreviewByteWindowTest {
         read(source, 0, 4)
         executor.runAll()
 
-        // 窗口内 4 块（含当前块之后 3 块）已就绪，读取不再向底层发请求。
         val before = origin.reads.size
         read(source, 100, 8)
         read(source, 150, 8)
@@ -59,42 +58,175 @@ class PreviewByteWindowTest {
     }
 
     @Test
-    fun `预读不超过窗口上限且不越过文件末尾`() {
+    fun `预读队列有界，一次命中只排两块`() {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
         val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
 
         read(source, 0, 4)
+
+        assertEquals(2, executor.pending())
         executor.runAll()
-
-        // 当前块 + 窗口内后续块，合计不超过一个块加一个窗口。
-        assertEquals(1 + window.toInt() / chunk, origin.reads.size)
-
-        val tail = RecordingOrigin(payload(100))
-        val tailExecutor = QueueExecutor()
-        val tailSource = PreviewByteWindow(tail, windowBytes = window, chunkBytes = chunk, readAheadExecutor = tailExecutor)
-        read(tailSource, 0, 4)
-        tailExecutor.runAll()
-        assertEquals(2, tail.reads.size)
+        assertEquals(3, origin.reads.size)
     }
 
     @Test
-    fun `跳到远处后只预读新位置之后的窗口`() {
+    fun `元数据阶段只读头 64 KiB 与尾 1 MiB`() {
+        val size = 20 * 1024 * 1024
+        val origin = RecordingOrigin(payload(size))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+
+        source.startMetadataReadAhead()
+        executor.runAll()
+
+        assertEquals(0L to PREVIEW_METADATA_HEAD_BYTES, origin.reads.first())
+        val tailStart = size - PREVIEW_METADATA_TAIL_BYTES.toLong()
+        val tail = origin.reads.drop(1)
+        assertEquals(
+            "尾部按读取块补齐：$tail",
+            (0 until 4).map { tailStart + it * PREVIEW_READ_CHUNK_BYTES.toLong() },
+            tail.map { it.first },
+        )
+        assertTrue("尾部每块不超过读取块上限：$tail", tail.all { it.second == PREVIEW_READ_CHUNK_BYTES })
+        val totalBytes = origin.reads.sumOf { it.second }
+        assertEquals(PREVIEW_METADATA_HEAD_BYTES + PREVIEW_METADATA_TAIL_BYTES, totalBytes)
+    }
+
+    @Test
+    fun `小文件的头尾区间相接时一次读完`() {
+        val origin = RecordingOrigin(payload(500_000))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+
+        source.startMetadataReadAhead()
+        executor.runAll()
+
+        assertEquals(500_000, origin.reads.sumOf { it.second })
+        assertEquals("不重复读同一段：${origin.reads}", origin.reads.map { it.first }.distinct().size, origin.reads.size)
+    }
+
+    @Test
+    fun `换锚点不丢弃已读到的块`() {
+        val origin = RecordingOrigin(payload(10_000))
+        val executor = QueueExecutor()
+        // 窗口容得下两处锚点附近的块：换锚点只补新块，不丢旧块。
+        val source = PreviewByteWindow(origin, windowBytes = 8L * chunk, chunkBytes = chunk, readAheadExecutor = executor)
+
+        read(source, 0, 4)
+        executor.runAll()
+
+        read(source, 5000, 4)
+        executor.runAll()
+        val readsAfterJump = origin.reads.size
+
+        read(source, 0, 4)
+        executor.runAll()
+
+        assertEquals("跳读后回来的块仍在本地", readsAfterJump, origin.reads.size)
+    }
+
+    @Test
+    fun `跳读只补新位置附近的块`() {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
         val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
 
         read(source, 0, 4)
         executor.runAll()
-        val beforeJump = origin.reads.toList()
+        val beforeJump = origin.reads.size
 
         read(source, 5000, 4)
         executor.runAll()
-        val afterJump = origin.reads.drop(beforeJump.size)
+        val afterJump = origin.reads.drop(beforeJump)
 
-        // 5000 落在起点 4992 的块里，补齐按块起点开始。
-        assertEquals(listOf(4992L), afterJump.take(1))
-        assertTrue("跳读后不再回读旧位置：$afterJump", afterJump.all { it >= 4992 })
+        assertEquals(4992L to chunk, afterJump.first())
+        assertTrue("跳读后不再回读旧位置：$afterJump", afterJump.all { it.first >= 4992 })
+    }
+
+    @Test
+    fun `常驻块按最近使用淘汰，总量不超过窗口上限`() {
+        val origin = RecordingOrigin(payload(10_000))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+
+        repeat(10) { index ->
+            read(source, index * chunk.toLong(), 1)
+            executor.runAll()
+        }
+        val readsAfterScan = origin.reads.size
+
+        read(source, 0, 1)
+
+        assertEquals(readsAfterScan + 1, origin.reads.size)
+        assertEquals(0L to chunk, origin.reads.last())
+    }
+
+    @Test
+    fun `读取块不越过底层协商上限`() {
+        val maxRead = 16 * 1024
+        val origin = RecordingOrigin(payload(1 shl 20), maxReadBytes = maxRead)
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+
+        read(source, 0, 4)
+        executor.runAll()
+        read(source, 300_000, 8)
+        executor.runAll()
+
+        assertTrue("每次读取都不超过协商上限：${origin.reads}", origin.reads.all { it.second <= maxRead })
+        assertEquals(maxRead, origin.reads.first().second)
+    }
+
+    @Test
+    fun `尾部按块对齐后与头部同块时整段都读到`() {
+        val size = 1100 * 1024
+        val origin = RecordingOrigin(payload(size))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+
+        source.startMetadataReadAhead()
+        executor.runAll()
+
+        assertEquals("头尾落在同一块时一次读完", size, origin.reads.sumOf { it.second })
+        assertTrue("覆盖到文件末尾", origin.reads.last().let { it.first + it.second >= size })
+    }
+
+    @Test
+    fun `已排队的块只向底层读一次`() {
+        val bytes = payload(10_000)
+        val origin = RecordingOrigin(bytes)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk)
+
+        read(source, 0, 4)
+        // 64 这块已排进预读：解码接手，预读任务退出，同一段字节不读两遍。
+        assertArrayEquals(bytes.copyOfRange(64, 68), read(source, 64, 4))
+
+        assertEquals(1, origin.reads.count { it.first == 64L })
+        source.close()
+    }
+
+    @Test
+    fun `预读走独立字节源`() {
+        val decodeOrigin = RecordingOrigin(payload(1000))
+        val readAheadOrigin = RecordingOrigin(payload(1000))
+        val executor = QueueExecutor()
+        val source = PreviewByteWindow(
+            decodeOrigin,
+            windowBytes = window,
+            chunkBytes = chunk,
+            readAheadSource = readAheadOrigin,
+            readAheadExecutor = executor,
+        )
+
+        read(source, 0, 4)
+        executor.runAll()
+
+        assertEquals("解码只补当前块", listOf(0L to chunk), decodeOrigin.reads)
+        assertEquals("预读落在独立句柄", listOf(64L to chunk, 128L to chunk), readAheadOrigin.reads)
+        source.close()
+        assertTrue(decodeOrigin.closed)
+        assertTrue(readAheadOrigin.closed)
     }
 
     @Test
@@ -102,10 +234,8 @@ class PreviewByteWindowTest {
         val origin = SlowOrigin(payload(100_000), delayMillis = 200)
         val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk)
 
-        // 当前块读完就挂上预读，预读在后台线程读后续块。
         read(source, 0, 4)
         assertTrue("预读应已开始", origin.awaitReading())
-        // 解码跳到窗口外：两路同时读，合计两路。
         read(source, 5000, 4)
 
         assertEquals(2, origin.maxConcurrent)
@@ -123,24 +253,6 @@ class PreviewByteWindowTest {
         } catch (expected: IOException) {
             assertEquals("连不上", expected.message)
         }
-    }
-
-    @Test
-    fun `锚点移动后淘汰窗口外的块`() {
-        val origin = RecordingOrigin(payload(1 shl 16))
-        val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
-
-        read(source, 0, 4)
-        executor.runAll()
-        assertEquals(1, origin.reads.count { it == 0L })
-
-        // 跳到远处：锚点移动后开头那块被淘汰，再读开头要重新向底层取。
-        read(source, 8192, 4)
-        executor.runAll()
-        read(source, 0, 4)
-
-        assertEquals(2, origin.reads.count { it == 0L })
     }
 
     @Test
@@ -194,15 +306,20 @@ private class QueueExecutor : Executor {
         tasks.addLast(command)
     }
 
+    fun pending(): Int = tasks.size
+
     fun runAll() {
         while (tasks.isNotEmpty()) tasks.removeFirst().run()
     }
 }
 
-/** 记录底层读取位置、可注入失败的假字节源。 */
-private class RecordingOrigin(private val bytes: ByteArray) : ByteSource {
+/** 记录底层读取位置与长度、可注入失败的假字节源。 */
+private class RecordingOrigin(
+    private val bytes: ByteArray,
+    override val maxReadBytes: Int = 0,
+) : ByteSource {
 
-    val reads = mutableListOf<Long>()
+    val reads = mutableListOf<Pair<Long, Int>>()
 
     var failure: IOException? = null
 
@@ -213,7 +330,7 @@ private class RecordingOrigin(private val bytes: ByteArray) : ByteSource {
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         failure?.let { throw it }
         if (position >= bytes.size) return 0
-        reads += position
+        reads += position to length
         val count = minOf(length.toLong(), bytes.size - position).toInt()
         bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
         return count
