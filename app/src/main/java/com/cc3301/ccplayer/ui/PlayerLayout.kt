@@ -256,7 +256,7 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 拖动跳转的像素死区：位移不超过它时不更新预览目标，避免手指停下后的抖动持续造新目标。 */
+/** 拖动跳转的像素死区：位移达到它才算越过死区，未越过时沿用上一次预览目标，手指停下后的抖动不再造新目标。 */
 val PlayerSeekDragDeadZone = 3.dp
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */

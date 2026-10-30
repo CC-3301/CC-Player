@@ -166,6 +166,38 @@ class PlayerGestureStateTest {
     }
 
     @Test
+    fun `死区内的抖动不更新预览目标`() {
+        val seek = PlayerSeekDrag(
+            baseMillis = 10_000L,
+            durationMillis = 600_000L,
+            width = width,
+            deadZonePx = 6f,
+        )
+
+        assertEquals(20_000L, seek.preview(30f))
+        // 位移没越过死区：返回 null，预览目标保持。
+        assertNull(seek.preview(34f))
+        assertEquals(20_000L, seek.previewMillis)
+        assertEquals(22_000L, seek.preview(36f))
+    }
+
+    @Test
+    fun `松手按手指真实位置结算，死区不改变落点`() {
+        val seek = PlayerSeekDrag(
+            baseMillis = 10_000L,
+            durationMillis = 600_000L,
+            width = width,
+            deadZonePx = 6f,
+        )
+
+        assertEquals(20_000L, seek.preview(30f))
+        // 松手时手指在 34f：死区挡住的这段也要落进提交目标。
+        assertEquals(21_333L, seek.finish(34f))
+        assertEquals(21_333L, seek.committedMillis)
+        assertNull(seek.previewMillis)
+    }
+
+    @Test
     fun `没有预览时松手不提交`() {
         val seek = PlayerSeekDrag(baseMillis = 10_000L, durationMillis = 100_000L, width = width)
 
