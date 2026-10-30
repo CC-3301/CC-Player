@@ -175,22 +175,20 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `首次请求前丢弃时建好源立即作废并重建一次`() {
+    fun `首次请求前丢弃不额外多建一次`() {
         var opens = 0
         val first = RecordingByteSource(payload)
-        val second = RecordingByteSource(payload)
         val target = server.serve("smb://nas/media/首次建源.mkv") {
             opens++
-            if (opens == 1) first else second
+            first
         }
 
-        // 还没有源时也照打陈旧标记：首次建源与退后台并发不能漏。
+        // 没有源时陈旧标记在建源前先消费：第一次建源就是这次请求的源，不多建一次。
         server.discardSources()
 
         assertArrayEquals(payload, httpRequest(target).body)
-        assertEquals(2, opens)
-        assertTrue(first.closed)
-        assertFalse(second.closed)
+        assertEquals(1, opens)
+        assertFalse(first.closed)
     }
 
     @Test
@@ -247,18 +245,33 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `读取抛 Error 时不当成源失效，下一次请求沿用同一条源`() {
+    fun `读取抛 Error 时连接按失败收尾且源不失效`() {
         var opens = 0
+        var closed = false
         val target = server.serve("smb://nas/media/错误不失效.mkv") {
             opens++
-            FailingByteSource(FakeError("读取失败"))
+            object : ByteSource {
+                override val size: Long = payload.size.toLong()
+
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int =
+                    throw FakeError("读取失败")
+
+                override fun close() {
+                    closed = true
+                }
+            }
         }
 
-        assertEquals(200, httpRequest(target).statusCode)
-        assertEquals(200, httpRequest(target).statusCode)
+        val failed = httpRequest(target)
+        // 连接按失败收尾：响应头已经发出，响应体被截断。
+        assertEquals(200, failed.statusCode)
+        assertEquals("1000", failed.header("Content-Length"))
+        assertEquals(0, failed.body.size)
 
-        // Error 不废弃字节源：下一次请求不再重新建立。
+        // 下一次请求沿用同一条源：Error 不当作源失效，也没有被关闭。
+        assertEquals(200, httpRequest(target).statusCode)
         assertEquals(1, opens)
+        assertFalse(closed)
     }
 
     @Test

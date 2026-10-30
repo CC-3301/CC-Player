@@ -798,7 +798,7 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPauseChanged(true)
         assertEquals(PlaybackState.Playing, controller.state.value)
 
-        // 新拖动丢弃这次落定：吞掉的暂停回声随落定一起丢弃。
+        // 新拖动丢弃这次落定；随后的普通 seek 接管落定时作废吞掉的回声。
         controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
         controller.seekTo(300_000)
         engine.reportSeekExecuted()
@@ -806,6 +806,69 @@ class PlaybackControllerSeekPreviewTest {
 
         // 普通 seek 的落定不替用户恢复播放。
         assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `预览落定吞过回声后普通 seek 落定不恢复播放`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // 预览落定在途时吞掉 keep-open 回声。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 用户直接发普通 seek：它接管落定，预览落下的回声随之作废。
+        controller.seekTo(300_000)
+        engine.reportSeekExecuted()
+        engine.reportSeekExecuted()
+
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `预览落定在途按暂停立刻生效，结算后保持暂停`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // 用户按暂停：不等引擎回声，状态立刻变。
+        controller.pause()
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // keep-open 回声在落定在途时到达：吞掉，但不改用户的暂停意图。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // 落定结算按暂停意图收尾：不恢复播放，也不把状态改回播放。
+        engine.reportSeekExecuted()
+        assertEquals(0, engine.resumeCalls)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `落定被取消收尾时结算吞掉的暂停回声`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 落定在途吞掉 keep-open 回声：引擎实际停了，状态仍按播放意图保持播放。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 再次拖动后由空闲超时按 commit=false 收尾：这一次收尾要结算吞掉的回声。
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
+        advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        // 不残留静音，也不留下“引擎已暂停、状态还在播放”。
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test

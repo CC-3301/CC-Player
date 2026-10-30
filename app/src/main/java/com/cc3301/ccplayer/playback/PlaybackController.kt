@@ -555,6 +555,8 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         engine.pause()
         settleStartedSwitchAsPaused()
+        // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
     /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾，保留冻结画面。 */
@@ -808,6 +810,8 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         engine.pause()
         settleStartedSwitchAsPaused()
+        // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
     /**
@@ -845,6 +849,8 @@ class PlaybackController(
         } else {
             engine.resume()
         }
+        // 继续播放按用户意图立刻生效，不等引擎回声。
+        updateState(PlaybackState.Playing)
     }
 
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
@@ -1017,7 +1023,8 @@ class PlaybackController(
         lastPreviewSeekTargetMillis = null
         lastPreviewSeekId = null
         if (!commit) {
-            // 取消或会话结束：落定作废，静音在这里恢复。
+            // 取消、切集或会话结束：落定作废，静音与吞掉的暂停回声都在这里收场。
+            settleIgnoredPauseEcho()
             clearLandingSeek()
             releasePreviewMute()
             return
@@ -1054,6 +1061,8 @@ class PlaybackController(
      * 复用的那一跳此前已经回报过执行时，落定当场结算。
      */
     private fun landSeek(targetMillis: Long, seekId: Long, fromPreview: Boolean) {
+        // 普通 seek 接管落定时，预览落下的暂停回声随之作废：不替用户恢复播放。
+        if (!fromPreview) ignoredPauseEcho = false
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
         pendingLanding = LandingSeek(seekId, targetMillis, fromPreview)
@@ -1067,18 +1076,23 @@ class PlaybackController(
         releasePreviewMute()
         engine.fadeInAudio(FADE_IN_MILLIS)
         // 预览期间吞掉的暂停回声在这里收尾：原本在播放就让引擎接着播。
-        if (ignoredPauseEcho) {
-            ignoredPauseEcho = false
-            if (!paused) engine.resume()
-        }
+        settleIgnoredPauseEcho()
         _seekSettlement.value = SeekSettlement(settlementIds.incrementAndGet(), landing.targetMillis)
+    }
+
+    /**
+     * 吞掉的 keep-open 暂停回声在这里收场：清标志；
+     * 播放意图仍为播放且没有新加载接管引擎时恢复播放。
+     */
+    private fun settleIgnoredPauseEcho() {
+        if (!ignoredPauseEcho) return
+        ignoredPauseEcho = false
+        if (active && loadPhase == LoadPhase.None && !paused) engine.resume()
     }
 
     /** 放弃等待中的落定：新拖动、新加载或停止后不再保留；静音由调用路径统一恢复。 */
     private fun clearLandingSeek() {
         pendingLanding = null
-        // 吞掉的暂停回声属于这条落定：落定被丢弃就一起丢弃，不留到之后的落定里补恢复。
-        ignoredPauseEcho = false
     }
 
     /** 预览静音的唯一写入入口：整段拖动只静音一次，逐次 seek 各自淡入会造成断续爆音。 */
@@ -1441,9 +1455,9 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
-        // 收起预览并恢复静音：进度不再被拖动目标钉住。
-        endSeekPreview(commit = false)
+        // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
+        endSeekPreview(commit = false)
         updateState(PlaybackState.Ended)
     }
 

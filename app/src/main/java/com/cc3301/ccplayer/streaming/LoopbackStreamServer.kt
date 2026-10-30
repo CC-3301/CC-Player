@@ -201,8 +201,8 @@ class LoopbackStreamServer(
 
     /**
      * 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。
-     * 读到 0 或抛异常都说明这条字节源已不可用：当场废弃，下一次请求重新建立，
-     * 重试不再打在同一条坏源上。
+     * 读到 0 或抛 [Exception] 视为这条源已不可用：当场废弃，下一次请求重新建立。
+     * [Error] 不当作源失效，直接向上抛，由连接层统一记录。
      */
     private fun copyRange(
         output: OutputStream,
@@ -223,8 +223,7 @@ class LoopbackStreamServer(
                 entry.invalidate(source)
                 throw failure
             } catch (failure: Error) {
-                // Error 不当作源失效：只记一行再抛，避免把 Error 当成源坏。
-                runCatching { System.err.println("回环流读取失败: $failure") }
+                // Error 不当作源失效：照旧上抛，由连接层统一记录。
                 throw failure
             }
             if (read <= 0) {
@@ -351,19 +350,18 @@ class LoopbackStreamServer(
             source?.let { current -> if (!stale) return current }
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
-                // 陈旧标记的唯一消费点：本次请求读到就清掉，并决定建源后是否还要重建一次。
-                var rebuildAfterOpen = consumeStale()
+                // 还没有源时先消费陈旧标记：空标记不该让第一次建源白建一次。
+                if (source == null) consumeStale()
                 source?.let { current ->
-                    if (!rebuildAfterOpen) return current
-                    // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾；紧接着建出来的就是新源。
+                    if (!consumeStale()) return current
+                    // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
                     source = null
                     runCatching { current.close() }
-                    rebuildAfterOpen = false
                 }
-                // 建源可能阻塞较久：建源前或建源期间收到的陈旧请求让这一条立即作废并重建一次；
-                // 重建期间再来的标记不在这里循环，留给下一次请求从同一处消费。
+                // 建源可能阻塞较久：建源期间收到的陈旧请求让这一条立即作废并重建一次；
+                // 重建期间再来的标记留给下一次请求从同一处消费。
                 var created = open()
-                if (rebuildAfterOpen || consumeStale()) {
+                if (consumeStale()) {
                     runCatching { created.close() }
                     created = open()
                 }
@@ -372,7 +370,7 @@ class LoopbackStreamServer(
             }
         }
 
-        /** 消费一次陈旧标记：读到就清掉并返回真。所有路径的陈旧判定都只经过这里。 */
+        /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */
         private fun consumeStale(): Boolean {
             if (!stale) return false
             stale = false
