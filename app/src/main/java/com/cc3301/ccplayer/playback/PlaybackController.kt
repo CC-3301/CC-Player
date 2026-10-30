@@ -957,9 +957,19 @@ class PlaybackController(
 
     /** 下发一次预览 seek；是否重发由界面按像素死区判定，队列由引擎收敛到「1 执行 + 1 待执行」。 */
     private fun issuePreviewSeek(target: Long) {
+        val clamped = previewSeekTarget(target)
         acquirePreviewMute()
-        lastPreviewSeekTargetMillis = target
-        lastPreviewSeekId = engine.seekTo(target).seekId
+        lastPreviewSeekTargetMillis = clamped
+        lastPreviewSeekId = engine.seekTo(clamped).seekId
+    }
+
+    /**
+     * 预览下发与落定的目标都离片尾留出安全余量：落进这条带里的 seek 会把文件推到片尾，
+     * 触发 eof-reached 的播完判定。余量取「播完」判据的同一容差。
+     */
+    private fun previewSeekTarget(positionMillis: Long): Long {
+        val limit = (playedDurationMillis - PREVIEW_END_MARGIN_MILLIS).coerceAtLeast(0L)
+        return positionMillis.coerceIn(0L, limit)
     }
 
     /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
@@ -981,7 +991,8 @@ class PlaybackController(
     private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null) {
         previewEndJob?.cancel()
         previewEndJob = null
-        val target = commitTarget ?: _seekPreviewMillis.value
+        // 预览落定同样不进片尾安全余量：停在片尾会立刻触发播完与自动暂停。
+        val target = commitTarget ?: _seekPreviewMillis.value?.let(::previewSeekTarget)
         val lastIssuedTarget = lastPreviewSeekTargetMillis
         val lastIssuedSeekId = lastPreviewSeekId
         _seekPreviewMillis.value = null
@@ -1363,6 +1374,11 @@ class PlaybackController(
         if (loadToken != expectedLoadToken || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
         if (_holdBlack.value) return
+        // 预览 seek 期间不算播完：此时切集会打断拖动，落定的 seek 会把播放带离片尾。
+        if (_seekPreviewMillis.value != null) {
+            diagnostics.log { "播放结束: 预览中，不触发连播" }
+            return
+        }
         diagnostics.log { "播放结束: ${currentMedia()?.name ?: ""}" }
         if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
             _sleepTimerState.value = SleepTimerState.Off
@@ -2052,6 +2068,9 @@ class PlaybackController(
 
         /** 收尾目标与最后一次下发的预览 seek 相差不足这段时长就视为同一目标，不再重复下发。 */
         const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
+
+        /** 预览与落定目标离片尾留出的安全余量；取「播完」判据的同一容差。 */
+        const val PREVIEW_END_MARGIN_MILLIS = 1_000L
 
         /** 落定通知的进程级序号：跨控制器实例也单调，界面据此只撤掉比它旧的保持值。 */
         internal val settlementIds = AtomicLong(0L)
