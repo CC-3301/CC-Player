@@ -40,7 +40,7 @@ class PlaybackControllerAudioTest {
         open(media)
         engine.reportMediaLoaded()
         engine.reportPositionChanged(1_000, 60_000)
-        controller.updateSeekPreview(30_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         controller.commitSeekPreview()
 
@@ -52,7 +52,7 @@ class PlaybackControllerAudioTest {
         open(media)
         engine.reportMediaLoaded()
 
-        controller.updateSeekPreview(30_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         assertEquals(listOf(PlaybackController.FADE_IN_MILLIS), engine.fadeInDurations)
     }

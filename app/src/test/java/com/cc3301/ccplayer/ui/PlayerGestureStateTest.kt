@@ -166,33 +166,24 @@ class PlayerGestureStateTest {
     }
 
     @Test
-    fun `死区内的抖动不更新预览目标`() {
-        val seek = PlayerSeekDrag(
-            baseMillis = 10_000L,
-            durationMillis = 600_000L,
-            width = width,
-            deadZonePx = 6f,
-        )
+    fun `拖动中恒按手指位置产出目标，死区不改变预览值`() {
+        val seek = PlayerSeekDrag(baseMillis = 10_000L, durationMillis = 600_000L, width = width)
 
         assertEquals(20_000L, seek.preview(30f))
-        // 位移没越过死区：返回 null，预览目标保持。
-        assertNull(seek.preview(34f))
-        assertEquals(20_000L, seek.previewMillis)
-        assertEquals(22_000L, seek.preview(36f))
+        // 相邻像素也产出真实目标：是否重发 seek 由调用方按像素死区判定。
+        assertEquals(21_333L, seek.preview(34f))
+        assertEquals(21_333L, seek.previewMillis)
     }
 
     @Test
-    fun `松手按手指真实位置结算，死区不改变落点`() {
-        val seek = PlayerSeekDrag(
-            baseMillis = 10_000L,
-            durationMillis = 600_000L,
-            width = width,
-            deadZonePx = 6f,
-        )
+    fun `松手落点与手指位置相差为零`() {
+        val seek = PlayerSeekDrag(baseMillis = 10_000L, durationMillis = 600_000L, width = width)
 
         assertEquals(20_000L, seek.preview(30f))
-        // 松手时手指在 34f：死区挡住的这段也要落进提交目标。
-        assertEquals(21_333L, seek.finish(34f))
+        // 松手时手指在 34f：落点就是这段真实位置，不被任何死区截断。
+        val committed = seek.finish(34f) ?: error("没有落点")
+        assertEquals(21_333L, committed)
+        assertEquals(0L, committed - 21_333L)
         assertEquals(21_333L, seek.committedMillis)
         assertNull(seek.previewMillis)
     }

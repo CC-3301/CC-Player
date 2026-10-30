@@ -222,7 +222,7 @@ class PlaybackControllerTest {
         engine.reportMediaLoaded()
         engine.reportPositionChanged(1_000, 60_000)
 
-        controller.updateSeekPreview(30_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         assertEquals(30_000L, controller.seekPreviewMillis.value)
         // 画面要跟到目标位置：预览下发静音的真实 seek，进度状态仍停在原位。
@@ -236,7 +236,7 @@ class PlaybackControllerTest {
         open(media)
         engine.reportMediaLoaded()
         engine.reportPositionChanged(1_000, 60_000)
-        controller.updateSeekPreview(30_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         controller.commitSeekPreview()
 

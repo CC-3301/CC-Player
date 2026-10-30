@@ -99,6 +99,17 @@ class SeekBarStateTest {
     }
 
     @Test
+    fun `只有更新的落定通知才撤掉保持值`() {
+        // 界面还没收到过通知：第一条通知就撤。
+        assertTrue(seekSettlementReleasesHold(heldSettlementId = 0L, settlementId = 1L))
+        // 同一目标再次落定：id 更大，照样撤。
+        assertTrue(seekSettlementReleasesHold(heldSettlementId = 1L, settlementId = 2L))
+        // 迟到的旧通知不能清掉新的保持值。
+        assertFalse(seekSettlementReleasesHold(heldSettlementId = 2L, settlementId = 2L))
+        assertFalse(seekSettlementReleasesHold(heldSettlementId = 3L, settlementId = 2L))
+    }
+
+    @Test
     fun `多指出现时取消拖动`() {
         assertFalse(isMultiPointerDrag(primaryId = 1L, pressedPointerIds = listOf(1L)))
         assertTrue(isMultiPointerDrag(primaryId = 1L, pressedPointerIds = listOf(1L, 2L)))

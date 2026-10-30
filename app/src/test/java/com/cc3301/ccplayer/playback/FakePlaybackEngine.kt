@@ -72,8 +72,10 @@ class FakePlaybackEngine : PlaybackEngine {
         startedPaused += paused
         startedPositions += startPositionMillis
         currentTargetUrl = url
-        // 与真实引擎一致：每次加载把 seek 序号归零。
+        // 与真实引擎一致：每次加载把 seek 序号归零，在途与待发 seek 一并作废。
         currentSeekSerial = 0
+        seekInFlightSerial = null
+        pendingSeekMillis = null
         return ++currentLoadToken
     }
 
@@ -105,10 +107,35 @@ class FakePlaybackEngine : PlaybackEngine {
         discardInFlightCalls++
     }
 
+    /** 在途 seek 的序号；未就绪前新目标只覆盖 [pendingSeekMillis]。 */
+    private var seekInFlightSerial: Int? = null
+
+    /** 在途期间被覆盖的最新待发目标；就绪后补发一次。 */
+    var pendingSeekMillis: Long? = null
+        private set
+
     override fun seekTo(positionMillis: Long): Int {
+        val inFlight = seekInFlightSerial
+        if (inFlight != null) {
+            // 与真实引擎一致：上一发未就绪时只覆盖待发目标，不堆命令。
+            pendingSeekMillis = positionMillis
+            return inFlight
+        }
+        return issueSeek(positionMillis)
+    }
+
+    private fun issueSeek(positionMillis: Long): Int {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"
-        return ++currentSeekSerial
+        return (++currentSeekSerial).also { seekInFlightSerial = it }
+    }
+
+    /** 就绪：放开在途槽位并补发被覆盖的目标。 */
+    private fun flushPendingSeek() {
+        seekInFlightSerial = null
+        val pending = pendingSeekMillis ?: return
+        pendingSeekMillis = null
+        issueSeek(pending)
     }
 
     override fun fadeInAudio(durationMillis: Long) {
@@ -176,6 +203,7 @@ class FakePlaybackEngine : PlaybackEngine {
         listener?.onLoadActivity(LoadActivity.FileLoaded, loadToken)
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
+        flushPendingSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
@@ -197,6 +225,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        flushPendingSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
@@ -212,6 +241,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.VideoReconfig, loadToken)
+        flushPendingSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
@@ -227,6 +257,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        flushPendingSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,

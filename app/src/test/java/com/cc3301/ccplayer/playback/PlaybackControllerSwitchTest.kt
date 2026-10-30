@@ -678,7 +678,7 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         assertTrue(controller.holdBlack.value)
 
-        controller.updateSeekPreview(0)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 0)
         controller.commitSeekPreview()
 
         assertFalse(controller.holdBlack.value)
