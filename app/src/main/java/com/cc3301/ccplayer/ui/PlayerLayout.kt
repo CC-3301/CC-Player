@@ -38,7 +38,7 @@ fun videoViewport(
 }
 
 /**
- * 切集期间视频区的比例：冻结画面就是原片，按它的比例铺满可视区；还没有冻结画面时沿用
+ * 冻结画面在册期间视频区的比例：冻结画面就是原片，按它的比例铺满可视区；还没有冻结画面时沿用
  * 最近一次上报；两者都没有时保持未知。新文件的比例不参与判定，旧画面才不会放大或跳变。
  */
 fun switchFreezeAspectRatio(
@@ -54,9 +54,8 @@ fun switchFreezeAspectRatio(
 }
 
 /**
- * 冻结画面覆盖层：冻结画面还在就盖住视频输出。
- * 冻结画面保留到新帧真正上屏，不随切集阶段结束而撤；撤帧与新画面比例在同一次重绘里生效，
- * 画面才不会先缩回原尺寸、等新帧到了再变一次。
+ * 冻结画面覆盖层：冻结画面还在就盖住视频输出；铺黑底期间不盖。
+ * 冻结画面保留到新帧真正上屏，不随切集阶段结束而撤；撤帧与新画面比例在同一次重绘里生效。
  */
 fun showFreezeOverlay(hasFreezeFrame: Boolean, holdBlack: Boolean): Boolean =
     hasFreezeFrame && !holdBlack
