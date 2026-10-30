@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -1642,6 +1643,89 @@ class CachedMediaPreviewSourceTest {
         assertTrue("打开挂起要按失败收尾，不能永久占位", request.await().retryable)
     }
 
+    @Test
+    fun `可见项优先取得句柄名额，预取占不满`() = runTest {
+        val slotExtractor = PreparedSlotExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = slotExtractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val prefetched = (0 until 6).map { index -> network("预取$index.mkv") }
+        bounded.updatePreviewWindow(
+            visibleLocations = emptySet(),
+            prefetchLocations = prefetched.map { file -> file.location }.toSet(),
+        )
+        val prefetches = prefetched.map { file -> async { bounded.prefetch(file) } }
+        runCurrent()
+        assertEquals("预取最多占 3 个名额，留 1 个给可见项", 3, slotExtractor.started.size)
+
+        val visible = async { bounded.visiblePreview(network("可见.mkv"), 9) }
+        runCurrent()
+        assertEquals("可见项不用等预取释放名额", 4, slotExtractor.started.size)
+        assertTrue(slotExtractor.started.contains("smb://nas/media/可见.mkv"))
+
+        slotExtractor.gate.complete(Unit)
+        assertNotNull(visible.await().image)
+        prefetches.forEach { it.await() }
+        assertEquals("每个已开句柄都关闭一次", slotExtractor.started.size, slotExtractor.closed.size)
+    }
+
+    @Test
+    fun `打开超时后归还句柄名额，后面的可见项继续打开`() = runTest {
+        val slotExtractor = PreparedSlotExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = slotExtractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val blocked = (0 until 4).map { index ->
+            async { bounded.visiblePreview(network("卡住$index.mkv"), index) }
+        }
+        runCurrent()
+        assertEquals("四个名额同时被占住", 4, slotExtractor.started.size)
+
+        // 打开一直不返回：超时只停止等待，名额回到池里。
+        advanceTimeBy(15_000)
+        runCurrent()
+        blocked.forEach { request -> assertTrue("打开超时按失败收尾", request.await().retryable) }
+
+        val later = async { bounded.visiblePreview(network("后来的.mkv"), 9) }
+        runCurrent()
+        assertEquals("超时后名额可以再发出去", 5, slotExtractor.started.size)
+        assertTrue(slotExtractor.started.contains("smb://nas/media/后来的.mkv"))
+    }
+
+    @Test
+    fun `取消可见请求后归还句柄名额，已开的句柄全部关闭`() = runTest {
+        val slotExtractor = PreparedSlotExtractor()
+        slotExtractor.gate.complete(Unit)
+        slotExtractor.decodeGate = CompletableDeferred()
+        val bounded = CachedMediaPreviewSource(
+            extractor = slotExtractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val blocked = (0 until 4).map { index ->
+            async { bounded.visiblePreview(network("占位$index.mkv"), index) }
+        }
+        runCurrent()
+        assertEquals("四个名额全部占住", 4, slotExtractor.started.size)
+
+        blocked.drop(1).forEach { request -> request.cancel() }
+        runCurrent()
+        assertEquals("取消的请求各自关闭句柄", 3, slotExtractor.closed.size)
+
+        val later = async { bounded.visiblePreview(network("后来的.mkv"), 9) }
+        runCurrent()
+        assertEquals("名额归还后才能再开", 5, slotExtractor.started.size)
+
+        slotExtractor.decodeGate.complete(Unit)
+        runCurrent()
+        assertNotNull(blocked[0].await().image)
+        assertNotNull(later.await().image)
+    }
+
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
         MediaFile(name = name, location = "root/$name", size = size, lastModified = lastModified)
 
@@ -1811,6 +1895,35 @@ private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
         )
 
     override suspend fun durationMillis(file: MediaFile): Long? = null
+}
+
+/** 打开句柄先等闸门；记录已开与已关的句柄，用来验证句柄名额的容量与归还。 */
+private class PreparedSlotExtractor : MediaPreviewExtractor {
+
+    /** 打开句柄前等的闸门。 */
+    val gate = CompletableDeferred<Unit>()
+
+    /** 解码前等的闸门；默认已放行。 */
+    var decodeGate: CompletableDeferred<Unit> = CompletableDeferred<Unit>().apply { complete(Unit) }
+
+    val started = mutableListOf<String>()
+    val closed = mutableListOf<String>()
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+        started += file.location
+        gate.await()
+        return NetworkPreviewPreparation(
+            decodeBlock = {
+                decodeGate.await()
+                byteArrayOf(1)
+            },
+            closeBlock = { closed += file.location },
+        )
+    }
 }
 
 /** 抽取一直挂起，取消后才结束，用来验证许可归还。 */

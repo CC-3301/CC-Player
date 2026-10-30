@@ -117,7 +117,8 @@ internal class PreviewByteWindow(
 
     /**
      * 取块内容；缺失时由当前线程补齐，补齐期间其它线程等锁上的通知。
-     * 定点读只填了块头一段时，解码要块内更后面的字节要补整块。
+     * 定点读只填了块头一段；解码要块内更后面的字节时整块重读，
+     * 256 KiB 的块从块头再读一遍，包含已经读到的前 64 KiB。
      */
     private fun chunkAt(start: Long, position: Long): ByteArray {
         synchronized(lock) {
@@ -194,7 +195,9 @@ internal class PreviewByteWindow(
         }
     }
 
-    /** 按块排队定点读；头 64 KiB 只填块头一段，其余块补齐整块。 */
+    /**
+     * 按块排队定点读：头 64 KiB 只填块头一段，同一块的后半段等解码用到时整块重读；其余块补齐整块。
+     */
     private fun queueMetadata(from: Long, to: Long) {
         val tasks = ArrayList<Pair<Long, Long>>()
         synchronized(lock) {

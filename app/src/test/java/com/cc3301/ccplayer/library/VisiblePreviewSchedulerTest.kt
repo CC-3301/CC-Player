@@ -448,6 +448,43 @@ class VisiblePreviewSchedulerTest {
             times.zipWithNext { previous, next -> next - previous },
         )
     }
+
+    @Test
+    fun `失败项离屏后取消重试计时，回屏立即重试`() = runTest {
+        val times = mutableListOf<Long>()
+        val attempts = mutableMapOf<Int, Int>()
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                times += testScheduler.currentTime
+                val attempt = (attempts[index] ?: 0) + 1
+                attempts[index] = attempt
+                // 0 首次失败、重试成功；1 一次就出图。
+                val fails = index == 0 && attempt == 1
+                return MediaPreview(
+                    image = null,
+                    durationMillis = if (fails) null else index + 1L,
+                    retryable = fails,
+                )
+            }
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        val requests = (0..1).map { index -> async { scheduler.preview(entries[index], index) } }
+        runCurrent()
+        assertEquals("先出 1，0 先跳过", listOf(0L, 0L), times)
+
+        // 重试间隔没到就离屏：离屏取消计时，回屏不再等这一整段。
+        advanceTimeBy(500)
+        scheduler.update(entries, firstVisible = 1, lastVisible = 1, rowSize = 1)
+        runCurrent()
+        scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
+        runCurrent()
+
+        assertNull(requests[0].await().image)
+        assertEquals("回屏立即重试，不等满 1s", listOf(0L, 0L, 500L), times)
+    }
 }
 
 /** 首次抽取取消后延迟结束，用来构造旧 attempt 迟到收尾。 */

@@ -18,7 +18,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -115,6 +114,7 @@ data class ThumbnailPolicy(
  * 缓存键包含位置、大小、修改时间、策略版本与目标宽度；修改时间缺失时退化为大小与有效期。
  * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。底层取帧是阻塞的原生调用且取消不掉，
  * 同一时刻只跑一路；许可按列表索引发给排队的可见请求，许可空闲也不让后来者越过排队者。
+ * 网络句柄名额同样按索引优先给可见项，预取占不满全部名额。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
  * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，预取失败不写退避。
@@ -135,8 +135,14 @@ class CachedMediaPreviewSource(
     /** 抽帧许可：容量为 1，本地与网络共用；可见项优先于预取取得。 */
     private val permits = PrioritySemaphore(EXTRACTION_CONCURRENCY)
 
-    /** 已开句柄、已起预读的条目名额：限制同屏并发句柄数。 */
-    private val preparedSlots = Semaphore(MAX_PREPARED_PREVIEWS)
+    /**
+     * 已开句柄、已起预读的条目名额：限制同屏并发句柄数。
+     * 可见项优先取得；预取最多占用预留名额之外的部分，占不满全部名额。
+     */
+    private val preparedSlots = PrioritySemaphore(
+        capacity = MAX_PREPARED_PREVIEWS,
+        prefetchCapacity = MAX_PREPARED_PREVIEWS - VISIBLE_RESERVED_PREPARED_SLOTS,
+    )
 
     /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
     private val noImage = NoImageMemory()
@@ -378,7 +384,7 @@ class CachedMediaPreviewSource(
                 if (!mayExtract(file.location, priority)) {
                     LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
-                    preparedSlots.withPermit { prepareAndDecode(file, key, targetWidth, priority) }
+                    preparedSlots.withPermit(priority) { prepareAndDecode(file, key, targetWidth, priority) }
                 }
             },
         )
@@ -387,7 +393,7 @@ class CachedMediaPreviewSource(
 
     /**
      * 打开句柄并起预读（占一个准备名额），再等解码许可、在许可内解码。
-     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束：建连或打开挂起时也会超时并按失败收尾。
+     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束；打开超时不跟着阻塞的原生调用一起等，名额随即归还。
      */
     private suspend fun prepareAndDecode(
         file: MediaFile,
@@ -397,11 +403,7 @@ class CachedMediaPreviewSource(
     ): LoadedPreview {
         var prepared: NetworkPreviewPreparation? = null
         try {
-            val opened = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                prepared = extractor.prepareNetworkPreview(file)
-                true
-            } ?: false
-            if (!opened) throw IllegalStateException("网络预览打开超时")
+            prepared = openOutsideRequest(file)
             // 排队时间不计入解码超时；阻塞中的网络读由各自的传输层超时兜底。
             val requestedAt = monotonicClockMillis()
             var queuedMillis = 0L
@@ -441,6 +443,45 @@ class CachedMediaPreviewSource(
             // 句柄无论解码成功、失败还是取消都要关。
             prepared?.close()
         }
+    }
+
+    /**
+     * 打开句柄并按目标位置起预读。
+     *
+     * 打开是取消不掉的阻塞原生调用：放在脱离请求的协程里跑，超时只停止等待，
+     * 名额随即归还，后面的可见项不跟着一个坏条目一起等。
+     * 打开最终结束后仍无人接手（超时或取消）时由打开方关闭句柄与预读。
+     */
+    private suspend fun openOutsideRequest(file: MediaFile): NetworkPreviewPreparation? {
+        val opened = CompletableDeferred<Result<NetworkPreviewPreparation?>>()
+        // 父 Job 跟随进程级范围，调度器沿用调用方的：请求取消不会连带取消这次打开。
+        val opening = CoroutineScope(
+            currentCoroutineContext() + Job(backgroundScope.coroutineContext[Job]),
+        ).launch {
+            val result = try {
+                Result.success(extractor.prepareNetworkPreview(file))
+            } catch (cancellation: CancellationException) {
+                opened.cancel(cancellation)
+                return@launch
+            } catch (failure: Throwable) {
+                Result.failure(failure)
+            }
+            // 没人接手（超时或取消）时在这里关闭，句柄不留在无人持有的地方。
+            if (!opened.complete(result)) runCatching { result.getOrNull()?.close() }
+        }
+        val settled = try {
+            withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { opened.await() }
+        } catch (failure: Throwable) {
+            opened.cancel(CancellationException("网络预览打开已放弃"))
+            opening.cancel()
+            throw failure
+        }
+        if (settled == null) {
+            opened.cancel(CancellationException("网络预览打开超时"))
+            opening.cancel()
+            throw IllegalStateException("网络预览打开超时")
+        }
+        return settled.getOrThrow()
     }
 
     /**
@@ -584,11 +625,17 @@ class CachedMediaPreviewSource(
         /** 抽帧许可容量：本地与网络共用同一个，同一时刻只有一路在取帧。 */
         private const val EXTRACTION_CONCURRENCY = 1
 
-        /** 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。 */
+        /**
+         * 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。
+         * 打开超时只放弃等待，阻塞中的原生打开由传输层超时收尾。
+         */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
 
         /** 同时处于「已开句柄、已起预读」状态的网络条目上限；一条目占两条句柄。 */
         private const val MAX_PREPARED_PREVIEWS = 4
+
+        /** 预取不得占用的句柄名额：预取占满其余名额时，可见项仍有一个可以直接打开。 */
+        private const val VISIBLE_RESERVED_PREPARED_SLOTS = 1
 
         /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
         private const val DURATION_RETRY_BASE_MILLIS = 30_000L
@@ -680,11 +727,16 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
 }
 
 /**
- * 带优先级的抽帧许可：许可只发给排队者中优先级最高的一位，可见请求按列表索引从小到大。
+ * 带优先级的许可：许可只发给排队者中优先级最高的一位，可见请求按列表索引从小到大。
  * 许可空闲也不直接放行后来的请求，后到的高索引项不会越过仍在排队的低索引项。
+ * 预取与时长补读另有配额，最多占 [prefetchCapacity] 个，可见项不会被它们堵在门外。
  * 取消等待会退出队列；已发出的许可在取消竞争中归还，避免许可泄漏。
  */
-private class PrioritySemaphore(private val capacity: Int) {
+private class PrioritySemaphore(
+    private val capacity: Int,
+    /** 非可见请求（预取与时长补读）最多同时占用的许可数；余下的留给可见项。 */
+    private val prefetchCapacity: Int = capacity,
+) {
 
     private val lock = Mutex()
     private var available = capacity
@@ -718,24 +770,34 @@ private class PrioritySemaphore(private val capacity: Int) {
         }
     }
 
-    /** 连续把空闲许可发给当前排队者中优先级最高的一位。 */
+    /** 连续把空闲许可发给优先级最高、且没超出自身配额的一位。 */
     private fun grantIdleLocked() {
         while (available > 0) {
-            val index = waiters.indices.minByOrNull { position -> priorityRank(waiters[position]) } ?: return
+            val index = waiters.indices
+                .filter { position -> withinQuotaLocked(waiters[position]) }
+                .minByOrNull { position -> priorityRank(waiters[position]) } ?: return
             val granted = waiters.removeAt(index)
             available--
             granted.granted.complete(Unit)
         }
     }
 
+    /** 预取与时长补读最多同时占用 [prefetchCapacity] 个；可见项不受配额限制。 */
+    private fun withinQuotaLocked(waiter: Waiter): Boolean {
+        if (waiter.priority.isVisible) return true
+        return capacity - available < prefetchCapacity
+    }
+
     private suspend fun release() {
         val next = lock.withLock {
-            val index = waiters.indices.minByOrNull { position -> priorityRank(waiters[position]) }
+            available++
+            val index = waiters.indices
+                .filter { position -> withinQuotaLocked(waiters[position]) }
+                .minByOrNull { position -> priorityRank(waiters[position]) }
             if (index == null) {
-                available++
                 null
             } else {
-                waiters.removeAt(index)
+                waiters.removeAt(index).also { available-- }
             }
         }
         next?.granted?.complete(Unit)

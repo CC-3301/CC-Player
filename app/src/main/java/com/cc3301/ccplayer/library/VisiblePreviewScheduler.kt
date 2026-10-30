@@ -25,8 +25,11 @@ import kotlinx.coroutines.yield
  * 4. 离屏、空窗口与 [reset] 只作废当前 attempt 并取消 Job，保留请求与 deferred；
  *    再次可见时重新下发。
  * 5. 只有最后一个订阅者取消时才取消（异常完成）deferred 并移除请求。
- * 6. [cancelAll] 先在锁内快照并作废全部 attempt，再在锁外逐个取消 Job，
+ * 6. [cancelAll] 先在锁内快照并作废全部 attempt 与重试计时，再在锁外逐个取消 Job，
  *    完成回调不会遍历正在被修改的集合。
+ * 7. 离屏、空窗口与 [reset] 同时清掉待重试标记并取消重试计时；再次可见时立即参与下发。
+ * 8. 重试计时由 attempt 收尾直接安排，不依赖 [dispatch] 的收尾分支；
+ *    等批次收尾由信号唤醒，不轮询。
  */
 class VisiblePreviewScheduler(
     private val source: MediaPreviewSource,
@@ -52,6 +55,9 @@ class VisiblePreviewScheduler(
     /** 离开库页面后不再接受新请求。 */
     private var closed = false
 
+    /** 一批首次尝试收尾的信号；重试计时在它上面等，不做轮询。 */
+    private var batchSettled = CompletableDeferred<Unit>()
+
     /** 更新可见与预取范围；离屏请求只作废当前 attempt，保留订阅等待再次可见。空范围同样生效。 */
     fun update(entries: List<MediaFile>, firstVisible: Int, lastVisible: Int, rowSize: Int) {
         val visible = if (firstVisible >= 0 && lastVisible >= firstVisible) {
@@ -66,6 +72,7 @@ class VisiblePreviewScheduler(
         }
         prefetcher.update(entries, firstVisible, lastVisible, rowSize)
         dispatch()
+        wakeRetryWaiters()
     }
 
     /**
@@ -113,6 +120,7 @@ class VisiblePreviewScheduler(
             pauseAllLocked()
         }
         prefetcher.cancelAll()
+        wakeRetryWaiters()
     }
 
     /** 离开库页面时取消全部请求与预取，并清空可见范围。 */
@@ -125,17 +133,23 @@ class VisiblePreviewScheduler(
             // 作废旧批次：它与新批次并跑会打乱下发顺序。
             drainGeneration++
             val snapshot = requests.values.map { request ->
-                invalidateAttemptLocked(request) to request
+                val timer = request.retryTimer
+                request.retryTimer = null
+                request.retryPending = false
+                PausedAttempt(invalidateAttemptLocked(request), timer, request)
             }
             requests.clear()
             snapshot
         }
-        // 先快照并作废 attempt，再在锁外取消：完成回调只会校验令牌后返回。
-        pending.forEach { (job, request) ->
-            job?.cancel()
+        // 先快照并作废 attempt 与重试计时，再在锁外取消：完成回调只会校验令牌后返回。
+        pending.forEach { paused ->
+            paused.attempt?.cancel()
+            paused.timer?.cancel()
+            val request = paused.request
             if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
         }
         prefetcher.cancelAll()
+        wakeRetryWaiters()
     }
 
     private fun pauseOutsideLocked(visible: Set<String>) {
@@ -148,9 +162,12 @@ class VisiblePreviewScheduler(
         requests.values.forEach(::pauseLocked)
     }
 
-    /** 作废当前 attempt 并取消 Job；请求与 deferred 保留，等再次可见时重新下发。 */
+    /** 作废当前 attempt 并取消 Job；离屏也不再等重试计时，请求与 deferred 保留到再次可见。 */
     private fun pauseLocked(request: Request) {
         invalidateAttemptLocked(request)?.cancel()
+        request.retryTimer?.cancel()
+        request.retryTimer = null
+        request.retryPending = false
     }
 
     /** 作废当前 attempt，返回被取消的 Job；回调随后会因令牌或 Job 身份不符而退出。 */
@@ -164,6 +181,9 @@ class VisiblePreviewScheduler(
     private fun removeRequestLocked(request: Request, cancelDeferred: Boolean) {
         if (requests[request.file.location] === request) requests.remove(request.file.location)
         invalidateAttemptLocked(request)?.cancel()
+        request.retryTimer?.cancel()
+        request.retryTimer = null
+        request.retryPending = false
         if (cancelDeferred && !request.deferred.isCompleted) {
             request.deferred.cancel(CancellationException("预览订阅已取消"))
         }
@@ -193,6 +213,7 @@ class VisiblePreviewScheduler(
                 } else {
                     // 可见项都出完（或都失败待重试）才安排失败项的重试。
                     scheduleRetries()
+                    wakeRetryWaiters()
                 }
             }
         }
@@ -244,8 +265,8 @@ class VisiblePreviewScheduler(
                 if (!request.deferred.isCompleted) request.deferred.complete(preview)
             }
         }
-        // 重新走一轮下发：失败项要靠这一轮排空后才安排重试计时。
-        dispatch()
+        // 重新走一轮下发，并独立安排重试计时：失败项要靠这一轮排空后才轮到重试。
+        resumeAfterAttempt()
     }
 
     /**
@@ -265,20 +286,36 @@ class VisiblePreviewScheduler(
         return if (freshRunning) null else candidates.minByOrNull(Request::index)
     }
 
+    /**
+     * 一次 attempt 收尾后的统一续跑：推进下发、安排重试计时、唤醒等批次的计时器。
+     * 三件事各走各的路，attempt 从别处启动也不会丢重试计时。
+     */
+    private fun resumeAfterAttempt() {
+        dispatch()
+        scheduleRetries()
+        wakeRetryWaiters()
+    }
+
+    /** 还有首次尝试没出图的可见项：在跑，或可下发。 */
+    private fun hasFreshWorkLocked(): Boolean = requests.values.any { request ->
+        request.retryAttempts == 0 &&
+            request.file.location in visibleLocations &&
+            (request.job != null || request.isDispatchableLocked())
+    }
+
+    /** 唤醒等批次收尾的重试计时；醒来后各自复查可见性。 */
+    private fun wakeRetryWaiters() {
+        val gate = synchronized(lock) { batchSettled.also { batchSettled = CompletableDeferred() } }
+        gate.complete(Unit)
+    }
+
     /** 可见项全部出图后为每个失败项安排重试计时：第 n 次重试等 n 秒。 */
     private fun scheduleRetries() {
         val starters = ArrayList<Pair<Request, Job>>()
         synchronized(lock) {
-            if (closed || dispatching) return
+            if (closed) return
             // 还有可见项没出图（在跑或可下发）时不安排重试。
-            if (requests.values.any { request ->
-                    request.retryAttempts == 0 &&
-                        request.file.location in visibleLocations &&
-                        (request.job != null || request.isDispatchableLocked())
-                }
-            ) {
-                return
-            }
+            if (hasFreshWorkLocked()) return
             requests.values
                 .filter { request ->
                     request.retryPending && request.retryTimer == null && request.file.location in visibleLocations
@@ -299,17 +336,19 @@ class VisiblePreviewScheduler(
 
     /** 等满递进间隔后把失败项重新排上；期间离屏或取消就不再重试。 */
     private suspend fun awaitRetry(request: Request) {
-        delay(VISIBLE_RETRY_STEP_MILLIS * request.retryAttempts)
-        // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。
+        // 间隔在锁内取：重试次数只由下发线程在锁内改。
+        val step = synchronized(lock) {
+            if (closed || request.deferred.isCompleted) return
+            request.retryAttempts
+        }
+        delay(VISIBLE_RETRY_STEP_MILLIS * step)
+        // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。批次收尾会唤醒，不轮询。
         while (true) {
-            val batchRunning = synchronized(lock) {
+            val gate = synchronized(lock) {
                 if (closed || request.deferred.isCompleted) return
-                requests.values.any { other ->
-                    other !== request && other.retryAttempts == 0 && other.file.location in visibleLocations
-                }
-            }
-            if (!batchRunning) break
-            delay(VISIBLE_RETRY_POLL_MILLIS)
+                if (hasFreshWorkLocked()) batchSettled else null
+            } ?: break
+            gate.await()
         }
         val again = synchronized(lock) {
             if (closed || request.deferred.isCompleted) return
@@ -330,7 +369,7 @@ class VisiblePreviewScheduler(
             if (requests[request.file.location] === request) requests.remove(request.file.location)
             if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
         }
-        dispatch()
+        resumeAfterAttempt()
     }
 
     private fun isCurrentAttemptLocked(request: Request, attemptId: Long): Boolean =
@@ -364,6 +403,13 @@ class VisiblePreviewScheduler(
         val job: Job,
     )
 
+    /** 一次暂停快照：attempt Job、重试计时 Job 与请求本身。 */
+    private class PausedAttempt(
+        val attempt: Job?,
+        val timer: Job?,
+        val request: Request,
+    )
+
     private companion object {
         val EMPTY_PREVIEW = MediaPreview(image = null, durationMillis = null)
 
@@ -372,8 +418,5 @@ class VisiblePreviewScheduler(
 
         /** 单个条目的失败重试上限。 */
         const val VISIBLE_RETRY_MAX_ATTEMPTS = 5
-
-        /** 等可见项出完的轮询间隔。 */
-        const val VISIBLE_RETRY_POLL_MILLIS = 20L
     }
 }

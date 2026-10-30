@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.CancellationException
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -184,6 +185,33 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `预读已排队后打开失败时关闭窗口，排队中的预读不再读取`() = runTest {
+        val reads = RecordingReads(ByteArray(1 shl 20))
+        val executor = RejectingExecutor(failAt = 2)
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAheadExecutor = executor,
+        )
+
+        try {
+            extractor.prepare(movie)
+            fail("应向上抛出预读提交失败")
+        } catch (expected: RejectedExecutionException) {
+            // 预期路径。
+        }
+
+        assertTrue("两条句柄都要关闭", reads.sources.all { source -> source.closed })
+        val readsBefore = reads.sources.sumOf { source -> source.reads.size }
+        executor.runAll()
+        assertEquals(
+            "关闭后已排队的预读不再读取",
+            readsBefore,
+            reads.sources.sumOf { source -> source.reads.size },
+        )
+    }
+
+    @Test
     fun `打开句柄失败时向调用方抛出`() = runTest {
         val extractor = NetworkPreviewExtractor(
             { _, _ -> error("打不开") },
@@ -263,6 +291,24 @@ private class StepExecutor : Executor {
         tasks.addLast(command)
     }
 
+    fun runAll() {
+        while (tasks.isNotEmpty()) tasks.removeFirst().run()
+    }
+}
+
+/** 前 [failAt] - 1 个任务入队，第 [failAt] 个提交时拒绝；用来构造窗口已建、准备未交付。 */
+private class RejectingExecutor(private val failAt: Int) : Executor {
+
+    private val tasks = ArrayDeque<Runnable>()
+    private var submissions = 0
+
+    override fun execute(command: Runnable) {
+        submissions++
+        if (submissions >= failAt) throw RejectedExecutionException("预读线程拒绝任务")
+        tasks.addLast(command)
+    }
+
+    /** 跑完已入队的任务：窗口关闭后它们必须直接退出，不再读底层。 */
     fun runAll() {
         while (tasks.isNotEmpty()) tasks.removeFirst().run()
     }

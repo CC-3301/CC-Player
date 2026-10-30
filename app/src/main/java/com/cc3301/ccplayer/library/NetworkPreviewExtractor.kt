@@ -51,7 +51,8 @@ class NetworkPreviewPreparation(
  * 解码与预读在同一条流上交替位置会重发区间请求。预读按元数据阶段定点读发起，之后跟随解码命中。
  * 打开与预读不占解码许可，解码由 [NetworkPreviewPreparation.decode] 在许可内执行。
  * 打开失败或取消时两条句柄都会关闭；取消或超时时先关闭句柄，让阻塞中的传输读取退出。
- * 读取按 [readPriority] 让出给播放读取。打开或解码失败抛出异常，由上层保持占位图并重试。
+ * 读取按 [readPriority] 让出给播放读取，两条句柄的等待合计成一条诊断。打开或解码失败抛出异常，
+ * 由上层保持占位图并重试。
  */
 class NetworkPreviewExtractor(
     private val reads: NetworkMediaReads,
@@ -74,6 +75,7 @@ class NetworkPreviewExtractor(
     suspend fun prepare(file: MediaFile): NetworkPreviewPreparation? {
         val waitedMillis = AtomicLong()
         var opened: NetworkPreviewPreparation? = null
+        var window: PreviewByteWindow? = null
         var primary: ByteSource? = null
         var readAhead: ByteSource? = null
         try {
@@ -83,30 +85,35 @@ class NetworkPreviewExtractor(
                     waitedMillis.addAndGet(millis)
                 }
                 primary = source
-                readAhead = openReadAhead(file)
-                val window = PreviewByteWindow(
+                readAhead = openReadAhead(file, waitedMillis)
+                val previewWindow = PreviewByteWindow(
                     origin = source,
                     readAheadSource = readAhead,
                     readAheadExecutor = readAheadExecutor,
                 )
-                window.startMetadataReadAhead()
+                window = previewWindow
+                previewWindow.startMetadataReadAhead()
                 NetworkPreviewPreparation(
                     decodeBlock = { targetWidth ->
                         try {
-                            decode(window, kind, targetWidth)
+                            decode(previewWindow, kind, targetWidth)
                         } finally {
-                            // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读。
+                            // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
                             diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
                         }
                     },
-                    closeBlock = { runCatching { window.close() } },
+                    closeBlock = { runCatching { previewWindow.close() } },
                 ).also { opened = it }
             }
         } catch (failure: Throwable) {
-            // 取消可能在 withContext 返回后才生效并丢弃结果：已打开的句柄在这里兜底关闭。
+            // 取消可能在 withContext 返回后才生效并丢弃结果：已打开的资源在这里兜底关闭。
             val preparation = opened
+            val openedWindow = window
             if (preparation != null) {
                 runCatching { preparation.close() }
+            } else if (openedWindow != null) {
+                // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
+                runCatching { openedWindow.close() }
             } else {
                 runCatching { primary?.close() }
                 runCatching { readAhead?.close() }
@@ -115,9 +122,11 @@ class NetworkPreviewExtractor(
         }
     }
 
-    /** 预读用的第二条句柄；打不开就退回与解码共用一条。取消照常向上抛。 */
-    private suspend fun openReadAhead(file: MediaFile): ByteSource? = try {
-        readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail)
+    /** 预读用的第二条句柄；让给播放读取的时长与主句柄一起累计。打不开就退回与解码共用一条。 */
+    private suspend fun openReadAhead(file: MediaFile, waitedMillis: AtomicLong): ByteSource? = try {
+        readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
+            waitedMillis.addAndGet(millis)
+        }
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (failure: Exception) {
