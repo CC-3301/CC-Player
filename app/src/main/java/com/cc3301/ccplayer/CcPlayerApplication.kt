@@ -3,7 +3,7 @@ package com.cc3301.ccplayer
 import android.app.Application
 import com.cc3301.ccplayer.diagnostics.CrashLogger
 import com.cc3301.ccplayer.diagnostics.Diagnostics
-import com.cc3301.ccplayer.diagnostics.RotatingFileSink
+import com.cc3301.ccplayer.diagnostics.SessionFileSink
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaPreviewHolder
 import com.cc3301.ccplayer.library.MediaPreviewSource
@@ -70,7 +70,7 @@ class CcPlayerApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        diagnostics = Diagnostics(RotatingFileSink(File(filesDir, Diagnostics.DIRECTORY_NAME)))
+        diagnostics = Diagnostics(SessionFileSink(File(filesDir, Diagnostics.DIRECTORY_NAME)))
         installCrashHandler()
         scope.launch {
             var initialized = false

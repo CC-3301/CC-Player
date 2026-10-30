@@ -105,9 +105,6 @@ class Diagnostics(
         /** 单个日志文件的上限。 */
         const val MAX_FILE_BYTES = 2L * 1024L * 1024L
 
-        /** 最多保留的日志文件数。 */
-        const val MAX_FILES = 3
-
         private val SINGLE_IO = Dispatchers.IO.limitedParallelism(1)
 
         private val USERINFO_PATTERN = Regex("(?i)([a-z][a-z0-9+.-]*://)[^/\\s]*@")
