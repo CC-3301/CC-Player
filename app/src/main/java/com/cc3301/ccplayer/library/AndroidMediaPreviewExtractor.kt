@@ -44,6 +44,9 @@ class AndroidMediaPreviewExtractor(
         }
     }
 
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? =
+        if (file.source == MediaSource.Network) networkPreview?.prepare(file) else null
+
     override suspend fun durationMillis(file: MediaFile): Long? {
         // 网络条目不显示时长角标（ADR-0017）。
         if (file.source != MediaSource.Local) return null

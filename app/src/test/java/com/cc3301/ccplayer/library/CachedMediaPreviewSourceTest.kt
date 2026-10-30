@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -1635,6 +1636,53 @@ class CachedMediaPreviewSourceTest {
 
     private fun metadataFile(): File =
         directory.listFiles().orEmpty().first { file -> file.name.endsWith(".meta") }
+
+    @Test
+    fun `预读在解码许可外进行，解码期间下一项的预读已经推进`() = runTest {
+        val decoding = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val prefetched = CompletableDeferred<Unit>()
+        val order = mutableListOf<String>()
+        val extractor = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+                error("网络取图应走准备路径")
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+                order += "预读:${file.name}"
+                if (file.name.startsWith("b")) prefetched.complete(Unit)
+                return NetworkPreviewPreparation(
+                    decodeBlock = { _ ->
+                        order += "解码:${file.name}"
+                        if (file.name.startsWith("a")) {
+                            decoding.complete(Unit)
+                            release.await()
+                        }
+                        ByteArray(4)
+                    },
+                    closeBlock = {},
+                )
+            }
+        }
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+
+        val first = async { source.visiblePreview(network("a.mkv"), 0) }
+        decoding.await()
+        val second = async { source.visiblePreview(network("b.mkv"), 1) }
+        withTimeout(5_000) { prefetched.await() }
+
+        assertFalse("首项仍在解码", first.isCompleted)
+        assertEquals("预读不占解码许可", listOf("预读:a.mkv", "解码:a.mkv", "预读:b.mkv"), order)
+
+        release.complete(Unit)
+        first.await()
+        second.await()
+    }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
         MediaFile(name = name, location = "root/$name", size = size, lastModified = lastModified)

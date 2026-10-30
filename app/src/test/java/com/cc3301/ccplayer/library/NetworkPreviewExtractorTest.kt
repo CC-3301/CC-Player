@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -18,8 +19,7 @@ import org.junit.Test
 class NetworkPreviewExtractorTest {
 
     private val payload = ByteArray(64) { it.toByte() }
-    private val source = RecordingByteSource(payload)
-    private val reads = RecordingReads(source)
+    private val reads = RecordingReads(payload)
     private val movie = MediaFile(
         name = "电影.mkv",
         location = "smb://nas/media/电影.mkv",
@@ -27,29 +27,60 @@ class NetworkPreviewExtractorTest {
         source = MediaSource.Network,
     )
 
+    private fun extractor(decoder: NetworkPreviewDecoder) = NetworkPreviewExtractor(reads, decoder = decoder)
+
     @Test
     fun `网络取图成功时返回解码结果并关闭句柄`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { opened, kind, _ ->
-            askedKind = kind
-            ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
-        }
+        val extractor = extractor(
+            NetworkPreviewDecoder { opened, kind, _ ->
+                askedKind = kind
+                ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
+            },
+        )
 
         assertArrayEquals(payload.copyOfRange(0, 8), extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)!!)
         assertEquals(MediaKind.Video, askedKind)
-        assertEquals(listOf(movie.location), reads.opened)
-        assertEquals("文件大小取自目录列表", listOf(movie.size), reads.sizes)
-        assertEquals(listOf(0L), source.reads)
-        assertTrue(source.closed)
+        assertEquals("解码与预读各开一条句柄", 2, reads.opened.size)
+        assertEquals("文件大小取自目录列表", setOf(movie.size), reads.sizes.toSet())
+        assertTrue("句柄全部关闭", reads.sources.all { source -> source.closed })
+    }
+
+    @Test
+    fun `预读用独立句柄，解码读本地字节`() = runTest {
+        val executor = StepExecutor()
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { opened, _, _ ->
+                val buffer = ByteArray(8)
+                opened.readAt(0, buffer, 0, buffer.size)
+                ByteArray(8)
+            },
+            readAheadExecutor = executor,
+        )
+
+        val prepared = extractor.prepare(movie)!!
+        try {
+            executor.runAll()
+            assertArrayEquals(ByteArray(8), prepared.decode(NETWORK_TARGET_WIDTH))
+        } finally {
+            prepared.close()
+        }
+
+        assertEquals("解码与预读各开一条句柄", 2, reads.opened.size)
+        assertTrue("解码只吃预读拉进来的本地字节", reads.sources[0].reads.isEmpty())
+        assertEquals("预读取文件头", listOf(0L), reads.sources[1].reads)
     }
 
     @Test
     fun `网络取图使用调用方的目标宽度`() = runTest {
         var askedWidth: Int? = null
-        val extractor = NetworkPreviewExtractor(reads) { _, _, width ->
-            askedWidth = width
-            ByteArray(1)
-        }
+        val extractor = extractor(
+            NetworkPreviewDecoder { _, _, width ->
+                askedWidth = width
+                ByteArray(1)
+            },
+        )
 
         extractor.imageBytes(movie, targetWidth = 320)
 
@@ -59,20 +90,22 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `音频按内嵌封面取图`() = runTest {
         var askedKind: MediaKind? = null
-        val extractor = NetworkPreviewExtractor(reads) { _, kind, _ ->
-            askedKind = kind
-            ByteArray(2)
-        }
+        val extractor = extractor(
+            NetworkPreviewDecoder { _, kind, _ ->
+                askedKind = kind
+                ByteArray(2)
+            },
+        )
 
         extractor.imageBytes(movie.copy(name = "歌.mp3"), NETWORK_TARGET_WIDTH)
 
         assertEquals(MediaKind.Audio, askedKind)
-        assertTrue(source.closed)
+        assertTrue(reads.sources.all { source -> source.closed })
     }
 
     @Test
     fun `解码抛异常时向调用方抛出并关闭句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> error("解码失败") }
+        val extractor = extractor(NetworkPreviewDecoder { _, _, _ -> error("解码失败") })
 
         try {
             extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
@@ -80,12 +113,15 @@ class NetworkPreviewExtractorTest {
         } catch (expected: IllegalStateException) {
             // 预期失败路径。
         }
-        assertTrue(source.closed)
+        assertTrue(reads.sources.all { source -> source.closed })
     }
 
     @Test
     fun `打开句柄失败时向调用方抛出`() = runTest {
-        val extractor = NetworkPreviewExtractor({ _, _ -> error("打不开") }) { _, _, _ -> ByteArray(1) }
+        val extractor = NetworkPreviewExtractor(
+            { _, _ -> error("打不开") },
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+        )
 
         try {
             extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
@@ -97,7 +133,7 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `非媒体文件不打开句柄`() = runTest {
-        val extractor = NetworkPreviewExtractor(reads) { _, _, _ -> ByteArray(1) }
+        val extractor = extractor(NetworkPreviewDecoder { _, _, _ -> ByteArray(1) })
 
         assertNull(extractor.imageBytes(movie.copy(name = "说明.txt"), NETWORK_TARGET_WIDTH))
         assertTrue(reads.opened.isEmpty())
@@ -106,10 +142,13 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `取消时关闭句柄以中断阻塞读取`() = runBlocking {
         val blocking = BlockingByteSource()
-        val extractor = NetworkPreviewExtractor({ _, _ -> blocking }) { opened, _, _ ->
-            opened.readAt(0, ByteArray(1), 0, 1)
-            ByteArray(1)
-        }
+        val extractor = NetworkPreviewExtractor(
+            { _, _ -> blocking },
+            decoder = NetworkPreviewDecoder { opened, _, _ ->
+                opened.readAt(0, ByteArray(1), 0, 1)
+                ByteArray(1)
+            },
+        )
 
         val job = launch(Dispatchers.Default) { extractor.imageBytes(movie, NETWORK_TARGET_WIDTH) }
         assertTrue(blocking.reading.await(5, TimeUnit.SECONDS))
@@ -122,6 +161,7 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `读取位置越界与末尾返回 -1`() {
+        val source = RecordingByteSource(payload)
         val buffer = ByteArray(8)
 
         assertEquals(-1, rangeReadAt(source, -1, buffer, 0, buffer.size))
@@ -132,6 +172,7 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `短读按实际字节数返回`() {
+        val source = RecordingByteSource(payload)
         val buffer = ByteArray(16)
 
         assertEquals(4, rangeReadAt(source, payload.size - 4L, buffer, 0, buffer.size))
@@ -143,6 +184,20 @@ class NetworkPreviewExtractorTest {
         val empty = RecordingByteSource(ByteArray(0))
 
         assertEquals(-1, rangeReadAt(empty, 0, ByteArray(4), 0, 4))
+    }
+}
+
+/** 按顺序执行预读任务，让预读在测试线程上确定发生。 */
+private class StepExecutor : Executor {
+
+    private val tasks = ArrayDeque<Runnable>()
+
+    override fun execute(command: Runnable) {
+        tasks.addLast(command)
+    }
+
+    fun runAll() {
+        while (tasks.isNotEmpty()) tasks.removeFirst().run()
     }
 }
 
@@ -195,15 +250,16 @@ private class BlockingByteSource : ByteSource {
     }
 }
 
-/** 记录打开位置与文件大小的假读取接缝。 */
-private class RecordingReads(private val source: ByteSource) : NetworkMediaReads {
+/** 每次打开都给一条新的句柄，记录打开位置与文件大小。 */
+private class RecordingReads(private val payload: ByteArray) : NetworkMediaReads {
 
     val opened = mutableListOf<String>()
     val sizes = mutableListOf<Long>()
+    val sources = mutableListOf<RecordingByteSource>()
 
     override suspend fun openRead(location: String, size: Long): ByteSource {
         opened += location
         sizes += size
-        return source
+        return RecordingByteSource(payload).also { sources += it }
     }
 }

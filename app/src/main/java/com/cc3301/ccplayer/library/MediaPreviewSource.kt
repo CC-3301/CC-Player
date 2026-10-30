@@ -71,6 +71,12 @@ interface MediaPreviewExtractor {
     /** 取预览图字节：视频按策略抽帧，音频是文件内嵌封面；没有可用图时返回 null，读取失败抛出异常。 */
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray?
 
+    /**
+     * 网络取图的准备：在取得解码许可之前打开句柄并按目标位置起预读。
+     * 返回 null 表示该实现不走预读，由调用方直接调 [imageBytes]。
+     */
+    suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? = null
+
     /** 取时长（毫秒）；元数据里没有时长时返回 null，读取失败抛出异常。 */
     suspend fun durationMillis(file: MediaFile): Long?
 
@@ -362,44 +368,48 @@ class CachedMediaPreviewSource(
             key = key,
             priority = priority,
             load = {
-                // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
-                val requestedAt = monotonicClockMillis()
-                var queuedMillis = 0L
-                val attempt = permits.withPermit(priority) {
-                    queuedMillis = monotonicClockMillis() - requestedAt
-                    if (!mayExtract(file.location, priority)) {
-                        null
-                    } else {
-                        var decoded: ByteArray? = null
-                        val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                            decoded = extractor.imageBytes(file, targetWidth)
-                            true
-                        } ?: false
-                        done to decoded
+                // 许可只约束解码：先打开句柄并起定点预读，预读在许可外与解码并发跑。
+                val prepared = extractor.prepareNetworkPreview(file)
+                try {
+                    // 排队时间不计入超时；阻塞中的网络读由各自的传输层超时兜底。
+                    val requestedAt = monotonicClockMillis()
+                    var queuedMillis = 0L
+                    val attempt = permits.withPermit(priority) {
+                        queuedMillis = monotonicClockMillis() - requestedAt
+                        if (!mayExtract(file.location, priority)) {
+                            null
+                        } else {
+                            var decoded: ByteArray? = null
+                            val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                                decoded = prepared?.decode(targetWidth) ?: extractor.imageBytes(file, targetWidth)
+                                true
+                            } ?: false
+                            done to decoded
+                        }
                     }
-                }
-                if (attempt != null) {
-                    // 排队与许可内耗时分开记：许可内包含字节预读与解码，两者在同一许可里交替发生。
                     val total = monotonicClockMillis() - requestedAt
-                    diagnostics.log { "网络封面: ${file.name} 排队 ${queuedMillis}ms 预读解码 ${total - queuedMillis}ms" }
-                }
-                if (attempt == null) {
-                    // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
-                    LoadedPreview(image = null, durationMillis = null, abandoned = true)
-                } else {
-                    // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
-                    currentCoroutineContext().ensureActive()
-                    val (completed, bytes) = attempt
-                    if (!completed) throw IllegalStateException("网络预览超时")
-                    if (bytes == null) {
-                        // 无图只在本次运行内记住；不写缓存，重启后重新确认。
-                        rememberNoImage(key)
-                        LoadedPreview(image = null, durationMillis = null)
+                    if (attempt == null) {
+                        // 已离开可见与预取范围：不抽取、不落盘、不计失败退避。
+                        LoadedPreview(image = null, durationMillis = null, abandoned = true)
                     } else {
-                        forgetNoImage(key)
-                        // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
-                        LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
+                        diagnostics.log { "网络封面: ${file.name} 排队 ${queuedMillis}ms 预读解码 ${total - queuedMillis}ms" }
+                        // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
+                        currentCoroutineContext().ensureActive()
+                        val (completed, bytes) = attempt
+                        if (!completed) throw IllegalStateException("网络预览超时")
+                        if (bytes == null) {
+                            // 无图只在本次运行内记住；不写缓存，重启后重新确认。
+                            rememberNoImage(key)
+                            LoadedPreview(image = null, durationMillis = null)
+                        } else {
+                            forgetNoImage(key)
+                            // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
+                            LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
+                        }
                     }
+                } finally {
+                    // 句柄无论解码成功、失败还是取消都要关。
+                    prepared?.close()
                 }
             },
         )

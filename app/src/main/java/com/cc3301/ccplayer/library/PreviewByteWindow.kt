@@ -251,9 +251,9 @@ internal class PreviewByteWindow(
     private fun Throwable.asPreviewReadFailure(): IOException =
         this as? IOException ?: IOException("预览字节读取失败", this)
 
-    private companion object {
+    companion object {
         /** 进程内唯一的预读线程：与解码线程合起来正好两路底层读取。 */
-        val previewReadAheadExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
+        internal val previewReadAheadExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "preview-byte-read-ahead").apply { isDaemon = true }
         }
     }
