@@ -1752,6 +1752,8 @@ class PlaybackControllerSwitchTest {
 
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
+        // 后一跳是这一代加载的最终落点：就绪后进度停在用户目标上，没有丢。
+        assertEquals(30_000L, controller.progress.value.positionMillis)
     }
 
     @Test

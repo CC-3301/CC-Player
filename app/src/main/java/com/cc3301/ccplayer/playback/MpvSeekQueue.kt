@@ -95,8 +95,9 @@ internal class MpvSeekQueue(
             inFlight = null
             pending = null
             timeoutGeneration++
+            // 撤计时器与清在途在同一临界区：不会撤掉随后新起的一跳自己的超时兜底。
+            cancelTimeout()
         }
-        cancelTimeout()
     }
 
     /**

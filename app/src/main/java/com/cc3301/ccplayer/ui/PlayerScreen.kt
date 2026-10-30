@@ -24,7 +24,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.indication
-import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -148,7 +147,6 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -343,7 +341,7 @@ fun PlayerScreen(
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeekPreview: (Long, Boolean) -> Unit,
-    onSeekCommit: (Long) -> Unit,
+    onSeekCommit: () -> Unit,
     onSeekBy: (Long) -> Long,
     onSeekStep: (Long) -> Long?,
     onSeekHeartbeat: () -> Unit,
@@ -556,9 +554,9 @@ fun PlayerScreen(
                 controls.resetTimer()
                 onSeekPreview(position, requestSeek)
             },
-            onSeekCommit = { target ->
+            onSeekCommit = {
                 controls.resetTimer()
-                onSeekCommit(target)
+                onSeekCommit()
             },
             onSeekStep = onSeekStep,
             onSeekHeartbeat = onSeekHeartbeat,
@@ -705,9 +703,9 @@ fun PlayerScreen(
                     controls.resetTimer()
                     onSeekPreview(position, requestSeek)
                 },
-                onSeekCommit = { target ->
+                onSeekCommit = {
                     controls.resetTimer()
-                    onSeekCommit(target)
+                    onSeekCommit()
                 },
                 onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
@@ -859,7 +857,7 @@ private fun PlayerGestureLayer(
     onSeekBy: (Long) -> Long,
     onDoubleTapFeedback: (DoubleTapSide, Long, Boolean) -> Unit,
     onSeekPreview: (Long, Boolean) -> Unit,
-    onSeekCommit: (Long) -> Unit,
+    onSeekCommit: () -> Unit,
     onSeekStep: (Long) -> Long?,
     onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
@@ -1019,7 +1017,7 @@ private fun PlayerGestureLayer(
                         // 松手、被转屏或输入中断都落定；落点就是手指当前位置，死区不改变落点。
                         seekDrag?.finish(lastSeekDragX)?.let { target ->
                             latestOnSeekPreview.value(target, false)
-                            latestOnSeekCommit.value(target)
+                            latestOnSeekCommit.value()
                         }
                     }
                 }
@@ -1318,7 +1316,7 @@ private fun Controls(
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeekPreview: (Long, Boolean) -> Unit,
-    onSeekCommit: (Long) -> Unit,
+    onSeekCommit: () -> Unit,
     onSeekHeartbeat: () -> Unit,
     onTogglePlaylist: () -> Unit,
     onToggleSubtitleMenu: () -> Unit,
@@ -1628,7 +1626,7 @@ private fun SeekBar(
     enabled: Boolean = true,
     appearanceEnabled: Boolean = true,
     onPreview: (Long, Boolean) -> Unit,
-    onCommit: (Long) -> Unit,
+    onCommit: () -> Unit,
     onHeartbeat: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1641,7 +1639,6 @@ private fun SeekBar(
     var sliderDragging by remember(mediaKey) { mutableStateOf(false) }
     // 滑杆落点先取当前播放位置：没有值变化就收尾时不能提交 0。
     var sliderMillis by remember(mediaKey) { mutableStateOf(positionMillis) }
-    val sliderInteractions = remember { MutableInteractionSource() }
     var leftTimeWidthPx by remember { mutableStateOf(0f) }
     var rightTimeWidthPx by remember { mutableStateOf(0f) }
     var dragTimeWidthPx by remember(mediaKey, durationMillis) { mutableStateOf<Float?>(null) }
@@ -1672,22 +1669,13 @@ private fun SeekBar(
     }
     val commitAt: (Long) -> Unit = { target ->
         heldMillis = target
-        onCommit(target)
+        onCommit()
     }
     val latestPreviewAt = rememberUpdatedState(previewAt)
     val latestCommitAt = rememberUpdatedState(commitAt)
     // 未拖动时落点跟随播放位置，避免收尾提交旧值。
     LaunchedEffect(positionMillis, sliderDragging) {
         if (!sliderDragging) sliderMillis = positionMillis
-    }
-    // 拖动被系统收回时滑杆不会回调收尾：这里复位并落定，预览不会一直续命、声音不会一直静音。
-    LaunchedEffect(sliderInteractions) {
-        sliderInteractions.interactions.collect { interaction ->
-            if (interaction is DragInteraction.Cancel) {
-                sliderDragging = false
-                latestCommitAt.value(sliderMillis)
-            }
-        }
     }
     val colors = SliderDefaults.colors(
         thumbColor = MaterialTheme.colorScheme.onPrimary,
@@ -1743,7 +1731,6 @@ private fun SeekBar(
             )
             Slider(
                 value = progress.toFloat(),
-                interactionSource = sliderInteractions,
                 onValueChange = {
                     // 滑杆入口（无障碍与外部驱动）每次都给真实目标：死区只用于指针拖动。
                     sliderDragging = true
@@ -1894,9 +1881,10 @@ private fun SeekBar(
                                     }
                                 }
                             } finally {
-                                // 松手、多指取消或手势被打断都落定；目标已按手指真实位置跟随，这里不再补发预览。
+                                // 松手、多指取消或手势被系统收回都走这里：复位拖动状态并按最后目标落定，只提交一次。
                                 dragMillis = null
                                 dragTimeWidthPx = null
+                                sliderDragging = false
                                 latestCommitAt.value(target)
                             }
                         }

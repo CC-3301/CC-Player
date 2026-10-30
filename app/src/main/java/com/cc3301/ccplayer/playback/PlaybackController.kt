@@ -218,6 +218,9 @@ class PlaybackController(
     /** 已查到、待应用的续播位置；媒体加载完成后跳一次。 */
     private var resumePositionMillis: Long? = null
 
+    /** 用户在本代加载内自己跳转过：尚未下发的续播位置作废，不再把画面拉回续播点。 */
+    private var userSeeked = false
+
     /** 当前媒体是否已播到结尾；看过一遍就不再落记录。 */
     private var watchedToEnd = false
 
@@ -932,16 +935,22 @@ class PlaybackController(
         return target
     }
 
-    /** 松手或取消拖动：按 [positionMillis]（省略时为最后一次预览位置）落定，声音在这一跳被执行后恢复并淡入；没有预览时不动作。 */
-    fun commitSeekPreview(positionMillis: Long? = null) {
-        // 从未进入预览（加载期或时长未知）：不补落定。
-        if (_seekPreviewMillis.value == null) return
-        endSeekPreview(commit = true, commitTarget = positionMillis)
+    /** 松手或取消拖动：落定到预览位置，声音在这一跳被执行后恢复并淡入；没有预览时不动作。 */
+    fun commitSeekPreview() {
+        endSeekPreview(commit = true)
     }
 
-    /** 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入；加载期照常下发。 */
+    /**
+     * 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入。
+     * 目标文件还没打开时（首次加载与恢复原片的加载期）不下发，避免 seek 打到旧文件上；
+     * 切集期照常下发，预览与松手收尾仍各受自己的加载期闸门约束。
+     */
     fun seekTo(positionMillis: Long) {
         if (!active) return
+        if (!mediaLoaded && loadPhase != LoadPhase.Switching) return
+        // 用户自己跳转后，尚未下发的续播位置作废，不再把画面拉回续播点。
+        userSeeked = true
+        resumePositionMillis = null
         endSeekPreview(commit = true, commitTarget = positionMillis, external = true)
     }
 
@@ -1011,6 +1020,8 @@ class PlaybackController(
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
+        // 外部跳转改写这一代加载的落点：就绪时进度从它开始，不回到加载起点。
+        if (external && loadPhase != LoadPhase.None) loadStartPositionMillis = target
         // 同一目标再下发一次会让画面先闪一下再落定：目标完全相同时复用最后一跳，否则落点会停在旧目标上。
         val seekId = if (lastIssuedTarget != null && lastIssuedSeekId != null && target == lastIssuedTarget) {
             lastIssuedSeekId
@@ -1868,6 +1879,7 @@ class PlaybackController(
         deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
         resumeLookupDone = _resumeMode.value == ResumeMode.FromStart
+        userSeeked = false
     }
 
     /** 新加载作废旧跳转：上一代的预览、落定与执行回报都不再有效。 */
@@ -1910,7 +1922,8 @@ class PlaybackController(
             val record: MediaProgress? = progressStore.find(media.location)
             if (!active || generation != loadGeneration) return@launch
             if (loadTargetIndex != index || loadTargetUrl != media.playbackLocation) return@launch
-            resumePositionMillis = record?.positionMillis?.takeIf { it > 0 }
+            // 用户已经自己跳转过：查询到的续播位置作废，不能再把画面拉回去。
+            resumePositionMillis = if (userSeeked) null else record?.positionMillis?.takeIf { it > 0 }
             resumeLookupDone = true
             applyResumePosition()
             val deferred = deferredReadyNeedsFrame
@@ -1926,6 +1939,11 @@ class PlaybackController(
     /** 续播 seek 必须在就绪前发出；发出后只认序号不小于它的 ready，之后的 seek 照常接受。 */
     private fun applyResumePosition() {
         if (!resumeLookupDone) return
+        // 用户已经自己跳转过：不再补发续播 seek。
+        if (userSeeked) {
+            resumePositionMillis = null
+            return
+        }
         val position = resumePositionMillis ?: return
         if (!mediaLoaded) return
         resumePositionMillis = null
