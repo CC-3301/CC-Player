@@ -375,7 +375,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `pausing after the target started settles the switch paused and keeps the freeze`() = runTest {
+    fun `pausing after the target started settles the switch paused and drops the freeze`() = runTest {
         val controller = playingController()
         val frame = testBitmap()
         engine.frameToGrab = PlaybackEngine.Frame(frame)
@@ -390,13 +390,7 @@ class PlaybackControllerSwitchTest {
 
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertEquals(frame, controller.freezeFrame.value)
-
-        // 用户继续播放后真正出帧，冻结画面才撤。
-        controller.resume()
-        engine.reportPauseChanged(false)
-        engine.reportPositionChanged(1_000, 600_000)
-        engine.reportFramePresented()
+        // 暂停收尾不会再有位置前进，就绪即撤冻结画面，直接露出新集首帧。
         assertNull(controller.freezeFrame.value)
     }
 
@@ -1409,11 +1403,11 @@ class PlaybackControllerSwitchTest {
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
-        // 暂停态已加载的文件也按暂停收尾，冻结画面继续保留。
+        // 暂停态已加载的文件也按暂停收尾；没有后续位置事件，就绪即撤冻结画面。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
-        assertSame(frame, controller.freezeFrame.value)
+        assertNull(controller.freezeFrame.value)
     }
 
     @Test
