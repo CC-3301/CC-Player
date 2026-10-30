@@ -204,4 +204,61 @@ class PlayerGestureStateTest {
         assertNull(seek.previewMillis)
         assertNull(seek.finish())
     }
+
+    @Test
+    fun `位移未过死区不下发`() {
+        assertFalse(dragBeyondDeadZone(previousPx = 100f, currentPx = 102.9f, deadZonePx = 3f))
+    }
+
+    @Test
+    fun `位移恰好等于死区就下发`() {
+        assertTrue(dragBeyondDeadZone(previousPx = 100f, currentPx = 103f, deadZonePx = 3f))
+    }
+
+    @Test
+    fun `位移超过死区就下发`() {
+        assertTrue(dragBeyondDeadZone(previousPx = 100f, currentPx = 104f, deadZonePx = 3f))
+    }
+
+    @Test
+    fun `手指没动但目标相差超过一秒也要下发`() {
+        assertTrue(
+            seekBeyondDeadZone(
+                previousPx = 100f,
+                currentPx = 100f,
+                deadZonePx = 3f,
+                lastIssuedTargetMillis = 10_000L,
+                targetMillis = 11_001L,
+                targetDeadZoneMillis = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `位移与目标都在死区内不下发`() {
+        assertFalse(
+            seekBeyondDeadZone(
+                previousPx = 100f,
+                currentPx = 102f,
+                deadZonePx = 3f,
+                lastIssuedTargetMillis = 10_000L,
+                targetMillis = 11_000L,
+                targetDeadZoneMillis = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `第一次预览没有上一次目标，直接下发`() {
+        assertTrue(
+            seekBeyondDeadZone(
+                previousPx = 100f,
+                currentPx = 100f,
+                deadZonePx = 3f,
+                lastIssuedTargetMillis = null,
+                targetMillis = 10_000L,
+                targetDeadZoneMillis = 1_000L,
+            ),
+        )
+    }
 }

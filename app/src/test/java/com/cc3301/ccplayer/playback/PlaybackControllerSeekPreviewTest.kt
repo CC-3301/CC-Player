@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import com.cc3301.ccplayer.progress.MediaProgress
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -258,20 +259,35 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `加载期跳转不下发 seek`() = runTest {
+    fun `首次加载文件还没打开时跳转不下发 seek`() = runTest {
         val controller = controller()
         open(controller)
 
         controller.seekTo(200_000)
 
-        // 加载期下发会推走本代的续播序号，让就绪判定等不到回执。
+        // 目标文件还没打开：下发会打到旧文件上，进度也不跳。
         assertTrue(engine.seekPositions.isEmpty())
         assertNull(controller.seekSettlement.value)
         assertEquals(0L, controller.progress.value.positionMillis)
     }
 
     @Test
-    fun `切集期跳转与收尾都不下发 seek`() = runTest {
+    fun `首次加载文件已打开后跳转照常下发`() = runTest {
+        val controller = controller()
+        open(controller)
+        engine.reportFileLoaded()
+
+        controller.seekTo(200_000)
+
+        assertEquals(listOf(200_000L), engine.seekPositions)
+        assertEquals(200_000L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(200_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `切集期跳转照常下发，收尾仍不下发`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.next()
@@ -280,8 +296,7 @@ class PlaybackControllerSeekPreviewTest {
         controller.seekTo(200_000)
         controller.commitSeekPreview()
 
-        assertTrue(engine.seekPositions.isEmpty())
-        assertEquals(60_000L, controller.progress.value.positionMillis)
+        assertEquals(listOf(200_000L), engine.seekPositions)
         assertTrue(engine.muteCalls.isEmpty())
     }
 
@@ -677,22 +692,24 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `停手不动再松手不重发 seek，落定仍等引擎执行回报`() = runTest {
+    fun `停手不动再松手时目标不同必多一跳，落点等于手指目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        // 手指停在死区内：显示目标继续跟随真实位置，但不再下发。
+        engine.reportFirstFrameReady()
+        // 手指停在像素死区内：显示目标继续跟随真实位置，但不再下发。
         controller.updateSeekPreview(requestSeek = false, positionMillis = 120_400)
         assertEquals(listOf(120_000L), engine.seekPositions)
 
         controller.commitSeekPreview()
-        // 目标与最后一次下发相差不足死区：复用，不再补一次收尾 seek。
-        assertEquals(listOf(120_000L), engine.seekPositions)
-        assertNull(controller.seekSettlement.value)
+        // 目标不同必补一跳：落定不允许停在旧目标上。
+        assertEquals(listOf(120_000L, 120_400L), engine.seekPositions)
+        assertEquals(120_400L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(120_400L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(120_400L, controller.progress.value.positionMillis)
     }
 
     @Test
@@ -704,10 +721,46 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportFirstFrameReady()
         controller.updateSeekPreview(requestSeek = false, positionMillis = 120_500)
         controller.commitSeekPreview()
+        assertEquals(listOf(120_000L, 120_500L), engine.seekPositions)
 
-        // 死区不参与落点：进度停在手指当前位置，与它相差 0。
+        // 死区不参与落点：进度停在手指当前位置，落定等补发的那一跳回报。
         assertEquals(120_500L, controller.progress.value.positionMillis)
+        engine.reportFirstFrameReady()
         assertEquals(120_500L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(120_500L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `目标完全相同时只下发一跳并当场结算`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportFirstFrameReady()
+
+        // 同一目标收尾复用已执行的那一跳：不再下发，落定当场结算。
+        controller.commitSeekPreview()
+        assertEquals(listOf(120_000L), engine.seekPositions)
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `续播查询未完成时用户先跳，查询完成后不再补发续播 seek`() = runTest {
+        val controller = playingController()
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        progress.holdFinds()
+
+        controller.next()
+        engine.reportFileLoaded()
+        // 查询还挂着：用户先跳走。
+        controller.seekTo(300_000)
+        assertEquals(listOf(300_000L), engine.seekPositions)
+
+        progress.releaseFinds()
+        runCurrent()
+
+        // 查询完成后不得再下发续播 seek 把用户拉回旧位置。
+        assertEquals(listOf(300_000L), engine.seekPositions)
+        assertEquals(300_000L, controller.progress.value.positionMillis)
     }
 
     @Test
