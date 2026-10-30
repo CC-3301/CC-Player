@@ -22,7 +22,8 @@ class MemoryDiagnosticsSink : DiagnosticsSink {
 /**
  * 单文件会话日志：当前文件为 `diagnostics.log`，只保留最近两次会话。
  * 每个进程第一次写入先追加一条会话标记；文件里已有两次会话时，先截掉最旧的一次再追加本次标记。
- * 单文件超过 [maxFileBytes] 时同样从最旧会话开始截；只剩本次会话后不再截断，避免写残当前会话。
+ * 单文件有 [maxFileBytes] 硬上限：超出先丢最旧会话；只剩本次会话仍超限时，
+ * 从本次会话最早的日志开始丢、保留最近的，文件不会无限增长。
  */
 class SessionFileSink(
     private val directory: File,
@@ -43,13 +44,52 @@ class SessionFileSink(
             val current = File(directory, CURRENT_FILE_NAME)
             directory.mkdirs()
             if (!sessionStarted) beginSession(current)
-            if (current.length() >= limit && sessionsInFile > 1) {
+            var line = "${timestamp()} $message\n".toByteArray(Charsets.UTF_8)
+            if (line.size > limit) line = truncate(line, limit.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            if (current.length() + line.size > limit && sessionsInFile > 1) {
+                // 先丢最旧会话；只剩本次会话仍放不下时才动本次会话。
                 keepLatestSession(current)
                 sessionsInFile = 1
             }
-            val line = "${timestamp()} $message\n"
-            FileOutputStream(current, true).use { it.write(line.toByteArray(Charsets.UTF_8)) }
+            if (current.length() + line.size > limit) dropOldestLines(current, line.size.toLong())
+            val remaining = (limit - current.length()).coerceAtLeast(0L).toInt()
+            val toWrite = if (line.size > remaining) truncate(line, remaining) else line
+            if (toWrite.isEmpty()) return
+            FileOutputStream(current, true).use { it.write(toWrite) }
         }
+    }
+
+    /** 只剩本次会话仍超限：保留会话标记，从最早的日志行开始丢，给新行留位置。 */
+    private fun dropOldestLines(current: File, incomingBytes: Long) {
+        val text = current.readText(Charsets.UTF_8)
+        val markerEnd = text.indexOf('\n').let { if (it < 0) text.length else it + 1 }
+        val marker = text.substring(0, markerEnd)
+        val body = text.substring(markerEnd).trimEnd('\n')
+        val budget = limit - incomingBytes - marker.toByteArray(Charsets.UTF_8).size
+        // 一次多丢一些：留出余量后不必每写一行都重写整个文件。
+        val target = budget * 3L / 4L
+        val kept = ArrayDeque<String>()
+        var used = 0L
+        var index = body.length
+        // 从末尾往前按行收集，超预算即停：只留最近的日志。
+        while (index > 0) {
+            val start = body.lastIndexOf('\n', index - 1)
+            val line = body.substring(start + 1, index)
+            val size = line.toByteArray(Charsets.UTF_8).size + 1L
+            if (kept.isNotEmpty() && used + size > target) break
+            kept.addFirst(line)
+            used += size
+            index = if (start < 0) 0 else start
+        }
+        current.writeText(marker + kept.joinToString("\n"), Charsets.UTF_8)
+    }
+
+    /** 截到 [max] 字节以内，并回退到字符边界，避免写出半个字符。 */
+    private fun truncate(bytes: ByteArray, max: Int): ByteArray {
+        if (bytes.size <= max) return bytes
+        var end = max.coerceAtLeast(0)
+        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
+        return bytes.copyOf(end)
     }
 
     /** 新会话：先丢掉本次之前的旧会话，只留最近一次，再追加本次标记。 */

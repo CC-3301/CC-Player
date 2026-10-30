@@ -297,6 +297,22 @@ class DiagnosticsTest {
     }
 
     @Test
+    fun `单会话写超上限后不超过上限且最新日志仍在`() {
+        val directory = temporaryFolder.newFolder("session-tail")
+        val fileSink = SessionFileSink(directory, maxFileBytes = 512)
+
+        repeat(40) { index -> fileSink.write("line-$index-" + "x".repeat(30)) }
+
+        val current = File(directory, SessionFileSink.CURRENT_FILE_NAME)
+        val text = current.readText(Charsets.UTF_8)
+
+        assertTrue(current.length() <= 512)
+        assertTrue(text.startsWith(SessionFileSink.SESSION_MARKER_PREFIX))
+        assertTrue(text.contains("line-39-"))
+        assertFalse(text.contains("line-0-"))
+    }
+
+    @Test
     fun `有内容时不清理旧导出`() {
         val logDirectory = temporaryFolder.newFolder("keep-old-logs")
         val outputDirectory = temporaryFolder.newFolder("keep-old-output")

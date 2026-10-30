@@ -102,8 +102,8 @@ class Diagnostics(
         /** 日志文件所在目录名（files 与 cache 下同名）。 */
         const val DIRECTORY_NAME = "diagnostics"
 
-        /** 单个日志文件的上限。 */
-        const val MAX_FILE_BYTES = 2L * 1024L * 1024L
+        /** 单个日志文件的硬上限；超出先丢最旧会话，再丢本次会话最早的日志。 */
+        const val MAX_FILE_BYTES = 8L * 1024L * 1024L
 
         private val SINGLE_IO = Dispatchers.IO.limitedParallelism(1)
 
