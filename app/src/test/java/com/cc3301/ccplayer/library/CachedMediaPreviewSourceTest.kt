@@ -1393,18 +1393,89 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `预取失败期间不产生额外尝试`() = runTest {
-        extractor.imageFailure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+    fun `预取失败后再次预取不再打开会话或解码`() = runTest {
+        var prepares = 0
+        var decodes = 0
+        val counting = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+                error("网络取图应走准备路径")
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+                prepares++
+                return NetworkPreviewPreparation(
+                    decodeBlock = {
+                        decodes++
+                        null
+                    },
+                    closeBlock = {},
+                )
+            }
+        }
+        val bounded = CachedMediaPreviewSource(
+            extractor = counting,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
         val file = network("预取失败.mkv")
-        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
 
-        assertNull(source.prefetch(file).image)
-        assertEquals(1, extractor.imageRequests.size)
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, prepares)
+        assertEquals(1, decodes)
 
-        // 预取失败不在后台重试：时间过去也不产生新的抽取。
-        advanceTimeBy(60_000)
-        runCurrent()
-        assertEquals(1, extractor.imageRequests.size)
+        // 模拟滚动进出：窗口每次重新包含该条目都会再次触发预取，但已被抑制，不再打开会话或解码。
+        repeat(3) {
+            bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+            bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+            assertNull(bounded.prefetch(file).image)
+        }
+
+        assertEquals("预取失败后不再重新打开会话", 1, prepares)
+        assertEquals("预取失败后不再重新解码", 1, decodes)
+    }
+
+    @Test
+    fun `预取失败后条目变为可见仍会重新准备与解码`() = runTest {
+        var prepares = 0
+        var decodes = 0
+        val counting = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+                error("网络取图应走准备路径")
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+                prepares++
+                return NetworkPreviewPreparation(
+                    decodeBlock = {
+                        decodes++
+                        if (decodes == 1) null else byteArrayOf(1)
+                    },
+                    closeBlock = {},
+                )
+            }
+        }
+        val bounded = CachedMediaPreviewSource(
+            extractor = counting,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = network("预取失败.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, decodes)
+        // 再次预取被抑制：不重复解码。
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, decodes)
+
+        // 变为可见：清掉抑制，重新准备与解码一次并出图。
+        bounded.updatePreviewWindow(visibleLocations = setOf(file.location), prefetchLocations = emptySet())
+        assertNotNull(bounded.visiblePreview(file, 0).image)
+        assertEquals(2, prepares)
+        assertEquals(2, decodes)
     }
 
     @Test

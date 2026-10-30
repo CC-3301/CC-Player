@@ -122,8 +122,8 @@ data class ThumbnailPolicy(
  * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
- * 失败或超时保持占位图且不写缓存；可见请求失败按键退避，网络预取失败不写退避、也不记无图，
- * 回到可见后重新抽取。
+ * 失败或超时保持占位图且不写缓存；可见请求的失败交给调度器按递进间隔重试，源侧不记失败；
+ * 网络预取失败不在后台重试，也不记无图，只抑制后续预取；回到可见后清掉抑制并重新抽取。
  * 成功封面落盘复用；网络路径只有可见请求确认的无图才在本次运行内记忆，预取不记无图；
  * 本地抽取失败仍按既有规则在本次运行内记住无图。
  */
@@ -143,8 +143,9 @@ class CachedMediaPreviewSource(
     private val permits = PrioritySemaphore(EXTRACTION_CONCURRENCY)
 
     /**
-     * 网络读取会话名额：限制同时处于「句柄已开、准备交给解码」状态的条目数，一条目占两条句柄。
-     * 这里限制的是同时打开的网络读取会话数，不是同时解码数：解码仍由 [permits] 串行执行、一次一张。
+     * 网络读取会话名额：限制同时处于「开始打开到解码结束」状态的条目数，一条目占两条句柄。
+     * 这里限制的是同时打开中（含正在打开）的网络读取会话数，不是同时解码数：
+     * 解码仍由 [permits] 串行执行、一次一张。
      * 可见项优先取得；预取最多占用预留名额之外的部分。
      * 名额从开始打开占到解码结束；超时归还名额后，后台仍可能留着未返回的打开，重试会再开一份。
      */
@@ -155,6 +156,9 @@ class CachedMediaPreviewSource(
 
     /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
     private val noImage = NoImageMemory()
+
+    /** 预取专用抑制：预取失败或无图的条目在本次运行内不再重复预取；变为可见时清除。 */
+    private val prefetchSuppressed = NoImageMemory()
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -194,6 +198,13 @@ class CachedMediaPreviewSource(
         if (file.isDirectory) return MediaPreview(image = null, durationMillis = null)
         val targetWidth = previewTargetWidth(file, policy)
         val key = thumbnailCacheKey(file, policy, targetWidth)
+        if (priority.isVisible) {
+            // 可见请求命中：先清掉预取抑制，回到这一屏仍要重新准备与解码。
+            clearPrefetchSuppression(key)
+        } else if (isPrefetchSuppressed(key)) {
+            // 本次运行内预取已失败或无图：不再重复打开会话与解码，等可见请求再试。
+            return MediaPreview(image = null, durationMillis = null)
+        }
         return when (file.source) {
             MediaSource.Local -> localPreview(file, key, targetWidth, priority)
             MediaSource.Network -> networkImage(file, key, targetWidth, priority).toPreview()
@@ -397,7 +408,25 @@ class CachedMediaPreviewSource(
                 }
             },
         )
+        notePrefetchOutcome(key, priority, loaded)
         return loaded
+    }
+
+    /** 预取专用抑制：预取失败或无图时记下，避免每次窗口变化重新入队都重开会话。 */
+    private fun isPrefetchSuppressed(key: String): Boolean = prefetchSuppressed.contains(key)
+
+    private fun clearPrefetchSuppression(key: String) {
+        prefetchSuppressed.forget(key)
+    }
+
+    /** 预取失败或无图时记下；放弃与取消不记，出图成功时清掉旧记录。 */
+    private fun notePrefetchOutcome(key: String, priority: PreviewPriority, loaded: LoadedPreview) {
+        if (priority.isVisible || loaded.abandoned) return
+        if (loaded.failed || loaded.image == null) {
+            prefetchSuppressed.remember(key)
+        } else {
+            prefetchSuppressed.forget(key)
+        }
     }
 
     /**
@@ -660,8 +689,8 @@ class CachedMediaPreviewSource(
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
 
         /**
-         * 同时打开的网络读取会话上限；一条目占两条句柄。
-         * 只限制同时打开的网络读取会话数，不改变解码并发：解码仍全局串行、一次一张。
+         * 同时处于「开始打开到解码结束」状态的网络条目上限；一条目占两条句柄。
+         * 只限制同时打开中（含正在打开）的读取会话数，不改变解码并发：解码仍全局串行、一次一张。
          * 名额从开始打开占到解码结束；超时归还名额后，后台可能仍留着未返回的打开，重试会再开一份。
          */
         private const val MAX_PREPARED_PREVIEWS = 4

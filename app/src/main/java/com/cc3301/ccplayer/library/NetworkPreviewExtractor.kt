@@ -62,6 +62,7 @@ class NetworkPreviewExtractor(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
 
+    /** 仅测试使用；生产的网络取图只走 [prepare]。 */
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
         val prepared = prepare(file) ?: return null
         try {
