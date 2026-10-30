@@ -62,12 +62,6 @@ class AndroidMediaPreviewExtractor(
     /** 本地文件一次打开读取器，同时取时长与预览图；时长读取失败不影响已解出的图片。 */
     override suspend fun imageAndDuration(file: MediaFile, targetWidth: Int): MediaPreviewExtraction =
         withContext(Dispatchers.IO) {
-            if (file.source == MediaSource.Network) {
-                return@withContext MediaPreviewExtraction(
-                    imageBytes = networkPreview?.imageBytes(file, targetWidth),
-                    duration = PreviewDuration.Unavailable,
-                )
-            }
             withRetriever(file) { retriever ->
                 when (mediaKindOf(file.name)) {
                     MediaKind.Video -> MediaPreviewExtraction(
