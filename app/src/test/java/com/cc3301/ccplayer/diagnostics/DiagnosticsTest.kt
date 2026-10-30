@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.diagnostics
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -99,14 +101,46 @@ class DiagnosticsTest {
     }
 
     @Test
-    fun `已判定写出的日志不再复查开关`() {
+    fun `已判定写出的日志不因开关关掉而丢行`() {
         diagnostics.enabled = true
         diagnostics.enabled = false
 
-        // 补写暂存日志时开关可能已关：已判定写出的行照样落盘，不会被再次拦掉。
+        // 内存出口视为已有日志内容：已判定写出的行照样落盘，不会因为开关刚关掉就丢。
         diagnostics.logAccepted("补写")
 
         assertEquals(listOf("补写"), sink.lines)
+    }
+
+    @Test
+    fun `判定之后立即关闭开关时不新建日志文件`() {
+        val directory = temporaryFolder.newFolder("closed-after-accept")
+        val scheduler = TestCoroutineScheduler()
+        val logger = Diagnostics(SessionFileSink(directory), StandardTestDispatcher(scheduler))
+
+        // 判定通过后开关立刻关掉，写入排队到之后执行：还没有日志文件就不能建。
+        logger.enabled = true
+        logger.logAccepted("补写")
+        logger.enabled = false
+        scheduler.advanceUntilIdle()
+
+        assertFalse(File(directory, SessionFileSink.CURRENT_FILE_NAME).exists())
+    }
+
+    @Test
+    fun `判定之后关闭开关时已有日志文件仍追加`() {
+        val directory = temporaryFolder.newFolder("append-after-accept")
+        val fileSink = SessionFileSink(directory)
+        fileSink.write("先有一行")
+        val scheduler = TestCoroutineScheduler()
+        val logger = Diagnostics(fileSink, StandardTestDispatcher(scheduler))
+
+        logger.enabled = true
+        logger.logAccepted("补写")
+        logger.enabled = false
+        scheduler.advanceUntilIdle()
+
+        val text = File(directory, SessionFileSink.CURRENT_FILE_NAME).readText(Charsets.UTF_8)
+        assertTrue(text.contains("补写"))
     }
 
     @Test
@@ -310,6 +344,65 @@ class DiagnosticsTest {
         assertTrue(text.startsWith(SessionFileSink.SESSION_MARKER_PREFIX))
         assertTrue(text.contains("line-39-"))
         assertFalse(text.contains("line-0-"))
+    }
+
+    @Test
+    fun `极小上限下连续写入不留半行`() {
+        val directory = temporaryFolder.newFolder("session-lines")
+        val fileSink = SessionFileSink(directory, maxFileBytes = 200)
+
+        repeat(20) { index -> fileSink.write("line-$index") }
+
+        val text = File(directory, SessionFileSink.CURRENT_FILE_NAME).readText(Charsets.UTF_8)
+        assertTrue(text.endsWith("\n"))
+        val lines = text.trimEnd('\n').split('\n')
+        assertTrue(lines.first().startsWith(SessionFileSink.SESSION_MARKER_PREFIX))
+        // 每一行都必须是完整行：半行或与下一行粘连都会在这里露出来。
+        lines.drop(1).forEach { line ->
+            val parts = line.split(' ')
+            assertEquals(line, 3, parts.size)
+            assertTrue(line, parts[0].matches(Regex("\\d{4}-\\d{2}-\\d{2}")))
+            assertTrue(line, parts[1].matches(Regex("\\d{2}:\\d{2}:\\d{2}\\.\\d{3}")))
+            assertTrue(line, parts[2].matches(Regex("line-\\d+")))
+        }
+    }
+
+    @Test
+    fun `放不下一整行时丢弃该行而不是写半行`() {
+        val directory = temporaryFolder.newFolder("session-drop")
+        val fileSink = SessionFileSink(directory, maxFileBytes = 64)
+
+        fileSink.write("消息" + "x".repeat(200))
+
+        val text = File(directory, SessionFileSink.CURRENT_FILE_NAME).readText(Charsets.UTF_8)
+        assertTrue(text.endsWith("\n"))
+        // 只剩会话标记这一行，没有半行残留。
+        assertEquals(1, text.trimEnd('\n').split('\n').size)
+        assertFalse(text.contains("消息"))
+    }
+
+    @Test
+    fun `升级前没有会话标记的旧文件按一次会话计`() {
+        val directory = temporaryFolder.newFolder("legacy")
+        val current = File(directory, SessionFileSink.CURRENT_FILE_NAME)
+        current.writeText("旧日志\n".repeat(40), Charsets.UTF_8)
+
+        SessionFileSink(directory, maxFileBytes = 200).write("新日志")
+
+        val text = current.readText(Charsets.UTF_8)
+        assertFalse(text.contains("旧日志"))
+        assertTrue(text.contains("新日志"))
+    }
+
+    @Test
+    fun `正文里的会话标记字样不当作会话边界`() {
+        val directory = temporaryFolder.newFolder("marker-in-body")
+        SessionFileSink(directory, maxFileBytes = 4096).write("片段: =====" + " 会话开始 不是边界")
+        SessionFileSink(directory, maxFileBytes = 4096).write("第二次会话")
+
+        val text = File(directory, SessionFileSink.CURRENT_FILE_NAME).readText(Charsets.UTF_8)
+        assertTrue(text.contains("片段: ====="))
+        assertTrue(text.contains("第二次会话"))
     }
 
     @Test
