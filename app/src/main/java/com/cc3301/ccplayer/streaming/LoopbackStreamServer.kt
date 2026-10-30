@@ -13,6 +13,9 @@ import java.util.concurrent.atomic.AtomicLong
 /** 接受循环连续失败达到该次数后关闭监听，避免忙循环。 */
 internal const val LOOPBACK_ACCEPT_FAILURE_LIMIT = 8
 
+/** 拷贝块的固定大小；回环读写统一按 1 MiB 搬运。 */
+internal const val COPY_BUFFER_BYTES = 1024 * 1024
+
 /**
  * 回环 HTTP 代理：只监听 127.0.0.1，把登记的流按 Range 响应给本机播放器。
  *
@@ -314,7 +317,6 @@ class LoopbackStreamServer(
         const val STATUS_NOT_FOUND = 404
         const val STATUS_UNAVAILABLE = 503
         const val BACKLOG = 16
-        const val COPY_BUFFER_BYTES = 64 * 1024
         const val MAX_REQUEST_HEAD_BYTES = 16 * 1024
         const val HEAD_TERMINATOR_BYTES = 4
         const val CR = '\r'.code

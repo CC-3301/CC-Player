@@ -245,6 +245,11 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `拷贝块固定为一兆字节`() {
+        assertEquals(1024 * 1024, COPY_BUFFER_BYTES)
+    }
+
+    @Test
     fun `关闭后接受线程退出`() {
         val before = acceptThreads()
         val fresh = LoopbackStreamServer()
