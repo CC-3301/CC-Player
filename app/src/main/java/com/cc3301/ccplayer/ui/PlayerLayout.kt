@@ -54,6 +54,30 @@ fun switchFreezeAspectRatio(
 }
 
 /**
+ * 冻结画面覆盖层：冻结画面还在就盖住视频输出。
+ * 冻结画面保留到新帧真正上屏，不随切集阶段结束而撤；撤帧与新画面比例在同一次重绘里生效，
+ * 画面才不会先缩回原尺寸、等新帧到了再变一次。
+ */
+fun showFreezeOverlay(hasFreezeFrame: Boolean, holdBlack: Boolean): Boolean =
+    hasFreezeFrame && !holdBlack
+
+/**
+ * 视频区比例：冻结画面可见期间一直按原片比例绘制，撤帧后才换成播放核心当前上报的比例。
+ * 切集就绪时上报的比例可能已经是新文件的比例。
+ */
+fun frozenVideoAspectRatio(
+    videoAspectRatio: Double?,
+    freezeOverlayVisible: Boolean,
+    freezeFrameWidth: Int,
+    freezeFrameHeight: Int,
+): Double? =
+    if (freezeOverlayVisible) {
+        switchFreezeAspectRatio(videoAspectRatio, freezeFrameWidth, freezeFrameHeight)
+    } else {
+        videoAspectRatio
+    }
+
+/**
  * 播放页黑底层规则：只有片尾、首次缓冲、或切集时已明确没有冻结画面才铺黑底。
  * 抓帧还在途时原画面仍留在 Surface 上，不铺黑底。
  */
@@ -167,11 +191,11 @@ val PlayerPressRippleColor = Color.White
 /** 播放页按压涟漪不透明度。 */
 const val PLAYER_PRESS_RIPPLE_ALPHA = 0.2f
 
-/** 缓冲文字描边宽度；描边以字形中心为轴，绘制时按两倍宽度得到可见外沿。 */
-val PlayerBufferingTextStrokeWidth = 2.dp
+/** 缓冲文字可见描边宽度；描边以字形中心为轴，按两倍宽度绘制，露在字形外侧的即此宽度。 */
+val PlayerBufferingTextStrokeWidth = 1.dp
 
 /** 缓冲文字描边（深色 scrim）不透明度。 */
-const val PLAYER_BUFFERING_TEXT_SCRIM_ALPHA = 0.85f
+const val PLAYER_BUFFERING_TEXT_SCRIM_ALPHA = 0.60f
 
 /** 缓冲文字描边颜色。 */
 val PlayerBufferingTextScrimColor = Color(0xFF020509)

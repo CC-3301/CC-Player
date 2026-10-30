@@ -4,7 +4,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerLayoutTest {
@@ -125,9 +127,9 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `缓冲文字 2dp scrim 85 个百分点描边`() {
-        assertEquals(2.dp, PlayerBufferingTextStrokeWidth)
-        assertEquals(0.85f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)
+    fun `缓冲文字 1dp scrim 60 个百分点描边`() {
+        assertEquals(1.dp, PlayerBufferingTextStrokeWidth)
+        assertEquals(0.60f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)
     }
 
     @Test
@@ -228,6 +230,47 @@ class PlayerLayoutTest {
     fun `切集期间没有可用比例时保持未知并交给铺满容器`() {
         assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = 0, freezeFrameHeight = 0))
         assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = -4, freezeFrameHeight = 90))
+    }
+
+    @Test
+    fun `切集就绪后冻结画面仍盖住视频输出`() {
+        // 切集阶段结束不撤帧：覆盖层只看冻结画面在不在。
+        assertTrue(showFreezeOverlay(hasFreezeFrame = true, holdBlack = false))
+        assertFalse(showFreezeOverlay(hasFreezeFrame = false, holdBlack = false))
+    }
+
+    @Test
+    fun `片尾黑底不显示冻结画面`() {
+        assertFalse(showFreezeOverlay(hasFreezeFrame = true, holdBlack = true))
+    }
+
+    @Test
+    fun `冻结画面可见期间视频区一直按原片比例`() {
+        // 播放核心此时可能已上报新文件的比例：冻结画面还在，视频区不跟着换。
+        assertEquals(
+            16.0 / 9.0,
+            frozenVideoAspectRatio(
+                videoAspectRatio = 2.0,
+                freezeOverlayVisible = true,
+                freezeFrameWidth = 1600,
+                freezeFrameHeight = 900,
+            )!!,
+            RATIO_TOLERANCE,
+        )
+    }
+
+    @Test
+    fun `冻结画面撤掉后视频区换成当前上报的比例`() {
+        assertEquals(
+            2.0,
+            frozenVideoAspectRatio(
+                videoAspectRatio = 2.0,
+                freezeOverlayVisible = false,
+                freezeFrameWidth = 1600,
+                freezeFrameHeight = 900,
+            )!!,
+            RATIO_TOLERANCE,
+        )
     }
 
     private fun assertViewport(
