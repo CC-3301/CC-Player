@@ -7,6 +7,7 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -352,7 +353,7 @@ class MpvPlaybackEngine(
     }
 
     override fun attachSurface(surface: Surface) {
-        if (attachedSurface === surface) return
+        if (released || attachedSurface === surface) return
         attachedSurface = surface
         MPVLib.attachSurface(surface)
     }
@@ -388,7 +389,7 @@ class MpvPlaybackEngine(
      * 摘挂载本身要跟着 Surface 生命周期走，留在调用线程。
      */
     override fun detachSurface() {
-        if (attachedSurface == null) return
+        if (released || attachedSurface == null) return
         awaitingSurfaceFrame = false
         synchronized(videoOutputLock) {
             videoOutputGeneration++
@@ -400,21 +401,28 @@ class MpvPlaybackEngine(
         videoOutputStopped = true
     }
 
-    /** 把视频输出属性交给专用线程；拆挂之后到点的任务按序号作废。 */
+    /** 把视频输出属性交给专用线程；拆挂之后到点的任务按序号作废，释放后不再受理。 */
     private fun postVideoOutput(task: () -> Unit) {
+        if (released) return
         val generation = synchronized(videoOutputLock) { videoOutputGeneration }
-        videoOutputExecutor.execute {
-            synchronized(videoOutputLock) {
-                if (generation == videoOutputGeneration) task()
+        // 释放与投递之间仍可能关线程：这里只丢弃，不能把拒绝执行抛给调用方。
+        runCatching {
+            videoOutputExecutor.execute {
+                synchronized(videoOutputLock) {
+                    if (generation == videoOutputGeneration) task()
+                }
             }
         }
     }
 
     override fun setSurfaceSize(width: Int, height: Int) {
+        if (released) return
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }
 
     override fun release() {
+        // 重复释放：第一次已经销毁或明确放弃销毁，不再动已释放的实例。
+        if (released) return
         MPVLib.removeObserver(this)
         MPVLib.removeLogObserver(errorLog)
         // 先挡住新的排程与投递再关线程：释放后到点的计时器不能再排任务。
@@ -426,13 +434,27 @@ class MpvPlaybackEngine(
         seekQueue.reset()
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
-        // 视频输出任务在 destroy 之前收干净：晚到的属性调用不能踩到已销毁的实例。
+        // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
+        // 闸门在 [VIDEO_OUTPUT_RELEASE_WAIT_MILLIS] 内没跑到，说明重建还没结束：
+        // 此时放弃销毁，晚到的属性调用不会踩到已销毁的实例，实例随进程退出回收。
+        val drained = CountDownLatch(1)
         synchronized(videoOutputLock) {
             videoOutputGeneration++
         }
+        val queued = runCatching {
+            videoOutputExecutor.execute { drained.countDown() }
+            true
+        }.getOrDefault(false)
+        val finished = queued &&
+            runCatching {
+                drained.await(VIDEO_OUTPUT_RELEASE_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+            }.getOrDefault(false)
         videoOutputExecutor.shutdownNow()
-        runCatching {
-            videoOutputExecutor.awaitTermination(VIDEO_OUTPUT_RELEASE_WAIT_SECONDS, TimeUnit.SECONDS)
+        attachedSurface = null
+        videoOutputStopped = true
+        if (!finished) {
+            diagnostics.log("释放: 视频输出线程未收尾，跳过销毁播放核心")
+            return
         }
         loadCoordinator.reset()
         MPVLib.destroy()
@@ -600,8 +622,8 @@ class MpvPlaybackEngine(
         /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
         const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
 
-        /** 释放时等视频输出线程收尾的上限；超时也继续释放，不能把退出挂住。 */
-        const val VIDEO_OUTPUT_RELEASE_WAIT_SECONDS = 2L
+        /** 释放时等视频输出线程排空队列的上限；超时即放弃销毁，不能把退出挂住。 */
+        const val VIDEO_OUTPUT_RELEASE_WAIT_MILLIS = 2_000L
 
         /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
         val nextSeekId = AtomicLong(0)
