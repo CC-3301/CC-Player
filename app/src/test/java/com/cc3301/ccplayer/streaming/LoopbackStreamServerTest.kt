@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.Closeable
 import java.io.IOException
@@ -255,6 +256,60 @@ class LoopbackStreamServerTest {
         assertFalse(acceptor.isAlive)
     }
 
+    @Test
+    fun `同一条连接可以连续处理多条请求`() {
+        KeepAliveConnection(url).use { client ->
+            val full = client.request()
+            val ranged = client.request(range = "bytes=10-19")
+
+            assertEquals("keep-alive", full.header("Connection"))
+            assertEquals(200, full.statusCode)
+            assertArrayEquals(payload, full.body)
+            assertEquals(206, ranged.statusCode)
+            assertArrayEquals(payload.copyOfRange(10, 20), ranged.body)
+            // 两条请求共用同一个字节源。
+            assertEquals(1, opened)
+        }
+    }
+
+    @Test
+    fun `客户端要求关闭时响应声明关闭并结束连接`() {
+        KeepAliveConnection(url).use { client ->
+            val response = client.request(close = true)
+
+            assertEquals("close", response.header("Connection"))
+            assertArrayEquals(payload, response.body)
+            assertEquals(-1, client.readAfterEnd())
+        }
+    }
+
+    @Test
+    fun `未知流也保持长连接并补齐长度`() {
+        KeepAliveConnection("http://127.0.0.1:${server.port}/4040").use { client ->
+            val missing = client.request()
+            val alive = client.request(url)
+
+            assertEquals(404, missing.statusCode)
+            assertEquals("0", missing.header("Content-Length"))
+            assertEquals(200, alive.statusCode)
+            assertArrayEquals(payload, alive.body)
+        }
+    }
+
+    @Test
+    fun `响应体没写满时结束连接`() {
+        val short = server.serve("smb://nas/media/半截.mkv") { ShortByteSource(payload) }
+        KeepAliveConnection(short).use { client ->
+            val response = client.request()
+
+            assertEquals(200, response.statusCode)
+            assertEquals("1000", response.header("Content-Length"))
+            assertTrue(response.body.size < payload.size)
+            // 帧边界已坏：这条连接不再承载下一条请求。
+            assertEquals(-1, client.readAfterEnd())
+        }
+    }
+
     private fun requestThroughBoundary(url: String): HttpResponse {
         val path = URI(url).path
         ServerSocket(0).use { listener ->
@@ -277,6 +332,72 @@ class LoopbackStreamServerTest {
             .toSet()
 }
 
+/** 测试用的长连接客户端：一条连接上按 Content-Length 逐条读回响应。 */
+class KeepAliveConnection(private val url: String, readTimeoutMillis: Int = 3_000) : Closeable {
+
+    private val socket = Socket(InetAddress.getByName(URI(url).host), URI(url).port).apply {
+        soTimeout = readTimeoutMillis
+    }
+    private val input = socket.getInputStream()
+    private val output = socket.getOutputStream()
+
+    /** 在 [target] 指向的流上发一条请求并读回这条响应。 */
+    fun request(target: String = url, range: String? = null, close: Boolean = false): HttpResponse {
+        val uri = URI(target)
+        val head = buildString {
+            append("GET ${uri.path} HTTP/1.1\r\n")
+            append("Host: ${uri.host}\r\n")
+            if (range != null) append("Range: $range\r\n")
+            if (close) append("Connection: close\r\n")
+            append("\r\n")
+        }
+        output.write(head.toByteArray())
+        output.flush()
+        return readResponse()
+    }
+
+    /** 读一条响应；响应体按 Content-Length 读，不用连接关闭来界定。 */
+    private fun readResponse(): HttpResponse {
+        val head = readHead()
+        val length = head.split("\r\n")
+            .firstOrNull { it.startsWith("Content-Length:", ignoreCase = true) }
+            ?.substringAfter(':')?.trim()?.toInt() ?: 0
+        val body = ByteArray(length)
+        var read = 0
+        while (read < length) {
+            val count = input.read(body, read, length - read)
+            if (count < 0) break
+            read += count
+        }
+        return HttpResponse.parse(head.toByteArray() + body.copyOf(read))
+    }
+
+    /** 读到空行为止，返回含空行的响应头文本。 */
+    private fun readHead(): String {
+        val head = StringBuilder()
+        var matched = 0
+        while (true) {
+            val byte = input.read()
+            if (byte < 0) break
+            head.append(byte.toChar())
+            matched = when {
+                (matched == 0 || matched == 2) && byte == 13 -> matched + 1
+                (matched == 1 || matched == 3) && byte == 10 -> matched + 1
+                else -> 0
+            }
+            if (matched == 4) break
+        }
+        return head.toString()
+    }
+
+    /** 再读一个字节看连接是否已结束；已结束返回 -1。 */
+    fun readAfterEnd(): Int = input.read()
+
+    override fun close() {
+        runCatching { socket.close() }
+    }
+}
+
 /** 记录是否被关闭的字节源。 */
 class RecordingByteSource(private val bytes: ByteArray) : ByteSource, Closeable {
 
@@ -294,6 +415,21 @@ class RecordingByteSource(private val bytes: ByteArray) : ByteSource, Closeable 
     override fun close() {
         closed = true
     }
+}
+
+/** 只读出前 [readable] 字节的字节源，之后读取返回 0，模拟读到一半读不动。 */
+class ShortByteSource(private val bytes: ByteArray, private val readable: Int = 10) : ByteSource {
+
+    override val size: Long = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (position >= readable) return 0
+        val count = minOf(length.toLong(), readable - position).toInt()
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    override fun close() = Unit
 }
 
 /** 每次读取都抛出指定异常，模拟网络读超时等失败。 */
