@@ -31,6 +31,10 @@ class WebDavStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
+    override fun discardByteSources() {
+        server.discardSources()
+    }
+
     override fun close() {
         server.close()
     }
