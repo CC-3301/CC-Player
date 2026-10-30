@@ -7,6 +7,10 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -52,6 +56,33 @@ class MpvPlaybackEngine(
     /** 当前文件是否有视频轨道；纯音频没有首帧，文件打开即可视为就绪。 */
     @Volatile
     private var hasVideoTrack = false
+
+    /** seek 队列：恒为「1 执行 + 1 待执行」，在途超时也归它判定。 */
+    private val seekQueue = MpvSeekQueue(
+        post = ::postSeekCommand,
+        onExecuted = { seekId, targetMillis -> listener?.onSeekExecuted(seekId, targetMillis) },
+        armTimeout = ::armSeekTimeout,
+        cancelTimeout = ::cancelSeekTimeout,
+    )
+
+    /** 在途 seek 的超时计时器：回执丢失也能放开队列并照常回报。 */
+    private val seekTimeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "mpv-seek-timeout").apply { isDaemon = true }
+    }
+
+    /** 下发 seek 命令的唯一线程：计时器线程只投递「这一跳已完成」，mpv 命令一律在这里执行。 */
+    private val seekCommandExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "mpv-seek-command").apply { isDaemon = true }
+    }
+
+    /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
+    private val seekTimeoutLock = Any()
+
+    private var seekTimeoutFuture: ScheduledFuture<*>? = null
+
+    /** 已释放：此后不再排计时器、不再投递命令，避免抛 RejectedExecutionException。 */
+    @Volatile
+    private var released = false
 
     @Volatile
     private var positionSeconds = 0.0
@@ -100,6 +131,7 @@ class MpvPlaybackEngine(
         hasVideoTrack = false
         awaitingLoadFrame = true
         seekDiagnostics.reset()
+        seekQueue.reset()
         positionGate.onStart(startPositionMillis)
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -141,6 +173,7 @@ class MpvPlaybackEngine(
         hasVideoTrack = false
         awaitingLoadFrame = false
         seekDiagnostics.reset()
+        seekQueue.reset()
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -150,18 +183,86 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
-     * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
+     * seek 后 mpv 会再发 PLAYBACK_RESTART：命令序号在入队时预留、真正下发时才进待认队列，
+     * ready 带回的序号只结算「已下发且序号相等」的那一跳。
+     * 队列归引擎所有：在途只覆盖待执行目标，执行完（回执或超时）补发。
+     * 返回的 seekId 在这里分配，不随后续加载归零，落定靠它认这一跳。
      */
-    override fun seekTo(positionMillis: Long): Int {
-        positionSeconds = positionMillis / 1000.0
-        // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
-        positionGate.onSeek(positionMillis)
-        val serial = loadCoordinator.onSeekIssued()
-        seekDiagnostics.issueSeek(positionMillis, serial) {
-            MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+    override fun seekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+        val seekId = nextSeekId.incrementAndGet()
+        val serial = loadCoordinator.reserveSeekSerial()
+        seekQueue.seek(seekId, serial, positionMillis)
+        return PlaybackEngine.SeekRequest(seekId, serial)
+    }
+
+    /** 把这一跳交给命令线程；此时还没有碰 mpv。 */
+    private fun postSeekCommand(seekId: Long, targetMillis: Long) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekCommandExecutor.execute { issueSeekCommand(seekId, targetMillis) }
         }
-        return serial
+    }
+
+    /**
+     * 命令线程上真正下发一次 seek：这一跳已不是当前在途就丢弃，迟到任务不打到新文件上。
+     * 队列锁内只登记归属并下发命令；诊断属性读取与写盘放在 [seekTimeoutLock] 内与释放互斥。
+     * 命令失败时队列已按失败结清这一跳并补发待执行，这里只收回诊断归属，不再向上抛。
+     */
+    private fun issueSeekCommand(seekId: Long, positionMillis: Long) {
+        var registered: MpvSeekDiagnostics.PendingSeek? = null
+        try {
+            val serial = seekQueue.issueIfCurrent(seekId) { entrySerial ->
+                positionSeconds = positionMillis / 1000.0
+                // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
+                positionGate.onSeek(positionMillis)
+                loadCoordinator.onSeekIssued(entrySerial)
+                registered = seekDiagnostics.register(positionMillis, entrySerial)
+                MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+            } ?: return
+            logSeekIssued(positionMillis, serial)
+        } catch (failure: Throwable) {
+            registered?.let { seekDiagnostics.discard(it, failure) }
+        }
+    }
+
+    /**
+     * 读属性写诊断行：与释放共用 [seekTimeoutLock]，锁内复查 [released] 后不再读已销毁的播放核心。
+     * 诊断关闭时不取锁、不读属性。
+     */
+    private fun logSeekIssued(targetMillis: Long, serial: Int) {
+        if (!diagnostics.enabled) return
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekDiagnostics.logIssued(targetMillis, serial)
+        }
+    }
+
+    /** 给在途这一跳重新计时：到点只把「这一跳已完成」投回命令线程，不在计时器线程下发命令。 */
+    private fun armSeekTimeout(onTimeout: () -> Unit) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = seekTimeoutExecutor.schedule(
+                { postTimeout(onTimeout) },
+                SEEK_IN_FLIGHT_TIMEOUT_MILLIS,
+                TimeUnit.MILLISECONDS,
+            )
+        }
+    }
+
+    /** 把一个到期任务从计时器线程交回命令线程执行。 */
+    private fun postTimeout(task: () -> Unit) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            seekCommandExecutor.execute(task)
+        }
+    }
+
+    private fun cancelSeekTimeout() {
+        synchronized(seekTimeoutLock) {
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = null
+        }
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
@@ -282,6 +383,15 @@ class MpvPlaybackEngine(
     override fun release() {
         MPVLib.removeObserver(this)
         MPVLib.removeLogObserver(errorLog)
+        // 先挡住新的排程与投递再关线程：释放后到点的计时器不能再排任务。
+        synchronized(seekTimeoutLock) {
+            released = true
+            seekTimeoutFuture?.cancel(false)
+            seekTimeoutFuture = null
+        }
+        seekQueue.reset()
+        seekTimeoutExecutor.shutdownNow()
+        seekCommandExecutor.shutdownNow()
         loadCoordinator.reset()
         MPVLib.destroy()
     }
@@ -369,6 +479,8 @@ class MpvPlaybackEngine(
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
         // 先确认 ready 属于当前代际再占去重槽：旧代际不吞当前加载的信号。
         val ready = loadCoordinator.acceptReady(needsFrameConfirmation) ?: return
+        // 只结算已下发且序号相等的那一跳：命令还没下发，或这一跳已被超时结算，都不在这里动队列。
+        seekQueue.onReceipt(ready.serial)
         listener?.onFirstFrameReady(
             needsFrameConfirmation,
             ready.spec.url,
@@ -443,6 +555,12 @@ class MpvPlaybackEngine(
     private fun formatSeconds(millis: Long): String = String.format(Locale.US, "%.3f", millis / 1000.0)
 
     private companion object {
+        /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
+        const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
+
+        /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
+        val nextSeekId = AtomicLong(0)
+
         const val PAUSE_PROPERTY = "pause"
         const val HWDEC_PROPERTY = "hwdec"
         const val TIME_POS_PROPERTY = "time-pos"
@@ -656,7 +774,8 @@ internal class MpvSeekDiagnostics(
     private val durationSeconds: () -> Double,
 ) {
 
-    private data class PendingSeek(val targetMillis: Long, val serial: Int)
+    /** 已下发、等 MPV_EVENT_SEEK 消费的一跳；[previous] 用于命令失败时回退归属。 */
+    class PendingSeek(val targetMillis: Long, val serial: Int, val previous: PendingSeek?)
 
     private val lock = Any()
     private val pending = ArrayDeque<PendingSeek>()
@@ -671,42 +790,41 @@ internal class MpvSeekDiagnostics(
         }
     }
 
-    /** 先登记再执行命令，避免 SEEK 事件先到；命令异常时锁内回滚后原样重抛。 */
-    fun issueSeek(targetMillis: Long, serial: Int, command: () -> Unit) {
-        val seek = PendingSeek(targetMillis, serial)
-        val previous = synchronized(lock) {
-            val previousIssued = lastIssued
+    /** 锁内只登记归属：SEEK 事件按登记顺序消费，命令还没回来就已经能对上。 */
+    fun register(targetMillis: Long, serial: Int): PendingSeek {
+        synchronized(lock) {
+            val seek = PendingSeek(targetMillis, serial, lastIssued)
             pending.addLast(seek)
             lastIssued = seek
-            previousIssued
+            return seek
         }
-        if (diagnostics.enabled) {
-            runCatching {
-                diagnostics.log {
-                    seekDebugLine("seek 前", targetMillis, serial, currentRemaining(targetMillis), snapshot())
-                }
+    }
+
+    /** 锁外：读属性并写下发前的诊断行。 */
+    fun logIssued(targetMillis: Long, serial: Int) {
+        if (!diagnostics.enabled) return
+        runCatching {
+            diagnostics.log {
+                seekDebugLine("seek 前", targetMillis, serial, currentRemaining(targetMillis), snapshot())
             }
         }
-        try {
-            command()
-        } catch (failure: Throwable) {
-            synchronized(lock) {
-                // 按引用移除：serial 复用时不能误删同值项。
-                val index = pending.indexOfFirst { it === seek }
-                val removed = index >= 0
-                if (removed) pending.removeAt(index)
-                // 已被 SEEK 事件消费时不能回退，否则其 restart 会归到旧目标。
-                if (removed && lastIssued === seek) lastIssued = previous
+    }
+
+    /** 锁外：命令异常时按引用回滚登记并记录失败；已被 SEEK 事件消费时不回滚。 */
+    fun discard(seek: PendingSeek, failure: Throwable) {
+        synchronized(lock) {
+            val index = pending.indexOfFirst { it === seek }
+            val removed = index >= 0
+            if (removed) pending.removeAt(index)
+            // 已被 SEEK 事件消费时不能回退，否则其 restart 会归到旧目标。
+            if (removed && lastIssued === seek) lastIssued = seek.previous
+        }
+        if (!diagnostics.enabled) return
+        runCatching {
+            diagnostics.log {
+                "seek 下发失败: 目标=${seek.targetMillis}ms 序号=${seek.serial} " +
+                    "错误=${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
             }
-            if (diagnostics.enabled) {
-                runCatching {
-                    diagnostics.log {
-                        "seek 下发失败: 目标=${targetMillis}ms 序号=$serial " +
-                            "错误=${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
-                    }
-                }
-            }
-            throw failure
         }
     }
 

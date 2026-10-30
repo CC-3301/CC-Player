@@ -41,7 +41,7 @@ class MpvFileEventsTest {
         assertEquals(null, coordinator.onEofChanged(true))
 
         // 拖回片尾外再播到结尾：同一代际要能再次上报播完。
-        coordinator.onSeekIssued()
+        coordinator.onSeekIssued(coordinator.reserveSeekSerial())
         assertEquals(spec.token, coordinator.onEofChanged(true))
     }
 
@@ -228,8 +228,9 @@ class MpvFileEventsTest {
         assertEquals(0, signals.acceptReady(needsFrameConfirmation = true))
 
         // seek 命令已下发，但旧的 PLAYBACK_RESTART 先于 MPV_EVENT_SEEK 被处理。
-        val seekSerial = signals.onSeekIssued()
+        val seekSerial = signals.reserve()
         assertEquals(1, seekSerial)
+        signals.onSeekIssued(seekSerial)
         assertEquals(0, signals.acceptReady(needsFrameConfirmation = false))
 
         // SEEK 事件到达后，后续 ready 才使用新序号。
@@ -243,8 +244,12 @@ class MpvFileEventsTest {
         val signals = MpvReadySignals()
         signals.onStart()
 
-        assertEquals(1, signals.onSeekIssued())
-        assertEquals(2, signals.onSeekIssued())
+        val first = signals.reserve()
+        val second = signals.reserve()
+        assertEquals(1, first)
+        assertEquals(2, second)
+        signals.onSeekIssued(first)
+        signals.onSeekIssued(second)
 
         signals.onSeekEvent()
         assertEquals(1, signals.acceptReady(needsFrameConfirmation = false))
@@ -268,13 +273,15 @@ class MpvFileEventsTest {
     fun `a new load clears pending seeks and the accepted serial`() {
         val signals = MpvReadySignals()
         signals.onStart()
-        assertEquals(1, signals.onSeekIssued())
+        signals.onSeekIssued(signals.reserve())
 
         // 上一轮 seek 没等到 MPV_EVENT_SEEK 就开始了新加载。
         signals.onStart()
         assertEquals(0, signals.acceptReady(needsFrameConfirmation = false))
 
-        assertEquals(1, signals.onSeekIssued())
+        val serial = signals.reserve()
+        assertEquals(1, serial)
+        signals.onSeekIssued(serial)
         signals.onSeekEvent()
         assertEquals(1, signals.acceptReady(needsFrameConfirmation = true))
     }

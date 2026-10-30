@@ -272,7 +272,8 @@ internal data class LoadEnd(val end: MpvFileEvents.End, val spec: LoadSpec?)
 /**
  * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
  *
- * seek 命令下发时先登记序号，但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”。
+ * 序号在 seek 入队时预留（控制层靠它做加载就绪门槛），命令真正下发后才进待认队列，
+ * 但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”；
  * 这样即使旧文件的 restart/reconfig 在 seek 命令之后才被处理，它仍带旧序号，不会被误认。
  * 同一序号内，需等待真正出帧与无需确认的 ready 各只上报一次。
  * 控制层线程与 mpv 事件线程都会调用，方法同步。
@@ -295,12 +296,17 @@ internal class MpvReadySignals {
         lastRestartSerial = -1
     }
 
-    /** 下发 seek，返回该 seek 的序号；对应 MPV_EVENT_SEEK 到达前，ready 仍用旧序号。 */
+    /** 预留一个 seek 序号；被覆盖或作废的那一跳不会进待认队列，序号因此可以跳号。 */
     @Synchronized
-    fun onSeekIssued(): Int {
+    fun reserve(): Int {
         issued++
-        pendingSeeks.addLast(issued)
         return issued
+    }
+
+    /** seek 命令已下发：它的 MPV_EVENT_SEEK 到达前，ready 仍用旧序号。 */
+    @Synchronized
+    fun onSeekIssued(serial: Int) {
+        pendingSeeks.addLast(serial)
     }
 
     /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
@@ -394,11 +400,15 @@ internal class MpvLoadCoordinator(
     @Synchronized
     fun pendingLoadToken(): Int? = loads.pendingStart()?.token
 
+    /** 预留本代的一个 seek 序号；ready 带回的序号与它相等才算这一跳之后的信号。 */
     @Synchronized
-    fun onSeekIssued(): Int {
+    fun reserveSeekSerial(): Int = readySignals.reserve()
+
+    @Synchronized
+    fun onSeekIssued(serial: Int) {
         // seek 发起表示真正离开片尾，允同一代际再次上报播完。
         fileEvents.onSeekIssued()
-        return readySignals.onSeekIssued()
+        readySignals.onSeekIssued(serial)
     }
 
     @Synchronized

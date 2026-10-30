@@ -66,6 +66,7 @@ import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.SeekSettlement
 import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
@@ -210,6 +211,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
+    private var seekSettlement by mutableStateOf<SeekSettlement?>(null)
     private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
     private var currentIndex by mutableStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
@@ -259,6 +261,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.state.collect { playbackState = it } }
                 launch { binder.controller.progress.collect { progress = it } }
                 launch { binder.controller.seekPreviewMillis.collect { seekPreviewMillis = it } }
+                launch { binder.controller.seekSettlement.collect { seekSettlement = it } }
                 launch { binder.controller.playlist.collect { playlist = it } }
                 launch { binder.controller.currentIndex.collect { currentIndex = it } }
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
@@ -424,6 +427,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = playbackState,
                             progress = progress,
                             seekPreviewMillis = seekPreviewMillis,
+                            seekSettlement = seekSettlement,
                             playlist = playlist,
                             currentIndex = currentIndex,
                             decodeMode = decodeMode,
@@ -447,7 +451,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onTogglePlayPause = { playback?.controller?.togglePlayPause() },
                             onPrevious = { playback?.controller?.previous() },
                             onNext = { playback?.controller?.next() },
-                            onSeekPreview = { playback?.controller?.updateSeekPreview(it) },
+                            onSeekPreview = { position, requestSeek ->
+                                playback?.controller?.updateSeekPreview(position, requestSeek)
+                            },
                             onSeekCommit = { playback?.controller?.commitSeekPreview() },
                             onSeekBy = { seekBy(it) },
                             onSeekStep = { playback?.controller?.updateSeekPreviewBy(it) },
@@ -802,6 +808,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         playbackState = PlaybackState.Idle
         progress = PlaybackProgress()
         seekPreviewMillis = null
+        seekSettlement = null
         playlist = emptyList()
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware

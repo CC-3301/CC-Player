@@ -99,51 +99,14 @@ class SeekBarStateTest {
     }
 
     @Test
-    fun `位置到达目标后清除保持值`() {
-        // 正向跳转：位置到达目标即清除，越过目标同样清除。
-        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 10_000L))
-        assertFalse(shouldKeepSeekPreview(50_000L, 45_000L, 10_000L))
-        // 反向跳转：位置降到目标即清除。
-        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 90_000L))
-        assertFalse(shouldKeepSeekPreview(44_722L, 45_000L, 90_000L))
-    }
-
-    @Test
-    fun `位置仍在起点与目标之间时保留`() {
-        // 落定 seek 从目标前的关键帧起解，位置先报告目标之前，此时不能清。
-        assertTrue(shouldKeepSeekPreview(44_722L, 45_000L, 10_000L))
-        assertTrue(shouldKeepSeekPreview(20_000L, 45_000L, 10_000L))
-        // 反向跳转还没降下来时同样保留。
-        assertTrue(shouldKeepSeekPreview(80_000L, 45_000L, 90_000L))
-        assertTrue(shouldKeepSeekPreview(46_600L, 45_000L, 90_000L))
-    }
-
-    @Test
-    fun `到达窗口两侧仍按起点到目标区间判定`() {
-        // 正向：位置已进入目标 −50ms 以内但还没到目标，仍保留。
-        assertTrue(shouldKeepSeekPreview(44_950L, 45_000L, 44_600L))
-        // 正向：走到目标即清除。
-        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 44_600L))
-        // 反向：位置还在目标 +1.5 秒内但未到目标，区间判定优先，仍保留。
-        assertTrue(shouldKeepSeekPreview(46_500L, 45_000L, 90_000L))
-        // 反向：越过目标（降到目标以下）即清除。
-        assertFalse(shouldKeepSeekPreview(44_722L, 45_000L, 90_000L))
-    }
-
-    @Test
-    fun `小幅跳转在起点附近来回一帧也不提前清除`() {
-        // 反向小幅拖动：起点只比目标大 200ms，首帧与下一帧 tick 都落在起点与目标之间。
-        assertTrue(shouldKeepSeekPreview(45_200L, 45_000L, 45_200L))
-        assertTrue(shouldKeepSeekPreview(45_190L, 45_000L, 45_200L))
-        assertTrue(shouldKeepSeekPreview(45_010L, 45_000L, 45_200L))
-        // 正向小幅拖动同理。
-        assertTrue(shouldKeepSeekPreview(45_000L, 45_200L, 45_000L))
-        assertTrue(shouldKeepSeekPreview(45_080L, 45_200L, 45_000L))
-    }
-
-    @Test
-    fun `目标就是起点时立即清除`() {
-        assertFalse(shouldKeepSeekPreview(45_000L, 45_000L, 45_000L))
+    fun `只有更新的落定通知才撤掉保持值`() {
+        // 界面还没收到过通知：第一条通知就撤。
+        assertTrue(seekSettlementReleasesHold(heldSettlementId = 0L, settlementId = 1L))
+        // 同一目标再次落定：id 更大，照样撤。
+        assertTrue(seekSettlementReleasesHold(heldSettlementId = 1L, settlementId = 2L))
+        // 迟到的旧通知不能清掉新的保持值。
+        assertFalse(seekSettlementReleasesHold(heldSettlementId = 2L, settlementId = 2L))
+        assertFalse(seekSettlementReleasesHold(heldSettlementId = 3L, settlementId = 2L))
     }
 
     @Test

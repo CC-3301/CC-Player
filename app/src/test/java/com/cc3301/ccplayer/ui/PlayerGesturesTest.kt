@@ -426,8 +426,11 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `控制层隐藏时拖动与滚轮不显示目标时间提示`() {
-        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.Seek))
+    fun `控制层隐藏时拖动与滚轮仍显示目标时间与增减量`() {
+        assertEquals(
+            setOf(GestureHint.SeekTarget),
+            shownGestureHints(controlsVisible = false, GestureHintSource.Seek),
+        )
         assertEquals(
             setOf(GestureHint.SeekTarget),
             shownGestureHints(controlsVisible = true, GestureHintSource.Seek),
@@ -444,13 +447,15 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `同一手势在可见与隐藏下显示的元素不同`() {
+    fun `隐藏态只保留跳转提示与双击加减十秒的该侧箭头`() {
         GestureHintSource.entries.forEach { source ->
-            // 显示规则只由可见性收紧：隐藏时是可见时的子集，且只有双击 ±10 秒保留元素。
+            // 显示规则只由可见性收紧：隐藏时是可见时的子集。
             val shown = shownGestureHints(controlsVisible = true, source)
             val hidden = shownGestureHints(controlsVisible = false, source)
             assertTrue(hidden.all { it in shown })
-            assertTrue(hidden.all { it == GestureHint.DoubleTapSide })
+            assertTrue(
+                hidden.all { it == GestureHint.DoubleTapSide || it == GestureHint.SeekTarget },
+            )
         }
     }
 

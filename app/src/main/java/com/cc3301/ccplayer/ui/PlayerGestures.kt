@@ -91,11 +91,12 @@ enum class GestureHintSource {
 }
 
 /**
- * 该手势此刻显示的提示元素。控制层隐藏时只保留双击 ±10 秒的该侧箭头与累计秒数，
- * 目标时间、音量百分比与涟漪都随控制层一起隐藏；双击暂停/继续不显示任何元素。
+ * 该手势此刻显示的提示元素。控制层隐藏时只保留拖动与滚轮调时长的目标时间、增减量，
+ * 以及双击 ±10 秒的该侧箭头与累计秒数；音量百分比与涟漪随控制层一起隐藏，
+ * 双击暂停/继续不显示任何元素。
  */
 fun shownGestureHints(controlsVisible: Boolean, source: GestureHintSource): Set<GestureHint> = when (source) {
-    GestureHintSource.Seek -> if (controlsVisible) setOf(GestureHint.SeekTarget) else emptySet()
+    GestureHintSource.Seek -> setOf(GestureHint.SeekTarget)
     GestureHintSource.Volume -> if (controlsVisible) setOf(GestureHint.VolumePercent) else emptySet()
     GestureHintSource.DoubleTapPause -> emptySet()
     GestureHintSource.DoubleTapSeek ->

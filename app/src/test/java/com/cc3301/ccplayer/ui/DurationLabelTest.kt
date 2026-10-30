@@ -8,15 +8,15 @@ import org.junit.Test
 class DurationLabelTest {
 
     @Test
-    fun `不足一分钟按秒显示`() {
-        assertEquals("0:00", formatDuration(0))
-        assertEquals("0:00", formatDuration(999))
-        assertEquals("0:59", formatDuration(59_000))
+    fun `不足一分钟按秒显示并补足分钟两位`() {
+        assertEquals("00:00", formatDuration(0))
+        assertEquals("00:00", formatDuration(999))
+        assertEquals("00:59", formatDuration(59_000))
     }
 
     @Test
-    fun `不足一小时按分秒显示`() {
-        assertEquals("3:07", formatDuration(187_000))
+    fun `不足一小时按分秒显示并补足分钟两位`() {
+        assertEquals("03:07", formatDuration(187_000))
         assertEquals("59:59", formatDuration(3_599_000))
     }
 
@@ -28,14 +28,15 @@ class DurationLabelTest {
 
     @Test
     fun `负数按零处理`() {
-        assertEquals("0:00", formatDuration(-1))
+        assertEquals("00:00", formatDuration(-1))
     }
 
     @Test
-    fun `拖动提示的增减量用方括号括起并带正负号`() {
-        assertEquals("[+0:15]", seekHintDeltaText(15_000L))
-        assertEquals("[-0:15]", seekHintDeltaText(-15_000L))
-        assertEquals("[+0:00]", seekHintDeltaText(0L))
+    fun `拖动提示的增减量用方括号括起、带正负号且分钟补足两位`() {
+        assertEquals("[+00:15]", seekHintDeltaText(15_000L))
+        assertEquals("[-00:15]", seekHintDeltaText(-15_000L))
+        assertEquals("[+00:00]", seekHintDeltaText(0L))
+        assertEquals("[+00:20]", seekHintDeltaText(20_000L))
         assertEquals("[+1:02:03]", seekHintDeltaText(3_723_000L))
     }
 
@@ -63,7 +64,7 @@ class DurationLabelTest {
     fun `未知时长显示占位并禁用 seek`() {
         val labels = seekBarLabels(5_000L, 0L, null, "--:--")
 
-        assertEquals("0:05", labels.current)
+        assertEquals("00:05", labels.current)
         assertEquals("--:--", labels.total)
         assertFalse(labels.seekEnabled)
     }
@@ -72,8 +73,8 @@ class DurationLabelTest {
     fun `已知时长显示拖动预览与总时长`() {
         val labels = seekBarLabels(10_000L, 100_000L, 45_000L, "--:--")
 
-        assertEquals("0:45", labels.current)
-        assertEquals("1:40", labels.total)
+        assertEquals("00:45", labels.current)
+        assertEquals("01:40", labels.total)
         assertTrue(labels.seekEnabled)
     }
 }

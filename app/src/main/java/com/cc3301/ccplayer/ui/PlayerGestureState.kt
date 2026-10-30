@@ -129,9 +129,13 @@ class PlayerDragGesture(
     }
 }
 
+/** 拖动位移是否越过死区：死区只拦重复下发，不影响松手时的真实目标。 */
+fun dragBeyondDeadZone(previousPx: Float?, currentPx: Float, deadZonePx: Float): Boolean =
+    previousPx == null || abs(currentPx - previousPx) >= deadZonePx
+
 /**
- * 中间区域拖动跳转：拖动中只更新预览，松手调用 [finish] 才产出提交位置。
- * 时长未知时不预览也不提交。
+ * 中间区域拖动跳转：拖动中恒按手指当前位置产出目标，松手调用 [finish] 提交同一套位置。
+ * 是否重发 seek 由调用方按像素死区判定，本类不做过滤。时长未知时不预览也不提交。
  */
 class PlayerSeekDrag(
     val baseMillis: Long,
@@ -144,18 +148,26 @@ class PlayerSeekDrag(
     var committedMillis: Long? = null
         private set
 
+    private var lastPreviewX: Float? = null
+
+    /** 拖动中：返回手指当前位置对应的目标，不做死区过滤。 */
     fun preview(dragX: Float): Long? {
         if (durationMillis <= 0) return null
-        val target = (baseMillis + seekDeltaMillis(dragX, width)).coerceIn(0L, durationMillis)
-        previewMillis = target
-        return target
+        lastPreviewX = dragX
+        previewMillis = targetAt(dragX)
+        return previewMillis
     }
 
-    /** 松手提交；没有预览时返回 null，表示不跳转。 */
-    fun finish(): Long? {
-        val target = previewMillis
+    /** 松手提交：按 [dragX] 结算真实目标（省略时按最后一次预览），不受死区影响；未拖动过返回 null。 */
+    fun finish(dragX: Float? = null): Long? {
+        if (durationMillis <= 0) return null
+        val x = dragX ?: lastPreviewX ?: return null
+        val target = targetAt(x)
         previewMillis = null
         committedMillis = target
         return target
     }
+
+    private fun targetAt(dragX: Float): Long =
+        (baseMillis + seekDeltaMillis(dragX, width)).coerceIn(0L, durationMillis)
 }

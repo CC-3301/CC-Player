@@ -245,10 +245,10 @@ data class PlayerIconBarMetrics(
 }
 
 /** 拖动提示里目标时间的字号；要明显大于增减量。 */
-val PlayerSeekHintTargetFontSize = 44.sp
+val PlayerSeekHintTargetFontSize = 48.sp
 
 /** 拖动提示里增减量的字号。 */
-val PlayerSeekHintDeltaFontSize = 36.sp
+val PlayerSeekHintDeltaFontSize = 32.sp
 
 /** 拖动提示两行之间的间距。 */
 val PlayerSeekHintLineGap = 6.dp
@@ -256,14 +256,18 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 预览目标的到达窗口下沿：落定 seek 从目标前的关键帧起解，位置会先报告目标之前，毫秒。 */
-const val SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS = 50L
-
-/** 预览目标的到达窗口上沿：落定后位置向前追到这里仍未清除也算到达，毫秒。 */
-const val SEEK_PREVIEW_ARRIVE_AFTER_MILLIS = 1_500L
+/** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
+val PlayerSeekDragDeadZone = 3.dp
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
+
+/**
+ * 落定通知是否该撤掉界面的进度保持值：只有比已处理过的通知更新的 id 才撤。
+ * 同一目标连续两次落定也能撤；旧代际的迟到通知不会误清新保持值。
+ */
+fun seekSettlementReleasesHold(heldSettlementId: Long, settlementId: Long): Boolean =
+    settlementId > heldSettlementId
 
 /** 进度条视觉轨道的像素范围。 */
 data class SeekBarTrackBounds(val start: Float, val end: Float)
@@ -329,34 +333,6 @@ fun seekBarDownMillis(
         thumbRadiusPx = thumbRadiusPx,
     )
     return seekBarMillisAt(x, bounds.start, bounds.end, durationMillis)
-}
-
-/**
- * 末次拖动预览是否继续保留。
- * 位置还在 [baseMillis]（拖动起点）与 [heldMillis]（预览目标）之间时一律保留：落定 seek 尚未生效或还没到目标，
- * 此时位置靠近目标不代表已到达。离开这一段后按方向判定：正向位置比目标还差
- * [SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 以上时保留，否则清除；反向位置高于目标
- * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS] 以上时保留，否则清除。
- */
-fun shouldKeepSeekPreview(
-    positionMillis: Long,
-    heldMillis: Long,
-    baseMillis: Long,
-): Boolean {
-    // 目标就是起点：没有可等的位置。
-    if (baseMillis == heldMillis) return false
-    // 起点与目标之间含起点、不含目标：位置走到目标上才算到达。
-    val betweenTarget = if (heldMillis > baseMillis) {
-        positionMillis >= baseMillis && positionMillis < heldMillis
-    } else {
-        positionMillis <= baseMillis && positionMillis > heldMillis
-    }
-    if (betweenTarget) return true
-    return if (heldMillis > baseMillis) {
-        positionMillis < heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS
-    } else {
-        positionMillis > heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS
-    }
 }
 
 /** 拖动事件里是否出现主指针以外的按下指针；出现时取消本次手势。 */

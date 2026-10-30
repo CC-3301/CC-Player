@@ -528,10 +528,11 @@ class PlaybackControllerSwitchTest {
 
         assertEquals(20_000L, engine.seekPositions.last())
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial - 1)
+        // 这条信号不对应任何 seek：它只是加载自身的结果，不能结束切集。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertTrue(controller.switching.value)
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
     }
@@ -678,7 +679,7 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         assertTrue(controller.holdBlack.value)
 
-        controller.updateSeekPreview(0)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 0)
         controller.commitSeekPreview()
 
         assertFalse(controller.holdBlack.value)
@@ -1398,7 +1399,7 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         assertTrue(controller.switching.value)
 
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -1500,7 +1501,7 @@ class PlaybackControllerSwitchTest {
         controller.next()
         engine.reportFileLoaded()
         engine.reportPositionChanged(20_000, 600_000)
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
 
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertEquals(20_000L, controller.progress.value.positionMillis)
@@ -1516,7 +1517,7 @@ class PlaybackControllerSwitchTest {
         controller.pause()
         engine.reportFileLoaded()
         engine.reportPositionChanged(30_000, 600_000)
-        engine.reportFirstFrameReady(seekSerial = engine.currentSeekSerial)
+        engine.reportFirstFrameReady()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(30_000L, controller.progress.value.positionMillis)
@@ -1734,17 +1735,41 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
 
         assertEquals(20_000L, engine.seekPositions.last())
-        val seekSerial = engine.currentSeekSerial
 
-        // seek 之前的信号序号更小：不能结束加载。
-        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
+        // 这条信号不对应任何 seek：它只是加载自身的结果，不能结束加载。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        // seek 之后引擎会再次上报 PLAYBACK_RESTART，这一条才算就绪。
-        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        // 续播 seek 执行后引擎会再次上报 PLAYBACK_RESTART，这一条才算就绪。
+        engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `a real ready after the resume seek timed out still counts as ready`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        assertEquals(20_000L, engine.seekPositions.last())
+
+        // 续播 seek 超时：引擎按执行完处理并回报，真正的 ready 之后才到。
+        engine.reportSeekExecuted()
+        assertTrue(controller.switching.value)
+
+        // 真实 ready 带的是续播那一跳的序号：不能因为晚于超时就被判失败。
+        engine.reportFirstFrameReady()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
     }
 
     @Test
@@ -1766,13 +1791,13 @@ class PlaybackControllerSwitchTest {
         runCurrent()
 
         assertEquals(30_000L, engine.seekPositions.last())
-        val seekSerial = engine.currentSeekSerial
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        engine.reportFirstFrameReady(seekSerial = seekSerial - 1)
+        // 不对应续播 seek 的信号不算数。
+        engine.reportFirstFrameReady(fromSeek = false)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        engine.reportFirstFrameReady(seekSerial = seekSerial)
+        engine.reportFirstFrameReady()
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
 

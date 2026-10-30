@@ -40,9 +40,12 @@ class FakePlaybackEngine : PlaybackEngine {
         private set
     val seekPositions = mutableListOf<Long>()
 
-    /** 最近一次 seek 的序号；ready 回调默认带上它。 */
-    var currentSeekSerial = 0
+    /** 最近一次下发的 seek 身份；与真实引擎一致，进程级单调，加载不重置。 */
+    var currentSeekId = 0L
         private set
+
+    /** 回报过的 (seekId, 目标毫秒)，用于断言回执带的是哪一跳。 */
+    val seekExecutions = mutableListOf<Pair<Long, Long>>()
     val fadeInDurations = mutableListOf<Long>()
 
     /** 静音指令序列：true 为静音，false 为恢复。 */
@@ -72,6 +75,13 @@ class FakePlaybackEngine : PlaybackEngine {
         startedPaused += paused
         startedPositions += startPositionMillis
         currentTargetUrl = url
+        // 与真实引擎一致：加载只作废在途与待发 seek，seek 身份本身不归零；命令序号换代归零。
+        seekInFlightId = null
+        seekInFlightMillis = null
+        pendingSeekId = null
+        pendingSeekMillis = null
+        currentSeekSerial = 0
+        acceptedSeekSerial = 0
         return ++currentLoadToken
     }
 
@@ -103,10 +113,70 @@ class FakePlaybackEngine : PlaybackEngine {
         discardInFlightCalls++
     }
 
-    override fun seekTo(positionMillis: Long): Int {
+    /** 在途这一跳的身份、序号与目标毫秒；未下发或已执行完时为 null。 */
+    private var seekInFlightId: Long? = null
+    private var seekInFlightSerial = 0
+    private var seekInFlightMillis: Long? = null
+
+    /** 在途期间被覆盖的最新待执行一跳；执行完补发一次。 */
+    var pendingSeekId: Long? = null
+        private set
+    var pendingSeekMillis: Long? = null
+        private set
+    private var pendingSeekSerial = 0
+
+    /** 本代加载内的 seek 序号：每下发一跳加一，加载换代归零；ready 带回同一个序号。 */
+    private var currentSeekSerial = 0
+
+    /** 本代最后一跳已回报执行的序号；本代还没有 seek 执行完时为 0。 */
+    private var acceptedSeekSerial = 0
+
+    override fun seekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+        val seekId = ++currentSeekId
+        val serial = ++currentSeekSerial
+        if (seekInFlightId != null) {
+            // 与真实引擎一致：在途时只覆盖待执行目标，不堆命令；返回的仍是这一跳自己的凭据。
+            pendingSeekId = seekId
+            pendingSeekSerial = serial
+            pendingSeekMillis = positionMillis
+            return PlaybackEngine.SeekRequest(seekId, serial)
+        }
+        issueSeek(seekId, serial, positionMillis)
+        return PlaybackEngine.SeekRequest(seekId, serial)
+    }
+
+    private fun issueSeek(seekId: Long, serial: Int, positionMillis: Long) {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"
-        return ++currentSeekSerial
+        seekInFlightId = seekId
+        seekInFlightSerial = serial
+        seekInFlightMillis = positionMillis
+    }
+
+    /** 与真实引擎一致：在途这一跳执行完后回报它自己的身份与目标，并补发待执行的一跳。 */
+    private fun completeSeek() {
+        val executedId = seekInFlightId ?: return
+        val executedMillis = seekInFlightMillis ?: return
+        val executedSerial = seekInFlightSerial
+        seekInFlightId = null
+        seekInFlightMillis = null
+        acceptedSeekSerial = executedSerial
+        seekExecutions += executedId to executedMillis
+        listener?.onSeekExecuted(executedId, executedMillis)
+        val pendingId = pendingSeekId ?: return
+        val pendingMillis = pendingSeekMillis ?: return
+        val pendingSerial = pendingSeekSerial
+        pendingSeekId = null
+        pendingSeekMillis = null
+        issueSeek(pendingId, pendingSerial, pendingMillis)
+    }
+
+    /** 模拟播放核心的在途 seek 超时：回报这一跳已执行并补发待执行目标。 */
+    fun reportSeekExecuted() = completeSeek()
+
+    /** 直接投一条回执，模拟旧代或旧跳的迟到回报。 */
+    fun reportSeekExecuted(seekId: Long, targetMillis: Long) {
+        listener?.onSeekExecuted(seekId, targetMillis)
     }
 
     override fun fadeInAudio(durationMillis: Long) {
@@ -173,11 +243,12 @@ class FakePlaybackEngine : PlaybackEngine {
     fun reportMediaLoaded(targetUrl: String? = currentTargetUrl, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity(LoadActivity.FileLoaded, loadToken)
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
-        // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
+        // 续播 seek 就发生在 onMediaLoaded 里：先回报这一跳已执行，再把它的序号带进 ready。
+        completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
-            seekSerial = currentSeekSerial,
+            seekSerial = acceptedSeekSerial,
             loadToken = loadToken,
         )
     }
@@ -188,17 +259,21 @@ class FakePlaybackEngine : PlaybackEngine {
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
     }
 
-    /** 首帧已上屏（播放中的 PLAYBACK_RESTART）。 */
+    /**
+     * 首帧已上屏（播放中的 PLAYBACK_RESTART）。
+     * [fromSeek] 为假表示这条信号是加载自身的结果、不对应任何 seek，也不会结算在途那一跳。
+     */
     fun reportFirstFrameReady(
         targetUrl: String? = currentTargetUrl,
-        seekSerial: Int = currentSeekSerial,
+        fromSeek: Boolean = true,
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        if (fromSeek) completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
-            seekSerial = seekSerial,
+            seekSerial = acceptedSeekSerial,
             loadToken = loadToken,
         )
     }
@@ -206,14 +281,15 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 暂停态只收到视频链重配，首帧可能还没上屏。 */
     fun reportVideoReconfigured(
         targetUrl: String? = currentTargetUrl,
-        seekSerial: Int = currentSeekSerial,
+        fromSeek: Boolean = true,
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.VideoReconfig, loadToken)
+        if (fromSeek) completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
-            seekSerial = seekSerial,
+            seekSerial = acceptedSeekSerial,
             loadToken = loadToken,
         )
     }
@@ -221,14 +297,15 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 暂停态下的 PLAYBACK_RESTART：不能证明画面已经上屏。 */
     fun reportPausedRestart(
         targetUrl: String? = currentTargetUrl,
-        seekSerial: Int = currentSeekSerial,
+        fromSeek: Boolean = true,
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        if (fromSeek) completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
-            seekSerial = seekSerial,
+            seekSerial = acceptedSeekSerial,
             loadToken = loadToken,
         )
     }
