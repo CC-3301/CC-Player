@@ -547,19 +547,6 @@ private fun Thumbnail(
                 modifier = Modifier.size(if (entry.isDirectory) 24.dp else 20.dp),
             )
         }
-        val duration = preview?.durationMillis
-        if (duration != null && !entry.isDirectory) {
-            Text(
-                text = formatDuration(duration),
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(AppSpacing.Xs)
-                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = AppSpacing.Xs, vertical = 1.dp),
-            )
-        }
     }
 }
 

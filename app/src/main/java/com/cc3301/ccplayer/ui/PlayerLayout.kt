@@ -245,10 +245,10 @@ data class PlayerIconBarMetrics(
 }
 
 /** 拖动提示里目标时间的字号；要明显大于增减量。 */
-val PlayerSeekHintTargetFontSize = 44.sp
+val PlayerSeekHintTargetFontSize = 48.sp
 
 /** 拖动提示里增减量的字号。 */
-val PlayerSeekHintDeltaFontSize = 36.sp
+val PlayerSeekHintDeltaFontSize = 32.sp
 
 /** 拖动提示两行之间的间距。 */
 val PlayerSeekHintLineGap = 6.dp
