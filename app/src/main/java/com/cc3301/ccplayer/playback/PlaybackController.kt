@@ -434,6 +434,12 @@ class PlaybackController(
             if (!wasAvailable) {
                 // 未进入恢复等待（无会话、加载中或片尾黑底）：缓存帧不适用，立即撤掉。
                 if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
+                // 后台期间无帧窗口可能已经走到截止：回前台重新给一个完整窗口，
+                // 不把耗尽的窗口直接判成切集失败。
+                if (switchFramePending && switchFrameRemainingMillis <= 0L) {
+                    switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
+                    switchFrameDeadlineMillis = null
+                }
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
             }
