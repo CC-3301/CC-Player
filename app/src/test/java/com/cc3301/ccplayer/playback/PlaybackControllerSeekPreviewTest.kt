@@ -26,20 +26,80 @@ class PlaybackControllerSeekPreviewTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `drag preview seeks are throttled to about one per interval`() = runTest {
+    fun `拖动期间在途预览 seek 恒不超过一个，新目标只覆盖旧目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(70_000)
-        controller.updateSeekPreview(80_000)
-
-        // 一帧内的多次移动只能下发一次，避免把播放核心压垮。
-        assertEquals(listOf(70_000L), engine.seekPositions)
-
-        advanceTimeBy(PlaybackController.PREVIEW_SEEK_INTERVAL_MILLIS)
         controller.updateSeekPreview(90_000)
+        controller.updateSeekPreview(120_000)
+        advanceTimeBy(PlaybackController.PREVIEW_HEARTBEAT_MILLIS)
 
-        assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
+        // 在途只留一个 seek；中途目标被最后一个覆盖，队列不随拖动增长。
+        assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(120_000L, controller.seekPreviewMillis.value)
+
+        // 回执到达后只补发被覆盖的最后一个目标。
+        engine.reportFirstFrameReady()
+        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+    }
+
+    @Test
+    fun `与上次下发相差不足一秒的目标不重发预览 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(70_000)
+        engine.reportFirstFrameReady()
+
+        // 死区内只更新显示目标，不产生新的 seek。
+        controller.updateSeekPreview(70_400)
+        assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(70_400L, controller.seekPreviewMillis.value)
+
+        // 越过死区才重发。
+        controller.updateSeekPreview(71_400)
+        assertEquals(listOf(70_000L, 71_400L), engine.seekPositions)
+    }
+
+    @Test
+    fun `快拖后立刻松手不回跳`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 快速拖到 2:00 立刻松手：预览与落定是同一个目标。
+        controller.updateSeekPreview(120_000)
+        controller.commitSeekPreview()
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        // 引擎下发 seek 时把位置乐观写成目标，随后迟到的旧位置样本才落盘。
+        engine.reportPositionChanged(120_000, 600_000)
+        engine.reportPositionChanged(80_000, 600_000)
+
+        // 回执到达前进度停在目标上，圆球不回跳。
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.settledSeekMillis.value)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        engine.reportPositionChanged(120_040, 600_000)
+        assertEquals(120_040L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `回执不到时连续两个越过目标的样本才算落定`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(120_000)
+        controller.commitSeekPreview()
+
+        // 单个样本可能是引擎下发 seek 时的乐观写回，不算到达。
+        engine.reportPositionChanged(120_000, 600_000)
+        assertNull(controller.settledSeekMillis.value)
+
+        engine.reportPositionChanged(120_010, 600_000)
+        assertEquals(120_000L, controller.settledSeekMillis.value)
     }
 
     @Test
@@ -49,7 +109,6 @@ class PlaybackControllerSeekPreviewTest {
         val fadesBeforePreview = engine.fadeInDurations.size
 
         controller.updateSeekPreview(70_000)
-        advanceTimeBy(PlaybackController.PREVIEW_SEEK_INTERVAL_MILLIS)
         controller.updateSeekPreview(80_000)
 
         // 预览 seek 各自淡入会造成拖动中断续爆音：只静音一次，不逐次淡入。
@@ -68,7 +127,7 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `release lands the exact preview target after a throttled drag`() = runTest {
+    fun `release lands the exact preview target after a covered drag`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
@@ -76,7 +135,7 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(130_000)
         assertEquals(listOf(70_000L), engine.seekPositions)
 
-        // 被节流掉的中间位置由收尾 seek 精确补上。
+        // 被覆盖掉的中间位置由收尾 seek 精确补上。
         controller.commitSeekPreview()
 
         assertEquals(130_000L, engine.seekPositions.last())
@@ -109,10 +168,11 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true), engine.muteCalls)
 
         controller.commitSeekPreview()
+        engine.reportFirstFrameReady()
         engine.reportPositionChanged(120_000, 600_000)
 
         assertEquals(listOf(true, false), engine.muteCalls)
-        // 预览结束后进度立刻恢复更新，不再被预览吞掉。
+        // 落定回执之后进度恢复更新，不再被预览吞掉。
         assertEquals(120_000L, controller.progress.value.positionMillis)
     }
 
@@ -168,6 +228,7 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(70_000L, 200_000L), engine.seekPositions)
         assertNull(controller.seekPreviewMillis.value)
 
+        engine.reportFirstFrameReady()
         engine.reportPositionChanged(200_000, 600_000)
         assertEquals(200_000L, controller.progress.value.positionMillis)
     }
@@ -310,7 +371,7 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPositionChanged(60_000, 600_000)
 
         assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
-        advanceTimeBy(PlaybackController.PREVIEW_SEEK_INTERVAL_MILLIS)
+        engine.reportFirstFrameReady()
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
 
         assertEquals(listOf(55_000L, 50_000L), engine.seekPositions)
@@ -323,6 +384,7 @@ class PlaybackControllerSeekPreviewTest {
         val fadesBeforePreview = engine.fadeInDurations.size
 
         assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        engine.reportFirstFrameReady()
         advanceTimeBy(200)
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
         advanceTimeBy(200)
@@ -347,6 +409,7 @@ class PlaybackControllerSeekPreviewTest {
         val gapMillis = PlaybackController.WHEEL_SETTLE_MILLIS - 100
 
         assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        engine.reportFirstFrameReady()
         advanceTimeBy(gapMillis)
 
         // 窗口内再滚一格只顺延，不先落定再重新静音。

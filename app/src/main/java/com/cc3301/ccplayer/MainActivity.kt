@@ -210,6 +210,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
+    private var settledSeekMillis by mutableStateOf<Long?>(null)
     private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
     private var currentIndex by mutableStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
@@ -259,6 +260,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.state.collect { playbackState = it } }
                 launch { binder.controller.progress.collect { progress = it } }
                 launch { binder.controller.seekPreviewMillis.collect { seekPreviewMillis = it } }
+                launch { binder.controller.settledSeekMillis.collect { settledSeekMillis = it } }
                 launch { binder.controller.playlist.collect { playlist = it } }
                 launch { binder.controller.currentIndex.collect { currentIndex = it } }
                 launch { binder.controller.decodeMode.collect { decodeMode = it } }
@@ -424,6 +426,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = playbackState,
                             progress = progress,
                             seekPreviewMillis = seekPreviewMillis,
+                            settledSeekMillis = settledSeekMillis,
                             playlist = playlist,
                             currentIndex = currentIndex,
                             decodeMode = decodeMode,
@@ -802,6 +805,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         playbackState = PlaybackState.Idle
         progress = PlaybackProgress()
         seekPreviewMillis = null
+        settledSeekMillis = null
         playlist = emptyList()
         currentIndex = NO_MEDIA
         decodeMode = DecodeMode.Hardware

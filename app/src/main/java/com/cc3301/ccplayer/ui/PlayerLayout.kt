@@ -256,11 +256,8 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 预览目标的到达窗口下沿：落定 seek 从目标前的关键帧起解，位置会先报告目标之前，毫秒。 */
-const val SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS = 50L
-
-/** 预览目标的到达窗口上沿：落定后位置向前追到这里仍未清除也算到达，毫秒。 */
-const val SEEK_PREVIEW_ARRIVE_AFTER_MILLIS = 1_500L
+/** 拖动跳转的像素死区：位移不超过它时不更新预览目标，避免手指停下后的抖动持续造新目标。 */
+val PlayerSeekDragDeadZone = 3.dp
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
@@ -329,34 +326,6 @@ fun seekBarDownMillis(
         thumbRadiusPx = thumbRadiusPx,
     )
     return seekBarMillisAt(x, bounds.start, bounds.end, durationMillis)
-}
-
-/**
- * 末次拖动预览是否继续保留。
- * 位置还在 [baseMillis]（拖动起点）与 [heldMillis]（预览目标）之间时一律保留：落定 seek 尚未生效或还没到目标，
- * 此时位置靠近目标不代表已到达。离开这一段后按方向判定：正向位置比目标还差
- * [SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS] 以上时保留，否则清除；反向位置高于目标
- * [SEEK_PREVIEW_ARRIVE_AFTER_MILLIS] 以上时保留，否则清除。
- */
-fun shouldKeepSeekPreview(
-    positionMillis: Long,
-    heldMillis: Long,
-    baseMillis: Long,
-): Boolean {
-    // 目标就是起点：没有可等的位置。
-    if (baseMillis == heldMillis) return false
-    // 起点与目标之间含起点、不含目标：位置走到目标上才算到达。
-    val betweenTarget = if (heldMillis > baseMillis) {
-        positionMillis >= baseMillis && positionMillis < heldMillis
-    } else {
-        positionMillis <= baseMillis && positionMillis > heldMillis
-    }
-    if (betweenTarget) return true
-    return if (heldMillis > baseMillis) {
-        positionMillis < heldMillis - SEEK_PREVIEW_ARRIVE_BEFORE_MILLIS
-    } else {
-        positionMillis > heldMillis + SEEK_PREVIEW_ARRIVE_AFTER_MILLIS
-    }
 }
 
 /** 拖动事件里是否出现主指针以外的按下指针；出现时取消本次手势。 */

@@ -147,6 +147,7 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -313,6 +314,7 @@ fun PlayerScreen(
     state: PlaybackState,
     progress: PlaybackProgress,
     seekPreviewMillis: Long?,
+    settledSeekMillis: Long?,
     playlist: List<MediaFile>,
     currentIndex: Int,
     decodeMode: DecodeMode,
@@ -674,6 +676,7 @@ fun PlayerScreen(
                 state = state,
                 progress = progress,
                 seekPreviewMillis = seekPreviewMillis,
+                settledSeekMillis = settledSeekMillis,
                 playlist = playlist,
                 currentIndex = currentIndex,
                 subtitleTracks = subtitleTracks,
@@ -944,6 +947,8 @@ private fun PlayerGestureLayer(
                     val drag = PlayerDragGesture(threshold, touchSlop)
                     drag.start(gestureZone(down.position.x, size.width))
                     var seekDrag: PlayerSeekDrag? = null
+                    // 上一次真正下发的累计位移，用于跳转死区。
+                    var lastPreviewDragX = 0f
                     var interactionNotified = false
                     levelControls.beginDrag()
                     try {
@@ -978,9 +983,13 @@ private fun PlayerGestureLayer(
                                         seekDrag = it
                                         seekDragActive = true
                                     }
-                                    seek.preview(update.seekDragX)?.let { target ->
-                                        latestOnSeekPreview.value(target)
-                                        latestOnSeekHint.value(SeekHint(target, target - seek.baseMillis))
+                                    // 死区内的抖动不更新预览目标：手指停下后画面不再继续跳。
+                                    if (abs(update.seekDragX - lastPreviewDragX) >= PlayerSeekDragDeadZone.toPx()) {
+                                        lastPreviewDragX = update.seekDragX
+                                        seek.preview(update.seekDragX)?.let { target ->
+                                            latestOnSeekPreview.value(target)
+                                            latestOnSeekHint.value(SeekHint(target, target - seek.baseMillis))
+                                        }
                                     }
                                 }
 
@@ -1278,6 +1287,7 @@ private fun Controls(
     state: PlaybackState,
     progress: PlaybackProgress,
     seekPreviewMillis: Long?,
+    settledSeekMillis: Long?,
     playlist: List<MediaFile>,
     currentIndex: Int,
     subtitleTracks: List<SubtitleTrack>,
@@ -1323,6 +1333,7 @@ private fun Controls(
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
+            settledSeekMillis = settledSeekMillis,
             enabled = interactive && actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
             appearanceEnabled = !initialLoading,
             onPreview = onSeekPreview,
@@ -1597,6 +1608,7 @@ private fun SeekBar(
     positionMillis: Long,
     durationMillis: Long,
     previewMillis: Long?,
+    settledSeekMillis: Long?,
     enabled: Boolean = true,
     appearanceEnabled: Boolean = true,
     onPreview: (Long) -> Unit,
@@ -1608,10 +1620,7 @@ private fun SeekBar(
     // 预览状态绑定到当前媒体与时长：切集后不沿用上一集的 seek 目标。
     var dragMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var heldMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
-    var heldBaseMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var pendingSliderMillis by remember(mediaKey) { mutableStateOf<Long?>(null) }
-    // 滑块拖动与指针拖动共用同一基线语义：本次拖动开始时的播放位置。
-    var sliderBaseMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var leftTimeWidthPx by remember { mutableStateOf(0f) }
     var rightTimeWidthPx by remember { mutableStateOf(0f) }
     var dragTimeWidthPx by remember(mediaKey, durationMillis) { mutableStateOf<Float?>(null) }
@@ -1622,33 +1631,26 @@ private fun SeekBar(
     val sliderEnabled = enabled && labels.seekEnabled
     // 按住进度条不动时没有指针事件；用心跳告诉控制层预览还活着。
     PreviewHeartbeat(dragging = dragMillis != null, onHeartbeat = onHeartbeat)
-    // 松手后保留末次预览，等播放位置追平再撤掉，避免左侧时间回跳。
-    LaunchedEffect(positionMillis, heldMillis, heldBaseMillis) {
-        val held = heldMillis ?: return@LaunchedEffect
-        val base = heldBaseMillis ?: return@LaunchedEffect
-        if (!shouldKeepSeekPreview(positionMillis, held, base)) {
-            heldMillis = null
-        }
+    // 松手后保留末次预览，等控制层回执落定 seek 完成再撤掉，避免左侧时间与圆球回跳。
+    LaunchedEffect(settledSeekMillis, heldMillis) {
+        if (settledSeekMillis != null && settledSeekMillis == heldMillis) heldMillis = null
     }
     LaunchedEffect(heldMillis) {
         if (heldMillis == null) return@LaunchedEffect
         delay(SEEK_PREVIEW_HOLD_MILLIS)
-        // 位置迟迟追不上目标时也要撤掉保持值，避免时间停在旧值。
+        // 回执迟迟不到时也要撤掉保持值，避免时间停在旧值。
         heldMillis = null
     }
     val previewAt: (Long) -> Unit = {
         heldMillis = null
-        heldBaseMillis = null
         onPreview(it)
     }
-    val commitAt: (Long, Long) -> Unit = { target, base ->
+    val commitAt: (Long) -> Unit = { target ->
         heldMillis = target
-        heldBaseMillis = base
         onCommit()
     }
     val latestPreviewAt = rememberUpdatedState(previewAt)
     val latestCommitAt = rememberUpdatedState(commitAt)
-    val latestPositionMillis = rememberUpdatedState(positionMillis)
     val colors = SliderDefaults.colors(
         thumbColor = MaterialTheme.colorScheme.onPrimary,
         activeTrackColor = AppColors.Accent,
@@ -1703,18 +1705,14 @@ private fun SeekBar(
                 value = progress.toFloat(),
                 onValueChange = {
                     val target = it.toLong()
-                    // 基线取本次拖动开始时的位置，与指针路径一致。
-                    if (sliderBaseMillis == null) sliderBaseMillis = latestPositionMillis.value
                     pendingSliderMillis = target
                     previewAt(target)
                 },
                 onValueChangeFinished = {
                     val target = pendingSliderMillis
-                    val base = sliderBaseMillis ?: latestPositionMillis.value
                     pendingSliderMillis = null
-                    sliderBaseMillis = null
                     if (target != null) {
-                        commitAt(target, base)
+                        commitAt(target)
                     } else {
                         onCommit()
                     }
@@ -1814,7 +1812,9 @@ private fun SeekBar(
                                 spacingPx = latestSpacingPx.value,
                                 thumbRadiusPx = latestThumbRadiusPx.value,
                             )
-                            val seekBase = latestPositionMillis.value
+                            // 死区内的抖动不更新预览目标：手指停下后画面不再继续跳。
+                            val deadZonePx = PlayerSeekDragDeadZone.toPx()
+                            var acceptedX = down.position.x
                             down.consume()
                             dragMillis = target
                             latestPreviewAt.value(target)
@@ -1828,6 +1828,8 @@ private fun SeekBar(
                                     if (isMultiPointerDrag(down.id.value, pressedIds)) break
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                     if (!change.pressed) break
+                                    if (abs(change.position.x - acceptedX) < deadZonePx) continue
+                                    acceptedX = change.position.x
                                     seekBarMillisAt(
                                         x = change.position.x,
                                         trackStart = bounds.start,
@@ -1845,7 +1847,7 @@ private fun SeekBar(
                                 dragMillis = null
                                 dragTimeWidthPx = null
                                 // 松手、多指取消或手势被打断都落定到当前预览位置并恢复声音。
-                                latestCommitAt.value(target, seekBase)
+                                latestCommitAt.value(target)
                             }
                         }
                     },
