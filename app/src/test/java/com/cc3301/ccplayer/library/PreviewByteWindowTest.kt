@@ -3,7 +3,6 @@ package com.cc3301.ccplayer.library
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertArrayEquals
@@ -22,7 +21,7 @@ class PreviewByteWindowTest {
     fun `解码按字节位置读到与底层一致的内容`() {
         val payload = payload(1000)
         val origin = RecordingOrigin(payload)
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = QueueExecutor())
 
         assertArrayEquals(payload.copyOfRange(0, 10), read(source, 0, 10))
         assertArrayEquals(payload.copyOfRange(70, 120), read(source, 70, 50))
@@ -32,7 +31,7 @@ class PreviewByteWindowTest {
     @Test
     fun `同一块只向底层读一次`() {
         val origin = RecordingOrigin(payload(1000))
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = QueueExecutor())
 
         read(source, 0, 4)
         read(source, 10, 4)
@@ -43,31 +42,30 @@ class PreviewByteWindowTest {
     }
 
     @Test
-    fun `命中后向后扩两块，后续读取不再请求底层`() {
+    fun `命中后向后扩一块，后续读取不再请求底层`() {
         val origin = RecordingOrigin(payload(1000))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = executor)
 
         read(source, 0, 4)
         executor.runAll()
 
         val before = origin.reads.size
         read(source, 100, 8)
-        read(source, 150, 8)
-        assertEquals(before, origin.reads.size)
+        assertEquals("紧跟的一块已在本地", before, origin.reads.size)
     }
 
     @Test
-    fun `预读队列有界，一次命中只排两块`() {
+    fun `预读队列有界，一次命中只排一块`() {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = executor)
 
         read(source, 0, 4)
 
-        assertEquals(2, executor.pending())
+        assertEquals(1, executor.pending())
         executor.runAll()
-        assertEquals(3, origin.reads.size)
+        assertEquals(2, origin.reads.size)
     }
 
     @Test
@@ -75,7 +73,7 @@ class PreviewByteWindowTest {
         val size = 20 * 1024 * 1024
         val origin = RecordingOrigin(payload(size))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, readAhead = executor)
 
         source.startMetadataReadAhead()
         executor.runAll()
@@ -97,7 +95,7 @@ class PreviewByteWindowTest {
     fun `小文件的头尾区间相接时一次读完`() {
         val origin = RecordingOrigin(payload(500_000))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, readAhead = executor)
 
         source.startMetadataReadAhead()
         executor.runAll()
@@ -111,7 +109,7 @@ class PreviewByteWindowTest {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
         // 窗口容得下两处锚点附近的块：换锚点只补新块，不丢旧块。
-        val source = PreviewByteWindow(origin, windowBytes = 8L * chunk, chunkBytes = chunk, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, windowBytes = 8L * chunk, chunkBytes = chunk, readAhead = executor)
 
         read(source, 0, 4)
         executor.runAll()
@@ -130,7 +128,7 @@ class PreviewByteWindowTest {
     fun `跳读只补新位置附近的块`() {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = executor)
 
         read(source, 0, 4)
         executor.runAll()
@@ -148,7 +146,7 @@ class PreviewByteWindowTest {
     fun `常驻块按最近使用淘汰，总量不超过窗口上限`() {
         val origin = RecordingOrigin(payload(10_000))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = executor)
 
         repeat(10) { index ->
             read(source, index * chunk.toLong(), 1)
@@ -167,7 +165,7 @@ class PreviewByteWindowTest {
         val maxRead = 16 * 1024
         val origin = RecordingOrigin(payload(1 shl 20), maxReadBytes = maxRead)
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, readAhead = executor)
 
         read(source, 0, 4)
         executor.runAll()
@@ -183,7 +181,7 @@ class PreviewByteWindowTest {
         val size = 1100 * 1024
         val origin = RecordingOrigin(payload(size))
         val executor = QueueExecutor()
-        val source = PreviewByteWindow(origin, readAheadExecutor = executor)
+        val source = PreviewByteWindow(origin, readAhead = executor)
 
         source.startMetadataReadAhead()
         executor.runAll()
@@ -216,14 +214,14 @@ class PreviewByteWindowTest {
             windowBytes = window,
             chunkBytes = chunk,
             readAheadSource = readAheadOrigin,
-            readAheadExecutor = executor,
+            readAhead = executor,
         )
 
         read(source, 0, 4)
         executor.runAll()
 
         assertEquals("解码只补当前块", listOf(0L to chunk), decodeOrigin.reads)
-        assertEquals("预读落在独立句柄", listOf(64L to chunk, 128L to chunk), readAheadOrigin.reads)
+        assertEquals("预读落在独立句柄", listOf(64L to chunk), readAheadOrigin.reads)
         source.close()
         assertTrue(decodeOrigin.closed)
         assertTrue(readAheadOrigin.closed)
@@ -245,7 +243,7 @@ class PreviewByteWindowTest {
     @Test
     fun `底层读取失败时向调用方抛出`() {
         val origin = RecordingOrigin(payload(1000)).apply { failure = IOException("连不上") }
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = QueueExecutor())
 
         try {
             read(source, 0, 4)
@@ -258,7 +256,7 @@ class PreviewByteWindowTest {
     @Test
     fun `关闭时正在补齐的块不返回`() {
         val origin = BlockingOrigin(payload(1000))
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = QueueExecutor())
         val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
         val reader = Thread { failure.set(runCatching { read(source, 0, 4) }.exceptionOrNull()) }
         reader.start()
@@ -274,7 +272,7 @@ class PreviewByteWindowTest {
     @Test
     fun `关闭后读取失败并关闭底层`() {
         val origin = RecordingOrigin(payload(1000))
-        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAheadExecutor = QueueExecutor())
+        val source = PreviewByteWindow(origin, windowBytes = window, chunkBytes = chunk, readAhead = QueueExecutor())
         read(source, 0, 4)
 
         source.close()
@@ -297,13 +295,13 @@ class PreviewByteWindowTest {
     private fun payload(size: Int): ByteArray = ByteArray(size) { index -> (index % 251).toByte() }
 }
 
-/** 按顺序执行预读任务，让预读在测试线程上确定发生。 */
-private class QueueExecutor : Executor {
+/** 按顺序执行预读任务，让预读在测试线程上确定发生；忽略 rank 与字节源。 */
+private class QueueExecutor : PreviewReadAhead {
 
     private val tasks = ArrayDeque<Runnable>()
 
-    override fun execute(command: Runnable) {
-        tasks.addLast(command)
+    override fun submit(rank: Long, key: Any, task: Runnable) {
+        tasks.addLast(task)
     }
 
     fun pending(): Int = tasks.size

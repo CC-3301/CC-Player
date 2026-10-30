@@ -4,7 +4,6 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.CancellationException
-import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +58,7 @@ class NetworkPreviewExtractorTest {
                 opened.readAt(0, buffer, 0, buffer.size)
                 ByteArray(8)
             },
-            readAheadExecutor = executor,
+            readAhead = executor,
         )
 
         val prepared = extractor.prepare(movie)!!
@@ -93,7 +92,7 @@ class NetworkPreviewExtractorTest {
                 opened.readAt(0, buffer, 0, buffer.size)
                 ByteArray(8)
             },
-            readAheadExecutor = executor,
+            readAhead = executor,
             diagnostics = diagnostics,
         )
 
@@ -191,7 +190,7 @@ class NetworkPreviewExtractorTest {
         val extractor = NetworkPreviewExtractor(
             reads,
             decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
-            readAheadExecutor = executor,
+            readAhead = executor,
         )
 
         try {
@@ -282,13 +281,13 @@ class NetworkPreviewExtractorTest {
     }
 }
 
-/** 按顺序执行预读任务，让预读在测试线程上确定发生。 */
-private class StepExecutor : Executor {
+/** 按顺序执行预读任务，让预读在测试线程上确定发生；忽略 rank 与字节源。 */
+private class StepExecutor : PreviewReadAhead {
 
     private val tasks = ArrayDeque<Runnable>()
 
-    override fun execute(command: Runnable) {
-        tasks.addLast(command)
+    override fun submit(rank: Long, key: Any, task: Runnable) {
+        tasks.addLast(task)
     }
 
     fun runAll() {
@@ -297,15 +296,15 @@ private class StepExecutor : Executor {
 }
 
 /** 前 [failAt] - 1 个任务入队，第 [failAt] 个提交时拒绝；用来构造窗口已建、准备未交付。 */
-private class RejectingExecutor(private val failAt: Int) : Executor {
+private class RejectingExecutor(private val failAt: Int) : PreviewReadAhead {
 
     private val tasks = ArrayDeque<Runnable>()
     private var submissions = 0
 
-    override fun execute(command: Runnable) {
+    override fun submit(rank: Long, key: Any, task: Runnable) {
         submissions++
         if (submissions >= failAt) throw RejectedExecutionException("预读线程拒绝任务")
-        tasks.addLast(command)
+        tasks.addLast(task)
     }
 
     /** 跑完已入队的任务：窗口关闭后它们必须直接退出，不再读底层。 */

@@ -5,7 +5,6 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
 import com.cc3301.ccplayer.streaming.ReadKind
-import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +57,7 @@ class NetworkPreviewExtractor(
     private val reads: NetworkMediaReads,
     private val readPriority: NetworkReadPriority = NetworkReadPriority.shared,
     private val decoder: NetworkPreviewDecoder,
-    private val readAheadExecutor: Executor = PreviewByteWindow.previewReadAheadExecutor,
+    private val readAhead: PreviewReadAhead = previewReadAhead,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
 
@@ -72,13 +71,19 @@ class NetworkPreviewExtractor(
         }
     }
 
-    /** 打开句柄并起定点预读；不占解码许可。失败或取消时关闭已打开的两条句柄。 */
-    suspend fun prepare(file: MediaFile): NetworkPreviewPreparation? {
+    /**
+     * 打开句柄并起定点预读；不占解码许可。失败或取消时关闭已打开的两条句柄。
+     * [readAheadRank] 是这条目的预读派发顺序：可见项按列表索引，预取排在可见之后。
+     */
+    suspend fun prepare(
+        file: MediaFile,
+        readAheadRank: Long = PREVIEW_PREFETCH_RANK,
+    ): NetworkPreviewPreparation? {
         val waitedMillis = AtomicLong()
         var opened: NetworkPreviewPreparation? = null
         var window: PreviewByteWindow? = null
         var primary: ByteSource? = null
-        var readAhead: ByteSource? = null
+        var readAheadHandle: ByteSource? = null
         try {
             return withContext(Dispatchers.IO) {
                 val kind = mediaKindOf(file.name) ?: return@withContext null
@@ -86,11 +91,12 @@ class NetworkPreviewExtractor(
                     waitedMillis.addAndGet(millis)
                 }
                 primary = source
-                readAhead = openReadAhead(file, waitedMillis)
+                readAheadHandle = openReadAhead(file, waitedMillis)
                 val previewWindow = PreviewByteWindow(
                     origin = source,
-                    readAheadSource = readAhead,
-                    readAheadExecutor = readAheadExecutor,
+                    readAheadSource = readAheadHandle,
+                    readAhead = readAhead,
+                    readAheadRank = readAheadRank,
                 )
                 window = previewWindow
                 previewWindow.startMetadataReadAhead()
@@ -117,7 +123,7 @@ class NetworkPreviewExtractor(
                 runCatching { openedWindow.close() }
             } else {
                 runCatching { primary?.close() }
-                runCatching { readAhead?.close() }
+                runCatching { readAheadHandle?.close() }
             }
             throw failure
         }

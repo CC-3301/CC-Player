@@ -85,6 +85,15 @@ interface MediaPreviewExtractor {
      */
     suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation?
 
+    /**
+     * 带预读 rank 的同一件事：[readAheadRank] 决定这条目的预读在池里的先后，
+     * 可见项按列表索引，预取排在可见之后。默认忽略 rank，实现只覆盖一参版本。
+     */
+    suspend fun prepareNetworkPreview(
+        file: MediaFile,
+        readAheadRank: Long,
+    ): NetworkPreviewPreparation? = prepareNetworkPreview(file)
+
     /** 取时长（毫秒）；元数据里没有时长时返回 null，读取失败抛出异常。 */
     suspend fun durationMillis(file: MediaFile): Long?
 
@@ -440,7 +449,7 @@ class CachedMediaPreviewSource(
         priority: PreviewPriority,
     ): LoadedPreview {
         // 没有可用的读取会话时直接按无图收尾，不再另开一条完整句柄取图。
-        val prepared = openOutsideRequest(file)
+        val prepared = openOutsideRequest(file, priority)
             ?: return LoadedPreview(image = null, durationMillis = null)
         try {
             // 排队时间不计入解码超时；阻塞中的网络读由各自的传输层超时兜底。
@@ -492,14 +501,17 @@ class CachedMediaPreviewSource(
      * 名额随即归还，后面的可见项不跟着一个坏条目一起等。
      * 打开最终结束后仍无人接手（超时或取消）时由打开方关闭句柄与预读。
      */
-    private suspend fun openOutsideRequest(file: MediaFile): NetworkPreviewPreparation? {
+    private suspend fun openOutsideRequest(
+        file: MediaFile,
+        priority: PreviewPriority,
+    ): NetworkPreviewPreparation? {
         val opened = CompletableDeferred<Result<NetworkPreviewPreparation?>>()
         // 父 Job 跟随进程级范围，调度器沿用调用方的：请求取消不会连带取消这次打开。
         val opening = CoroutineScope(
             currentCoroutineContext() + Job(backgroundScope.coroutineContext[Job]),
         ).launch {
             val result = try {
-                Result.success(extractor.prepareNetworkPreview(file))
+                Result.success(extractor.prepareNetworkPreview(file, priority.rank))
             } catch (cancellation: CancellationException) {
                 opened.completeExceptionally(cancellation)
                 return@launch
@@ -777,6 +789,14 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
 
     val isVisible: Boolean get() = kind == Kind.Visible
 
+    /** 取许可与派发预读用同一套 rank：可见项按列表索引，预取与时长补读排在最后。 */
+    val rank: Long
+        get() = when (kind) {
+            Kind.Visible -> order.toLong()
+            Kind.Prefetch -> PREVIEW_PREFETCH_RANK
+            Kind.Duration -> PREVIEW_DURATION_RANK
+        }
+
     companion object {
         fun visible(order: Int) = PreviewPriority(Kind.Visible, order)
 
@@ -836,7 +856,7 @@ private class PrioritySemaphore(
         while (available > 0) {
             val index = waiters.indices
                 .filter { position -> withinQuotaLocked(waiters[position]) }
-                .minByOrNull { position -> priorityRank(waiters[position]) } ?: return
+                .minByOrNull { position -> waiters[position].priority.rank } ?: return
             val granted = waiters.removeAt(index)
             available--
             granted.granted.complete(Unit)
@@ -854,7 +874,7 @@ private class PrioritySemaphore(
             available++
             val index = waiters.indices
                 .filter { position -> withinQuotaLocked(waiters[position]) }
-                .minByOrNull { position -> priorityRank(waiters[position]) }
+                .minByOrNull { position -> waiters[position].priority.rank }
             if (index == null) {
                 null
             } else {
@@ -864,20 +884,9 @@ private class PrioritySemaphore(
         next?.granted?.complete(Unit)
     }
 
-    /** 可见请求先于预取，时长补读最后；可见请求内按列表索引排序，同级保持等待顺序。 */
-    private fun priorityRank(waiter: Waiter): Long = when (waiter.priority.kind) {
-        PreviewPriority.Kind.Visible -> waiter.priority.order.toLong()
-        PreviewPriority.Kind.Prefetch -> PREFETCH_RANK
-        PreviewPriority.Kind.Duration -> DURATION_RANK
-    }
-
+    /** 排队者带优先级；派发顺序取 [PreviewPriority.rank]，同级保持等待顺序。 */
     private class Waiter(
         val priority: PreviewPriority,
         val granted: CompletableDeferred<Unit>,
     )
-
-    private companion object {
-        const val PREFETCH_RANK = Long.MAX_VALUE - 1
-        const val DURATION_RANK = Long.MAX_VALUE
-    }
 }
