@@ -304,7 +304,7 @@ private class RejectingExecutor(private val failAt: Int) : PreviewReadAhead {
     override fun submit(rank: Long, key: Any, task: Runnable) {
         submissions++
         if (submissions >= failAt) throw RejectedExecutionException("预读线程拒绝任务")
-        tasks.addLast(command)
+        tasks.addLast(task)
     }
 
     /** 跑完已入队的任务：窗口关闭后它们必须直接退出，不再读底层。 */
