@@ -28,3 +28,5 @@ HANDOFF.md
 backups/
 # Kotlin 编译会话目录
 .kotlin/
+# 工作树
+.worktrees/
