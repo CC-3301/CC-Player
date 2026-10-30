@@ -75,6 +75,18 @@ class MpvPlaybackEngine(
         Thread(runnable, "mpv-seek-command").apply { isDaemon = true }
     }
 
+    /**
+     * 视频输出属性的唯一线程：设置 vo 会重建整条输出并阻塞到内部完成，不能占用主线程。
+     * 单线程保证多次开输出、翻转按调用顺序执行。
+     */
+    private val videoOutputExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "mpv-video-output").apply { isDaemon = true }
+    }
+
+    /** 视频输出属性的下发序号：拆挂时递增，让排队中的开输出作废。 */
+    private val videoOutputLock = Any()
+    private var videoOutputGeneration = 0
+
     /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
     private val seekTimeoutLock = Any()
 
@@ -354,26 +366,48 @@ class MpvPlaybackEngine(
         videoOutputStopped = false
         awaitingSurfaceFrame = true
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
-        MPVLib.setOptionString("force-window", "yes")
-        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        postVideoOutput {
+            MPVLib.setOptionString("force-window", "yes")
+            MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        }
     }
 
     /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出。 */
     override fun flipVideoOutput() {
         if (attachedSurface == null || videoOutputStopped) return
         awaitingSurfaceFrame = true
-        MPVLib.setPropertyString("vo", "null")
-        MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        postVideoOutput {
+            MPVLib.setPropertyString("vo", "null")
+            MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+        }
     }
 
+    /**
+     * 分离 Surface：先关输出再摘挂载，顺序不能变。
+     * 与开输出在同一把锁上互斥：排队中的开输出在这里作废，拆挂之后 vo 不会被重新打开。
+     * 摘挂载本身要跟着 Surface 生命周期走，留在调用线程。
+     */
     override fun detachSurface() {
         if (attachedSurface == null) return
         awaitingSurfaceFrame = false
-        MPVLib.setPropertyString("vo", "null")
-        MPVLib.setOptionString("force-window", "no")
-        MPVLib.detachSurface()
+        synchronized(videoOutputLock) {
+            videoOutputGeneration++
+            MPVLib.setPropertyString("vo", "null")
+            MPVLib.setOptionString("force-window", "no")
+            MPVLib.detachSurface()
+        }
         attachedSurface = null
         videoOutputStopped = true
+    }
+
+    /** 把视频输出属性交给专用线程；拆挂之后到点的任务按序号作废。 */
+    private fun postVideoOutput(task: () -> Unit) {
+        val generation = synchronized(videoOutputLock) { videoOutputGeneration }
+        videoOutputExecutor.execute {
+            synchronized(videoOutputLock) {
+                if (generation == videoOutputGeneration) task()
+            }
+        }
     }
 
     override fun setSurfaceSize(width: Int, height: Int) {
@@ -392,6 +426,14 @@ class MpvPlaybackEngine(
         seekQueue.reset()
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
+        // 视频输出任务在 destroy 之前收干净：晚到的属性调用不能踩到已销毁的实例。
+        synchronized(videoOutputLock) {
+            videoOutputGeneration++
+        }
+        videoOutputExecutor.shutdownNow()
+        runCatching {
+            videoOutputExecutor.awaitTermination(VIDEO_OUTPUT_RELEASE_WAIT_SECONDS, TimeUnit.SECONDS)
+        }
         loadCoordinator.reset()
         MPVLib.destroy()
     }
@@ -557,6 +599,9 @@ class MpvPlaybackEngine(
     private companion object {
         /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
         const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
+
+        /** 释放时等视频输出线程收尾的上限；超时也继续释放，不能把退出挂住。 */
+        const val VIDEO_OUTPUT_RELEASE_WAIT_SECONDS = 2L
 
         /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
         val nextSeekId = AtomicLong(0)
