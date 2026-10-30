@@ -89,6 +89,9 @@ class PlaybackController(
     /** 已下发、等播放核心回报执行的收尾 seek；执行前进度停在这个目标上。 */
     private var pendingLanding: LandingSeek? = null
 
+    /** 预览或预览落定期间吞掉的引擎暂停回声；落定后按播放意图补一次恢复。 */
+    private var ignoredPauseEcho = false
+
     /** 预览 seek 期间音频已静音；进入预览时置位，恢复只走 [releasePreviewMute]。 */
     private var previewMuted = false
 
@@ -307,6 +310,9 @@ class PlaybackController(
     /** 切集无帧失败计时；暂停或 Surface 分离时取消，按当前时间结算剩余。 */
     private var switchFrameWatchdogJob: Job? = null
 
+    /** 本次切集是否已因回前台续过一次无帧窗口；每次重新给窗口时清零，避免反复续期。 */
+    private var switchFrameWindowRenewed = false
+
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
     private val resumeActivityGate = ResumeActivityGate()
 
@@ -437,6 +443,13 @@ class PlaybackController(
             if (!wasAvailable) {
                 // 未进入恢复等待（无会话、加载中或片尾黑底）：缓存帧不适用，立即撤掉。
                 if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
+                // 后台期间无帧窗口可能已经走到截止：回前台重新给一个完整窗口，
+                // 不把耗尽的窗口直接判成切集失败。
+                if (switchFramePending && switchFrameRemainingMillis <= 0L && !switchFrameWindowRenewed) {
+                    switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
+                    switchFrameDeadlineMillis = null
+                    switchFrameWindowRenewed = true
+                }
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
             }
@@ -545,6 +558,8 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         engine.pause()
         settleStartedSwitchAsPaused()
+        // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
     /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾，保留冻结画面。 */
@@ -798,6 +813,8 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         engine.pause()
         settleStartedSwitchAsPaused()
+        // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
     /**
@@ -835,6 +852,8 @@ class PlaybackController(
         } else {
             engine.resume()
         }
+        // 继续播放按用户意图立刻生效，不等引擎回声；加载阶段由就绪流程按意图定。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Playing)
     }
 
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
@@ -968,9 +987,24 @@ class PlaybackController(
 
     /** 下发一次预览 seek；是否重发由界面按像素死区判定，队列由引擎收敛到「1 执行 + 1 待执行」。 */
     private fun issuePreviewSeek(target: Long) {
+        val clamped = previewSeekTarget(target)
         acquirePreviewMute()
-        lastPreviewSeekTargetMillis = target
-        lastPreviewSeekId = engine.seekTo(target).seekId
+        lastPreviewSeekTargetMillis = clamped
+        lastPreviewSeekId = engine.seekTo(clamped).seekId
+    }
+
+    /**
+     * 预览下发与落定的目标都离片尾留出安全余量：落进这条带里的 seek 会把文件推到片尾，
+     * 触发 eof-reached 的播完判定。余量严格大于「播完」容差，夹取结果才在播完带外。
+     * 时长本身不超过余量时，余量按半程缩，保证预览仍有可拖动的区间；
+     * 这种短片里任何位置都可能落在播完带内，由预览守卫兜底。
+     */
+    private fun previewSeekTarget(positionMillis: Long): Long {
+        val durationMillis = playedDurationMillis
+        if (durationMillis <= 0L) return positionMillis
+        val margin = minOf(PREVIEW_END_MARGIN_MILLIS, durationMillis / 2)
+        val limit = (durationMillis - margin).coerceAtLeast(0L)
+        return positionMillis.coerceIn(0L, limit)
     }
 
     /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
@@ -993,27 +1027,36 @@ class PlaybackController(
     private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null, external: Boolean = false) {
         previewEndJob?.cancel()
         previewEndJob = null
-        val target = commitTarget ?: _seekPreviewMillis.value
+        // 预览落定同样不进片尾安全余量：停在片尾会立刻触发播完与自动暂停。
+        val target = commitTarget ?: _seekPreviewMillis.value?.let(::previewSeekTarget)
         val lastIssuedTarget = lastPreviewSeekTargetMillis
         val lastIssuedSeekId = lastPreviewSeekId
         _seekPreviewMillis.value = null
         lastPreviewSeekTargetMillis = null
         lastPreviewSeekId = null
         if (!commit) {
-            // 取消或会话结束：落定作废，静音在这里恢复。
+            // 取消、切集或会话结束：落定作废，静音与吞掉的暂停回声都在这里收场。
+            settleIgnoredPauseEcho()
             clearLandingSeek()
             releasePreviewMute()
             return
         }
-        // 会话已结束：没有落定可等，静音在这里收掉。
+        // 会话已结束：没有落定可等，静音与吞掉的暂停回声都在这里收场。
         if (!active) {
+            settleIgnoredPauseEcho()
             releasePreviewMute()
             return
         }
-        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复。
-        if (target == null) return
+        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复；
+        // 吞掉的暂停回声在这里收场，恢复仍按播放意图决定。
+        if (target == null) {
+            settleIgnoredPauseEcho()
+            return
+        }
         // 预览落定的加载期闸门：会推走本代的续播序号，落定等不到回执；外部跳转照常下发。
+        // 吞掉的暂停回声在这里清掉，新加载由自己接管引擎。
         if (!external && loadPhase != LoadPhase.None) {
+            settleIgnoredPauseEcho()
             releasePreviewMute()
             return
         }
@@ -1028,17 +1071,18 @@ class PlaybackController(
         } else {
             engine.seekTo(target).seekId
         }
-        landSeek(target, seekId)
+        // 外部跳转（带目标）是普通 seek；没有外部目标时落定的是预览位置。
+        landSeek(target, seekId, fromPreview = commitTarget == null)
     }
 
     /**
      * 登记落定：进度先停在目标上，等播放核心回报这一跳已执行后再放开。
      * 复用的那一跳此前已经回报过执行时，落定当场结算。
      */
-    private fun landSeek(targetMillis: Long, seekId: Long) {
+    private fun landSeek(targetMillis: Long, seekId: Long, fromPreview: Boolean) {
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
-        pendingLanding = LandingSeek(seekId, targetMillis)
+        pendingLanding = LandingSeek(seekId, targetMillis, fromPreview)
         if (lastExecutedSeekId == seekId) settleLanding()
     }
 
@@ -1048,7 +1092,19 @@ class PlaybackController(
         pendingLanding = null
         releasePreviewMute()
         engine.fadeInAudio(FADE_IN_MILLIS)
+        // 预览期间吞掉的暂停回声在这里收尾：原本在播放就让引擎接着播。
+        settleIgnoredPauseEcho()
         _seekSettlement.value = SeekSettlement(settlementIds.incrementAndGet(), landing.targetMillis)
+    }
+
+    /**
+     * 吞掉的 keep-open 暂停回声在这里收场：清标志；
+     * 播放意图仍为播放且没有新加载接管引擎时恢复播放。
+     */
+    private fun settleIgnoredPauseEcho() {
+        if (!ignoredPauseEcho) return
+        ignoredPauseEcho = false
+        if (active && loadPhase == LoadPhase.None && !paused) engine.resume()
     }
 
     /** 放弃等待中的落定：新拖动、新加载或停止后不再保留；静音由调用路径统一恢复。 */
@@ -1070,10 +1126,14 @@ class PlaybackController(
         engine.setAudioMuted(false)
     }
 
-    /** 已下发的落定：认哪一跳 seek，以及界面落点（死区复用时两者可以不同）。 */
+    /**
+     * 已下发的落定：认哪一跳 seek、界面落点（死区复用时两者可以不同），
+     * 以及是否来自预览。播完判定只拦预览来源的落定。
+     */
     private class LandingSeek(
         val seekId: Long,
         val targetMillis: Long,
+        val fromPreview: Boolean,
     )
 
     /** 预览 seek 只在正常播放中下发；加载阶段与时长未知时保持原行为。 */
@@ -1081,6 +1141,10 @@ class PlaybackController(
         loadPhase == LoadPhase.None &&
             playedDurationMillis > 0L &&
             (_state.value == PlaybackState.Playing || _state.value == PlaybackState.Paused)
+
+    /** 预览中，或预览来源的落定还没执行完：播完判定与引擎暂停回声都要让路。 */
+    private fun previewLandingInFlight(): Boolean =
+        _seekPreviewMillis.value != null || pendingLanding?.fromPreview == true
 
     fun setDecodeMode(mode: DecodeMode) {
         _decodeMode.value = mode
@@ -1355,6 +1419,11 @@ class PlaybackController(
             // 切集与恢复期间的暂停由控制层自己设置，忽略引擎回声。
             LoadPhase.Switching, LoadPhase.Restoring -> Unit
             LoadPhase.None -> {
+                // keep-open 播完后引擎会回一条暂停：预览与预览落定期间这不是用户意图，不能压状态。
+                if (paused && previewLandingInFlight()) {
+                    ignoredPauseEcho = true
+                    return
+                }
                 this.paused = paused
                 // 引擎主动暂停时挂起无帧计时；恢复后按剩余窗口继续。
                 if (paused) suspendSwitchFrameWatchdog() else if (switchFramePending) armSwitchFrameWatchdog()
@@ -1375,6 +1444,12 @@ class PlaybackController(
         if (loadToken != expectedLoadToken || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
         if (_holdBlack.value) return
+        // 预览 seek 或预览来源的落定还没执行完都不算播完：切集会打断拖动，
+        // 落定的 seek 会把播放带离片尾；普通 seek 落到片尾照常连播。
+        if (previewLandingInFlight()) {
+            diagnostics.log { "播放结束: 预览或落定中，不触发连播" }
+            return
+        }
         diagnostics.log { "播放结束: ${currentMedia()?.name ?: ""}" }
         if (_sleepTimerState.value == SleepTimerState.EndOfEpisode) {
             _sleepTimerState.value = SleepTimerState.Off
@@ -1397,9 +1472,9 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
-        // 收起预览并恢复静音：进度不再被拖动目标钉住。
-        endSeekPreview(commit = false)
+        // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
+        endSeekPreview(commit = false)
         updateState(PlaybackState.Ended)
     }
 
@@ -1520,6 +1595,7 @@ class PlaybackController(
     private fun restartSwitchFrameDeadline() {
         switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
         switchFrameDeadlineMillis = null
+        switchFrameWindowRenewed = false
         switchFrameWatchdogJob?.cancel()
         switchFrameWatchdogJob = null
         armSwitchFrameWatchdog()
@@ -1580,6 +1656,7 @@ class PlaybackController(
     private fun clearSwitchFrameDeadline() {
         switchFrameRemainingMillis = 0
         switchFrameDeadlineMillis = null
+        switchFrameWindowRenewed = false
         resumeActivityGate.reset()
     }
 
@@ -1721,10 +1798,12 @@ class PlaybackController(
                 if (switchFailureReported) return
                 logLoadFailure("播放失败", source, errorText)
                 clearPendingSwitchFrame()
-                // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音。
+                // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音；
+                // 吞掉的暂停回声也在结束时清掉，active 已为假，不再恢复播放。
                 releasePreviewMute()
                 active = false
                 paused = true
+                settleIgnoredPauseEcho()
                 updateState(PlaybackState.Ended)
                 _playbackFailures.tryEmit(Unit)
             }
@@ -2071,6 +2150,12 @@ class PlaybackController(
 
         /** 拖动预览重发 seek 的目标差阈值：目标与最后一次下发相差超过这段时长就补一跳。 */
         const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
+
+        /**
+         * 预览与落定目标离片尾留出的安全余量。必须严格大于「播完」容差：
+         * 播完判据是「位置 ≥ 时长 − 容差」，余量取同比只会把目标夹在播完带内。
+         */
+        const val PREVIEW_END_MARGIN_MILLIS = 2_000L
 
         /** 落定通知的进程级序号：跨控制器实例也单调，界面据此只撤掉比它旧的保持值。 */
         internal val settlementIds = AtomicLong(0L)

@@ -651,19 +651,19 @@ class PlaybackControllerSeekPreviewTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 500_000)
         controller.commitSeekPreview()
         engine.reportFirstFrameReady()
         val first = controller.seekSettlement.value ?: error("第一次落定没有通知")
 
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 500_000)
         controller.commitSeekPreview()
         engine.reportFirstFrameReady()
         val second = controller.seekSettlement.value ?: error("第二次落定没有通知")
 
         // 同一目标两次落定各自发通知：界面只有看到更大的 id 才撤掉新的保持值。
-        assertEquals(600_000L, first.targetMillis)
-        assertEquals(600_000L, second.targetMillis)
+        assertEquals(500_000L, first.targetMillis)
+        assertEquals(500_000L, second.targetMillis)
         assertTrue(second.id > first.id)
     }
 
@@ -764,21 +764,210 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `拖到片尾仍在预览时播完会收起预览并恢复静音`() = runTest {
-        val controller = singleController()
-        engine.reportPositionChanged(500_000, 600_000)
+    fun `预览中收到播完不切集也不结束会话`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        val startedLoads = engine.startedUrls.size
 
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 600_000)
-        assertEquals(600_000L, controller.seekPreviewMillis.value)
-        assertEquals(listOf(true), engine.muteCalls)
-
-        // 仍在预览态时播完：收起预览、恢复静音，进度不被拖动目标钉住。
+        // 预览 seek 期间的播完不算连播信号：不切集、不结束会话、不收起预览。
         engine.reportPlaybackEnded()
 
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(120_000L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(true), engine.muteCalls)
+    }
+
+    @Test
+    fun `落定在途收到播完不切集`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        val startedLoads = engine.startedUrls.size
+
+        // 收尾已下发、回报还没到：此时播完不能当连播信号。
         assertNull(controller.seekPreviewMillis.value)
+        engine.reportPlaybackEnded()
+
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 落定执行后照常结算，播放停在落定目标上。
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `普通 seek 落到片尾仍触发自动连播`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 通知栏或手动跳转不是预览：它的落定在途不能拦住播完判定。
+        controller.seekTo(599_000)
+        assertNull(controller.seekPreviewMillis.value)
+
+        engine.reportPlaybackEnded()
+
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+    }
+
+    @Test
+    fun `预览落定期间引擎回的暂停不压成暂停态`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 598_000)
+        controller.commitSeekPreview()
+        val startedLoads = engine.startedUrls.size
+
+        // keep-open 播完后引擎先报 eof，再回一条暂停；这条暂停不是用户意图。
+        engine.reportPlaybackEnded()
+        engine.reportPauseChanged(true)
+
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 落定执行完按播放意图恢复：原本在播放就继续播。
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `放弃落定后普通 seek 落定按播放意图恢复一次`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // keep-open 播完后引擎回的暂停在落定在途时被吞掉。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 新拖动丢弃这次落定；吞掉的回声留到普通落定结算时按播放意图收场。
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
+        controller.seekTo(300_000)
+        engine.reportSeekExecuted()
+        engine.reportSeekExecuted()
+
+        // 播放意图仍是播放：结算恢复一次，迟到回执不重复恢复。
+        assertEquals(1, engine.resumeCalls)
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
+    }
+
+    @Test
+    fun `预览落定吞过回声后普通 seek 落定恢复播放一次`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // 预览落定在途时吞掉 keep-open 回声。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 用户直接发普通 seek：它接管落定，吞掉的回声交给结算按播放意图处理。
+        controller.seekTo(300_000)
+        engine.reportSeekExecuted()
+        engine.reportSeekExecuted()
+
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        // 迟到的回执不会重复恢复。
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
+    }
+
+    @Test
+    fun `预览落定在途按暂停立刻生效，结算后保持暂停`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // 用户按暂停：不等引擎回声，状态立刻变。
+        controller.pause()
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // keep-open 回声在落定在途时到达：吞掉，但不改用户的暂停意图。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // 落定结算按暂停意图收尾：不恢复播放，也不把状态改回播放。
+        engine.reportSeekExecuted()
+        assertEquals(0, engine.resumeCalls)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `落定被取消收尾时结算吞掉的暂停回声`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 落定在途吞掉 keep-open 回声：引擎实际停了，状态仍按播放意图保持播放。
+        engine.reportPauseChanged(true)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 再次拖动后由空闲超时按 commit=false 收尾：这一次收尾要结算吞掉的回声。
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
+        advanceTimeBy(PlaybackController.PREVIEW_IDLE_TIMEOUT_MILLIS + 1)
+        runCurrent()
+
+        // 不残留静音，也不留下“引擎已暂停、状态还在播放”。
         assertEquals(listOf(true, false), engine.muteCalls)
-        assertEquals(500_000L, controller.progress.value.positionMillis)
-        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
+    fun `预览目标落在末尾时收进安全余量`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        val lastSafePosition = 600_000L - PlaybackController.PREVIEW_END_MARGIN_MILLIS
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 600_000)
+
+        // 显示目标仍是手指位置；下发与落定的 seek 离片尾留出安全余量，不把文件推到片尾。
+        assertEquals(600_000L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(lastSafePosition), engine.seekPositions)
+
+        controller.commitSeekPreview()
+        assertEquals(listOf(lastSafePosition), engine.seekPositions)
+        assertEquals(lastSafePosition, controller.progress.value.positionMillis)
+        assertFalse(controller.switching.value)
+        assertEquals(0, controller.currentIndex.value)
+
+        // 夹取后的位置不在「播完」带内：退出预览后按正常位置落库，不按看过一遍清掉。
+        engine.reportFirstFrameReady()
+        runCurrent()
+        engine.reportPositionChanged(lastSafePosition, 600_000)
+        runCurrent()
+        assertEquals(lastSafePosition, progress.records["root/ep1.mkv"]?.positionMillis)
+    }
+
+    @Test
+    fun `时长不超过余量时预览仍有可拖动区间`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(0, 1_500)
+        val limit = 1_500L / 2
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 1_500)
+
+        // 短片余量按半程缩：拖动不会被压成 0，仍有一段可预览区间。
+        assertEquals(1_500L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(limit), engine.seekPositions)
+        assertTrue(limit > 0L)
     }
 
     @Test
@@ -921,15 +1110,6 @@ class PlaybackControllerSeekPreviewTest {
         frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
         nowMillis = { testScheduler.currentTime },
     )
-
-    /** 起播单集并等首帧就绪：播完走会话结束，不触发自动连播。 */
-    private fun TestScope.singleController(): PlaybackController {
-        val controller = controller()
-        val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
-        controller.openPlaylist(files, files.first())
-        engine.reportMediaLoaded()
-        return controller
-    }
 
     /** 起播第一集并等首帧就绪，作为正常播放状态。 */
     private fun TestScope.playingController(): PlaybackController {

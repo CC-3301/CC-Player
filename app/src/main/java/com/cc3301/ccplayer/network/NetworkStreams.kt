@@ -17,6 +17,9 @@ interface NetworkStreams : Closeable {
 
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
+
+    /** 丢弃已建立的字节源；之后的请求重新建立。退到后台后底层连接可能已失效。 */
+    fun discardByteSources()
 }
 
 /**
@@ -29,6 +32,11 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     }
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
+
+    /** 同一个代理登记在多个方案下时只丢弃一次。 */
+    override fun discardByteSources() {
+        streamsByScheme.values.toSet().forEach { streams -> streams.discardByteSources() }
+    }
 
     /** 同一个代理登记在多个方案下时只关一次。 */
     override fun close() {

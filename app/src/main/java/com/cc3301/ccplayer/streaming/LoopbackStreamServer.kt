@@ -44,6 +44,14 @@ class LoopbackStreamServer(
     /** 实际监听的端口；构造时传 0 则由系统分配。 */
     val port: Int get() = serverSocket.localPort
 
+    /**
+     * 丢弃已建立的字节源：只打陈旧标记，不打断正在进行的响应；
+     * 下一次请求先关闭旧源再重建。地址不变。
+     */
+    fun discardSources() {
+        entries.values.forEach { it.markStale() }
+    }
+
     /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
     fun serve(key: String, open: () -> ByteSource): String {
         val id = idsByKey.computeIfAbsent(key) {
@@ -151,7 +159,7 @@ class LoopbackStreamServer(
             return when {
                 entry == null -> respondStatus(output, request, STATUS_NOT_FOUND)
                 source == null -> respondStatus(output, request, STATUS_UNAVAILABLE)
-                else -> respond(output, request, source)
+                else -> respond(output, request, entry, source)
             }
         } catch (disconnected: IOException) {
             return false
@@ -159,7 +167,7 @@ class LoopbackStreamServer(
     }
 
     /** 写一条带 Range 的响应；返回这条连接能否继续承载下一条请求。 */
-    private fun respond(output: OutputStream, request: Request, source: ByteSource): Boolean {
+    private fun respond(output: OutputStream, request: Request, entry: Entry, source: ByteSource): Boolean {
         val range = byteRangeResponse(request.rangeHeader, source.size)
         val headers = linkedMapOf(
             "Content-Type" to CONTENT_TYPE,
@@ -170,7 +178,7 @@ class LoopbackStreamServer(
         range.contentRange?.let { headers["Content-Range"] = it }
         writeHead(output, range.statusCode, statusText(range.statusCode), headers)
         val written = request.method == METHOD_HEAD || range.contentLength <= 0L ||
-            copyRange(output, source, range.start, range.contentLength)
+            copyRange(output, entry, source, range.start, range.contentLength)
         output.flush()
         // 响应体没写满时这条连接的帧边界已坏，不能再承载下一条请求。
         return written
@@ -191,15 +199,37 @@ class LoopbackStreamServer(
     private fun readBlockBytes(source: ByteSource): Int =
         source.maxReadBytes.takeIf { it in 1 until COPY_BUFFER_BYTES } ?: COPY_BUFFER_BYTES
 
-    /** 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。 */
-    private fun copyRange(output: OutputStream, source: ByteSource, start: Long, length: Long): Boolean {
+    /**
+     * 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。
+     * 读到 0 或抛 [Exception] 视为这条源已不可用：当场废弃，下一次请求重新建立。
+     * [Error] 不当作源失效，直接向上抛，由连接层统一记录。
+     */
+    private fun copyRange(
+        output: OutputStream,
+        entry: Entry,
+        source: ByteSource,
+        start: Long,
+        length: Long,
+    ): Boolean {
         val buffer = ByteArray(readBlockBytes(source))
         var position = start
         var remaining = length
         while (remaining > 0) {
             val wanted = minOf(remaining, buffer.size.toLong()).toInt()
-            val read = source.readAt(position, buffer, 0, wanted)
-            if (read <= 0) return false
+            val read = try {
+                source.readAt(position, buffer, 0, wanted)
+            } catch (failure: Exception) {
+                // 读取失败按原样废弃这条源，异常照旧向上抛。
+                entry.invalidate(source)
+                throw failure
+            } catch (failure: Error) {
+                // Error 不当作源失效：照旧上抛，由连接层统一记录。
+                throw failure
+            }
+            if (read <= 0) {
+                entry.invalidate(source)
+                return false
+            }
             output.write(buffer, 0, read)
             position += read
             remaining -= read
@@ -296,7 +326,10 @@ class LoopbackStreamServer(
         val keepAlive: Boolean,
     )
 
-    /** 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。 */
+    /**
+     * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
+     * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
+     */
     private class Entry(private val open: () -> ByteSource) {
 
         private val lock = Any()
@@ -304,16 +337,64 @@ class LoopbackStreamServer(
         @Volatile
         private var source: ByteSource? = null
 
+        /** 已登记陈旧：不打断正在进行的读取，下一次请求先关闭再重建。 */
+        @Volatile
+        private var stale = false
+
         @Volatile
         private var closed = false
 
         /** 取字节源；建立失败时抛出，下次请求会重试。关闭后不再建立新源。 */
         fun source(): ByteSource {
             if (closed) throw IllegalStateException("流已关闭")
-            source?.let { return it }
+            source?.let { current -> if (!stale) return current }
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
-                return source ?: open().also { source = it }
+                // 还没有源时先消费陈旧标记：空标记不该让第一次建源白建一次。
+                if (source == null) consumeStale()
+                source?.let { current ->
+                    if (!consumeStale()) return current
+                    // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
+                    source = null
+                    runCatching { current.close() }
+                }
+                // 建源可能阻塞较久：建源期间收到的陈旧请求让这一条立即作废并重建一次；
+                // 重建期间再来的标记留给下一次请求从同一处消费。
+                var created = open()
+                if (consumeStale()) {
+                    runCatching { created.close() }
+                    created = open()
+                }
+                source = created
+                return created
+            }
+        }
+
+        /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */
+        private fun consumeStale(): Boolean {
+            if (!stale) return false
+            stale = false
+            return true
+        }
+
+        /**
+         * 打陈旧标记：不关闭、不取锁，正在进行的响应不受影响。
+         * 还没有建立源时也照打：首次建源与退后台并发时，这次请求不能漏。
+         */
+        fun markStale() {
+            stale = true
+        }
+
+        /**
+         * 废弃指定的字节源：缓存里还是这一条时才关闭并清空。
+         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应。
+         */
+        fun invalidate(expired: ByteSource) {
+            synchronized(lock) {
+                if (source !== expired) return
+                source = null
+                stale = false
+                runCatching { expired.close() }
             }
         }
 
@@ -322,6 +403,7 @@ class LoopbackStreamServer(
                 closed = true
                 source?.let { runCatching { it.close() } }
                 source = null
+                stale = false
             }
         }
     }

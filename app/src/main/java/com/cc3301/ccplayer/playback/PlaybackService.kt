@@ -156,6 +156,10 @@ class PlaybackService : Service() {
 
         val controller: PlaybackController get() = this@PlaybackService.controller
 
+        /** 后台播放关闭且已退到后台：此时播放已按策略暂停。 */
+        val blocksBackgroundPlayback: Boolean
+            get() = this@PlaybackService.backgroundPolicy.blocksBackgroundPlayback
+
         /** 界面只上报前后台；暂停与通知动作由服务内的策略统一决定。 */
         fun setAppInForeground(foreground: Boolean) {
             this@PlaybackService.backgroundPolicy.setAppInForeground(foreground)

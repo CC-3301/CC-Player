@@ -119,27 +119,195 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `读取抛运行时异常后监听仍存活且不复用重建`() {
+    fun `读取抛运行时异常后废弃字节源，下一次请求重新建立`() {
         var opens = 0
         val unstable = server.serve("smb://nas/media/超时.mkv") {
             opens++
-            FailingByteSource(IllegalStateException("Timeout expired"))
+            if (opens == 1) {
+                FailingByteSource(IllegalStateException("Timeout expired"))
+            } else {
+                RecordingByteSource(payload)
+            }
         }
 
         val failed = httpRequest(unstable)
         assertEquals(200, failed.statusCode)
         assertEquals(0, failed.body.size)
 
-        // 同一个流保留原字节源，失败就再次快速失败；监听线程仍可服务其它流。
-        assertEquals(200, httpRequest(unstable).statusCode)
-        assertEquals(1, opens)
+        // 这条字节源已不可用：重试建一条新的，不再打在同一条坏源上。
+        val retried = httpRequest(unstable)
+        assertEquals(200, retried.statusCode)
+        assertArrayEquals(payload, retried.body)
+        assertEquals(2, opens)
         assertArrayEquals(payload, httpRequest(url).body)
+    }
+
+    @Test
+    fun `读到 0 后废弃字节源，下一次请求重新建立`() {
+        var opens = 0
+        val short = server.serve("smb://nas/media/半截源.mkv") {
+            opens++
+            if (opens == 1) ShortByteSource(payload) else RecordingByteSource(payload)
+        }
+
+        val half = httpRequest(short)
+        assertEquals(200, half.statusCode)
+        assertEquals(10, half.body.size)
+
+        // 读不动不补零、不重试同一条源：下次请求换新源读全。
+        assertArrayEquals(payload, httpRequest(short).body)
+        assertEquals(2, opens)
+    }
+
+    @Test
+    fun `丢弃已建立的字节源后下一次请求重新建立`() {
+        httpRequest(url)
+        assertEquals(1, opened)
+        assertFalse(source.closed)
+
+        server.discardSources()
+
+        // 只打陈旧标记：正在进行的响应不受影响，下一次请求才关闭旧源并重建。
+        assertFalse(source.closed)
+        assertArrayEquals(payload, httpRequest(url).body)
+        assertTrue(source.closed)
+        assertEquals(2, opened)
+    }
+
+    @Test
+    fun `首次请求前丢弃不额外多建一次`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/首次建源.mkv") {
+            opens++
+            first
+        }
+
+        // 没有源时陈旧标记在建源前先消费：第一次建源就是这次请求的源，不多建一次。
+        server.discardSources()
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(1, opens)
+        assertFalse(first.closed)
+    }
+
+    @Test
+    fun `建源期间收到丢弃标记时建好后立即重建一次`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val second = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/建源并发.mkv") {
+            opens++
+            // 模拟首次建源阻塞期间退到后台。
+            if (opens == 1) server.discardSources()
+            if (opens == 1) first else second
+        }
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+    }
+
+    @Test
+    fun `二次建源期间再收到丢弃标记，下一次请求消费`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val second = RecordingByteSource(payload)
+        val third = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/二次建源.mkv") {
+            opens++
+            when (opens) {
+                // 首次建源期间落一次丢弃：建好后立即重建一次。
+                1 -> {
+                    server.discardSources()
+                    first
+                }
+                // 二次建源期间再落一次：不在这里循环，留给下一次请求消费。
+                2 -> {
+                    server.discardSources()
+                    second
+                }
+                else -> third
+            }
+        }
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+
+        // 下一次请求消费遗留的标记：关闭二次建出来的源，再建一次。
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(3, opens)
+        assertTrue(second.closed)
+        assertFalse(third.closed)
+    }
+
+    @Test
+    fun `读取抛 Error 时连接按失败收尾且源不失效`() {
+        var opens = 0
+        var closed = false
+        val target = server.serve("smb://nas/media/错误不失效.mkv") {
+            opens++
+            object : ByteSource {
+                override val size: Long = payload.size.toLong()
+
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int =
+                    throw FakeError("读取失败")
+
+                override fun close() {
+                    closed = true
+                }
+            }
+        }
+
+        val failed = httpRequest(target)
+        // 连接按失败收尾：响应头已经发出，响应体被截断。
+        assertEquals(200, failed.statusCode)
+        assertEquals("1000", failed.header("Content-Length"))
+        assertEquals(0, failed.body.size)
+
+        // 下一次请求沿用同一条源：Error 不当作源失效，也没有被关闭。
+        assertEquals(200, httpRequest(target).statusCode)
+        assertEquals(1, opens)
+        assertFalse(closed)
+    }
+
+    @Test
+    fun `迟到的失败不关掉并发重建出来的新源`() {
+        var opens = 0
+        lateinit var target: String
+        val fresh = RecordingByteSource(payload)
+        val failing = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                // 这次读取失败之前，另一次请求已经把字节源重建并读出完整响应。
+                server.discardSources()
+                assertArrayEquals(payload, httpRequest(target).body)
+                return 0
+            }
+
+            override fun close() = Unit
+        }
+        target = server.serve("smb://nas/media/迟到失败.mkv") {
+            opens++
+            if (opens == 1) failing else fresh
+        }
+
+        httpRequest(target)
+
+        // 只有被废弃的那一条才关闭：重建出来的新源留着，不被迟到的失败带走。
+        assertEquals(2, opens)
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
     }
 
     @Test
     fun `读取抛 Error 后监听仍存活`() {
         val failing = server.serve("smb://nas/media/读取错误.mkv") {
-            FailingByteSource(AssertionError("读取失败"))
+            FailingByteSource(FakeError("读取失败"))
         }
 
         assertEquals(200, httpRequest(failing).statusCode)
@@ -148,7 +316,7 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `连接边界直接调用时运行时异常不逃逸`() {
-        listOf(IllegalStateException("Timeout expired"), AssertionError("读取失败"))
+        listOf(IllegalStateException("Timeout expired"), FakeError("读取失败"))
             .forEachIndexed { index, failure ->
                 val target = server.serve("smb://nas/media/边界-$index.mkv") {
                     FailingByteSource(failure)
@@ -211,7 +379,7 @@ class LoopbackStreamServerTest {
         val fresh = LoopbackStreamServer(
             acceptSocket = {
                 gate.await()
-                throw AssertionError("accept 失败")
+                throw FakeError("accept 失败")
             },
         )
         val address = fresh.serve("key") { RecordingByteSource(payload) }
@@ -488,6 +656,9 @@ class ShortByteSource(private val bytes: ByteArray, private val readable: Int = 
 
     override fun close() = Unit
 }
+
+/** 测试用 Error 子类：与非异常的断言失败区分开。 */
+class FakeError(message: String) : Error(message)
 
 /** 每次读取都抛出指定异常，模拟网络读超时等失败。 */
 class FailingByteSource(private val failure: Throwable) : ByteSource {

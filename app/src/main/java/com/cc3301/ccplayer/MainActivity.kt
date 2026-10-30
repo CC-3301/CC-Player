@@ -77,6 +77,7 @@ import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
+import com.cc3301.ccplayer.streaming.StaleSourceDiscardPolicy
 import com.cc3301.ccplayer.ui.AppScreen
 import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
@@ -182,6 +183,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var stateCollection: Job? = null
     private var streams: NetworkStreams? = null
 
+    /** 退到后台丢弃字节源的判定：加载期间记待丢弃，加载结束或回前台前补做。 */
+    private val staleSourceDiscardPolicy = StaleSourceDiscardPolicy()
+
     /** 退后台时等待抓帧的分离任务；新的生命周期切换会取消旧任务。 */
     private var backgroundDetachJob: Job? = null
 
@@ -258,7 +262,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
             stateCollection = lifecycleScope.launch {
-                launch { binder.controller.state.collect { playbackState = it } }
+                launch {
+                    binder.controller.state.collect {
+                        playbackState = it
+                        // 退后台时加载中没丢成的字节源，加载一结束就补做。
+                        if (it != PlaybackState.Loading && staleSourceDiscardPolicy.onLoadingFinished()) {
+                            discardByteSources()
+                        }
+                    }
+                }
                 launch { binder.controller.progress.collect { progress = it } }
                 launch { binder.controller.seekPreviewMillis.collect { seekPreviewMillis = it } }
                 launch { binder.controller.seekSettlement.collect { seekSettlement = it } }
@@ -739,6 +751,25 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         binder?.controller?.commitSeekPreview()
         // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
         binder?.controller?.beginBackgroundCapture()
+        // 后台且（后台播放关闭或已暂停）时才丢，地址不变，只打陈旧标记；
+        // 加载中不能丢：当前响应正踩在这些源上，先记待丢弃，加载结束或回前台前补做。
+        if (binder != null) {
+            val state = binder.controller.state.value
+            if (staleSourceDiscardPolicy.onLeftForeground(
+                    backgroundPlaybackOff = binder.blocksBackgroundPlayback,
+                    paused = state == PlaybackState.Paused,
+                    loading = state == PlaybackState.Loading,
+                )
+            ) {
+                discardByteSources()
+            }
+        }
+    }
+
+    /** 丢弃已建立的字节源：只打陈旧标记，放到后台线程避免撞上正在建立源的长阻塞。 */
+    private fun discardByteSources() {
+        val networkStreams = streams ?: return
+        lifecycleScope.launch(Dispatchers.IO) { networkStreams.discardByteSources() }
     }
 
     /**
@@ -765,6 +796,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
+        // 退后台时因加载中没丢成的字节源，回前台发起请求前补做。
+        if (staleSourceDiscardPolicy.onReturnedToForeground()) discardByteSources()
         // Surface 未销毁时画面一直在，缓存帧多余；已经重挂则等播放核心的首个新帧。
         playback?.controller?.onReturnedToForeground()
     }
