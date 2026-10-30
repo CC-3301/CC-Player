@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -173,6 +174,63 @@ class PlaybackControllerBackgroundTest {
         assertEquals(0, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
         assertNull(controller.backgroundRestoreFrame.value)
+    }
+
+    @Test
+    fun `回前台不把已耗尽的等新帧窗口直接判失败`() = runTest {
+        val controller = playingController()
+        controller.next()
+        engine.reportFileLoaded()
+        // 2 秒兜底收尾：切集已就绪，只等新帧上屏，无帧窗口从此前的加载事件起算。
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 1)
+        runCurrent()
+        val startedLoads = engine.startedUrls.size
+
+        // 窗口走到截止时刻时退到后台：挂起时剩余已为 0。
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        controller.setRenderSurfaceAvailable(false)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+
+        // 回前台重新给一个完整窗口：不立刻回退原片，也不压成暂停。
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 新帧上屏后照常收尾，之后不再触发失败。
+        engine.reportPositionChanged(1_000, 600_000)
+        engine.reportFramePresented()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS * 2)
+        runCurrent()
+        assertEquals(startedLoads, engine.startedUrls.size)
+    }
+
+    @Test
+    fun `窗口耗尽后反复回前台不会无限续期`() = runTest {
+        val controller = playingController()
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 1)
+        runCurrent()
+        val startedLoads = engine.startedUrls.size
+
+        // 第一次回前台：窗口已耗尽，续一个完整窗口。
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        controller.setRenderSurfaceAvailable(false)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+        assertEquals(startedLoads, engine.startedUrls.size)
+
+        // 第二个窗口也耗尽：再次回前台不再续期，按切集失败回到原片。
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        controller.setRenderSurfaceAvailable(false)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+
+        assertEquals(startedLoads + 1, engine.startedUrls.size)
     }
 
     @Test

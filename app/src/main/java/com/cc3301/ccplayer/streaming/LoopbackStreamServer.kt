@@ -44,6 +44,14 @@ class LoopbackStreamServer(
     /** 实际监听的端口；构造时传 0 则由系统分配。 */
     val port: Int get() = serverSocket.localPort
 
+    /**
+     * 丢弃已建立的字节源：只打陈旧标记，不打断正在进行的响应；
+     * 下一次请求先关闭旧源再重建。地址不变。
+     */
+    fun discardSources() {
+        entries.values.forEach { it.markStale() }
+    }
+
     /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
     fun serve(key: String, open: () -> ByteSource): String {
         val id = idsByKey.computeIfAbsent(key) {
@@ -151,7 +159,7 @@ class LoopbackStreamServer(
             return when {
                 entry == null -> respondStatus(output, request, STATUS_NOT_FOUND)
                 source == null -> respondStatus(output, request, STATUS_UNAVAILABLE)
-                else -> respond(output, request, source)
+                else -> respond(output, request, entry, source)
             }
         } catch (disconnected: IOException) {
             return false
@@ -159,7 +167,7 @@ class LoopbackStreamServer(
     }
 
     /** 写一条带 Range 的响应；返回这条连接能否继续承载下一条请求。 */
-    private fun respond(output: OutputStream, request: Request, source: ByteSource): Boolean {
+    private fun respond(output: OutputStream, request: Request, entry: Entry, source: ByteSource): Boolean {
         val range = byteRangeResponse(request.rangeHeader, source.size)
         val headers = linkedMapOf(
             "Content-Type" to CONTENT_TYPE,
@@ -170,7 +178,7 @@ class LoopbackStreamServer(
         range.contentRange?.let { headers["Content-Range"] = it }
         writeHead(output, range.statusCode, statusText(range.statusCode), headers)
         val written = request.method == METHOD_HEAD || range.contentLength <= 0L ||
-            copyRange(output, source, range.start, range.contentLength)
+            copyRange(output, entry, source, range.start, range.contentLength)
         output.flush()
         // 响应体没写满时这条连接的帧边界已坏，不能再承载下一条请求。
         return written
@@ -191,15 +199,33 @@ class LoopbackStreamServer(
     private fun readBlockBytes(source: ByteSource): Int =
         source.maxReadBytes.takeIf { it in 1 until COPY_BUFFER_BYTES } ?: COPY_BUFFER_BYTES
 
-    /** 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。 */
-    private fun copyRange(output: OutputStream, source: ByteSource, start: Long, length: Long): Boolean {
+    /**
+     * 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。
+     * 读到 0 或抛异常都说明这条字节源已不可用：当场废弃，下一次请求重新建立，
+     * 重试不再打在同一条坏源上。
+     */
+    private fun copyRange(
+        output: OutputStream,
+        entry: Entry,
+        source: ByteSource,
+        start: Long,
+        length: Long,
+    ): Boolean {
         val buffer = ByteArray(readBlockBytes(source))
         var position = start
         var remaining = length
         while (remaining > 0) {
             val wanted = minOf(remaining, buffer.size.toLong()).toInt()
-            val read = source.readAt(position, buffer, 0, wanted)
-            if (read <= 0) return false
+            val read = try {
+                source.readAt(position, buffer, 0, wanted)
+            } catch (failure: Exception) {
+                entry.invalidate(source)
+                throw failure
+            }
+            if (read <= 0) {
+                entry.invalidate(source)
+                return false
+            }
             output.write(buffer, 0, read)
             position += read
             remaining -= read
@@ -296,7 +322,10 @@ class LoopbackStreamServer(
         val keepAlive: Boolean,
     )
 
-    /** 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。 */
+    /**
+     * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
+     * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
+     */
     private class Entry(private val open: () -> ByteSource) {
 
         private val lock = Any()
@@ -304,16 +333,46 @@ class LoopbackStreamServer(
         @Volatile
         private var source: ByteSource? = null
 
+        /** 已登记陈旧：不打断正在进行的读取，下一次请求先关闭再重建。 */
+        @Volatile
+        private var stale = false
+
         @Volatile
         private var closed = false
 
         /** 取字节源；建立失败时抛出，下次请求会重试。关闭后不再建立新源。 */
         fun source(): ByteSource {
             if (closed) throw IllegalStateException("流已关闭")
-            source?.let { return it }
+            source?.let { current -> if (!stale) return current }
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
-                return source ?: open().also { source = it }
+                source?.let { current ->
+                    if (!stale) return current
+                    // 陈旧：旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
+                    stale = false
+                    source = null
+                    runCatching { current.close() }
+                }
+                stale = false
+                return open().also { source = it }
+            }
+        }
+
+        /** 打陈旧标记：不关闭、不取锁，正在进行的响应不受影响。 */
+        fun markStale() {
+            if (source != null) stale = true
+        }
+
+        /**
+         * 废弃指定的字节源：缓存里还是这一条时才关闭并清空。
+         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应。
+         */
+        fun invalidate(expired: ByteSource) {
+            synchronized(lock) {
+                if (source !== expired) return
+                source = null
+                stale = false
+                runCatching { expired.close() }
             }
         }
 
@@ -322,6 +381,7 @@ class LoopbackStreamServer(
                 closed = true
                 source?.let { runCatching { it.close() } }
                 source = null
+                stale = false
             }
         }
     }

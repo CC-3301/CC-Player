@@ -37,6 +37,8 @@ private class GatedNetworkStreams : NetworkStreams {
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
 
+    override fun discardByteSources() = Unit
+
     override fun close() = Unit
 }
 
