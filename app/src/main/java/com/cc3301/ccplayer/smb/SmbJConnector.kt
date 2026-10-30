@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.smb
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.hierynomus.msdtyp.AccessMask
@@ -21,11 +23,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.EnumSet
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** SMBJ 连接器：只协商 SMB2/3，随机读用按位置读的请求。 */
-class SmbJConnector(private val config: SmbConfig = smb2OnlyConfig()) : SmbConnector {
+class SmbJConnector(
+    private val config: SmbConfig = smb2OnlyConfig(),
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+) : SmbConnector {
 
     private val client = SMBClient(config)
+
+    /** 协商结果只记一次：同一条连接的方言与读上限不随重连变化，重复记只是刷日志。 */
+    private val negotiateLogged = AtomicBoolean(false)
 
     override suspend fun connect(
         host: String,
@@ -36,8 +45,10 @@ class SmbJConnector(private val config: SmbConfig = smb2OnlyConfig()) : SmbConne
     ): SmbConnection = withContext(Dispatchers.IO) {
         var connection: Connection? = null
         try {
-            connection = client.connect(host, port)
-            val session = connection.authenticate(authenticationOf(username, password))
+            val opened = client.connect(host, port)
+            connection = opened
+            logNegotiated(opened)
+            val session = opened.authenticate(authenticationOf(username, password))
             val diskShare = session.connectShare(share)
             if (diskShare !is DiskShare) {
                 throw MediaSourceException(MediaFailure.NotFound, "共享不是目录共享：$share")
@@ -50,6 +61,16 @@ class SmbJConnector(private val config: SmbConfig = smb2OnlyConfig()) : SmbConne
         } catch (failure: Exception) {
             runCatching { connection?.close() }
             throw failure.asSourceFailure("连不上 SMB 共享 $host/$share")
+        }
+    }
+
+    /** 协商事实：方言决定最大读尺寸，SMB2.0.2 只有 64 KiB，块会退化为 64 KiB。 */
+    private fun logNegotiated(connection: Connection) {
+        if (!negotiateLogged.compareAndSet(false, true)) return
+        runCatching { connection.negotiatedProtocol }.onSuccess { negotiated ->
+            diagnostics.log {
+                "SMB 建连: 方言 ${negotiated.dialect} maxReadSize ${negotiated.maxReadSize}"
+            }
         }
     }
 

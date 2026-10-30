@@ -2,8 +2,6 @@ package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.IOException
-import java.util.concurrent.Executor
-import java.util.concurrent.Executors
 
 /** 字节预读窗口上限：每条目常驻内存的字节上限。 */
 internal const val PREVIEW_READ_WINDOW_BYTES = 8L * 1024 * 1024
@@ -17,19 +15,20 @@ internal const val PREVIEW_METADATA_HEAD_BYTES = 64 * 1024
 /** 元数据阶段的尾部定点读：容器索引通常在文件末尾。 */
 internal const val PREVIEW_METADATA_TAIL_BYTES = 1024 * 1024
 
-/** 解码命中一块后向后扩 2 块。 */
-private const val FOLLOW_READ_AHEAD_CHUNKS = 2
+/** 解码命中一块后向后扩 1 块。 */
+private const val FOLLOW_READ_AHEAD_CHUNKS = 1
 
 /**
  * 本地字节窗口：解码只读本地字节，缺失的块由本层向底层补齐。
  *
  * 补齐按块进行：块大小取读取块上限与底层协商上限中较小者，一块正好一次底层读取。
- * 元数据阶段只定点取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗；解码命中一块后向后扩 2 块。
+ * 元数据阶段只定点取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗；解码命中一块后向后扩 1 块。
  * 换锚点不丢弃已读到的块：常驻块按最近使用淘汰，总量不超过窗口上限。
- * 底层读取最多两路：解码线程补齐当前块，预读线程补齐后续块；预读可用独立字节源，
- * 避免与解码在同一条流上交替位置。关闭后不再补齐、不再回写，读取一律失败。
+ * 预读交给进程内两条线程的池，每次提交带本条目的 rank：可见项按列表索引，预取排在可见之后，
+ * 已经在跑的读取不抢占。不同条目的预读可以重叠；同一字节源上的两次读不并发。
+ * 预读可用独立字节源，避免与解码在同一条流上交替位置。关闭后不再补齐、不再回写，读取一律失败。
  *
- * 已知限制：预读只有进程内一条线程，多条目的预读排队串行，不因摘出解码许可而并行；
+ * 已知限制：同一条目的预读仍按块串行，只有跨条目才重叠；
  * 解码缺块仍由解码线程在许可内补齐（预读没覆盖到那段时才走这条路径，补完才继续解码）。
  */
 internal class PreviewByteWindow(
@@ -37,14 +36,15 @@ internal class PreviewByteWindow(
     private val windowBytes: Long = PREVIEW_READ_WINDOW_BYTES,
     chunkBytes: Int = PREVIEW_READ_CHUNK_BYTES,
     readAheadSource: ByteSource? = null,
-    private val readAheadExecutor: Executor = previewReadAheadExecutor,
+    private val readAhead: PreviewReadAhead = previewReadAhead,
+    private val readAheadRank: Long = PREVIEW_PREFETCH_RANK,
 ) : ByteSource {
 
     /** 块粒度：不越过底层协商上限，64 KiB 服务器上一块正好一次读取。 */
     private val chunkBytes: Int = origin.maxReadBytes.takeIf { it in 1 until chunkBytes } ?: chunkBytes
 
-    /** 预读用的字节源；没给独立句柄时与解码共用一条。 */
-    private val readAhead: ByteSource = readAheadSource ?: origin
+    /** 预读用的字节源；没给独立句柄时与解码共用一条。它同时是预读派发的互斥键。 */
+    private val aheadSource: ByteSource = readAheadSource ?: origin
 
     private val lock = Object()
 
@@ -112,7 +112,7 @@ internal class PreviewByteWindow(
             lock.notifyAll()
         }
         runCatching { origin.close() }
-        if (readAhead !== origin) runCatching { readAhead.close() }
+        if (aheadSource !== origin) runCatching { aheadSource.close() }
     }
 
     /**
@@ -191,7 +191,7 @@ internal class PreviewByteWindow(
         }
         tasks.forEach { chunk ->
             val to = minOf(size, chunk + chunkBytes)
-            readAheadExecutor.execute { readAheadChunk(chunk, to) }
+            readAhead.submit(readAheadRank, aheadSource) { readAheadChunk(chunk, to) }
         }
     }
 
@@ -211,7 +211,9 @@ internal class PreviewByteWindow(
                 start += chunkBytes
             }
         }
-        tasks.forEach { (chunk, end) -> readAheadExecutor.execute { readAheadChunk(chunk, end) } }
+        tasks.forEach { (chunk, end) ->
+            readAhead.submit(readAheadRank, aheadSource) { readAheadChunk(chunk, end) }
+        }
     }
 
     /** 后台读一块；已排队取消、已关闭、块已就绪或正在读取时直接退出。 */
@@ -228,7 +230,7 @@ internal class PreviewByteWindow(
             val bytes = ByteArray((to - chunk).toInt())
             var read = 0
             while (read < bytes.size) {
-                val count = readAhead.readAt(chunk + read, bytes, read, bytes.size - read)
+                val count = aheadSource.readAt(chunk + read, bytes, read, bytes.size - read)
                 if (count <= 0) break
                 read += count
             }
@@ -262,11 +264,4 @@ internal class PreviewByteWindow(
 
     private fun Throwable.asPreviewReadFailure(): IOException =
         this as? IOException ?: IOException("预览字节读取失败", this)
-
-    companion object {
-        /** 进程内唯一的预读线程：与解码线程合起来正好两路底层读取。 */
-        internal val previewReadAheadExecutor: Executor = Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "preview-byte-read-ahead").apply { isDaemon = true }
-        }
-    }
 }

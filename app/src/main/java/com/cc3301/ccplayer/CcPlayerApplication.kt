@@ -61,7 +61,11 @@ class CcPlayerApplication : Application() {
         val webDavReads = WebDavMediaReads(OkHttpWebDavTransport(), WebDavLocator(sources))
         return RoutingMediaReads(
             mapOf(
-                SmbLocation.SCHEME to SmbMediaReads(SmbJConnector(), SmbLocator(sources)),
+                SmbLocation.SCHEME to SmbMediaReads(
+                    // 预览读的协商结果记一次日志：方言决定块大小（SMB2.0.2 只有 64 KiB）。
+                    SmbJConnector(diagnostics = diagnostics),
+                    SmbLocator(sources),
+                ),
                 WebDavAddress.SCHEME_HTTP to webDavReads,
                 WebDavAddress.SCHEME_HTTPS to webDavReads,
             ),
