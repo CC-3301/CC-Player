@@ -849,8 +849,8 @@ class PlaybackController(
         } else {
             engine.resume()
         }
-        // 继续播放按用户意图立刻生效，不等引擎回声。
-        updateState(PlaybackState.Playing)
+        // 继续播放按用户意图立刻生效，不等引擎回声；加载阶段由就绪流程按意图定。
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Playing)
     }
 
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
@@ -1029,15 +1029,22 @@ class PlaybackController(
             releasePreviewMute()
             return
         }
-        // 会话已结束：没有落定可等，静音在这里收掉。
+        // 会话已结束：没有落定可等，静音与吞掉的暂停回声都在这里收场。
         if (!active) {
+            settleIgnoredPauseEcho()
             releasePreviewMute()
             return
         }
-        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复。
-        if (target == null) return
-        // 加载期不再下发 seek：会推走本代的续播序号，落定等不到回执。
+        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复；
+        // 吞掉的暂停回声在这里收场，恢复仍按播放意图决定。
+        if (target == null) {
+            settleIgnoredPauseEcho()
+            return
+        }
+        // 加载期不再下发 seek：会推走本代的续播序号，落定等不到回执；
+        // 吞掉的暂停回声在这里清掉，新加载由自己接管引擎。
         if (loadPhase != LoadPhase.None) {
+            settleIgnoredPauseEcho()
             releasePreviewMute()
             return
         }
@@ -1061,8 +1068,6 @@ class PlaybackController(
      * 复用的那一跳此前已经回报过执行时，落定当场结算。
      */
     private fun landSeek(targetMillis: Long, seekId: Long, fromPreview: Boolean) {
-        // 普通 seek 接管落定时，预览落下的暂停回声随之作废：不替用户恢复播放。
-        if (!fromPreview) ignoredPauseEcho = false
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
         pendingLanding = LandingSeek(seekId, targetMillis, fromPreview)
@@ -1781,10 +1786,12 @@ class PlaybackController(
                 if (switchFailureReported) return
                 logLoadFailure("播放失败", source, errorText)
                 clearPendingSwitchFrame()
-                // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音。
+                // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音；
+                // 吞掉的暂停回声也在结束时清掉，active 已为假，不再恢复播放。
                 releasePreviewMute()
                 active = false
                 paused = true
+                settleIgnoredPauseEcho()
                 updateState(PlaybackState.Ended)
                 _playbackFailures.tryEmit(Unit)
             }

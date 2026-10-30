@@ -788,7 +788,7 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `放弃落定后普通 seek 落定不额外恢复播放`() = runTest {
+    fun `放弃落定后普通 seek 落定按播放意图恢复一次`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
@@ -798,18 +798,20 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPauseChanged(true)
         assertEquals(PlaybackState.Playing, controller.state.value)
 
-        // 新拖动丢弃这次落定；随后的普通 seek 接管落定时作废吞掉的回声。
+        // 新拖动丢弃这次落定；吞掉的回声留到普通落定结算时按播放意图收场。
         controller.updateSeekPreview(requestSeek = false, positionMillis = 200_000)
         controller.seekTo(300_000)
         engine.reportSeekExecuted()
         engine.reportSeekExecuted()
 
-        // 普通 seek 的落定不替用户恢复播放。
-        assertEquals(0, engine.resumeCalls)
+        // 播放意图仍是播放：结算恢复一次，迟到回执不重复恢复。
+        assertEquals(1, engine.resumeCalls)
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
     }
 
     @Test
-    fun `预览落定吞过回声后普通 seek 落定不恢复播放`() = runTest {
+    fun `预览落定吞过回声后普通 seek 落定恢复播放一次`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
@@ -819,12 +821,16 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPauseChanged(true)
         assertEquals(PlaybackState.Playing, controller.state.value)
 
-        // 用户直接发普通 seek：它接管落定，预览落下的回声随之作废。
+        // 用户直接发普通 seek：它接管落定，吞掉的回声交给结算按播放意图处理。
         controller.seekTo(300_000)
         engine.reportSeekExecuted()
         engine.reportSeekExecuted()
 
-        assertEquals(0, engine.resumeCalls)
+        assertEquals(1, engine.resumeCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        // 迟到的回执不会重复恢复。
+        engine.reportSeekExecuted()
+        assertEquals(1, engine.resumeCalls)
     }
 
     @Test
