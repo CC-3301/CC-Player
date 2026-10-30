@@ -304,6 +304,9 @@ class PlaybackController(
     /** 切集无帧失败计时；暂停或 Surface 分离时取消，按当前时间结算剩余。 */
     private var switchFrameWatchdogJob: Job? = null
 
+    /** 本次切集是否已因回前台续过一次无帧窗口；每次重新给窗口时清零，避免反复续期。 */
+    private var switchFrameWindowRenewed = false
+
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
     private val resumeActivityGate = ResumeActivityGate()
 
@@ -436,9 +439,10 @@ class PlaybackController(
                 if (!beginSurfaceRestore()) replaceBackgroundRestoreFrame(null)
                 // 后台期间无帧窗口可能已经走到截止：回前台重新给一个完整窗口，
                 // 不把耗尽的窗口直接判成切集失败。
-                if (switchFramePending && switchFrameRemainingMillis <= 0L) {
+                if (switchFramePending && switchFrameRemainingMillis <= 0L && !switchFrameWindowRenewed) {
                     switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
                     switchFrameDeadlineMillis = null
+                    switchFrameWindowRenewed = true
                 }
                 // 只在真正回到前台时恢复计时；已可用时重复上报不能重置剩余窗口。
                 armSwitchFrameWatchdog()
@@ -1385,9 +1389,10 @@ class PlaybackController(
         if (loadToken != expectedLoadToken || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
         if (_holdBlack.value) return
-        // 预览 seek 期间不算播完：此时切集会打断拖动，落定的 seek 会把播放带离片尾。
-        if (_seekPreviewMillis.value != null) {
-            diagnostics.log { "播放结束: 预览中，不触发连播" }
+        // 预览 seek 或落定这一跳还没执行完都不算播完：切集会打断拖动，
+        // 落定的 seek 会把播放带离片尾。
+        if (_seekPreviewMillis.value != null || pendingLanding != null) {
+            diagnostics.log { "播放结束: 预览或落定中，不触发连播" }
             return
         }
         diagnostics.log { "播放结束: ${currentMedia()?.name ?: ""}" }
@@ -1535,6 +1540,7 @@ class PlaybackController(
     private fun restartSwitchFrameDeadline() {
         switchFrameRemainingMillis = NO_FRAME_WINDOW_MILLIS
         switchFrameDeadlineMillis = null
+        switchFrameWindowRenewed = false
         switchFrameWatchdogJob?.cancel()
         switchFrameWatchdogJob = null
         armSwitchFrameWatchdog()
@@ -1595,6 +1601,7 @@ class PlaybackController(
     private fun clearSwitchFrameDeadline() {
         switchFrameRemainingMillis = 0
         switchFrameDeadlineMillis = null
+        switchFrameWindowRenewed = false
         resumeActivityGate.reset()
     }
 

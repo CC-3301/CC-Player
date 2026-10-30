@@ -207,6 +207,33 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `窗口耗尽后反复回前台不会无限续期`() = runTest {
+        val controller = playingController()
+        controller.next()
+        engine.reportFileLoaded()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + 1)
+        runCurrent()
+        val startedLoads = engine.startedUrls.size
+
+        // 第一次回前台：窗口已耗尽，续一个完整窗口。
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1)
+        controller.setRenderSurfaceAvailable(false)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+        assertEquals(startedLoads, engine.startedUrls.size)
+
+        // 第二个窗口也耗尽：再次回前台不再续期，按切集失败回到原片。
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        controller.setRenderSurfaceAvailable(false)
+        runCurrent()
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+
+        assertEquals(startedLoads + 1, engine.startedUrls.size)
+    }
+
+    @Test
     fun `Surface 分离时取消恢复等待`() = runTest {
         val controller = capturedController()
 

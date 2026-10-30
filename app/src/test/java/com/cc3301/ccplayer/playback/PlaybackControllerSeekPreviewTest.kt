@@ -729,6 +729,27 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `落定在途收到播完不切集`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        val startedLoads = engine.startedUrls.size
+
+        // 收尾已下发、回报还没到：此时播完不能当连播信号。
+        assertNull(controller.seekPreviewMillis.value)
+        engine.reportPlaybackEnded()
+
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(startedLoads, engine.startedUrls.size)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 落定执行后照常结算，播放停在落定目标上。
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
     fun `预览目标落在末尾时收进安全余量`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
