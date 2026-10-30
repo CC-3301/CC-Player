@@ -31,6 +31,9 @@ class LoopbackStreamServer(
 
     private val entries = ConcurrentHashMap<String, Entry>()
     private val idsByKey = ConcurrentHashMap<String, String>()
+
+    /** 已 accept 的连接；[close] 逐个断开，阻塞在读上的处理线程随之退出。 */
+    private val connections = ConcurrentHashMap.newKeySet<Socket>()
     private val nextId = AtomicLong(1)
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
@@ -53,6 +56,9 @@ class LoopbackStreamServer(
 
     override fun close() {
         runCatching { serverSocket.close() }
+        // 监听关掉不影响已建立的连接：逐个断开，处理线程不会残留在读上。
+        connections.forEach { runCatching { it.close() } }
+        connections.clear()
         entries.values.forEach { it.close() }
         entries.clear()
         idsByKey.clear()
@@ -85,9 +91,11 @@ class LoopbackStreamServer(
                 return
             }
             consecutiveFailures = 0
+            connections.add(connection)
             try {
                 Thread({ handle(connection) }, "loopback-stream-connection").apply { isDaemon = true }.start()
             } catch (failure: Throwable) {
+                connections.remove(connection)
                 runCatching { connection.close() }
             }
         }
@@ -123,8 +131,12 @@ class LoopbackStreamServer(
                 }
             }
         } catch (failure: Throwable) {
-            // 读超时等异常只结束本次连接，连接线程正常退出。
+            // 连接异常只结束本次连接，连接线程正常退出；空闲连接不按时间主动断开，
+            // 只由客户端断开、要求 close、响应没写满或异常结束。
             runCatching { System.err.println("回环流连接结束: $failure") }
+        } finally {
+            // 线程退出时摘掉登记，[close] 之后不再重复处理这条连接。
+            connections.remove(connection)
         }
     }
 
@@ -206,6 +218,7 @@ class LoopbackStreamServer(
     /**
      * 读一条请求；返回 null 表示连接已结束或请求不合规。
      * 逐字节读到空行为止，不做预读：同一连接上的下一条请求不能被这条请求的缓冲吃掉。
+     * 空行判定见 [readRequestHead]：多余的 CR 让空行重新起算，不是按行解析的容错。
      */
     private fun readRequest(input: InputStream): Request? {
         val head = readRequestHead(input) ?: return null
@@ -234,7 +247,11 @@ class LoopbackStreamServer(
         )
     }
 
-    /** 读到请求头的空行为止；请求头过大或连接已结束返回 null。 */
+    /**
+     * 读到请求头的空行为止；请求头过大或连接已结束返回 null。
+     * 空行判定是逐字节状态机：遇到多余的 CR（如 `\r\r\n`）会重新起算，
+     * 这一条最终按请求头过大或连接结束收尾，属可接受的边界。
+     */
     private fun readRequestHead(input: InputStream): String? {
         val head = ByteArrayOutputStream()
         var matched = 0

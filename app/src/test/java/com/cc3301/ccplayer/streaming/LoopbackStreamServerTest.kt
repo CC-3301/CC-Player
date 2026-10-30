@@ -315,6 +315,22 @@ class LoopbackStreamServerTest {
         }
     }
 
+    @Test
+    fun `关闭时断开已建立的连接并结束处理线程`() {
+        val before = connectionThreads()
+        KeepAliveConnection(url).use { client ->
+            assertEquals(200, client.request().statusCode)
+            val worker = (connectionThreads() - before).single()
+
+            server.close()
+
+            // 阻塞在请求头上的处理线程随连接断开退出，不留下残留线程。
+            assertEquals(-1, client.readAfterEnd())
+            worker.join(2_000)
+            assertFalse(worker.isAlive)
+        }
+    }
+
     private fun requestThroughBoundary(url: String): HttpResponse {
         val path = URI(url).path
         ServerSocket(0).use { listener ->
@@ -330,6 +346,11 @@ class LoopbackStreamServerTest {
             }
         }
     }
+
+    private fun connectionThreads(): Set<Thread> =
+        Thread.getAllStackTraces().keys
+            .filter { it.name == "loopback-stream-connection" && it.isAlive }
+            .toSet()
 
     private fun acceptThreads(): Set<Thread> =
         Thread.getAllStackTraces().keys
