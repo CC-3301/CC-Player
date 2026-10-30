@@ -105,6 +105,42 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `旧到达窗口两侧的位置样本都不结算落定`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+
+        // 旧判据的窗口下沿（目标 −50ms）与上沿（目标 +1500ms）：位置样本本身不撤掉落定。
+        engine.reportPositionChanged(119_950, 600_000)
+        engine.reportPositionChanged(121_500, 600_000)
+        assertNull(controller.seekSettlement.value)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        engine.reportSeekExecuted()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `反向跳转落到目标 −278ms 仍按回执结算`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(90_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 45_000)
+        controller.commitSeekPreview()
+
+        // 解码器从目标前的关键帧起解：位置先落到目标 −278ms，这是固有位移，不是「未到达」。
+        engine.reportPositionChanged(44_722, 600_000)
+        assertNull(controller.seekSettlement.value)
+        assertEquals(45_000L, controller.progress.value.positionMillis)
+
+        engine.reportSeekExecuted()
+        assertEquals(45_000L, controller.seekSettlement.value?.targetMillis)
+        // 结算后跟随引擎值，固有位移不被改写。
+        engine.reportPositionChanged(45_010, 600_000)
+        assertEquals(45_010L, controller.progress.value.positionMillis)
+    }
+
+    @Test
     fun `preview seeks mute once and the release lands before restoring the audio`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
