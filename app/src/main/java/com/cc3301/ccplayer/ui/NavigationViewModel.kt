@@ -275,7 +275,7 @@ class NavigationViewModel(
             if (!diagnostics.enabled) return
             pendingDiagnostics.toList().also { pendingDiagnostics.clear() }
         }
-        pending.forEach { message -> diagnostics.log(message) }
+        pending.forEach { message -> diagnostics.logAccepted(message) }
     }
 
     private fun cancelColdStartRestore() {
@@ -301,7 +301,7 @@ class NavigationViewModel(
             pendingDiagnostics.remove(message)
             message
         }
-        diagnostics.log(immediate)
+        diagnostics.logAccepted(immediate)
     }
 
     private suspend fun saveSnapshot(state: NavigationState) {

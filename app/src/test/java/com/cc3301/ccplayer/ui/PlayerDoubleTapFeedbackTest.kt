@@ -91,6 +91,19 @@ class PlayerDoubleTapFeedbackTest {
     }
 
     @Test
+    fun `控制层隐藏时清空未播完的涟漪且保留累计`() {
+        feedback.onDoubleTap(DoubleTapSide.Left, -10_000L)
+        now = 1_000L
+        feedback.onDoubleTap(DoubleTapSide.Right, 10_000L)
+
+        feedback.clearRipples()
+
+        assertEquals(emptyList<DoubleTapRipple>(), feedback.ripples)
+        assertEquals(10_000L, feedback.left?.accumulatedMillis)
+        assertEquals(10_000L, feedback.right?.accumulatedMillis)
+    }
+
+    @Test
     fun `不产生涟漪时只累计秒数`() {
         feedback.onDoubleTap(DoubleTapSide.Right, 10_000L, ripple = false)
 
