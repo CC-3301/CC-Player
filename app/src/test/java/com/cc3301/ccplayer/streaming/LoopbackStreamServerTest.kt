@@ -163,14 +163,45 @@ class LoopbackStreamServerTest {
     fun `丢弃已建立的字节源后下一次请求重新建立`() {
         httpRequest(url)
         assertEquals(1, opened)
-        assertTrue(!source.closed)
+        assertFalse(source.closed)
 
         server.discardSources()
 
-        // 旧源关掉，地址不变，下一次请求重新建立。
-        assertTrue(source.closed)
+        // 只打陈旧标记：正在进行的响应不受影响，下一次请求才关闭旧源并重建。
+        assertFalse(source.closed)
         assertArrayEquals(payload, httpRequest(url).body)
+        assertTrue(source.closed)
         assertEquals(2, opened)
+    }
+
+    @Test
+    fun `迟到的失败不关掉并发重建出来的新源`() {
+        var opens = 0
+        lateinit var target: String
+        val fresh = RecordingByteSource(payload)
+        val failing = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                // 这次读取失败之前，另一次请求已经把字节源重建并读出完整响应。
+                server.discardSources()
+                assertArrayEquals(payload, httpRequest(target).body)
+                return 0
+            }
+
+            override fun close() = Unit
+        }
+        target = server.serve("smb://nas/media/迟到失败.mkv") {
+            opens++
+            if (opens == 1) failing else fresh
+        }
+
+        httpRequest(target)
+
+        // 只有被废弃的那一条才关闭：重建出来的新源留着，不被迟到的失败带走。
+        assertEquals(2, opens)
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
     }
 
     @Test

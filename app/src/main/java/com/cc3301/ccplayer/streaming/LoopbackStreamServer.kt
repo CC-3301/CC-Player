@@ -45,11 +45,11 @@ class LoopbackStreamServer(
     val port: Int get() = serverSocket.localPort
 
     /**
-     * 丢弃全部已建立的字节源：关闭后清空缓存，之后的请求重新建立。
-     * 地址不变；退到后台后底层连接可能已失效，恢复时不能沿用旧源。
+     * 丢弃已建立的字节源：只打陈旧标记，不打断正在进行的响应；
+     * 下一次请求先关闭旧源再重建。地址不变。
      */
     fun discardSources() {
-        entries.values.forEach { it.invalidate() }
+        entries.values.forEach { it.markStale() }
     }
 
     /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
@@ -218,12 +218,12 @@ class LoopbackStreamServer(
             val wanted = minOf(remaining, buffer.size.toLong()).toInt()
             val read = try {
                 source.readAt(position, buffer, 0, wanted)
-            } catch (failure: Throwable) {
-                entry.invalidate()
+            } catch (failure: Exception) {
+                entry.invalidate(source)
                 throw failure
             }
             if (read <= 0) {
-                entry.invalidate()
+                entry.invalidate(source)
                 return false
             }
             output.write(buffer, 0, read)
@@ -322,7 +322,10 @@ class LoopbackStreamServer(
         val keepAlive: Boolean,
     )
 
-    /** 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。 */
+    /**
+     * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
+     * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
+     */
     private class Entry(private val open: () -> ByteSource) {
 
         private val lock = Any()
@@ -330,24 +333,46 @@ class LoopbackStreamServer(
         @Volatile
         private var source: ByteSource? = null
 
+        /** 已登记陈旧：不打断正在进行的读取，下一次请求先关闭再重建。 */
+        @Volatile
+        private var stale = false
+
         @Volatile
         private var closed = false
 
         /** 取字节源；建立失败时抛出，下次请求会重试。关闭后不再建立新源。 */
         fun source(): ByteSource {
             if (closed) throw IllegalStateException("流已关闭")
-            source?.let { return it }
+            source?.let { current -> if (!stale) return current }
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
-                return source ?: open().also { source = it }
+                source?.let { current ->
+                    if (!stale) return current
+                    // 陈旧：旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
+                    stale = false
+                    source = null
+                    runCatching { current.close() }
+                }
+                stale = false
+                return open().also { source = it }
             }
         }
 
-        /** 废弃当前字节源：关闭并清空，之后的请求重新建立；流本身仍可继续登记。 */
-        fun invalidate() {
+        /** 打陈旧标记：不关闭、不取锁，正在进行的响应不受影响。 */
+        fun markStale() {
+            if (source != null) stale = true
+        }
+
+        /**
+         * 废弃指定的字节源：缓存里还是这一条时才关闭并清空。
+         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应。
+         */
+        fun invalidate(expired: ByteSource) {
             synchronized(lock) {
-                source?.let { runCatching { it.close() } }
+                if (source !== expired) return
                 source = null
+                stale = false
+                runCatching { expired.close() }
             }
         }
 
@@ -356,6 +381,7 @@ class LoopbackStreamServer(
                 closed = true
                 source?.let { runCatching { it.close() } }
                 source = null
+                stale = false
             }
         }
     }

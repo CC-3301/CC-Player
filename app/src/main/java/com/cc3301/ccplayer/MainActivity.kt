@@ -740,11 +740,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
         binder?.controller?.beginBackgroundCapture()
         // 后台播放关闭时播放已暂停：底层连接可能失效，丢弃已建立的字节源，之后的请求重新建立。
-        // 加载中不能丢：当前响应正踩在这些源上。
+        // 加载中不能丢：当前响应正踩在这些源上。丢弃放到后台线程，
+        // 避免撞上另一条请求正在建立字节源的长阻塞。
         if (binder?.blocksBackgroundPlayback == true &&
             binder.controller.state.value != PlaybackState.Loading
         ) {
-            streams?.discardByteSources()
+            val networkStreams = streams
+            if (networkStreams != null) {
+                lifecycleScope.launch(Dispatchers.IO) { networkStreams.discardByteSources() }
+            }
         }
     }
 
