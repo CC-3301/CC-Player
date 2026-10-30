@@ -971,10 +971,15 @@ class PlaybackController(
 
     /**
      * 预览下发与落定的目标都离片尾留出安全余量：落进这条带里的 seek 会把文件推到片尾，
-     * 触发 eof-reached 的播完判定。余量取「播完」判据的同一容差。
+     * 触发 eof-reached 的播完判定。余量严格大于「播完」容差，夹取结果才在播完带外。
+     * 时长本身不超过余量时，余量按半程缩，保证预览仍有可拖动的区间；
+     * 这种短片里任何位置都可能落在播完带内，由预览守卫兜底。
      */
     private fun previewSeekTarget(positionMillis: Long): Long {
-        val limit = (playedDurationMillis - PREVIEW_END_MARGIN_MILLIS).coerceAtLeast(0L)
+        val durationMillis = playedDurationMillis
+        if (durationMillis <= 0L) return positionMillis
+        val margin = minOf(PREVIEW_END_MARGIN_MILLIS, durationMillis / 2)
+        val limit = (durationMillis - margin).coerceAtLeast(0L)
         return positionMillis.coerceIn(0L, limit)
     }
 
@@ -2075,8 +2080,11 @@ class PlaybackController(
         /** 收尾目标与最后一次下发的预览 seek 相差不足这段时长就视为同一目标，不再重复下发。 */
         const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
 
-        /** 预览与落定目标离片尾留出的安全余量；取「播完」判据的同一容差。 */
-        const val PREVIEW_END_MARGIN_MILLIS = 1_000L
+        /**
+         * 预览与落定目标离片尾留出的安全余量。必须严格大于「播完」容差：
+         * 播完判据是「位置 ≥ 时长 − 容差」，余量取同比只会把目标夹在播完带内。
+         */
+        const val PREVIEW_END_MARGIN_MILLIS = 2_000L
 
         /** 落定通知的进程级序号：跨控制器实例也单调，界面据此只撤掉比它旧的保持值。 */
         internal val settlementIds = AtomicLong(0L)

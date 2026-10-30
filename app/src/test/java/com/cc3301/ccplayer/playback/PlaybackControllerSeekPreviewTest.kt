@@ -745,6 +745,27 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(lastSafePosition, controller.progress.value.positionMillis)
         assertFalse(controller.switching.value)
         assertEquals(0, controller.currentIndex.value)
+
+        // 夹取后的位置不在「播完」带内：退出预览后按正常位置落库，不按看过一遍清掉。
+        engine.reportFirstFrameReady()
+        runCurrent()
+        engine.reportPositionChanged(lastSafePosition, 600_000)
+        runCurrent()
+        assertEquals(lastSafePosition, progress.records["root/ep1.mkv"]?.positionMillis)
+    }
+
+    @Test
+    fun `时长不超过余量时预览仍有可拖动区间`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(0, 1_500)
+        val limit = 1_500L / 2
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 1_500)
+
+        // 短片余量按半程缩：拖动不会被压成 0，仍有一段可预览区间。
+        assertEquals(1_500L, controller.seekPreviewMillis.value)
+        assertEquals(listOf(limit), engine.seekPositions)
+        assertTrue(limit > 0L)
     }
 
     @Test
