@@ -187,9 +187,13 @@ class LoopbackStreamServer(
         return true
     }
 
+    /** 单次读取的块大小：不超过拷贝块，也不越过字节源声明的单次读上限。 */
+    private fun readBlockBytes(source: ByteSource): Int =
+        source.maxReadBytes.takeIf { it in 1 until COPY_BUFFER_BYTES } ?: COPY_BUFFER_BYTES
+
     /** 把 [length] 字节拷进响应体；返回是否读满。读不动时按失败收尾，不补零。 */
     private fun copyRange(output: OutputStream, source: ByteSource, start: Long, length: Long): Boolean {
-        val buffer = ByteArray(COPY_BUFFER_BYTES)
+        val buffer = ByteArray(readBlockBytes(source))
         var position = start
         var remaining = length
         while (remaining > 0) {

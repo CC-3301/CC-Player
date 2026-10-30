@@ -331,6 +331,18 @@ class LoopbackStreamServerTest {
         }
     }
 
+    @Test
+    fun `单次读取不越过字节源声明的上限`() {
+        val limited = LimitRecordingByteSource(ByteArray(8 * 1024) { (it % 251).toByte() }, maxReadBytes = 1024)
+        val target = server.serve("smb://nas/media/限读.mkv") { limited }
+
+        val response = httpRequest(target)
+
+        assertArrayEquals(limited.bytes, response.body)
+        assertTrue(limited.reads.isNotEmpty())
+        assertTrue("单次读取越过上限：${limited.reads}", limited.reads.all { it <= 1024 })
+    }
+
     private fun requestThroughBoundary(url: String): HttpResponse {
         val path = URI(url).path
         ServerSocket(0).use { listener ->
@@ -441,6 +453,25 @@ class RecordingByteSource(private val bytes: ByteArray) : ByteSource, Closeable 
     override fun close() {
         closed = true
     }
+}
+
+/** 记录每次请求长度的字节源，并声明单次读上限，用于验证按上限分块。 */
+class LimitRecordingByteSource(val bytes: ByteArray, override val maxReadBytes: Int) : ByteSource {
+
+    /** 每次读取请求的长度，按发生顺序。 */
+    val reads = mutableListOf<Int>()
+
+    override val size: Long get() = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        reads += length
+        if (position >= bytes.size) return 0
+        val count = minOf(length.toLong(), bytes.size - position).toInt()
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    override fun close() = Unit
 }
 
 /** 只读出前 [readable] 字节的字节源，之后读取返回 0，模拟读到一半读不动。 */
