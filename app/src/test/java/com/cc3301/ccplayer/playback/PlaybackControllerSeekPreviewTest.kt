@@ -16,7 +16,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 拖动与滚轮的实时画面预览：节流下发真实 seek、预览期间静音、收尾精确落定，
+ * 拖动与滚轮的实时画面预览：节流下发真实 seek、预览期间静音、收尾按引擎执行回报落定，
  * 且不参与加载与切集的状态判定。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -76,7 +76,7 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPositionChanged(120_000, 600_000)
         engine.reportPositionChanged(80_000, 600_000)
 
-        // 回执到达前进度停在目标上，圆球不回跳。
+        // 回报到达前进度停在目标上，圆球不回跳。
         assertEquals(120_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
@@ -88,17 +88,18 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `回执不到时连续两个越过目标的样本才算落定`() = runTest {
+    fun `落定只认引擎回报的执行目标，位置样本不参与`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
         controller.commitSeekPreview()
 
-        // 单个样本可能是引擎下发 seek 时的乐观写回，不算到达。
+        // 位置样本恰好等于目标也不算落定：到达由播放核心回报执行，不由位置推断。
         engine.reportPositionChanged(120_000, 600_000)
-        assertNull(controller.seekSettlement.value?.targetMillis)
-
         engine.reportPositionChanged(120_010, 600_000)
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportFirstFrameReady()
         assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
     }
 
@@ -117,12 +118,15 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.commitSeekPreview()
 
-        // 上一发仍在途：收尾挂起，声音与淡入一起等回执，旧位置不会以满音量播出。
+        // 收尾目标与最后一次下发相同：复用那一跳，声音等它执行完再恢复。
         assertEquals(listOf(70_000L), engine.seekPositions)
         assertEquals(listOf(true), engine.muteCalls)
 
         engine.reportFirstFrameReady()
+        assertEquals(listOf(70_000L, 80_000L), engine.seekPositions)
+        assertEquals(listOf(true), engine.muteCalls)
 
+        engine.reportFirstFrameReady()
         assertEquals(
             listOf("seek(80000)", "muted(false)", "fade(500)"),
             engine.seekAudioCalls.takeLast(3),
@@ -141,14 +145,18 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(requestSeek = true, positionMillis = 130_000)
         assertEquals(listOf(70_000L), engine.seekPositions)
 
-        // 被覆盖掉的中间位置由收尾 seek 精确补上：上一发在途时先挂起。
+        // 被覆盖掉的中间位置由收尾目标补齐：它已在引擎的待执行槽里，不重复下发。
         controller.commitSeekPreview()
         assertEquals(listOf(70_000L), engine.seekPositions)
         assertNull(controller.seekPreviewMillis.value)
+        assertEquals(130_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
         assertEquals(130_000L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(130_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
@@ -162,6 +170,9 @@ class PlaybackControllerSeekPreviewTest {
 
         // 同一目标再下发一次会把画面清空重解码，落定前先闪一下。
         assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        engine.reportFirstFrameReady()
         assertEquals(listOf("muted(false)", "fade(500)"), engine.seekAudioCalls.takeLast(2))
         assertEquals(listOf(true, false), engine.muteCalls)
         assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
@@ -181,7 +192,7 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportPositionChanged(120_000, 600_000)
 
         assertEquals(listOf(true, false), engine.muteCalls)
-        // 落定回执之后进度恢复更新，不再被预览吞掉。
+        // 落定之后进度恢复更新，不再被预览吞掉。
         assertEquals(120_000L, controller.progress.value.positionMillis)
     }
 
@@ -216,6 +227,7 @@ class PlaybackControllerSeekPreviewTest {
         assertNull(controller.seekPreviewMillis.value)
         assertEquals(listOf(70_000L), engine.seekPositions)
         assertEquals(fadesBeforePreview, engine.fadeInDurations.size)
+        assertNull(controller.seekSettlement.value)
 
         engine.reportPositionChanged(120_000, 600_000)
         assertEquals(120_000L, controller.progress.value.positionMillis)
@@ -229,20 +241,20 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.seekTo(200_000)
 
-        // 上一发在途：跳转挂起，回执后按先 seek、再恢复声音与淡入的顺序收尾。
+        // 上一跳在途：跳转进待执行槽，回执后按顺序补发。
         assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(200_000L, engine.pendingSeekMillis)
         assertNull(controller.seekPreviewMillis.value)
+
+        engine.reportFirstFrameReady()
+        assertEquals(listOf(70_000L, 200_000L), engine.seekPositions)
 
         engine.reportFirstFrameReady()
         assertEquals(
             listOf("seek(200000)", "muted(false)", "fade(500)"),
             engine.seekAudioCalls.takeLast(3),
         )
-        assertEquals(listOf(70_000L, 200_000L), engine.seekPositions)
-
-        engine.reportPositionChanged(200_000, 600_000)
-        engine.reportPositionChanged(200_010, 600_000)
-        assertEquals(200_000L, controller.progress.value.positionMillis)
+        assertEquals(200_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
@@ -399,6 +411,8 @@ class PlaybackControllerSeekPreviewTest {
         engine.reportFirstFrameReady()
         advanceTimeBy(200)
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
+        // 最后一跳的回报先到：收尾时才能当场结算。
+        engine.reportFirstFrameReady()
         advanceTimeBy(200)
 
         // 窗口从最后一档起算：没有先落定再重新静音的音量跳变。
@@ -408,9 +422,11 @@ class PlaybackControllerSeekPreviewTest {
 
         advanceTimeBy(PlaybackController.WHEEL_SETTLE_MILLIS + 1)
 
+        // 最后一跳已回报执行：落定当场结算，声音恢复并淡入。
         assertEquals(listOf(true, false), engine.muteCalls)
         assertEquals(fadesBeforePreview + 1, engine.fadeInDurations.size)
         assertEquals(50_000L, engine.seekPositions.last())
+        assertEquals(50_000L, controller.seekSettlement.value?.targetMillis)
         assertNull(controller.seekPreviewMillis.value)
     }
 
@@ -429,6 +445,7 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true), engine.muteCalls)
 
         assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
+        engine.reportFirstFrameReady()
         advanceTimeBy(gapMillis)
         assertEquals(50_000L, controller.seekPreviewMillis.value)
         assertEquals(listOf(true), engine.muteCalls)
@@ -474,165 +491,118 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(listOf(true, false), engine.muteCalls)
     }
 
-
     @Test
-    fun `上一发在途时收尾 seek 挂起到回执之后`() = runTest {
+    fun `上一发在途时收尾目标进待执行槽，回执后只补发一次`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 90_000)
         controller.commitSeekPreview()
-        // 上一发还没回执：收尾挂起，命令队列只有一发。
+        // 上一发还没回执：收尾目标替换待执行，命令队列只有一发。
         assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(90_000L, engine.pendingSeekMillis)
         assertEquals(90_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
-        // 挂起的收尾发出后仍要等它自己的回执或位置到达。
+        // 补发的收尾仍要等它自己的执行回报。
         assertNull(controller.seekSettlement.value)
-        engine.reportPositionChanged(90_000, 600_000)
-        engine.reportPositionChanged(90_010, 600_000)
+
+        engine.reportFirstFrameReady()
         assertEquals(90_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
-    fun `回执丢失时引擎待执行 seek 不增长`() = runTest {
+    fun `回执一直不来时引擎超时回报，落定不会被永久钉住`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 引擎在途超时：视为这一跳已执行并补发待执行目标。
+        engine.reportSeekExecuted()
+        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportSeekExecuted()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertNull(engine.pendingSeekMillis)
+    }
+
+    @Test
+    fun `松手后退后台两次收尾只下发一次 seek、只落定一次`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        // 退后台再走一次收尾：不重复下发，也不重复通知。
+        controller.pauseForBackground()
+        assertEquals(listOf(120_000L), engine.seekPositions)
+
+        engine.reportFirstFrameReady()
+        val settled = controller.seekSettlement.value ?: error("松手收尾没有落定")
+        assertEquals(120_000L, settled.targetMillis)
+
+        controller.pauseForBackground()
+        engine.reportFirstFrameReady()
+        assertEquals(listOf(120_000L), engine.seekPositions)
+        assertEquals(settled.id, controller.seekSettlement.value?.id)
+        assertEquals(listOf(true, false), engine.muteCalls)
+    }
+
+    @Test
+    fun `按住时被中断会恢复静音且不跨集泄漏`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 来电/锁屏让播放页退后台：预览收尾，但这一跳还没执行，声音先不恢复。
+        controller.pauseForBackground()
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 播放核心回报这一跳已执行：声音恢复。
+        engine.reportSeekExecuted()
+        assertEquals(listOf(true, false), engine.muteCalls)
+
+        // 切集不会把静音带进新一集，也不会再写一次静音。
+        controller.next()
+        engine.reportMediaLoaded()
+        assertEquals(listOf(true, false), engine.muteCalls)
+    }
+
+    @Test
+    fun `引擎在途时再来预览与收尾，待执行只保留最后一个目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 90_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 130_000)
+        controller.commitSeekPreview()
+
+        // 队列恒为「1 执行 + 1 待执行」：待执行只剩最后一个目标。
         assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(130_000L, engine.pendingSeekMillis)
 
-        // 控制层按超时放开自己的槽位，引擎侧仍在途：新目标只覆盖待发目标，命令队列恒为 1 + 1。
-        advanceTimeBy(PlaybackController.PREVIEW_SEEK_TIMEOUT_MILLIS + 1)
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-
-        assertEquals(listOf(70_000L), engine.seekPositions)
-        assertEquals(120_000L, engine.pendingSeekMillis)
-
-        // 上一发就绪后补发被覆盖的目标，队列不再增长。
-        engine.reportFirstFrameReady()
-        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+        engine.reportSeekExecuted()
+        assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
         assertNull(engine.pendingSeekMillis)
-    }
-
-    @Test
-    fun `回执与位置都不到时按超时放开进度`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(60_000, 600_000)
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        controller.commitSeekPreview()
-        assertNull(controller.seekSettlement.value?.targetMillis)
-
-        advanceTimeBy(PlaybackController.SEEK_SETTLE_TIMEOUT_MILLIS + 1)
-
-        // 兜底只放开跟随，不发落定通知，也不把进度改写回旧值。
         assertNull(controller.seekSettlement.value)
-        assertEquals(120_000L, controller.progress.value.positionMillis)
 
-        engine.reportPositionChanged(120_500, 600_000)
-        assertEquals(120_500L, controller.progress.value.positionMillis)
+        // 补发的最后一跳也要等它自己的执行回报。
+        engine.reportSeekExecuted()
+        assertEquals(130_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
-    fun `反向拖动的落定也按目标一侧判定到达`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(100_000, 600_000)
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 80_000)
-        controller.commitSeekPreview()
-
-        // 单个样本（引擎下发 seek 时的乐观写回）不算到达。
-        engine.reportPositionChanged(80_000, 600_000)
-        assertNull(controller.seekSettlement.value?.targetMillis)
-
-        engine.reportPositionChanged(79_900, 600_000)
-        assertEquals(80_000L, controller.seekSettlement.value?.targetMillis)
-    }
-
-    @Test
-    fun `切集后新的拖动落定仍要等回执`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(60_000, 600_000)
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        controller.commitSeekPreview()
-        engine.reportFirstFrameReady()
-        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
-        val previousSettlementId = controller.seekSettlement.value!!.id
-
-        // 切到第二集：引擎的 seek 序号按加载归零，控制层的回执基线也要换代。
-        controller.next()
-        engine.reportMediaLoaded()
-        engine.reportPositionChanged(10_000, 600_000)
-
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 100_000)
-        controller.commitSeekPreview()
-
-        // 新一集的落定不能沿用上一集的序号直接算完成：通知 id 不变。
-        assertEquals(previousSettlementId, controller.seekSettlement.value!!.id)
-        engine.reportFirstFrameReady()
-        assertEquals(100_000L, controller.seekSettlement.value?.targetMillis)
-    }
-
-    @Test
-    fun `旧代际的迟到回执不能结束落定`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(60_000, 600_000)
-        val previousToken = engine.currentLoadToken
-
-        controller.next()
-        engine.reportMediaLoaded()
-        engine.reportPositionChanged(10_000, 600_000)
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 100_000)
-        controller.commitSeekPreview()
-
-        engine.reportFirstFrameReady(loadToken = previousToken)
-        assertNull(controller.seekSettlement.value?.targetMillis)
-
-        engine.reportFirstFrameReady()
-        assertEquals(100_000L, controller.seekSettlement.value?.targetMillis)
-    }
-
-    @Test
-    fun `停手不动再松手不重发 seek，落定仍要等回执`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(60_000, 600_000)
-
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        engine.reportFirstFrameReady()
-        // 手指停在死区内：显示目标继续跟随真实位置，但不再下发。
-        controller.updateSeekPreview(requestSeek = false, positionMillis = 120_400)
-        assertEquals(listOf(120_000L), engine.seekPositions)
-
-        controller.commitSeekPreview()
-        // 目标与最后一次下发相差不足死区：复用，不再补一次收尾 seek。
-        assertEquals(listOf(120_000L), engine.seekPositions)
-
-        // 落定仍要等回执或连续两个越过目标的样本。
-        assertNull(controller.seekSettlement.value)
-        engine.reportPositionChanged(120_400, 600_000)
-        assertNull(controller.seekSettlement.value)
-        engine.reportPositionChanged(120_410, 600_000)
-        assertEquals(120_400L, controller.seekSettlement.value?.targetMillis)
-    }
-
-    @Test
-    fun `落定目标就是手指最后的位置`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(60_000, 600_000)
-
-        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        engine.reportFirstFrameReady()
-        controller.updateSeekPreview(requestSeek = false, positionMillis = 120_500)
-        controller.commitSeekPreview()
-
-        // 死区不参与落点：进度停在手指当前位置，与它相差 0。
-        assertEquals(120_500L, controller.progress.value.positionMillis)
-    }
-
-    @Test
-    fun `同一目标连续两次拖到端点各结算一次`() = runTest {
+    fun `同一目标连续两次落定各通知一次，id 递增`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
@@ -650,6 +620,64 @@ class PlaybackControllerSeekPreviewTest {
         assertEquals(600_000L, first.targetMillis)
         assertEquals(600_000L, second.targetMillis)
         assertTrue(second.id > first.id)
+    }
+
+    @Test
+    fun `跨集后引擎序号归零，落定仍按目标毫秒匹配`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        controller.commitSeekPreview()
+        engine.reportFirstFrameReady()
+        val previous = controller.seekSettlement.value ?: error("第一次落定没有通知")
+
+        // 切到第二集：引擎的 seek 序号按加载归零，落定不能沿用旧回报。
+        controller.next()
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(10_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 100_000)
+        controller.commitSeekPreview()
+
+        assertEquals(previous.id, controller.seekSettlement.value?.id)
+        engine.reportFirstFrameReady()
+        val settled = controller.seekSettlement.value ?: error("切集后没有落定")
+        assertEquals(100_000L, settled.targetMillis)
+        assertTrue(settled.id > previous.id)
+    }
+
+    @Test
+    fun `停手不动再松手不重发 seek，落定仍等引擎执行回报`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        // 手指停在死区内：显示目标继续跟随真实位置，但不再下发。
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 120_400)
+        assertEquals(listOf(120_000L), engine.seekPositions)
+
+        controller.commitSeekPreview()
+        // 目标与最后一次下发相差不足死区：复用，不再补一次收尾 seek。
+        assertEquals(listOf(120_000L), engine.seekPositions)
+        assertNull(controller.seekSettlement.value)
+
+        engine.reportFirstFrameReady()
+        assertEquals(120_400L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `落定目标就是手指最后的位置`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        engine.reportFirstFrameReady()
+        controller.updateSeekPreview(requestSeek = false, positionMillis = 120_500)
+        controller.commitSeekPreview()
+
+        // 死区不参与落点：进度停在手指当前位置，与它相差 0。
+        assertEquals(120_500L, controller.progress.value.positionMillis)
+        assertEquals(120_500L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test

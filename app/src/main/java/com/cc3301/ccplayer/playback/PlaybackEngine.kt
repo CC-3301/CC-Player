@@ -41,7 +41,8 @@ interface PlaybackEngine {
     /**
      * 跳到指定播放位置，单位毫秒。
      * 返回本次 seek 的序号；之后的 ready 回调带上同一序号，控制层据此只认 seek 之后的信号。
-     * 上一次 seek 尚未就绪时只覆盖待发目标，就绪后再补发一次。
+     * 队列归引擎所有：恒为「1 执行 + 1 待执行」，在途期间新目标只覆盖待执行目标；
+     * 在途这一跳执行完（收到回执或超时）后立即补发，并通过 [Listener.onSeekExecuted] 回报执行的目标毫秒。
      */
     fun seekTo(positionMillis: Long): Int
 
@@ -110,6 +111,12 @@ interface PlaybackEngine {
             seekSerial: Int,
             loadToken: Int,
         )
+
+        /**
+         * 一条 seek 已执行完：回报这一跳的目标毫秒。
+         * 回执到达与在途超时都上报；控制层按目标毫秒是否相等确认落定，不按 seek 序号。
+         */
+        fun onSeekExecuted(targetMillis: Long)
 
         /**
          * 收到任一加载相关事件；用于重置“完全无事件”看门狗。

@@ -1652,7 +1652,7 @@ private fun SeekBar(
     LaunchedEffect(heldMillis) {
         if (heldMillis == null) return@LaunchedEffect
         delay(SEEK_PREVIEW_HOLD_MILLIS)
-        // 界面兜底与控制层兜底各管一段：控制层 2 秒内放开进度跟随，界面 5 秒后不再顶住时间标签。
+        // 落定通知由播放核心执行回报驱动；等不到通知时界面到点自行放掉保持值。
         heldMillis = null
     }
     val previewAt: (Long, Boolean) -> Unit = { target, requestSeek ->

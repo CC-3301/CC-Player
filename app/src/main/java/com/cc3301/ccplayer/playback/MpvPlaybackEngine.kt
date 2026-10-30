@@ -7,6 +7,9 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -53,11 +56,25 @@ class MpvPlaybackEngine(
     @Volatile
     private var hasVideoTrack = false
 
-    /** 在途 seek 的序号；未下发或已就绪时为 null。在途期间新目标只覆盖 [pendingSeekMillis]。 */
-    private var seekInFlightSerial: Int? = null
+    /** seek 队列：恒为「1 执行 + 1 待执行」，在途超时也归它判定。 */
+    private val seekQueue = MpvSeekQueue(
+        issue = ::issueSeekCommand,
+        onExecuted = { targetMillis -> listener?.onSeekExecuted(targetMillis) },
+        armTimeout = ::armSeekTimeout,
+        cancelTimeout = ::cancelSeekTimeout,
+    )
 
-    /** 在途期间被覆盖的最新待发目标；就绪后补发一次，命令队列恒为「1 执行 + 1 待执行」。 */
-    private var pendingSeekMillis: Long? = null
+    /** 在途 seek 的超时计时器：回执丢失也能放开队列并照常回报。 */
+    private val seekTimeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "mpv-seek-timeout").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var seekTimeoutFuture: ScheduledFuture<*>? = null
+
+    /** 最近一次真正下发到 mpv 的 seek 序号；在途期间新目标被合并时返回它。 */
+    @Volatile
+    private var issuedSeekSerial = 0
 
     @Volatile
     private var positionSeconds = 0.0
@@ -106,8 +123,7 @@ class MpvPlaybackEngine(
         hasVideoTrack = false
         awaitingLoadFrame = true
         seekDiagnostics.reset()
-        seekInFlightSerial = null
-        pendingSeekMillis = null
+        seekQueue.reset()
         positionGate.onStart(startPositionMillis)
         MPVLib.setPropertyBoolean(PAUSE_PROPERTY, paused)
         val command = mutableListOf("loadfile", url, "replace")
@@ -149,8 +165,7 @@ class MpvPlaybackEngine(
         hasVideoTrack = false
         awaitingLoadFrame = false
         seekDiagnostics.reset()
-        seekInFlightSerial = null
-        pendingSeekMillis = null
+        seekQueue.reset()
         MPVLib.command(arrayOf("stop"))
     }
 
@@ -162,36 +177,38 @@ class MpvPlaybackEngine(
     /**
      * seek 后 mpv 会再发 PLAYBACK_RESTART。序号在这里下发，
      * 但要等 MPV_EVENT_SEEK 到达后才用于标记 ready，迟到的旧事件仍带旧序号。
-     * 在途时只覆盖待发目标，等就绪后补发：命令队列恒为「1 执行 + 1 待执行」。
+     * 队列归引擎所有：在途只覆盖待执行目标，执行完（回执或超时）补发。
      */
     override fun seekTo(positionMillis: Long): Int {
-        val inFlight = seekInFlightSerial
-        if (inFlight != null) {
-            pendingSeekMillis = positionMillis
-            return inFlight
-        }
-        return issueSeek(positionMillis)
+        seekQueue.seek(positionMillis)
+        return issuedSeekSerial
     }
 
     /** 真正下发一次 seek：登记序号并执行 mpv 命令。 */
-    private fun issueSeek(positionMillis: Long): Int {
+    private fun issueSeekCommand(positionMillis: Long) {
         positionSeconds = positionMillis / 1000.0
         // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
         positionGate.onSeek(positionMillis)
         val serial = loadCoordinator.onSeekIssued()
+        issuedSeekSerial = serial
         seekDiagnostics.issueSeek(positionMillis, serial) {
             MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
         }
-        seekInFlightSerial = serial
-        return serial
     }
 
-    /** 就绪即上一发 seek 完成：补发在途期间被覆盖的目标。 */
-    private fun flushPendingSeek() {
-        seekInFlightSerial = null
-        val pending = pendingSeekMillis ?: return
-        pendingSeekMillis = null
-        issueSeek(pending)
+    /** 给在途这一跳重新计时：超时即按执行完处理，回执丢了也不会卡住队列。 */
+    private fun armSeekTimeout(onTimeout: () -> Unit) {
+        seekTimeoutFuture?.cancel(false)
+        seekTimeoutFuture = seekTimeoutExecutor.schedule(
+            onTimeout,
+            SEEK_IN_FLIGHT_TIMEOUT_MILLIS,
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    private fun cancelSeekTimeout() {
+        seekTimeoutFuture?.cancel(false)
+        seekTimeoutFuture = null
     }
 
     /** 用 mpv 的 lavfi 桥接 FFmpeg 的 afade：淡入从当前播放位置起算，只作用于音频链。 */
@@ -312,6 +329,8 @@ class MpvPlaybackEngine(
     override fun release() {
         MPVLib.removeObserver(this)
         MPVLib.removeLogObserver(errorLog)
+        seekQueue.reset()
+        seekTimeoutExecutor.shutdownNow()
         loadCoordinator.reset()
         MPVLib.destroy()
     }
@@ -399,8 +418,8 @@ class MpvPlaybackEngine(
     private fun reportReady(needsFrameConfirmation: Boolean = false) {
         // 先确认 ready 属于当前代际再占去重槽：旧代际不吞当前加载的信号。
         val ready = loadCoordinator.acceptReady(needsFrameConfirmation) ?: return
-        // 先补发上一发在途期间被覆盖的目标，控制层随后拿到的回执对应已经结束的那一发。
-        flushPendingSeek()
+        // 这一跳已执行完：先回报执行的目标毫秒，再补发在途期间被覆盖的目标。
+        seekQueue.onReceipt()
         listener?.onFirstFrameReady(
             needsFrameConfirmation,
             ready.spec.url,
@@ -475,6 +494,9 @@ class MpvPlaybackEngine(
     private fun formatSeconds(millis: Long): String = String.format(Locale.US, "%.3f", millis / 1000.0)
 
     private companion object {
+        /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
+        const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
+
         const val PAUSE_PROPERTY = "pause"
         const val HWDEC_PROPERTY = "hwdec"
         const val TIME_POS_PROPERTY = "time-pos"

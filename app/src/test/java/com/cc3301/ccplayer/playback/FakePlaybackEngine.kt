@@ -74,7 +74,7 @@ class FakePlaybackEngine : PlaybackEngine {
         currentTargetUrl = url
         // 与真实引擎一致：每次加载把 seek 序号归零，在途与待发 seek 一并作废。
         currentSeekSerial = 0
-        seekInFlightSerial = null
+        seekInFlightMillis = null
         pendingSeekMillis = null
         return ++currentLoadToken
     }
@@ -107,19 +107,18 @@ class FakePlaybackEngine : PlaybackEngine {
         discardInFlightCalls++
     }
 
-    /** 在途 seek 的序号；未就绪前新目标只覆盖 [pendingSeekMillis]。 */
-    private var seekInFlightSerial: Int? = null
+    /** 在途 seek 的目标毫秒；未下发或已执行完时为 null。 */
+    private var seekInFlightMillis: Long? = null
 
-    /** 在途期间被覆盖的最新待发目标；就绪后补发一次。 */
+    /** 在途期间被覆盖的最新待执行目标；执行完补发一次。 */
     var pendingSeekMillis: Long? = null
         private set
 
     override fun seekTo(positionMillis: Long): Int {
-        val inFlight = seekInFlightSerial
-        if (inFlight != null) {
-            // 与真实引擎一致：上一发未就绪时只覆盖待发目标，不堆命令。
+        if (seekInFlightMillis != null) {
+            // 与真实引擎一致：在途时只覆盖待执行目标，不堆命令。
             pendingSeekMillis = positionMillis
-            return inFlight
+            return currentSeekSerial
         }
         return issueSeek(positionMillis)
     }
@@ -127,16 +126,22 @@ class FakePlaybackEngine : PlaybackEngine {
     private fun issueSeek(positionMillis: Long): Int {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"
-        return (++currentSeekSerial).also { seekInFlightSerial = it }
+        seekInFlightMillis = positionMillis
+        return ++currentSeekSerial
     }
 
-    /** 就绪：放开在途槽位并补发被覆盖的目标。 */
-    private fun flushPendingSeek() {
-        seekInFlightSerial = null
+    /** 与真实引擎一致：在途这一跳执行完后回报目标并补发待执行目标。 */
+    private fun completeSeek() {
+        val executed = seekInFlightMillis ?: return
+        seekInFlightMillis = null
+        listener?.onSeekExecuted(executed)
         val pending = pendingSeekMillis ?: return
         pendingSeekMillis = null
         issueSeek(pending)
     }
+
+    /** 模拟播放核心的在途 seek 超时：回报这一跳已执行并补发待执行目标。 */
+    fun reportSeekExecuted() = completeSeek()
 
     override fun fadeInAudio(durationMillis: Long) {
         fadeInDurations += durationMillis
@@ -203,7 +208,7 @@ class FakePlaybackEngine : PlaybackEngine {
         listener?.onLoadActivity(LoadActivity.FileLoaded, loadToken)
         listener?.onMediaLoaded(targetUrl, loadToken, hasVideoTrack)
         // seek 序号在 onMediaLoaded 之后读取：续播 seek 就发生在那里。
-        flushPendingSeek()
+        completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
@@ -225,7 +230,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
-        flushPendingSeek()
+        completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = false,
             targetUrl = targetUrl,
@@ -241,7 +246,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.VideoReconfig, loadToken)
-        flushPendingSeek()
+        completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,
@@ -257,7 +262,7 @@ class FakePlaybackEngine : PlaybackEngine {
         loadToken: Int = currentLoadToken,
     ) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
-        flushPendingSeek()
+        completeSeek()
         listener?.onFirstFrameReady(
             needsFrameConfirmation = true,
             targetUrl = targetUrl,

@@ -43,6 +43,8 @@ class PlaybackControllerAudioTest {
         controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         controller.commitSeekPreview()
+        // 声音在播放核心回报这一跳执行完之后恢复并淡入。
+        engine.reportFirstFrameReady()
 
         assertEquals(listOf(500L, 500L), engine.fadeInDurations)
     }
