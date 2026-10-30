@@ -1476,9 +1476,9 @@ class PlaybackController(
             switchOriginIndex = NO_MEDIA
             switchOriginEnded = false
         }
-        // 冻结画面不在这里撤：只有确认新帧上屏（位置前进或暂停态抓帧成功）后才撤；
-        // 目标没有视频轨时没有新视频帧可等，按黑底处理。
-        if (!targetHasVideo) replaceFreezeFrame(null)
+        // 冻结画面在确认新帧上屏（位置前进或抓帧成功）后才撤；暂停收尾没有后续位置事件，
+        // 就绪即撤，直接露新集首帧；目标没有视频轨时没有新视频帧可等，按黑底处理。
+        if (!targetHasVideo || paused) replaceFreezeFrame(null)
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
         playedDurationMillis = duration
