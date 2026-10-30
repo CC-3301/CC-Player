@@ -270,7 +270,7 @@ internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
 internal data class LoadEnd(val end: MpvFileEvents.End, val spec: LoadSpec?)
 
 /**
- * seek 与 ready 的序号：控制层只认续播 seek 之后的信号。
+ * seek 与 ready 的序号：ready 带回的序号不小于该 seek 的序号，才算这一跳之后的信号。
  *
  * 序号在 seek 入队时预留（控制层靠它做加载就绪门槛），命令真正下发后才进待认队列，
  * 但要等 MPV_EVENT_SEEK 到达才把它设为“当前可接受序号”；

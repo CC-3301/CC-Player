@@ -881,7 +881,7 @@ class CachedMediaPreviewSourceTest {
         }
         previews.awaitAll()
 
-        // 同一时刻只有一路在取帧：本地与网络共享同一个许可。
+        // 同一时刻只有一路在解码：网络读取会话名额不改变解码串行，本地与网络共享同一个许可。
         assertEquals(1, tracker.maxConcurrent)
         assertEquals(6, tracker.requests)
     }
@@ -1377,6 +1377,108 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `预取失败不记无图，回到可见后重新抽取`() = runTest {
+        extractor.imageBytes = null
+        val file = network("预取无图.mkv")
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNull(source.prefetch(file).image)
+        assertEquals(1, extractor.imageRequests.size)
+
+        // 回到可见：预取结果没有记成“本次运行无图”，按可见请求重新抽取。
+        extractor.imageBytes = byteArrayOf(1)
+        source.updatePreviewWindow(visibleLocations = setOf(file.location), prefetchLocations = emptySet())
+        assertNotNull(source.visiblePreview(file, 0).image)
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `预取失败后再次预取不再打开会话或解码`() = runTest {
+        var prepares = 0
+        var decodes = 0
+        val counting = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+                error("网络取图应走准备路径")
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+                prepares++
+                return NetworkPreviewPreparation(
+                    decodeBlock = {
+                        decodes++
+                        null
+                    },
+                    closeBlock = {},
+                )
+            }
+        }
+        val bounded = CachedMediaPreviewSource(
+            extractor = counting,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = network("预取失败.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, prepares)
+        assertEquals(1, decodes)
+
+        // 模拟滚动进出：窗口每次重新包含该条目都会再次触发预取，但已被抑制，不再打开会话或解码。
+        repeat(3) {
+            bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = emptySet())
+            bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+            assertNull(bounded.prefetch(file).image)
+        }
+
+        assertEquals("预取失败后不再重新打开会话", 1, prepares)
+        assertEquals("预取失败后不再重新解码", 1, decodes)
+    }
+
+    @Test
+    fun `预取失败后条目变为可见仍会重新准备与解码`() = runTest {
+        var prepares = 0
+        var decodes = 0
+        val counting = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
+                error("网络取图应走准备路径")
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+                prepares++
+                return NetworkPreviewPreparation(
+                    decodeBlock = {
+                        decodes++
+                        if (decodes == 1) null else byteArrayOf(1)
+                    },
+                    closeBlock = {},
+                )
+            }
+        }
+        val bounded = CachedMediaPreviewSource(
+            extractor = counting,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val file = network("预取失败.mkv")
+        bounded.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, decodes)
+        // 再次预取被抑制：不重复解码。
+        assertNull(bounded.prefetch(file).image)
+        assertEquals(1, decodes)
+
+        // 变为可见：清掉抑制，重新准备与解码一次并出图。
+        bounded.updatePreviewWindow(visibleLocations = setOf(file.location), prefetchLocations = emptySet())
+        assertNotNull(bounded.visiblePreview(file, 0).image)
+        assertEquals(2, prepares)
+        assertEquals(2, decodes)
+    }
+
+    @Test
     fun `预取失败不写失败退避`() = runTest {
         extractor.imageFailure = MediaSourceException(MediaFailure.Unreachable, "连不上")
         val file = network("失败.mkv")
@@ -1646,6 +1748,31 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `准备返回空时按无图处理，不再新开句柄取图`() = runTest {
+        var imageCalls = 0
+        val extractor = object : MediaPreviewExtractor {
+            override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
+                imageCalls++
+                return byteArrayOf(1)
+            }
+
+            override suspend fun durationMillis(file: MediaFile): Long? = null
+
+            override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? = null
+        }
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+
+        val preview = source.visiblePreview(network("没有会话.mkv"), 0)
+
+        assertNull(preview.image)
+        assertEquals("准备为空时不得另开句柄取图", 0, imageCalls)
+        assertTrue("无图不落缓存", directory.listFiles().isNullOrEmpty())
+    }
+
+    @Test
     fun `可见项优先取得句柄名额，预取占不满`() = runTest {
         val slotExtractor = PreparedSlotExtractor()
         val bounded = CachedMediaPreviewSource(
@@ -1770,6 +1897,13 @@ class CachedMediaPreviewSourceTest {
 /** 测试用的后台范围：不受限调度，命中后的时长补读在断言前跑完。 */
 private val unconfinedBackgroundScope = CoroutineScope(Dispatchers.Unconfined)
 
+/** 测试用准备：解码时才调用 [imageBytes]，不新开真实句柄。 */
+private fun MediaPreviewExtractor.preparation(file: MediaFile): NetworkPreviewPreparation =
+    NetworkPreviewPreparation(
+        decodeBlock = { targetWidth -> imageBytes(file, targetWidth) },
+        closeBlock = {},
+    )
+
 /** 抽取开始后等待闸门，用来稳定构造唯一许可被占用、后续请求排队的场景。 */
 private class GatedExtractor(
     var imageGate: CompletableDeferred<Unit>? = CompletableDeferred(),
@@ -1777,6 +1911,8 @@ private class GatedExtractor(
     var durationFailure: Exception? = null,
     var durationMillis: Long? = null,
 ) : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     val started = mutableListOf<String>()
     val cancelled = mutableListOf<String>()
@@ -1815,6 +1951,8 @@ private class GatedExtractor(
 /** 名字以“慢”开头的条目会先等一段时间，用来验证超时后的许可释放。 */
 private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPreviewExtractor {
 
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
+
     val requests = mutableListOf<String>()
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
@@ -1828,6 +1966,8 @@ private class SlowFileExtractor(private val slowDelayMillis: Long) : MediaPrevie
 
 /** 记录同时进行的抽图数，用来验证并发上限；可注入失败。 */
 private class ConcurrentExtractor(private val failure: Exception? = null) : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     var requests = 0
     var concurrent = 0
@@ -1852,6 +1992,8 @@ private class ConcurrentExtractor(private val failure: Exception? = null) : Medi
 /** 第一次抽取会一直等待，用来验证首个调用者取消后等待者重新抽取。 */
 private class RetryExtractor : MediaPreviewExtractor {
 
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
+
     var requests = 0
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
@@ -1865,6 +2007,8 @@ private class RetryExtractor : MediaPreviewExtractor {
 
 /** 第一次抽取抛出 Error，用来验证等待者不会永久阻塞。 */
 private class ErrorOnceExtractor : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     var requests = 0
 
@@ -1883,6 +2027,8 @@ private class ErrorOnceExtractor : MediaPreviewExtractor {
 /** 直接读本地文件，文件不存在或不可读时由真实 IO 抛错，用来验证未经注入的失败路径。 */
 private class FileReadingExtractor : MediaPreviewExtractor {
 
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
+
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
         File(file.location).readBytes()
 
@@ -1891,6 +2037,8 @@ private class FileReadingExtractor : MediaPreviewExtractor {
 
 /** 抽取失败直到 [failure] 被置空，用来验证整次抽取的退避与恢复。 */
 private class RetryAfterFailureExtractor : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     var requests = 0
     var failure: Exception? = IllegalStateException("抽取失败")
@@ -1906,6 +2054,8 @@ private class RetryAfterFailureExtractor : MediaPreviewExtractor {
 
 /** 网络候选帧恒为纯色，用来验证不合格时保持占位图。 */
 private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     var decodes = 0
 
@@ -1977,6 +2127,8 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
 
 /** 抽取一直挂起，取消后才结束，用来验证许可归还。 */
 private class CancellableExtractor : MediaPreviewExtractor {
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation = preparation(file)
 
     val started = mutableListOf<String>()
 

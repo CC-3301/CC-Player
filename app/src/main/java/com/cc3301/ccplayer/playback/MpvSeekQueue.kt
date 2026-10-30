@@ -95,8 +95,9 @@ internal class MpvSeekQueue(
             inFlight = null
             pending = null
             timeoutGeneration++
+            // 撤计时器与清在途在同一临界区：不会撤掉随后新起的一跳自己的超时兜底。
+            cancelTimeout()
         }
-        cancelTimeout()
     }
 
     /**
@@ -114,6 +115,9 @@ internal class MpvSeekQueue(
             val next = pending
             pending = null
             inFlight = next
+            // 撤计时器与换跳在同一临界区：另一个线程刚起的下一跳不会在这里丢掉自己的超时兜底。
+            timeoutGeneration++
+            cancelTimeout()
             Completion(executed, next)
         }
         finish(completion)
@@ -128,14 +132,16 @@ internal class MpvSeekQueue(
             val next = pending
             pending = null
             inFlight = next
+            // 与回执路径一致：撤计时器与换跳在同一临界区。
+            timeoutGeneration++
+            cancelTimeout()
             Completion(entry, next)
         }
         finish(completion)
     }
 
-    /** 结算收尾：撤掉计时器、回报这一跳、补发待执行那一跳。 */
+    /** 结算收尾：回报这一跳、补发待执行那一跳；计时器已在结算的临界区撤掉。 */
     private fun finish(completion: Completion) {
-        cancelTimeout()
         onExecuted(completion.executed.seekId, completion.executed.targetMillis)
         completion.next?.let { next ->
             startTimeout()

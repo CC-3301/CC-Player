@@ -17,14 +17,14 @@ internal const val PREVIEW_METADATA_HEAD_BYTES = 64 * 1024
 /** 元数据阶段的尾部定点读：容器索引通常在文件末尾。 */
 internal const val PREVIEW_METADATA_TAIL_BYTES = 1024 * 1024
 
-/** 解码命中一块后向后扩的块数。 */
+/** 解码命中一块后向后扩 2 块。 */
 private const val FOLLOW_READ_AHEAD_CHUNKS = 2
 
 /**
  * 本地字节窗口：解码只读本地字节，缺失的块由本层向底层补齐。
  *
  * 补齐按块进行：块大小取读取块上限与底层协商上限中较小者，一块正好一次底层读取。
- * 元数据阶段只定点取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗；解码命中一块后只向后扩 1–2 块。
+ * 元数据阶段只定点取文件头 64 KiB 与文件末尾 1 MiB，不铺满整窗；解码命中一块后向后扩 2 块。
  * 换锚点不丢弃已读到的块：常驻块按最近使用淘汰，总量不超过窗口上限。
  * 底层读取最多两路：解码线程补齐当前块，预读线程补齐后续块；预读可用独立字节源，
  * 避免与解码在同一条流上交替位置。关闭后不再补齐、不再回写，读取一律失败。
@@ -174,7 +174,7 @@ internal class PreviewByteWindow(
         return if (read == limit) bytes else bytes.copyOf(read)
     }
 
-    /** 解码命中后向后扩 1–2 块；已在本地或读完的位置不排队。 */
+    /** 解码命中后向后扩 2 块；已在本地或读完的位置不排队。 */
     private fun followReadAhead(start: Long) {
         val tasks = ArrayList<Long>()
         synchronized(lock) {
