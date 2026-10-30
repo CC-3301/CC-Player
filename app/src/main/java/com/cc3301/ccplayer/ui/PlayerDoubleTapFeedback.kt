@@ -55,6 +55,11 @@ class PlayerDoubleTapFeedback(
         ripples = ripples.filterNot { it.id == id }
     }
 
+    /** 涟漪层不再可见时清掉未播完的条目：重新显示时不重播。 */
+    fun clearRipples() {
+        if (ripples.isNotEmpty()) ripples = emptyList()
+    }
+
     /** 切集时清空提示与涟漪，避免沿用上一集累计。 */
     fun reset() {
         left = null

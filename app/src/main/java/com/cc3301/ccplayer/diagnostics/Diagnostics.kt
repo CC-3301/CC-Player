@@ -8,9 +8,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
 
-/** 诊断日志出口；生产环境写轮转文件，测试注入内存实现。 */
+/** 诊断日志出口；生产环境写单文件会话日志，测试注入内存实现。 */
 interface DiagnosticsSink {
     fun write(message: String)
+
+    /** 是否已有日志内容：已判定写入但开关刚关掉时，用它避免新建文件。 */
+    val hasContent: Boolean get() = true
 }
 
 /** 诊断日志接缝：关闭时不向外写出任何内容。 */
@@ -26,6 +29,14 @@ interface DiagnosticsLog {
 
     /** 诊断由关闭变为开启时回调一次；返回注销句柄。 */
     fun onEnabled(listener: () -> Unit): () -> Unit = {}
+
+    /**
+     * 写出已经判定过开关的日志：补写暂存日志时用，避免与并发关停交错时把已取出的行丢掉。
+     * 开关已关且还没有日志文件时不写，保持「关闭不建文件」。
+     */
+    fun logAccepted(message: String) {
+        log(message)
+    }
 }
 
 /** 不写日志的实现，供不需要诊断的构造使用。 */
@@ -72,6 +83,17 @@ class Diagnostics(
         scope.launch { runCatching { sink.write(redactSecrets(message)) } }
     }
 
+    /**
+     * 已经判定开关打开的消息直接写出，写入时不再复查开关，补写不丢行。
+     * 只有在开关已关且还没有日志文件时才放弃：不新建文件、不写会话标记。
+     */
+    override fun logAccepted(message: String) {
+        scope.launch {
+            if (!enabled && !sink.hasContent) return@launch
+            runCatching { sink.write(redactSecrets(message)) }
+        }
+    }
+
     /** 同步写入，供应用退出等进程可能立即结束的路径使用。 */
     fun logSync(message: String) {
         if (!enabled) return
@@ -89,11 +111,8 @@ class Diagnostics(
         /** 日志文件所在目录名（files 与 cache 下同名）。 */
         const val DIRECTORY_NAME = "diagnostics"
 
-        /** 单个日志文件的上限。 */
-        const val MAX_FILE_BYTES = 2L * 1024L * 1024L
-
-        /** 最多保留的日志文件数。 */
-        const val MAX_FILES = 3
+        /** 单个日志文件的硬上限；超出先丢最旧会话，再丢本次会话最早的日志。 */
+        const val MAX_FILE_BYTES = 8L * 1024L * 1024L
 
         private val SINGLE_IO = Dispatchers.IO.limitedParallelism(1)
 

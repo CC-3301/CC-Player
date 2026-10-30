@@ -20,65 +20,135 @@ class MemoryDiagnosticsSink : DiagnosticsSink {
 }
 
 /**
- * 轮转文件出口：当前文件为 `diagnostics.log`，轮转文件依次为 `diagnostics.1.log`、
- * `diagnostics.2.log`；单文件达到 [maxFileBytes] 时切新文件，超过 [maxFiles] 的删最旧。
- * 目录与文件在第一次写入时才创建，关闭状态不会留下日志文件。
+ * 单文件会话日志：当前文件为 `diagnostics.log`，只保留最近两次会话。
+ * 每个进程第一次写入先追加一条会话标记；文件里已有两次会话时，先截掉最旧的一次再追加本次标记。
+ * 单文件有 [maxFileBytes] 硬上限：超出先丢最旧会话；只剩本次会话仍超限时，
+ * 从本次会话最早的日志开始丢、保留最近的。每条日志行自成一行，放不下一整行时丢弃该行。
  */
-class RotatingFileSink(
+class SessionFileSink(
     private val directory: File,
     private val maxFileBytes: Long = Diagnostics.MAX_FILE_BYTES,
-    private val maxFiles: Int = Diagnostics.MAX_FILES,
-    private val moveFile: (File, File) -> Boolean = { source, target -> source.renameTo(target) },
 ) : DiagnosticsSink {
 
     private val lock = Any()
     private val limit = maxFileBytes.coerceAtLeast(1L)
 
+    /** 本进程是否已追加会话标记；进程内只追加一次。 */
+    private var sessionStarted = false
+
+    /** 文件里当前的会话数；没有标记的旧内容也算一次会话。 */
+    private var sessionsInFile = 0
+
+    /** 已经存在日志文件：已判定写入时据此决定是否允许首次建文件。 */
+    override val hasContent: Boolean
+        get() = File(directory, CURRENT_FILE_NAME).isFile
+
     override fun write(message: String) {
         synchronized(lock) {
-            val line = truncate("${timestamp()} $message\n".toByteArray(Charsets.UTF_8))
             val current = File(directory, CURRENT_FILE_NAME)
-            if (current.length() > 0 && current.length() + line.size > limit) rotate()
             directory.mkdirs()
-            FileOutputStream(File(directory, CURRENT_FILE_NAME), true).use { it.write(line) }
+            if (!sessionStarted) beginSession(current)
+            val line = "${timestamp()} $message\n".toByteArray(Charsets.UTF_8)
+            // 一整行都放不下：丢弃这一行，写半行会让下一行粘上来。
+            if (line.size > limit) return
+            if (current.length() + line.size > limit && sessionsInFile > 1) {
+                // 先丢最旧会话；只剩本次会话仍放不下时才动本次会话。
+                keepLatestSession(current)
+                sessionsInFile = 1
+            }
+            if (current.length() + line.size > limit) dropOldestLines(current, line.size.toLong())
+            // 裁剪后仍放不下同样丢弃整行，不写半行。
+            if (current.length() + line.size > limit) return
+            FileOutputStream(current, true).use { it.write(line) }
         }
     }
 
-    /** 超长行截到文件上限，并回退到 UTF-8 字符边界，避免写出半个字符。 */
-    private fun truncate(line: ByteArray): ByteArray {
-        val max = limit.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-        if (line.size <= max) return line
-        var end = max
-        while (end > 0 && (line[end].toInt() and 0xC0) == 0x80) end--
-        return line.copyOf(end)
+    /**
+     * 只剩本次会话仍超限：保留本次会话标记，从最早的日志行开始丢、保留最近的。
+     * 重写结果按完整行组织，始终以换行结尾。
+     */
+    private fun dropOldestLines(current: File, incomingBytes: Long) {
+        val text = current.readText(Charsets.UTF_8)
+        val markerAt = markerStarts(text).lastOrNull() ?: 0
+        val markerEnd = text.indexOf('\n', markerAt).let { if (it < 0) text.length else it + 1 }
+        val marker = text.substring(markerAt, markerEnd)
+        val lines = text.substring(markerEnd).trimEnd('\n').split('\n').filter { it.isNotEmpty() }
+        val budget = limit - incomingBytes - marker.toByteArray(Charsets.UTF_8).size
+        // 一次多丢一些：留出余量后不必每写一行都重写整个文件。
+        val target = budget * 3L / 4L
+        val kept = ArrayDeque<String>()
+        var used = 0L
+        for (index in lines.indices.reversed()) {
+            val line = lines[index]
+            val size = line.toByteArray(Charsets.UTF_8).size + 1L
+            if (kept.isNotEmpty() && used + size > target) break
+            kept.addFirst(line)
+            used += size
+        }
+        val body = if (kept.isEmpty()) "" else kept.joinToString("\n") + "\n"
+        current.writeText(marker + body, Charsets.UTF_8)
     }
 
-    private fun rotate() {
-        if (maxFiles <= 1) {
-            File(directory, CURRENT_FILE_NAME).delete()
-            return
-        }
-        File(directory, rotatedFileName(maxFiles - 1)).delete()
-        for (index in maxFiles - 2 downTo 1) {
-            val source = File(directory, rotatedFileName(index))
-            if (source.exists()) move(source, File(directory, rotatedFileName(index + 1)))
-        }
-        val current = File(directory, CURRENT_FILE_NAME)
-        if (current.exists()) move(current, File(directory, rotatedFileName(1)))
+    /** 新会话：先丢掉本次之前的旧会话，只留最近一次，再追加本次标记。 */
+    private fun beginSession(current: File) {
+        sessionStarted = true
+        val existing = if (current.isFile) current.readText(Charsets.UTF_8) else ""
+        var kept = if (existing.isBlank()) "" else latestSession(existing)
+        // 旧版本文件可能不以换行结尾：补一个，避免标记粘在最后一行上。
+        if (kept.isNotEmpty() && !kept.endsWith("\n")) kept += "\n"
+        val content = kept + sessionMarkerLine()
+        current.writeText(content, Charsets.UTF_8)
+        sessionsInFile = countSessions(content).coerceAtLeast(1)
     }
 
-    /** 重命名失败时删除源文件，避免旧文件让后续写入持续超限。 */
-    private fun move(source: File, target: File) {
-        if (!moveFile(source, target)) source.delete()
+    /** 从最后一个行首会话标记处取到文件末尾；没有标记时整份当作上次会话。 */
+    private fun latestSession(text: String): String {
+        val last = markerStarts(text).lastOrNull() ?: return text
+        return if (last <= 0) text else text.substring(last)
     }
+
+    /** 单文件超限：只留本次会话。 */
+    private fun keepLatestSession(current: File) {
+        val text = current.readText(Charsets.UTF_8)
+        val last = markerStarts(text).lastOrNull() ?: return
+        if (last > 0) current.writeText(text.substring(last), Charsets.UTF_8)
+    }
+
+    /**
+     * 行首会话标记的位置。
+     * 只认行首：日志正文里出现同样的字样不当作会话边界。
+     */
+    private fun markerStarts(text: String): List<Int> {
+        val starts = mutableListOf<Int>()
+        val prefixLength = SESSION_MARKER_PREFIX.length
+        var index = 0
+        while (index <= text.length - prefixLength) {
+            val at = text.indexOf(SESSION_MARKER_PREFIX, index)
+            if (at < 0) break
+            if (at == 0 || text[at - 1] == '\n') starts += at
+            index = at + prefixLength
+        }
+        return starts
+    }
+
+    /** 会话数：行首标记的个数；标记之前还有内容时，那段无标记的旧日志也算一次会话。 */
+    private fun countSessions(text: String): Int {
+        if (text.isBlank()) return 0
+        val starts = markerStarts(text)
+        return if (starts.isEmpty()) 1 else starts.size + if (starts.first() > 0) 1 else 0
+    }
+
+    private fun sessionMarkerLine(): String = "$SESSION_MARKER_PREFIX${timestamp()} =====\n"
 
     private fun timestamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
 
-    private fun rotatedFileName(index: Int): String = "$BASE_FILE_NAME.$index.log"
-
     companion object {
         const val BASE_FILE_NAME = "diagnostics"
+
         const val CURRENT_FILE_NAME = "$BASE_FILE_NAME.log"
+
+        /** 会话标记行前缀：清理与截断都按它识别会话边界。 */
+        const val SESSION_MARKER_PREFIX = "===== 会话开始 "
     }
 }
