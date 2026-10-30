@@ -258,40 +258,52 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a stuck grab at the episode end restores black paused without duplicate failure`() = runTest {
-        val gate = CountDownLatch(1)
-        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        try {
-            val controller = PlaybackController(
-                engine,
-                progress,
-                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-                frameProbeDispatcher = executor,
-                nowMillis = { testScheduler.currentTime },
-            )
-            open(controller, "ep1.mkv", "ep2.mkv")
-            engine.reportMediaLoaded()
-            val failures = collectFailures(controller)
-            engine.beforeGrab = { gate.await() }
+    fun `a natural end switch skips the grab and loads the target right away`() = runTest {
+        val probeDispatcher = StandardTestDispatcher(testScheduler)
+        val controller = PlaybackController(
+            engine,
+            progress,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            frameProbeDispatcher = probeDispatcher,
+            nowMillis = { testScheduler.currentTime },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv")
+        engine.reportMediaLoaded()
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
 
-            // 自然播完触发自动下一集，抓帧卡住。
-            engine.reportPlaybackEnded()
-            assertTrue(controller.freezeFramePending.value)
+        engine.reportPlaybackEnded()
 
-            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
-            runCurrent()
+        // 片尾没有可抓的帧：不排抓帧，目标立刻开始加载，界面按黑底等待。
+        assertFalse(engine.actions.contains("grab"))
+        assertFalse(controller.freezeFramePending.value)
+        assertNull(controller.freezeFrame.value)
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
+        assertEquals(listOf("pause", "start"), engine.actions.takeLast(2))
+        assertTrue(controller.switching.value)
 
-            assertTrue(controller.holdBlack.value)
-            assertNull(controller.freezeFrame.value)
-            assertNull(controller.backgroundRestoreFrame.value)
-            assertEquals(PlaybackState.Paused, controller.state.value)
-            assertFalse(controller.switching.value)
-            // 一次切集只提示一次失败。
-            assertEquals(1, failures.size)
-        } finally {
-            gate.countDown()
-            executor.close()
-        }
+        // 抓帧调度器处理完也不再补抓。
+        runCurrent()
+        assertFalse(engine.actions.contains("grab"))
+    }
+
+    @Test
+    fun `a natural end switch drops the stale freeze frame`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+        // 新帧还没上屏：上一条切换抓到的冻结画面仍在屏幕上。
+        assertSame(frame, controller.freezeFrame.value)
+        assertFalse(controller.switching.value)
+
+        engine.reportPlaybackEnded()
+
+        // 片尾没有可抓的帧：旧冻结画面撤掉，界面按黑底等待，不停在前一集的旧帧上。
+        assertNull(controller.freezeFrame.value)
+        assertTrue(controller.switching.value)
+        assertEquals(2, controller.currentIndex.value)
     }
 
     @Test
@@ -837,26 +849,6 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackFailed()
         assertEquals(2, failures.size)
         assertEquals(PlaybackState.Ended, controller.state.value)
-    }
-
-    @Test
-    fun `an automatic switch that grabbed a frame still restores at the end on file load`() = runTest {
-        val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-        engine.reportPositionChanged(590_000, 600_000)
-
-        engine.reportPlaybackEnded()
-        assertEquals(frame, controller.freezeFrame.value)
-
-        engine.reportPlaybackFailed()
-        assertTrue(controller.switching.value)
-
-        // 自然播完标记优先：即使抓到了帧，片尾恢复仍以文件加载完成为就绪。
-        engine.reportFileLoaded()
-        assertFalse(controller.switching.value)
-        assertTrue(controller.holdBlack.value)
-        assertNull(controller.freezeFrame.value)
     }
 
     @Test
