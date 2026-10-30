@@ -143,7 +143,7 @@ private class SmbJConnection(
             throw failure.asSourceFailure("打不开共享内文件：$path")
         }
         try {
-            // 读尺寸按协商上限给出，避免超出后由底层拆成多次 READ。
+            // 读尺寸按协商上限给出：底层不会按协商上限自动切分，超限的单次读会被服务端拒绝。
             SmbJReadHandle(file, maxReadSize = negotiatedMaxReadSize())
         } catch (failure: Exception) {
             runCatching { file.close() }
