@@ -89,6 +89,28 @@ class SurfaceDetachOrderTest {
     }
 
     @Test
+    fun `队列跑空但校验不过时跳过当场挂`() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val live = VideoOutputQueue { task -> executor.execute { task() } }
+            val calls = mutableListOf<String>()
+
+            // 等排空的这段时间里已经释放：当场挂之前再校验一次，不挂。
+            val attachedNow = live.attach(
+                awaitMillis = 2_000,
+                stillCurrent = { false },
+                attach = { calls += "attach" },
+                onSkipped = { calls += "skipped" },
+            )
+
+            assertFalse(attachedNow)
+            assertEquals(listOf("skipped"), calls)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `队列跑空时当场挂`() {
         val executor = Executors.newSingleThreadExecutor()
         try {

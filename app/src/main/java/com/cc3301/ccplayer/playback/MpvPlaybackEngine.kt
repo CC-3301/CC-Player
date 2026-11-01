@@ -363,7 +363,12 @@ class MpvPlaybackEngine(
             stillCurrent = { !released && attachedSurface === surface },
             attach = { MPVLib.attachSurface(surface) },
             onSkipped = {
-                diagnostics.log("挂载: 排队到分离之后的挂载没执行（Surface 已换或视频输出线程已关）")
+                // 这次挂载不会发生：清掉挂载记录，后续不再对着它开输出。
+                if (attachedSurface === surface) {
+                    attachedSurface = null
+                    videoOutputStopped = true
+                }
+                diagnostics.log("挂载: 这次挂载没执行（Surface 已换、已释放或视频输出线程已关）")
             },
         )
     }
@@ -431,7 +436,7 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * 释放引擎持有的全部原生资源。
+     * 在等待上限内释放引擎持有的原生资源；闸门超时就放弃销毁，实例随进程退出回收。
      * 还挂着 Surface 时先投一条分离再排空视频输出线程：闸门跑到的分支，销毁播放核心之前一定分离过；
      * 闸门没跑到的分支放弃销毁，那条分支不承诺分离。
      */
