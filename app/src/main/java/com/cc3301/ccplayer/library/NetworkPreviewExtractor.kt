@@ -81,7 +81,6 @@ class NetworkPreviewExtractor(
         readAheadRank: Long = PREVIEW_PREFETCH_RANK,
     ): NetworkPreviewPreparation? {
         val waitedMillis = AtomicLong()
-        var opened: NetworkPreviewPreparation? = null
         var window: PreviewByteWindow? = null
         var primary: ByteSource? = null
         var readAheadHandle: ByteSource? = null
@@ -102,7 +101,7 @@ class NetworkPreviewExtractor(
                 window = previewWindow
                 previewWindow.startMetadataReadAhead()
                 NetworkPreviewPreparation(
-                    // 系统抽帧器在调用线程上回调读字节：解码固定在本模块的 IO 线程发起，不跟随调用方所在线程。
+                    // 系统抽帧器在调用线程上回调读字节：解码固定在 `Dispatchers.IO` 上发起，不跟随调用方所在线程。
                     decodeBlock = { targetWidth ->
                         withContext(Dispatchers.IO) {
                             try {
@@ -113,21 +112,17 @@ class NetworkPreviewExtractor(
                             }
                         }
                     },
-                    // 关闭句柄同样可能阻塞在网络上：取消时也要执行，固定在本模块的 IO 线程收尾。
                     closeBlock = {
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
                     },
-                ).also { opened = it }
+                )
             }
         } catch (failure: Throwable) {
             // 取消可能在 withContext 返回后才生效并丢弃结果：已打开的资源在这里兜底关闭。
-            // 关闭句柄可能阻塞在网络上：取消时也要执行，固定在本模块的 IO 线程收尾。
+            // 关闭句柄可能阻塞在网络上：取消时也要执行，固定在 `Dispatchers.IO` 上收尾。
             withContext(NonCancellable + Dispatchers.IO) {
-                val preparation = opened
                 val openedWindow = window
-                if (preparation != null) {
-                    runCatching { preparation.close() }
-                } else if (openedWindow != null) {
+                if (openedWindow != null) {
                     // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
                     runCatching { openedWindow.close() }
                 } else {
