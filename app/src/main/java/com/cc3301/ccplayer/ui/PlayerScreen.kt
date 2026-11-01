@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -101,6 +102,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
@@ -189,6 +191,23 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
         }
     }
 }
+
+/**
+ * 控件按住期间不自动隐藏：按下即通知，抬起或手势取消时通知恢复。
+ * 只在 Initial 阶段观察且不消费事件，点击与拖动照常传给子节点。
+ */
+private fun Modifier.holdControlsVisible(onPressChange: (Boolean) -> Unit): Modifier =
+    pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            onPressChange(true)
+            try {
+                waitForUpOrCancellation(pass = PointerEventPass.Initial)
+            } finally {
+                onPressChange(false)
+            }
+        }
+    }
 
 /** 鼠标移动或进入时的指针位置；触摸与手写笔不参与指针显隐，返回 null。 */
 private fun PointerEvent.mousePosition(): Offset? {
@@ -321,10 +340,12 @@ fun PlayerScreen(
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onToggleRotation: () -> Unit,
     onClose: () -> Unit,
+    onButtonClickDebounced: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
+    val buttonDebounce = remember { PlayerButtonDebounce() }
     val panels = remember { PlayerPanelState() }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
@@ -374,7 +395,14 @@ fun PlayerScreen(
     LaunchedEffect(controlsVisible) {
         if (!controlsVisible) doubleTapFeedback.clearRipples()
     }
-    LaunchedEffect(controls.visible, controls.panelOpen, controls.lastInteractionAtMillis, switching, initialLoading) {
+    LaunchedEffect(
+        controls.visible,
+        controls.panelOpen,
+        controls.pressing,
+        controls.lastInteractionAtMillis,
+        switching,
+        initialLoading,
+    ) {
         // 加载全程不自动隐藏，避免切集期间控制条消失。
         val holdVisible = switching || initialLoading
         while (controls.visible && !controls.panelOpen) {
@@ -596,17 +624,21 @@ fun PlayerScreen(
         }
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
-        // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
+        // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
             visible = barsVisible,
             enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
             exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.TopStart),
         ) {
+            val topBarInteractive = playerBarsInteractive(
+                barsVisible = barsVisible,
+                exitAnimating = transition.targetState == EnterExitState.PostExit,
+            )
             PlayerTopBar(
                 title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                 moreVisible = moreVisible,
-                interactive = barsVisible,
+                interactive = topBarInteractive,
                 rotateEnabled = actionAllowed(PlayerAction.Rotate, switching, initialLoading, restoring),
                 rotateAppearanceEnabled = actionLooksEnabled(
                     PlayerAction.Rotate,
@@ -634,6 +666,9 @@ fun PlayerScreen(
                     controls.showByUserAction()
                     panels.toggle(PlayerPanel.More)
                 },
+                modifier = Modifier.holdControlsVisible { pressed ->
+                    if (pressed) controls.onPressDown() else controls.onPressUp()
+                },
             )
         }
         AnimatedVisibility(
@@ -642,6 +677,10 @@ fun PlayerScreen(
             exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
+            val bottomBarInteractive = playerBarsInteractive(
+                barsVisible = barsVisible,
+                exitAnimating = transition.targetState == EnterExitState.PostExit,
+            )
             Controls(
                 state = state,
                 progress = progress,
@@ -656,16 +695,23 @@ fun PlayerScreen(
                 switching = switching,
                 initialLoading = initialLoading,
                 restoring = restoring,
-                interactive = barsVisible,
+                interactive = bottomBarInteractive,
                 onTogglePlayPause = {
                     controls.showByUserAction()
-                    onTogglePlayPause()
+                    // 播放/暂停是状态开关：距上一击不足 300 毫秒的重复点击只算一次，并把被压掉的一击记下来。
+                    if (buttonDebounce.accept(PlayerPressButton.PlayPause)) {
+                        onTogglePlayPause()
+                    } else {
+                        onButtonClickDebounced("播放键重复点击被忽略: 距上一击不足 ${PLAYER_BUTTON_DEBOUNCE_MILLIS} 毫秒")
+                    }
                 },
                 onPrevious = {
+                    // 上一集每一击都要把切集目标前移，不去抖。
                     controls.showByUserAction()
                     onPrevious()
                 },
                 onNext = {
+                    // 下一集每一击都要把切集目标前移，不去抖。
                     controls.showByUserAction()
                     onNext()
                 },
@@ -688,6 +734,9 @@ fun PlayerScreen(
                 },
                 onLock = { lock.tapLockButton() },
                 onSelectSubtitle = onSelectSubtitle,
+                modifier = Modifier.holdControlsVisible { pressed ->
+                    if (pressed) controls.onPressDown() else controls.onPressUp()
+                },
             )
         }
         if (moreVisible && panelVisible) {

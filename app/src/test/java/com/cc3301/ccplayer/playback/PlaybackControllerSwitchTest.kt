@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import android.graphics.Bitmap
+import com.cc3301.ccplayer.diagnostics.Diagnostics
+import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
@@ -1979,6 +1981,68 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `切集期间按一次播放键记下的暂停意图在就绪后生效`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val controller = playingControllerWithDiagnostics(sink)
+        val resumeCallsBefore = engine.resumeCalls
+
+        controller.next()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        controller.togglePlayPause()
+
+        // 这一击在切集期就被记下：切集加载中的播放/暂停不落到「未就绪，不动作」。
+        assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队暂停") })
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        // 就绪后可见状态就是按下的意图。
+        assertFalse(controller.switching.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(resumeCallsBefore, engine.resumeCalls)
+    }
+
+    @Test
+    fun `切集期间按下的暂停在重新前移目标后仍然生效`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.togglePlayPause()
+        controller.next()
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `切集期间连点两次下一集目标前移两格`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.next()
+
+        // 每一击都前移目标：起始第 0 集，两击后目标是第 2 集，最终只等这一集就绪。
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals("root/ep3.mkv", engine.startedUrls.last())
+        assertTrue(controller.switching.value)
+
+        // 被跳过的中间集迟到的就绪不能结束切集。
+        engine.reportFirstFrameReady(targetUrl = "root/ep2.mkv")
+        assertTrue(controller.switching.value)
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+    }
+
+    @Test
     fun `a single resume echo is ignored but real load activity still refreshes`() {
         val gate = ResumeActivityGate()
 
@@ -2192,6 +2256,28 @@ class PlaybackControllerSwitchTest {
             frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
+
+    /** 带诊断的控制层：用来断言被拒绝的点击留下了意图记录。 */
+    private fun TestScope.controller(diagnostics: Diagnostics): PlaybackController =
+        PlaybackController(
+            engine,
+            progress,
+            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+            diagnostics = diagnostics,
+            nowMillis = { testScheduler.currentTime },
+        )
+
+    private fun TestScope.playingControllerWithDiagnostics(
+        sink: MemoryDiagnosticsSink,
+        vararg names: String = arrayOf("ep1.mkv", "ep2.mkv"),
+    ): PlaybackController {
+        val diagnostics = Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true }
+        val controller = controller(diagnostics)
+        open(controller, *names)
+        engine.reportMediaLoaded()
+        return controller
+    }
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
     private fun TestScope.playingController(

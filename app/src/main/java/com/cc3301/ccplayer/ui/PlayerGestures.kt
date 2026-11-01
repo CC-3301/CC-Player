@@ -227,6 +227,13 @@ fun playerBarsVisible(
     (controlsVisible || firstBuffering) &&
     panelBarsVisible
 
+/**
+ * 顶/底栏控件此刻是否可以点击：栏可见，或正在淡出（画面还在，点击照常生效）。
+ * 退场动画期间不移除可点击的子树，避免控件可见却点不到。
+ */
+fun playerBarsInteractive(barsVisible: Boolean, exitAnimating: Boolean): Boolean =
+    barsVisible || exitAnimating
+
 /** 首次缓冲：本次播放还没有开始过切集时的加载阶段。 */
 fun isFirstBuffering(initialLoading: Boolean, switchedSinceOpen: Boolean): Boolean =
     initialLoading && !switchedSinceOpen
@@ -251,8 +258,8 @@ enum class PlayerAction {
 }
 
 /**
- * 当前可用的播放页操作：首次加载只放行返回；目标加载只放行返回与上一集/下一集；
- * 恢复原片期间额外放行播放/暂停。
+ * 当前可用的播放页操作：首次加载只放行返回；目标加载放行返回、上一集/下一集与播放/暂停
+ * （播放/暂停只记意图，切集就绪后按意图执行）；恢复原片期间额外放行播放/暂停。
  */
 fun actionAllowed(
     action: PlayerAction,
@@ -269,13 +276,26 @@ fun actionAllowed(
     switching ->
         action == PlayerAction.Back ||
             action == PlayerAction.Previous ||
-            action == PlayerAction.Next
+            action == PlayerAction.Next ||
+            action == PlayerAction.PlayPause
+    else -> true
+}
+
+/** 该操作是否还取决于相邻条目：上一集/下一集分别看列表边界。 */
+private fun adjacencyAvailable(
+    action: PlayerAction,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+): Boolean = when (action) {
+    PlayerAction.Previous -> canGoPrevious
+    PlayerAction.Next -> canGoNext
     else -> true
 }
 
 /**
- * 控件外观是否保持可用：切集与恢复只拦截点击，不降低其它控件的亮度；
- * 首次加载仍按不可用外观置灰（返回入口除外）。上一集/下一集还要看相邻条目。
+ * 控件外观是否可用：首次加载只保留返回入口，其余按不可用外观显示；
+ * 切集期间与点击判据同源，被拦截的操作一并置灰，不出现能看到却点不动的控件；
+ * 恢复原片只拦截点击、不改变亮度（ADR-0025）。上一集/下一集在列表边界始终置灰。
  */
 fun actionLooksEnabled(
     action: PlayerAction,
@@ -286,13 +306,7 @@ fun actionLooksEnabled(
     restoring: Boolean,
 ): Boolean {
     if (initialLoading) return action == PlayerAction.Back
-    return when (action) {
-        PlayerAction.Previous -> canGoPrevious &&
-            actionAllowed(action, switching, initialLoading, restoring)
-
-        PlayerAction.Next -> canGoNext &&
-            actionAllowed(action, switching, initialLoading, restoring)
-
-        else -> true
-    }
+    val adjacency = adjacencyAvailable(action, canGoPrevious, canGoNext)
+    if (restoring) return adjacency
+    return adjacency && actionAllowed(action, switching, initialLoading, restoring)
 }

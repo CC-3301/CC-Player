@@ -264,6 +264,56 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
+    fun `切集期间按播放键记录排队意图`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        controller.togglePlayPause()
+
+        assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队暂停") })
+    }
+
+    @Test
+    fun `切集回退丢弃继续播放的意图时记录日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        controller.next()
+        // 切集期间先按暂停、再按继续：失败回退保持暂停时这个「继续」被丢弃。
+        controller.togglePlayPause()
+        controller.togglePlayPause()
+        engine.reportPlaybackFailed()
+
+        assertTrue(sink.lines.any { it.contains("切集回退保持暂停: 丢弃继续播放的意图") })
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `播放会话未就绪时播放键未被执行的记录`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        open(controller)
+
+        // 首次加载阶段播放键没有可执行的会话状态：留一行诊断。
+        controller.togglePlayPause()
+
+        assertTrue(sink.lines.any { it.contains("播放键未执行") })
+    }
+
+    @Test
     fun `重复失败只记录一次`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)

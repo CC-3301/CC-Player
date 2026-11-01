@@ -374,15 +374,22 @@ class PlaybackController(
         playAt(index)
     }
 
-    /** 切换到播放列表第 [index] 项；超出范围、首次加载、切集或恢复期间不动作。 */
+    /** 切换到播放列表索引 [index] 的条目；超出范围、首次加载、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
         // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
-        if (loadPhase != LoadPhase.None) return
+        if (loadPhase != LoadPhase.None) {
+            diagnostics.log { "播放列表选择未执行: ${loadPhaseLabel(loadPhase)}阶段（索引 $index）" }
+            return
+        }
         playIndex(index)
     }
 
     private fun playIndex(index: Int, originAtEnd: Boolean = false) {
-        val media = _playlist.value.getOrNull(index) ?: return
+        val media = _playlist.value.getOrNull(index)
+        if (media == null) {
+            diagnostics.log { "播放目标不存在: 索引 $index" }
+            return
+        }
         if (active) {
             startSwitch(index, media, originAtEnd)
         } else {
@@ -393,7 +400,11 @@ class PlaybackController(
     /** 按媒体位置切换，不把列表视图的下标当作播放下标。 */
     fun play(media: MediaFile) {
         val index = _playlist.value.indexOfFirst { it.location == media.location }
-        if (index >= 0) playAt(index)
+        if (index < 0) {
+            diagnostics.log { "播放列表不含该条目: ${media.name}" }
+            return
+        }
+        playAt(index)
     }
 
     /** 名称自然排序下的下一集；列表末尾时不动作。切集缓冲期间实时前移目标。 */
@@ -410,7 +421,7 @@ class PlaybackController(
         when (loadPhase) {
             // 目标回到原集时直接取消切集，回原位置恢复，不再重新加载同一集。
             LoadPhase.Switching -> if (index == switchOriginIndex) cancelSwitch() else retargetSwitch(index)
-            // 首次加载缓冲期间只允许返回，上一集/下一集不生效。
+            // 首次加载缓冲期间只允许返回；相邻集在控制层已被拦下，这里不再有可执行的动作。
             LoadPhase.Initial -> Unit
             // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
             else -> playIndex(index)
@@ -735,6 +746,10 @@ class PlaybackController(
         watchedToEnd = false
         pausedAtEpisodeEnd = false
         mediaLoaded = false
+        // 回退一律保持暂停：当前意图是继续播放时，这个意图在这里被丢弃。
+        if (!paused) {
+            diagnostics.log { "切集回退保持暂停: 丢弃继续播放的意图" }
+        }
         paused = true
         _restoring.value = false
         _subtitleTracks.value = switchOriginSubtitleTracks
@@ -813,13 +828,23 @@ class PlaybackController(
         updateState(PlaybackState.Paused)
     }
 
+    /**
+     * 播放/暂停：切集期间的意图直接写进暂停标记，切集就绪时由就绪流程按它收尾。
+     * 一次按下就生效于标记，不需要另存排队状态。
+     */
     fun togglePlayPause() {
+        if (loadPhase == LoadPhase.Switching) {
+            val pauseIntent = !paused
+            if (pauseIntent) pause() else resume()
+            diagnostics.log { "切集期间播放键: 排队${if (pauseIntent) "暂停" else "继续"}" }
+            return
+        }
         when (_state.value) {
             PlaybackState.Playing -> pause()
             PlaybackState.Paused -> resume()
             // 播完或失败后引擎已卸载，播放键重开当前文件。
             PlaybackState.Ended -> if (_currentIndex.value != NO_MEDIA) playAt(_currentIndex.value)
-            else -> Unit
+            else -> diagnostics.log { "播放键未执行: 会话未就绪（${loadPhaseLabel(loadPhase)}）" }
         }
     }
 

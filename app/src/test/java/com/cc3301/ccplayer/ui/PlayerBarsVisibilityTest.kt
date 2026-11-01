@@ -94,6 +94,26 @@ class PlayerBarsVisibilityTest {
     }
 
     @Test
+    fun `淡出动画期间控件保持可点击`() {
+        assertTrue(playerBarsInteractive(barsVisible = true, exitAnimating = false))
+        // 栏已不可见但淡出未结束：画面还在，点击照常生效。
+        assertTrue(playerBarsInteractive(barsVisible = false, exitAnimating = true))
+        assertFalse(playerBarsInteractive(barsVisible = false, exitAnimating = false))
+    }
+
+    @Test
+    fun `控制层隐藏且不在退场时控件不可点击`() {
+        controls.toggle()
+
+        assertFalse(
+            playerBarsInteractive(
+                barsVisible = barsVisible(),
+                exitAnimating = false,
+            ),
+        )
+    }
+
+    @Test
     fun `指针跟随栏的可见性`() {
         pointer.onPointerEnter(Offset.Zero)
 

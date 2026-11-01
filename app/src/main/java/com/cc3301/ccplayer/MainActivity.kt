@@ -454,9 +454,18 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
-                            onTogglePlayPause = { playback?.controller?.togglePlayPause() },
-                            onPrevious = { playback?.controller?.previous() },
-                            onNext = { playback?.controller?.next() },
+                            onTogglePlayPause = {
+                                playback?.controller?.togglePlayPause()
+                                    ?: diagnostics.log { "播放键未执行: 播放会话已断开" }
+                            },
+                            onPrevious = {
+                                playback?.controller?.previous()
+                                    ?: diagnostics.log { "上一集未执行: 播放会话已断开" }
+                            },
+                            onNext = {
+                                playback?.controller?.next()
+                                    ?: diagnostics.log { "下一集未执行: 播放会话已断开" }
+                            },
                             onSeekPreview = { position, requestSeek ->
                                 playback?.controller?.updateSeekPreview(position, requestSeek)
                             },
@@ -490,6 +499,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 sessionOrientation.toggle(currentScreenOrientation())
                             },
                             onClose = { handlePlayerBack() },
+                            onButtonClickDebounced = { line -> diagnostics.log(line) },
                         )
                     }
 
