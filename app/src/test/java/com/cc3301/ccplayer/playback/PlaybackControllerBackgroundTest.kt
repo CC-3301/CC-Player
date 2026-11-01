@@ -99,10 +99,11 @@ class PlaybackControllerBackgroundTest {
     fun `片尾黑底不缓存末帧`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
-        controller.next()
+        engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        // 片尾自动恢复：黑底保持到用户操作。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
         capture(controller)
 
@@ -313,10 +314,11 @@ class PlaybackControllerBackgroundTest {
     fun `片尾黑底重挂后不产生缓存帧`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
-        controller.next()
+        engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        // 片尾自动恢复：黑底保持到用户操作。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
         reattach(controller)
         runCurrent()
@@ -330,10 +332,11 @@ class PlaybackControllerBackgroundTest {
     fun `片尾黑底重挂不等待也不翻转`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
-        controller.next()
+        engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        // 片尾自动恢复：黑底保持到用户操作。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
         reattach(controller)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
@@ -503,14 +506,15 @@ class PlaybackControllerBackgroundTest {
     fun `片尾黑底在后台暂停后仍然保持`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
-        controller.next()
+        engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        // 片尾自动恢复：黑底保持到用户操作。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
         controller.pauseForBackground()
 
-        assertTrue(controller.holdBlack.value)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
     }
 
     @Test

@@ -141,6 +141,7 @@ import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
+import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.customSleepMinutes
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.ui.theme.AppColors
@@ -325,15 +326,12 @@ fun PlayerScreen(
     sleepTimerOption: SleepTimerOption?,
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
-    videoAspectRatio: Double?,
+    surfacePresentation: SurfacePresentation,
     switching: Boolean,
     restoring: Boolean,
     buffering: Boolean,
     initialLoading: Boolean,
-    switchKeepsSurfaceFrame: Boolean,
-    targetHasVideo: Boolean,
     backgroundRestoreFrame: Bitmap?,
-    holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -462,7 +460,7 @@ fun PlayerScreen(
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
-            videoAspectRatio = videoAspectRatio,
+            videoAspectRatio = surfacePresentation.aspectRatio,
         )
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
@@ -482,25 +480,16 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：本集没有视频轨、首次缓冲、切集且不沿用屏幕上停住的旧帧，
-        // 或片尾恢复就绪后保持黑底。
-        if (
-            showPlayerBlackLayer(
-                holdBlack = holdBlack,
-                buffering = buffering,
-                switching = switching,
-                keepsSurfaceFrame = switchKeepsSurfaceFrame,
-                targetHasVideo = targetHasVideo,
-            )
-        ) {
+        // 黑底画在视频视图之后：屏幕上没有可显示的画面时铺黑底（首次打开、片尾恢复、切集无画面、无视频轨）。
+        if (showPlayerBlackLayer(surfacePresentation.showsPicture)) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black),
             )
         }
-        // 后台回来先盖住离开前的画面；播放核心重新出帧后由控制层撤掉这一层。
-        if (!switching && !holdBlack && backgroundRestoreFrame != null) {
+        // 后台回来先盖住离开前的画面；与控制层同一判据，黑底期间不盖。
+        if (surfacePresentation.showsPicture && backgroundRestoreFrame != null) {
             Image(
                 bitmap = backgroundRestoreFrame.asImageBitmap(),
                 contentDescription = null,

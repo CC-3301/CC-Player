@@ -4,71 +4,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 黑底层只在需要黑底、或切集时不沿用屏幕上停住的旧帧时出现。 */
+/** 黑底层只由控制层派生的画面判据决定：没有可显示的画面就铺黑底。 */
 class PlayerBlackLayerTest {
 
     @Test
-    fun `a switch keeps the old picture instead of a black layer`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = true,
-                switching = true,
-                keepsSurfaceFrame = true,
-                targetHasVideo = true,
-            ),
-        )
+    fun `a visible picture keeps the black layer off`() {
+        assertFalse(showPlayerBlackLayer(showsPicture = true))
     }
 
     @Test
-    fun `a switch that does not keep the surface frame falls back to black`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                keepsSurfaceFrame = false,
-                targetHasVideo = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `the end hold stays black`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = true,
-                buffering = false,
-                switching = false,
-                keepsSurfaceFrame = false,
-                targetHasVideo = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `initial buffering keeps the black background`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = true,
-                switching = false,
-                keepsSurfaceFrame = true,
-                targetHasVideo = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `a target without video keeps the black background`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = false,
-                keepsSurfaceFrame = false,
-                targetHasVideo = false,
-            ),
-        )
+    fun `no picture on the surface draws the black layer`() {
+        assertTrue(showPlayerBlackLayer(showsPicture = false))
     }
 }

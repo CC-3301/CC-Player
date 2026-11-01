@@ -38,16 +38,10 @@ fun videoViewport(
 }
 
 /**
- * 播放页黑底层规则：本集没有视频轨、片尾保持黑底、首次缓冲，或切集且不沿用屏幕上停住的旧帧才铺黑底。
- * 切集沿用旧帧时原画面还留在 Surface 上，不铺黑底。
+ * 播放页黑底层规则：屏幕上没有可显示的画面就铺黑底。
+ * 有没有画面只由控制层派生的 SurfacePresentation 给出，界面不再自行组合加载阶段、黑底与视频轨。
  */
-fun showPlayerBlackLayer(
-    holdBlack: Boolean,
-    buffering: Boolean,
-    switching: Boolean,
-    keepsSurfaceFrame: Boolean,
-    targetHasVideo: Boolean,
-): Boolean = !targetHasVideo || holdBlack || (buffering && !switching) || (switching && !keepsSurfaceFrame)
+fun showPlayerBlackLayer(showsPicture: Boolean): Boolean = !showsPicture
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp

@@ -207,30 +207,13 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `切集沿用屏幕末帧时不铺黑底`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                keepsSurfaceFrame = true,
-                targetHasVideo = true,
-            ),
-        )
+    fun `屏上有画面时不铺黑底`() {
+        assertFalse(showPlayerBlackLayer(showsPicture = true))
     }
 
     @Test
-    fun `切集不沿用末帧时才铺黑底`() {
-        // 切集态且不沿用屏幕上的旧帧，才铺黑底。
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                keepsSurfaceFrame = false,
-                targetHasVideo = true,
-            ),
-        )
+    fun `屏上没有画面时铺黑底`() {
+        assertTrue(showPlayerBlackLayer(showsPicture = false))
     }
 
     private fun assertViewport(

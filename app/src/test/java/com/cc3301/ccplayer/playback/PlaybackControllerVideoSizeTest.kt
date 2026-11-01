@@ -92,22 +92,18 @@ class PlaybackControllerVideoSizeTest {
         open("ep1.mkv", "ep2.mkv")
         engine.reportVideoSizeChanged(1920, 1080)
         engine.reportMediaLoaded()
+        engine.reportFramePresented()
 
         controller.next()
         engine.reportVideoSizeChanged(1080, 1920)
 
-        // 切集沿用屏幕上的旧帧：新文件的比例先不采纳，屏上旧画面才不会被拉伸。
-        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
+        // 切集沿用屏幕上的旧帧：视频区继续用原片比例，屏上旧画面才不会被拉伸。
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, TOLERANCE)
 
         engine.reportMediaLoaded()
 
-        // 就绪收尾但新帧还没上屏：比例仍保持原片，等新帧真正上屏。
-        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
-
-        engine.reportFramePresented()
-
-        // 新帧上屏：暂存的新比例与新画面同一次生效。
-        assertEquals(0.5625, controller.videoAspectRatio.value!!, TOLERANCE)
+        // 首帧已可显示：撤旧帧与换比例在同一次派生里一起生效。
+        assertEquals(0.5625, controller.surfacePresentation.value.aspectRatio!!, TOLERANCE)
     }
 
     @Test
@@ -115,18 +111,18 @@ class PlaybackControllerVideoSizeTest {
         open("ep1.mkv", "ep2.mkv")
         engine.reportVideoSizeChanged(1920, 1080)
         engine.reportMediaLoaded()
+        engine.reportFramePresented()
 
         controller.next()
         engine.reportMediaLoaded()
-        engine.reportFramePresented()
 
         // 切集期间引擎一次比例都没上报：视频区沿用上一个已知比例。
-        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, TOLERANCE)
 
         engine.reportVideoSizeChanged(1080, 1920)
 
         // 切集结束后新上报照常生效，不会被永久锁在旧比例。
-        assertEquals(0.5625, controller.videoAspectRatio.value!!, TOLERANCE)
+        assertEquals(0.5625, controller.surfacePresentation.value.aspectRatio!!, TOLERANCE)
     }
 
     @Test

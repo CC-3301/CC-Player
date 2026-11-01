@@ -71,6 +71,7 @@ import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
+import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
@@ -226,7 +227,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var switching by mutableStateOf(false)
     private var restoring by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
-    private var holdBlack by mutableStateOf(false)
 
     /** 浏览页进入播放页的准备态与首次加载门禁。 */
     private val playbackEntry = PlaybackEntryState()
@@ -245,11 +245,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         )
     }
 
-    /** 切集沿用屏幕上停住的旧帧：沿用时不再铺黑底。 */
-    private var switchKeepsSurfaceFrame by mutableStateOf(false)
-
-    /** 当前集是否有视频轨；纯音频没有可显示的画面，按黑底处理。 */
-    private var targetHasVideo by mutableStateOf(true)
+    /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
+    private var surfacePresentation by mutableStateOf(SurfacePresentation())
 
     /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
     private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
@@ -287,9 +284,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
-                launch { binder.controller.holdBlack.collect { holdBlack = it } }
-                launch { binder.controller.switchKeepsSurfaceFrame.collect { switchKeepsSurfaceFrame = it } }
-                launch { binder.controller.targetHasVideo.collect { targetHasVideo = it } }
+                launch { binder.controller.surfacePresentation.collect { surfacePresentation = it } }
                 launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -451,15 +446,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             autoPlayNext = autoPlayNext,
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
-                            videoAspectRatio = videoAspectRatio,
+                            surfacePresentation = surfacePresentation,
                             switching = switching,
                             restoring = restoring,
                             buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
-                            switchKeepsSurfaceFrame = switchKeepsSurfaceFrame,
-                            targetHasVideo = targetHasVideo,
                             backgroundRestoreFrame = backgroundRestoreFrame,
-                            holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -860,9 +852,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         switching = false
         restoring = false
         buffering = false
-        holdBlack = false
-        switchKeepsSurfaceFrame = false
-        targetHasVideo = true
+        surfacePresentation = SurfacePresentation()
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off
