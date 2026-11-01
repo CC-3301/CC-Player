@@ -3,7 +3,8 @@ package com.cc3301.ccplayer.playback
 /**
  * 引擎侧的 seek 队列：恒为「1 执行 + 1 待执行」，每一跳带一个永不复用的 seekId 与本代命令序号。
  *
- * 身份由引擎分配，加载与停止都不重置它；命令序号在入队时预留，ready 带回同一个序号。
+ * 身份由引擎分配，加载与停止都不重置它；命令序号在入队时预留、首次下发用它，改写后的再次下发换新序号，
+ * ready 带回最近下发的那个。
  * 下发分两步：[seek] 只把这一跳交给 [post]，命令线程再经 [issueIfCurrent] 校验「仍是当前在途」后才下发 mpv 命令；
  * 持队列锁下发是为与 release/destroy 互斥，属性读取与诊断写盘都不在队列锁内做。
  * 切集或停止插在入队与下发之间时，旧目标因此不会打到新文件上。
@@ -81,11 +82,12 @@ internal class MpvSeekQueue(
             if (entry == null || !entry.preview) return null
             entry.targetMillis = targetMillis
             if (pending?.preview == true) pending = null
-            entry
+            // 序号在锁内取快照：命令线程随后可能把这一跳的序号换成新下发的那个。
+            Active(entry.seekId, entry.serial)
         }
         startTimeout()
         post(retargeted.seekId)
-        return Active(retargeted.seekId, retargeted.serial)
+        return retargeted
     }
 
     /**
