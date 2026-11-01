@@ -4,7 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 黑底层只在片尾、首次缓冲或切集已明确无帧时出现。 */
+/** 黑底层只在片尾、首次缓冲或切集时没有画面可显示时出现。 */
 class PlayerBlackLayerTest {
 
     @Test
@@ -16,6 +16,7 @@ class PlayerBlackLayerTest {
                 switching = true,
                 hasFreezeFrame = false,
                 freezeFramePending = true,
+                keepsSurfaceFrame = false,
             ),
         )
     }
@@ -29,6 +30,7 @@ class PlayerBlackLayerTest {
                 switching = true,
                 hasFreezeFrame = false,
                 freezeFramePending = false,
+                keepsSurfaceFrame = false,
             ),
         )
     }
@@ -42,6 +44,7 @@ class PlayerBlackLayerTest {
                 switching = true,
                 hasFreezeFrame = true,
                 freezeFramePending = false,
+                keepsSurfaceFrame = false,
             ),
         )
     }
@@ -55,6 +58,7 @@ class PlayerBlackLayerTest {
                 switching = false,
                 hasFreezeFrame = false,
                 freezeFramePending = false,
+                keepsSurfaceFrame = false,
             ),
         )
     }
@@ -68,6 +72,7 @@ class PlayerBlackLayerTest {
                 switching = false,
                 hasFreezeFrame = false,
                 freezeFramePending = false,
+                keepsSurfaceFrame = false,
             ),
         )
     }

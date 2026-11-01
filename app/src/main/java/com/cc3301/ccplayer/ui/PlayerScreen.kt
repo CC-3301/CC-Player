@@ -332,6 +332,7 @@ fun PlayerScreen(
     initialLoading: Boolean,
     freezeFrame: Bitmap?,
     freezeFramePending: Boolean,
+    switchKeepsSurfaceFrame: Boolean,
     backgroundRestoreFrame: Bitmap?,
     holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
@@ -490,7 +491,7 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲、切集已明确无帧，或片尾恢复就绪后保持黑底。
+        // 黑底画在视频视图之后：首次缓冲、切集时没有画面可显示，或片尾恢复就绪后保持黑底。
         if (
             showPlayerBlackLayer(
                 holdBlack = holdBlack,
@@ -498,6 +499,7 @@ fun PlayerScreen(
                 switching = switching,
                 hasFreezeFrame = freezeFrame != null,
                 freezeFramePending = freezeFramePending,
+                keepsSurfaceFrame = switchKeepsSurfaceFrame,
             )
         ) {
             Box(

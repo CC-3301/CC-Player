@@ -273,6 +273,35 @@ class PlayerLayoutTest {
         )
     }
 
+    @Test
+    fun `片尾自动切集沿用屏幕末帧时不铺黑底`() {
+        assertFalse(
+            showPlayerBlackLayer(
+                holdBlack = false,
+                buffering = false,
+                switching = true,
+                hasFreezeFrame = false,
+                freezeFramePending = false,
+                keepsSurfaceFrame = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `切集时没有画面可显示才铺黑底`() {
+        // 切集态且没有冻结帧、没有待抓帧、也不沿用末帧，才铺黑底。
+        assertTrue(
+            showPlayerBlackLayer(
+                holdBlack = false,
+                buffering = false,
+                switching = true,
+                hasFreezeFrame = false,
+                freezeFramePending = false,
+                keepsSurfaceFrame = false,
+            ),
+        )
+    }
+
     private fun assertViewport(
         left: Float,
         top: Float,

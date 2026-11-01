@@ -119,6 +119,13 @@ class PlaybackController(
     val freezeFramePending: StateFlow<Boolean> = _freezeFramePending.asStateFlow()
 
     /**
+     * 片尾自动切集期间沿用屏幕上停住的末帧：不抓帧，也不铺黑底。
+     * 只在自然播完触发的那次切集为真；切集结束、失败回退或目标没有视频轨时清零。
+     */
+    private val _switchKeepsSurfaceFrame = MutableStateFlow(false)
+    val switchKeepsSurfaceFrame: StateFlow<Boolean> = _switchKeepsSurfaceFrame.asStateFlow()
+
+    /**
      * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
      * 片尾没有首帧可显示，不能用冻结画面占位。
      */
@@ -590,6 +597,7 @@ class PlaybackController(
         switchOriginEnded = false
         switchFailureReported = false
         _holdBlack.value = false
+        _switchKeepsSurfaceFrame.value = false
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Initial
@@ -633,13 +641,16 @@ class PlaybackController(
         beginLoadWatchdog()
         // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
         engine.pause()
-        // 片尾切集不抓帧：原片已停在末帧，取帧只会把加载往后拖；此时界面按黑底等待。
+        // 片尾切集不抓帧：原片已停在末帧，取帧只会把加载往后拖。
         if (originAtEnd) {
             cancelSwitchCapture()
             // 上一条切换遗留的冻结画面要撤掉，否则片尾切集会停在前一集的旧帧上。
             replaceFreezeFrame(null)
+            // 没有冻结帧也没有待抓帧：屏幕上停住的末帧就是等待画面，切集期间不铺黑底。
+            _switchKeepsSurfaceFrame.value = true
             startSwitchTarget()
         } else {
+            _switchKeepsSurfaceFrame.value = false
             captureThenStartSwitch()
         }
     }
@@ -736,6 +747,7 @@ class PlaybackController(
         switchOriginEnded = false
         restoreAtEndOfEpisode = false
         _switching.value = false
+        _switchKeepsSurfaceFrame.value = false
         // 片尾失败保持黑底暂停；撤掉冻结帧与后台缓存帧。
         _holdBlack.value = originEnded
         if (originEnded) {
@@ -1557,6 +1569,7 @@ class PlaybackController(
         endBufferingIndicator()
         endLoadWatchdog()
         _switching.value = false
+        _switchKeepsSurfaceFrame.value = false
         // 状态就绪但新帧还没上屏时保留原片信息，60 秒仍无帧就回退。
         switchFramePending = targetHasVideo && !frameConfirmed
         if (!switchFramePending) {
@@ -1690,6 +1703,8 @@ class PlaybackController(
     /** 失败或取消切集：重新打开原视频，停在切集前的位置；冻结画面留到它重新出帧。 */
     private fun restoreOrigin() {
         val origin = restoreOriginBaseState() ?: return
+        // 切集失败：不再沿用屏幕上的旧画面，按原规则黑底等待或恢复原片画面。
+        _switchKeepsSurfaceFrame.value = false
         // 自然播完以显式标记为准；位置兜底只在抓不到末帧时补充。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
@@ -1944,6 +1959,7 @@ class PlaybackController(
         expectedLoadToken = 0
         switchFailureReported = false
         _holdBlack.value = false
+        _switchKeepsSurfaceFrame.value = false
         replaceFreezeFrame(null)
         resetBackgroundCapture()
     }
