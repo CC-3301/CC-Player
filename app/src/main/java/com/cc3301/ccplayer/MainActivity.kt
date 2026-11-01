@@ -364,6 +364,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     orientationMode,
                     surfacePresentation.aspectRatio,
                     sessionOrientation.override,
+                    // 进页时列表还没落地；媒介身份变化后要重算等待。
+                    playlist,
+                    currentIndex,
                 ) {
                     playerOrientationMode = orientationMode
                     when {
@@ -703,6 +706,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun enterPlayer(preparing: Boolean) {
         sessionOrientation.beginPlayback()
         appliedScreenOrientation = ScreenOrientation.System
+        heldScreenOrientation = null
         playerVisible = true
         playbackEntry.enter(preparing)
         requestNotificationPermission()
@@ -946,7 +950,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun awaitingVideoOrientation(): Boolean = awaitsVideoOrientation(
         mode = playerOrientationMode,
         videoAspectRatio = surfacePresentation.aspectRatio,
-        playingVideo = currentMediaIsVideo(),
+        audioOnly = currentMediaIsAudio(),
         rotationOverride = sessionOrientation.override,
     )
 
@@ -956,12 +960,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             heldScreenOrientation = it
             diagnostics.log { "方向等待: 视频方向未知，钉住 " + screenOrientationLabel(it) }
         }
+        appliedScreenOrientation = held
         applyOrientation(held)
     }
 
-    /** 当前条目是不是视频；纯音频没有视频方向，不进入等待。 */
-    private fun currentMediaIsVideo(): Boolean =
-        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Video } ?: false
+    /** 当前条目是不是纯音频；纯音频没有视频方向，不进入等待。列表未就绪时按视频算。 */
+    private fun currentMediaIsAudio(): Boolean =
+        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Audio } ?: false
 
     /** 传感器帧：目标方向连续稳定达到阈值后才施加。 */
     private fun applyPlayerOrientationFromSensor() {
