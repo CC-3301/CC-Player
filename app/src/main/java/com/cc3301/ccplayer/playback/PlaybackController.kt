@@ -747,6 +747,7 @@ class PlaybackController(
         switchOriginEnded = false
         restoreAtEndOfEpisode = false
         _switching.value = false
+        _switchKeepsSurfaceFrame.value = false
         // 片尾失败保持黑底暂停；撤掉冻结帧与后台缓存帧。
         _holdBlack.value = originEnded
         if (originEnded) {

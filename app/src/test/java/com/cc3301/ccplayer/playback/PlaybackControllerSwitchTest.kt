@@ -617,6 +617,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(600_000L, engine.startedPositions.last())
         assertTrue(controller.switching.value)
         assertNull(controller.freezeFrame.value)
+        // 片尾切集失败回退：不再沿用屏幕上停住的末帧，恢复期间按黑底等待。
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
         assertEquals(1, failures.size)
 
         // 片尾恢复没有首帧可等：文件加载完成即结束恢复，保持黑底暂停。
@@ -1038,6 +1041,21 @@ class PlaybackControllerSwitchTest {
         engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
+    fun `cancelling a natural end switch goes black while the origin is restored`() = runTest {
+        val controller = playingController()
+
+        engine.reportPlaybackEnded()
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+
+        assertTrue(controller.cancelSwitch())
+
+        // 取消后不再沿用末帧：恢复原片期间按黑底等待它重新出帧。
+        assertTrue(controller.restoring.value)
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
     }
 
     @Test

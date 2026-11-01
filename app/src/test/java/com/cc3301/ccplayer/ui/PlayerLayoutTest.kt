@@ -289,7 +289,7 @@ class PlayerLayoutTest {
 
     @Test
     fun `切集时没有画面可显示才铺黑底`() {
-        // 目标没有视频轨、抓帧没有结果、或 60 秒无帧回退：控制器不再沿用旧画面。
+        // 切集态且没有冻结帧、没有待抓帧、也不沿用末帧，才铺黑底。
         assertTrue(
             showPlayerBlackLayer(
                 holdBlack = false,
