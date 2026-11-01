@@ -3,7 +3,10 @@ package com.cc3301.ccplayer.streaming
 /**
  * 退到后台后何时丢弃已建立的字节源：
  * 后台且（后台播放关闭 或 当前暂停）才丢；加载期间先记待丢弃，
- * 加载结束或下次回到前台发起请求前补做一次，做完清标志。
+ * 加载结束（仍在后台）或回到前台时补做一次。
+ *
+ * 标志只在 [discard] 真的执行之后才清：没丢成的那一次留着等下一次补做，
+ * 不会被「标志已消费」吞掉。
  */
 class StaleSourceDiscardPolicy {
 
@@ -24,17 +27,25 @@ class StaleSourceDiscardPolicy {
             pending = true
             return false
         }
+        pending = false
         return true
     }
 
-    /** 加载结束：有待丢弃就补做一次。 */
-    fun onLoadingFinished(): Boolean = consumePending()
+    /**
+     * 加载结束：按当前是否仍在后台重新判定——已回到前台就留给回前台补做，标志不动。
+     * [discard] 返回是否真的丢了。
+     */
+    fun onLoadingFinished(inBackground: Boolean, discard: () -> Boolean): Boolean {
+        if (!inBackground) return false
+        return makeup(discard)
+    }
 
     /** 回到前台发起请求前：有待丢弃就补做一次。 */
-    fun onReturnedToForeground(): Boolean = consumePending()
+    fun onReturnedToForeground(discard: () -> Boolean): Boolean = makeup(discard)
 
-    private fun consumePending(): Boolean {
+    private fun makeup(discard: () -> Boolean): Boolean {
         if (!pending) return false
+        if (!discard()) return false
         pending = false
         return true
     }

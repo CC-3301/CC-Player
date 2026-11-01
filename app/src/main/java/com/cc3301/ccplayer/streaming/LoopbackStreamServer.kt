@@ -8,6 +8,11 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 /** 接受循环连续失败达到该次数后关闭监听，避免忙循环。 */
@@ -15,6 +20,9 @@ internal const val LOOPBACK_ACCEPT_FAILURE_LIMIT = 8
 
 /** 拷贝块的固定大小；回环读写统一按 1 MiB 搬运。 */
 internal const val COPY_BUFFER_BYTES = 1024 * 1024
+
+/** 重建字节源的等待上限：超时按本次请求失败收尾，不无限等待。 */
+internal const val SOURCE_REBUILD_TIMEOUT_MILLIS = 5_000L
 
 /**
  * 回环 HTTP 代理：只监听 127.0.0.1，把登记的流按 Range 响应给本机播放器。
@@ -27,6 +35,7 @@ internal const val COPY_BUFFER_BYTES = 1024 * 1024
 class LoopbackStreamServer(
     port: Int = 0,
     private val acceptSocket: (ServerSocket) -> Socket = { it.accept() },
+    private val rebuildTimeoutMillis: Long = SOURCE_REBUILD_TIMEOUT_MILLIS,
 ) : AutoCloseable {
 
     private val entries = ConcurrentHashMap<String, Entry>()
@@ -35,6 +44,12 @@ class LoopbackStreamServer(
     /** 已 accept 的连接；[close] 逐个断开，阻塞在读上的处理线程随之退出。 */
     private val connections = ConcurrentHashMap.newKeySet<Socket>()
     private val nextId = AtomicLong(1)
+
+    /** 建源线程：SMB 重连可能长时间阻塞，不能挂在请求线程上。 */
+    private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "loopback-source-open").apply { isDaemon = true }
+    }
+
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
         isDaemon = true
@@ -56,7 +71,11 @@ class LoopbackStreamServer(
     fun serve(key: String, open: () -> ByteSource): String {
         val id = idsByKey.computeIfAbsent(key) {
             val created = nextId.getAndIncrement().toString()
-            entries[created] = Entry(open)
+            entries[created] = Entry(
+                open = open,
+                runAsync = { task -> sourceOpener.execute { task() } },
+                timeoutMillis = rebuildTimeoutMillis,
+            )
             created
         }
         return "http://$LOOPBACK_ADDRESS:$port/$id"
@@ -70,6 +89,8 @@ class LoopbackStreamServer(
         entries.values.forEach { it.close() }
         entries.clear()
         idsByKey.clear()
+        // 在途建源不在这里等、也不打断：建好后由建源线程自己关掉。
+        sourceOpener.shutdown()
     }
 
     private fun acceptLoop() {
@@ -329,8 +350,15 @@ class LoopbackStreamServer(
     /**
      * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
      * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
+     *
+     * 重建不持锁也不占用请求线程：锁只保护「谁在重建」与 source 引用的切换，
+     * 关旧源与建新源都在建源线程上做；请求最多等 [timeoutMillis]。
      */
-    private class Entry(private val open: () -> ByteSource) {
+    private class Entry(
+        private val open: () -> ByteSource,
+        private val runAsync: (() -> Unit) -> Unit,
+        private val timeoutMillis: Long,
+    ) {
 
         private val lock = Any()
 
@@ -344,30 +372,78 @@ class LoopbackStreamServer(
         @Volatile
         private var closed = false
 
-        /** 取字节源；建立失败时抛出，下次请求会重试。关闭后不再建立新源。 */
+        /** 在途重建；非空期间来的请求跟着它一起等结果，不另起一次建源。 */
+        private var rebuilding: Rebuild? = null
+
+        /** 取字节源；建立失败或等待超时都抛出，下次请求会重试。关闭后不再建立新源。 */
         fun source(): ByteSource {
-            if (closed) throw IllegalStateException("流已关闭")
-            source?.let { current -> if (!stale) return current }
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+            var round: Rebuild? = null
+            var started = false
             synchronized(lock) {
                 check(!closed) { "流已关闭" }
-                // 还没有源时先消费陈旧标记：空标记不该让第一次建源白建一次。
-                if (source == null) consumeStale()
-                source?.let { current ->
-                    if (!consumeStale()) return current
-                    // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
-                    source = null
-                    runCatching { current.close() }
+                val inFlight = rebuilding
+                if (inFlight != null) {
+                    round = inFlight
+                } else {
+                    val current = source
+                    if (current != null && !stale) return current
+                    // 这次重建消费当前标记：空标记不该让第一次建源白建一次。
+                    consumeStale()
+                    val created = Rebuild()
+                    rebuilding = created
+                    round = created
+                    started = true
                 }
-                // 建源可能阻塞较久：建源期间收到的陈旧请求让这一条立即作废并重建一次；
-                // 重建期间再来的标记留给下一次请求从同一处消费。
+            }
+            val pending = round ?: throw IllegalStateException("流已关闭")
+            if (started) runAsync { rebuild(pending) }
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0L || !pending.finished.await(remaining, TimeUnit.NANOSECONDS)) {
+                throw TimeoutException("重建字节源超时")
+            }
+            pending.failure?.let { throw it }
+            return pending.result ?: throw IllegalStateException("流已关闭")
+        }
+
+        /**
+         * 建源：关闭旧源与建立新源都不持锁，锁只在发布结果时短暂持有。
+         * 建源期间收到陈旧标记时，建好的这一条立即作废再建一次；二次建源期间再来的标记留给下一次请求。
+         * 建源期间这条流被关闭时，建出来的源在这里自己关掉。
+         */
+        private fun rebuild(round: Rebuild) {
+            var result: ByteSource? = null
+            var failure: Throwable? = null
+            try {
+                var expired: ByteSource? = null
+                synchronized(lock) {
+                    expired = source
+                    source = null
+                }
+                // 旧源可能还有别的响应在读，关闭后那一条按读取失败收尾。
+                expired?.let { runCatching { it.close() } }
                 var created = open()
                 if (consumeStale()) {
                     runCatching { created.close() }
                     created = open()
                 }
-                source = created
-                return created
+                var kept = false
+                synchronized(lock) {
+                    if (!closed) {
+                        source = created
+                        result = created
+                        kept = true
+                    }
+                    rebuilding = null
+                }
+                if (!kept) runCatching { created.close() }
+            } catch (thrown: Throwable) {
+                failure = thrown
+                synchronized(lock) { rebuilding = null }
             }
+            round.failure = failure
+            round.result = result
+            round.finished.countDown()
         }
 
         /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */
@@ -398,13 +474,27 @@ class LoopbackStreamServer(
             }
         }
 
+        /** 关闭这条流：只改状态并关掉当前源，不等在途建源；建好的源由建源线程自己关掉。 */
         fun close() {
+            var current: ByteSource? = null
             synchronized(lock) {
                 closed = true
-                source?.let { runCatching { it.close() } }
+                current = source
                 source = null
                 stale = false
             }
+            current?.let { runCatching { it.close() } }
+        }
+
+        /** 一轮重建：发起方与并发请求共用一个结果，[finished] 一定有且只触发一次。 */
+        private class Rebuild {
+            val finished = CountDownLatch(1)
+
+            @Volatile
+            var result: ByteSource? = null
+
+            @Volatile
+            var failure: Throwable? = null
         }
     }
 
