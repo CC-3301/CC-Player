@@ -264,6 +264,35 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
+    fun `切集期间按播放键记录排队意图`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        controller.togglePlayPause()
+
+        assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队暂停") })
+    }
+
+    @Test
+    fun `播放会话未就绪时播放键未被执行的记录`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        open(controller)
+
+        // 首次加载阶段播放键没有可执行的会话状态：留一行诊断。
+        controller.togglePlayPause()
+
+        assertTrue(sink.lines.any { it.contains("播放键未执行") })
+    }
+
+    @Test
     fun `重复失败只记录一次`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)

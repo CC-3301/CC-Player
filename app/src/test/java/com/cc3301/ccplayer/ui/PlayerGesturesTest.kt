@@ -134,9 +134,12 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `切集期间只放行返回、上一集与下一集`() {
+    fun `切集期间放行返回、上一集、下一集与播放暂停`() {
         val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
-        assertEquals(setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next), allowed)
+        assertEquals(
+            setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next, PlayerAction.PlayPause),
+            allowed,
+        )
     }
 
     @Test
@@ -185,14 +188,14 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `切集期间其它动作被拦截但外观不禁用`() {
+    fun `切集期间被拦截的动作按不可用外观显示`() {
         listOf(
-            PlayerAction.PlayPause,
             PlayerAction.Seek,
             PlayerAction.Lock,
             PlayerAction.More,
             PlayerAction.Playlist,
             PlayerAction.Subtitles,
+            PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(
                 action.name,
@@ -201,7 +204,7 @@ class PlayerGesturesTest {
             )
             assertEquals(
                 action.name,
-                true,
+                false,
                 actionLooksEnabled(
                     action,
                     canGoPrevious = true,
@@ -212,6 +215,25 @@ class PlayerGesturesTest {
                 ),
             )
         }
+    }
+
+    @Test
+    fun `切集期间播放暂停可点且外观正常`() {
+        assertEquals(
+            true,
+            actionAllowed(PlayerAction.PlayPause, switching = true, initialLoading = false, restoring = false),
+        )
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.PlayPause,
+                canGoPrevious = false,
+                canGoNext = false,
+                switching = true,
+                initialLoading = false,
+                restoring = false,
+            ),
+        )
     }
 
     @Test

@@ -160,6 +160,49 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
+    fun `按下控件即重新计时`() {
+        now = 4_999L
+        controls.onPressDown()
+
+        assertEquals(4_999L, controls.lastInteractionAtMillis)
+
+        now = 5_000L
+        controls.hideIfExpired()
+
+        assertEquals(true, controls.visible)
+    }
+
+    @Test
+    fun `按住期间不自动隐藏`() {
+        controls.onPressDown()
+        assertEquals(true, controls.pressing)
+
+        now = 30_000L
+        assertEquals(-1L, controls.millisUntilAutoHide())
+        controls.hideIfExpired()
+
+        assertEquals(true, controls.visible)
+    }
+
+    @Test
+    fun `抬起后从抬起时刻重新计时`() {
+        controls.onPressDown()
+        now = 20_000L
+        controls.onPressUp()
+
+        assertEquals(false, controls.pressing)
+        assertEquals(5_000L, controls.millisUntilAutoHide())
+
+        now = 24_999L
+        controls.hideIfExpired()
+        assertEquals(true, controls.visible)
+
+        now = 25_000L
+        controls.hideIfExpired()
+        assertEquals(false, controls.visible)
+    }
+
+    @Test
     fun `隐藏态加载阶段变化不显示控制层`() {
         now = 5_000L
         controls.hideIfExpired()

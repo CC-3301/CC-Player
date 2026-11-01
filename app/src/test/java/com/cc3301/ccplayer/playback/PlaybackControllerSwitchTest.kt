@@ -1979,6 +1979,55 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `切集期间按播放键排队，切集就绪后暂停`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        controller.togglePlayPause()
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        // 意图在切集就绪后生效：目标是新集，停在新集首帧的暂停态。
+        assertFalse(controller.switching.value)
+        assertEquals(1, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
+    fun `切集期间连按两次播放键回到继续`() = runTest {
+        val controller = playingController()
+
+        controller.next()
+        controller.togglePlayPause()
+        controller.togglePlayPause()
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(1, engine.resumeCalls)
+    }
+
+    @Test
+    fun `切集期间按下的暂停在重新前移目标后仍然生效`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+
+        controller.next()
+        controller.togglePlayPause()
+        controller.next()
+
+        engine.reportFileLoaded()
+        engine.reportFirstFrameReady()
+
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.resumeCalls)
+    }
+
+    @Test
     fun `a single resume echo is ignored but real load activity still refreshes`() {
         val gate = ResumeActivityGate()
 

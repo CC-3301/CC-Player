@@ -19,7 +19,7 @@ const val CONTROLS_FADE_MILLIS = 200L
  * 播放页控制层的显隐与自动隐藏计时。
  *
  * 显示状态下 [CONTROLS_AUTO_HIDE_MILLIS] 内无操作即隐藏；任意操作重新计时；
- * 面板打开期间不隐藏，关闭后重新计时（ADR-0025）。
+ * 面板打开或控件按住期间不隐藏，关闭或抬起后重新计时（ADR-0025）。
  *
  * 显示只由用户操作触发：点击画面 [toggle]、点击控件 [showByUserAction]、用户在面板里打开抽屉
  * 或菜单 [updatePanelOpen]；首次加载与切集不显示控制层。
@@ -37,6 +37,10 @@ class PlayerControlsVisibility(
     var lastInteractionAtMillis by mutableLongStateOf(elapsedMillis())
         private set
 
+    /** 控件按住中：按下即重新计时，按住全程不自动隐藏。 */
+    var pressing by mutableStateOf(false)
+        private set
+
     /** 点击画面：显示时隐藏，隐藏时显示并重新计时。 */
     fun toggle() {
         if (visible) visible = false else showByUserAction()
@@ -50,6 +54,18 @@ class PlayerControlsVisibility(
 
     /** 仅重新计时，不改显隐；手势只重置自动隐藏计时，不唤出控制层。 */
     fun resetTimer() {
+        lastInteractionAtMillis = elapsedMillis()
+    }
+
+    /** 控件按下：按操作重新计时并保持显示，抬起前不隐藏。 */
+    fun onPressDown() {
+        pressing = true
+        lastInteractionAtMillis = elapsedMillis()
+    }
+
+    /** 控件抬起：恢复计时，隐藏倒计时从抬起时刻重新起算。 */
+    fun onPressUp() {
+        pressing = false
         lastInteractionAtMillis = elapsedMillis()
     }
 
@@ -71,16 +87,16 @@ class PlayerControlsVisibility(
         }
     }
 
-    /** 距自动隐藏的剩余毫秒；不参与计时或 [holdVisible] 为真时返回 -1。 */
+    /** 距自动隐藏的剩余毫秒；不参与计时、[holdVisible] 或按住中时返回 -1。 */
     fun millisUntilAutoHide(holdVisible: Boolean = false): Long {
-        if (holdVisible || !visible || panelOpen) return -1L
+        if (holdVisible || !visible || panelOpen || pressing) return -1L
         val elapsed = elapsedMillis() - lastInteractionAtMillis
         return (CONTROLS_AUTO_HIDE_MILLIS - elapsed).coerceAtLeast(0L)
     }
 
-    /** 显示状态下无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 后隐藏；面板打开或 [holdVisible] 时保持。 */
+    /** 显示状态下无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 后隐藏；面板打开、按住中或 [holdVisible] 时保持。 */
     fun hideIfExpired(holdVisible: Boolean = false) {
-        if (holdVisible || !visible || panelOpen) return
+        if (holdVisible || !visible || panelOpen || pressing) return
         if (elapsedMillis() - lastInteractionAtMillis >= CONTROLS_AUTO_HIDE_MILLIS) {
             visible = false
         }
