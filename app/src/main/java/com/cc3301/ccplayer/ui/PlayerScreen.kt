@@ -87,6 +87,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,7 +100,6 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -147,6 +147,7 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -189,41 +190,10 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
     }
 }
 
-/** 鼠标移动或进入才算指针活动；触摸与手写笔不参与指针显隐。 */
-private fun PointerEvent.isMouseActivity(): Boolean =
-    (type == PointerEventType.Enter || type == PointerEventType.Move) &&
-        changes.any { it.type == PointerType.Mouse }
-
-/** 等到下一次鼠标活动，期间到达的其它事件不写状态。 */
-private suspend fun AwaitPointerEventScope.awaitMouseActivity() {
-    while (!awaitPointerEvent().isMouseActivity()) {
-        // 忽略触摸与手写笔事件。
-    }
-}
-
-/**
- * 鼠标静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 隐藏指针，再有任何鼠标活动立即恢复。
- * 计时只在鼠标真正出现后开始，触屏用户不会进入这段逻辑；
- * 每次鼠标移动只重置倒计时，只有可见性真正翻转时才回调，避免逐帧重组。
- */
-private suspend fun AwaitPointerEventScope.autoHidePointer(onVisibilityChange: (Boolean) -> Unit) {
-    var hidden = false
-    while (true) {
-        awaitMouseActivity()
-        if (hidden) {
-            hidden = false
-            onVisibilityChange(false)
-        }
-        // 超时仍未收到鼠标活动即视为静止；期间收到活动则回到外层重新计时。
-        val idle = withTimeoutOrNull(PLAYER_POINTER_HIDE_DELAY_MILLIS) {
-            awaitMouseActivity()
-            false
-        } ?: true
-        if (idle) {
-            hidden = true
-            onVisibilityChange(true)
-        }
-    }
+/** 鼠标移动或进入时的指针位置；触摸与手写笔不参与指针显隐，返回 null。 */
+private fun PointerEvent.mousePosition(): Offset? {
+    if (type != PointerEventType.Enter && type != PointerEventType.Move) return null
+    return changes.firstOrNull { it.type == PointerType.Mouse }?.position
 }
 
 /** 播放页点击：按压反馈由目标区域决定，覆盖范围外不显示涟漪。 */
@@ -362,6 +332,19 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
+    // 本次播放开始过切集之后，加载阶段不再算首次缓冲。
+    var switchedThisSession by remember { mutableStateOf(false) }
+    LaunchedEffect(switching) {
+        switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
+    }
+    val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
+    // 顶/底栏是否可见同时决定指针是否跟随出现。
+    val barsVisible = playerBarsVisible(
+        locked = locked,
+        controlsVisible = controlsVisible,
+        panelBarsVisible = panels.controlBarsVisible,
+        firstBuffering = firstBuffering,
+    )
     // 面板可见性统一由此判定；不可见的面板不能拦截手势。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -372,10 +355,9 @@ fun PlayerScreen(
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
 
-    // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
+    // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
     LaunchedEffect(switching, initialLoading) {
-        // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
-        controls.show()
+        controls.onLoadingPhaseChanged()
         panels.closeWhenBlocked(switching, initialLoading)
     }
 
@@ -435,23 +417,43 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 播放页内鼠标静止 3 秒隐藏指针，移动或离开播放页时恢复。其它界面不处理指针。
+    // 指针跟随顶/底栏的实际可见性；栏隐藏时指针一并隐藏，有效移动只唤出指针。其它界面不处理指针。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
-    var pointerHidden by remember { mutableStateOf(false) }
+    val pointer = remember { PlayerPointerVisibility() }
+    LaunchedEffect(barsVisible) {
+        pointerFollowsBars(barsVisible, pointer)
+    }
+    // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
+    LaunchedEffect(pointer) {
+        runPointerAutoHide(
+            pointer = pointer,
+            awaitVisible = { snapshotFlow { pointer.visible }.first { it } },
+            delayMillis = { delay(it) },
+        )
+    }
 
+    val pointerDensity = LocalDensity.current
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)
         .pointerHoverIcon(
-            icon = if (pointerHidden) hiddenPointerIcon else PointerIcon.Default,
+            icon = if (pointer.visible) PointerIcon.Default else hiddenPointerIcon,
             overrideDescendants = true,
         )
-        .pointerInput(Unit) {
+        .pointerInput(pointerDensity.density) {
             awaitPointerEventScope {
-                autoHidePointer { hidden -> pointerHidden = hidden }
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val position = event.mousePosition() ?: continue
+                    if (event.type == PointerEventType.Enter) {
+                        pointer.onPointerEnter(position)
+                    } else {
+                        pointer.onPointerMove(position, pointerDensity)
+                    }
+                }
             }
         }) {
         val density = LocalDensity.current
@@ -592,9 +594,6 @@ fun PlayerScreen(
                     .semantics { contentDescription = lockedHint },
             )
         }
-        val barsVisible = inputAllowed(PlayerInput.ControlBar, locked) &&
-            backEntryVisible(controlsVisible, initialLoading) &&
-            panels.controlBarsVisible
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
@@ -628,11 +627,11 @@ fun PlayerScreen(
                 ),
                 onBack = onClose,
                 onRotate = {
-                    controls.show()
+                    controls.showByUserAction()
                     onToggleRotation()
                 },
                 onToggleMore = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.More)
                 },
             )
@@ -659,15 +658,15 @@ fun PlayerScreen(
                 restoring = restoring,
                 interactive = barsVisible,
                 onTogglePlayPause = {
-                    controls.show()
+                    controls.showByUserAction()
                     onTogglePlayPause()
                 },
                 onPrevious = {
-                    controls.show()
+                    controls.showByUserAction()
                     onPrevious()
                 },
                 onNext = {
-                    controls.show()
+                    controls.showByUserAction()
                     onNext()
                 },
                 onSeekPreview = { position, requestSeek ->
@@ -680,11 +679,11 @@ fun PlayerScreen(
                 },
                 onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.Playlist)
                 },
                 onToggleSubtitleMenu = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.Subtitles)
                 },
                 onLock = { lock.tapLockButton() },
@@ -738,7 +737,7 @@ fun PlayerScreen(
             UnlockButton(
                 onTap = {
                     lock.tapLockButton()
-                    controls.show()
+                    controls.showByUserAction()
                 },
                 modifier = Modifier
                     .align(Alignment.TopStart)

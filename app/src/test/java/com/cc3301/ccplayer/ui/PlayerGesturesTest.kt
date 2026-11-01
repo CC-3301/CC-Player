@@ -351,13 +351,6 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `首次加载时返回入口不受控制层显隐影响`() {
-        assertTrue(backEntryVisible(controlsVisible = true, initialLoading = false))
-        assertTrue(backEntryVisible(controlsVisible = false, initialLoading = true))
-        assertFalse(backEntryVisible(controlsVisible = false, initialLoading = false))
-    }
-
-    @Test
     fun `双击跳转按当前位置与时长夹取实际位移`() {
         assertEquals(
             RelativeSeekTarget(targetMillis = 20_000L, deltaMillis = 10_000L),
