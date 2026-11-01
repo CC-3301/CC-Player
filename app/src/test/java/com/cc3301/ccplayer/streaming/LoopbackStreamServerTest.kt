@@ -15,6 +15,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -568,8 +569,9 @@ class LoopbackStreamServerTest {
             fresh.close()
             val closeMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
 
-            // 关闭只改状态并返回，不等在建源上。
+            // 关闭只改状态并返回，不等在建源上：建源还卡着，源也确实还没建出来。
             assertTrue("关闭耗时 $closeMillis ms", closeMillis < 1_000)
+            assertFalse("关闭不该等建源返回", builtClosed.get())
 
             // 后台建源返回后自己关掉建出来的源。
             release.countDown()
@@ -579,6 +581,28 @@ class LoopbackStreamServerTest {
             release.countDown()
             runCatching { fresh.close() }
             request.join(5_000)
+        }
+    }
+
+    @Test(timeout = 10_000L)
+    fun `建源线程已关时请求当场失败，不把超时走满`() {
+        val rejected = Executors.newSingleThreadExecutor().apply { shutdown() }
+        val fresh = LoopbackStreamServer(rebuildTimeoutMillis = 10_000, sourceOpener = rejected)
+        try {
+            val target = fresh.serve("smb://nas/media/拒绝.mkv") { RecordingByteSource(payload) }
+
+            val first = System.nanoTime()
+            val response = httpRequest(target)
+            val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - first)
+
+            // 投递被拒就当场结算这一轮：回 503，不是等满 10 秒超时。
+            assertEquals(503, response.statusCode)
+            assertTrue("等了 $waitedMillis ms", waitedMillis < 1_000)
+
+            // 在途轮次已清空：下一次请求同样当场失败，不会挂在前一轮上。
+            assertEquals(503, httpRequest(target).statusCode)
+        } finally {
+            fresh.close()
         }
     }
 

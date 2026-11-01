@@ -36,6 +36,10 @@ class LoopbackStreamServer(
     port: Int = 0,
     private val acceptSocket: (ServerSocket) -> Socket = { it.accept() },
     private val rebuildTimeoutMillis: Long = SOURCE_REBUILD_TIMEOUT_MILLIS,
+    /** 建源线程：SMB 重连可能长时间阻塞，不能挂在请求线程上。 */
+    private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "loopback-source-open").apply { isDaemon = true }
+    },
 ) : AutoCloseable {
 
     private val entries = ConcurrentHashMap<String, Entry>()
@@ -44,11 +48,6 @@ class LoopbackStreamServer(
     /** 已 accept 的连接；[close] 逐个断开，阻塞在读上的处理线程随之退出。 */
     private val connections = ConcurrentHashMap.newKeySet<Socket>()
     private val nextId = AtomicLong(1)
-
-    /** 建源线程：SMB 重连可能长时间阻塞，不能挂在请求线程上。 */
-    private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
-        Thread(runnable, "loopback-source-open").apply { isDaemon = true }
-    }
 
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
