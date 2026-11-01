@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -109,17 +110,20 @@ class PlaybackController(
     val buffering: StateFlow<Boolean> = _buffering.asStateFlow()
 
     /**
-     * 屏幕上现在该显示什么：界面只读这个派生结果（有无画面与该用的比例），
+     * 屏幕上现在该显示什么：界面只读这个派生结果（有无画面、该用的比例与回前台的缓存帧），
      * 不再自行组合加载阶段、黑底与视频轨。只在 [settlePresentation] 里写。
      */
     private val _surfacePresentation = MutableStateFlow(SurfacePresentation())
     val surfacePresentation: StateFlow<SurfacePresentation> = _surfacePresentation.asStateFlow()
 
-    /** 切集起点屏幕上是否停着原片画面；目标出画面、Surface 重建或切集结束时清零。 */
-    private var originFrameOnSurface = false
+    /** 屏幕上停着的是哪一帧；撤旧帧与比例切换都只认它。 */
+    private var screenFrame = ScreenFrame.None
 
-    /** 当前加载代际的画面是否已经上屏。 */
-    private var frameOnSurface = false
+    /**
+     * 本次切集的目标是否已接管视频输出（收到过重配或首帧信号）。
+     * 它不撤屏上的旧帧，只在无帧兜底时区分「旧帧可能已不在屏上」与「旧帧还在屏上」。
+     */
+    private var switchOutputLive = false
 
     /** 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。 */
     private var holdBlack = false
@@ -132,11 +136,10 @@ class PlaybackController(
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
 
     /**
-     * 暂停态退到后台前缓存的画面。回前台先盖在视频视图上，
-     * 等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
+     * 暂停态退到后台前缓存的画面，对外只作为 [SurfacePresentation.heldFrame] 出现：
+     * 回前台先盖在视频视图上，等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
      */
     private val _backgroundRestoreFrame = MutableStateFlow<Bitmap?>(null)
-    val backgroundRestoreFrame: StateFlow<Bitmap?> = _backgroundRestoreFrame.asStateFlow()
 
     /** 抓帧进行中；抓帧线程写，界面线程读。 */
     @Volatile
@@ -449,8 +452,7 @@ class PlaybackController(
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
             // Surface 销毁后屏幕上没有画面：回前台按黑底等首个新帧。
-            originFrameOnSurface = false
-            frameOnSurface = false
+            screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
             suspendSwitchFrameWatchdog()
@@ -532,7 +534,7 @@ class PlaybackController(
             val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
             backgroundCaptureInFlight = false
             if (frame == null || token != backgroundCaptureToken) return@launch
-            _backgroundRestoreFrame.value = frame
+            replaceBackgroundRestoreFrame(frame)
         }
         backgroundCaptureJob = job
         return job
@@ -588,8 +590,8 @@ class PlaybackController(
         switchFailureReported = false
         holdBlack = false
         // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
-        originFrameOnSurface = false
-        frameOnSurface = false
+        screenFrame = ScreenFrame.None
+        switchOutputLive = false
         originAspectRatio = null
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
@@ -624,8 +626,9 @@ class PlaybackController(
         switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
         // 切集起点屏幕上的画面与比例都取自派生结果：黑底期间没有画面可沿用。
-        originFrameOnSurface = _surfacePresentation.value.showsPicture
-        originAspectRatio = _surfacePresentation.value.aspectRatio ?: _videoAspectRatio.value
+        val presentation = _surfacePresentation.value
+        screenFrame = if (presentation.showsPicture) ScreenFrame.Origin else ScreenFrame.None
+        originAspectRatio = presentation.aspectRatio
         holdBlack = false
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
@@ -640,31 +643,28 @@ class PlaybackController(
     }
 
     /**
-     * 唯一的派生点：按当前事实算出屏幕该显示什么。
-     * 切集起点、新帧上屏、切集就绪、失败或取消回原片、新加载开始、会话结束时调用；
+     * 唯一的派生点：把当前事实交给 [deriveSurfacePresentation]，得出屏幕该显示什么。
+     * 切集起点、新帧上屏、切集就绪、失败或取消回原片、新加载开始、会话结束、Surface 重建时调用；
      * 「撤旧帧」与「比例采纳」都只在这里一起发生。
      */
     private fun settlePresentation() {
-        val showsPicture = when {
-            // 当前集没有视频轨：没有可显示的画面。
-            !targetHasVideo -> false
-            // 片尾恢复就绪后保持黑底。
-            holdBlack -> false
-            // 首次打开：画面真正上屏前什么都没有。
-            loadPhase == LoadPhase.Initial -> frameOnSurface
-            // 恢复期：片尾恢复保持黑底，手动失败/取消的过渡沿用原片画面。
-            loadPhase == LoadPhase.Restoring -> !switchOriginEnded && (originFrameOnSurface || frameOnSurface)
-            // 切集与常态：原片画面还在，或当前画面已经上屏。
-            else -> originFrameOnSurface || frameOnSurface
-        }
-        // 屏幕上还是原片画面时沿用它原来的比例；目标画面接管后换成新文件比例。
-        val aspectRatio = if (originFrameOnSurface && !frameOnSurface) {
-            originAspectRatio ?: _videoAspectRatio.value
-        } else {
-            _videoAspectRatio.value
-        }
-        _surfacePresentation.value = SurfacePresentation(showsPicture = showsPicture, aspectRatio = aspectRatio)
+        _surfacePresentation.value = deriveSurfacePresentation(
+            screenFrame = screenFrame,
+            targetHasVideo = targetHasVideo,
+            endBlackHold = endBlackHold(),
+            originAspectRatio = originAspectRatio,
+            targetAspectRatio = _videoAspectRatio.value,
+            heldFrame = _backgroundRestoreFrame.value,
+        )
     }
+
+    /**
+     * 片尾黑底：片尾自动切集结束、且停在暂停等待时成立；已挂起的黑底同样算。
+     * 切集进行中不判：片尾的末帧要继续留在屏上，直到目标画面接管。
+     * 派生与恢复收尾共用这一处判据。
+     */
+    private fun endBlackHold(): Boolean =
+        holdBlack || (loadPhase != LoadPhase.Switching && switchOriginEnded && paused)
 
     /** 切集目标切换时共用的状态重置；缓冲计时由调用方决定。 */
     private fun applySwitchTarget(index: Int, media: MediaFile) {
@@ -676,9 +676,8 @@ class PlaybackController(
         restartSwitchFrameDeadline()
         _switching.value = true
         _restoring.value = false
-        // 新目标还没出画面：按切集起点的画面重新判定（重定目标后不会误黑）。
-        frameOnSurface = false
-        settlePresentation()
+        // 新目标还没接管视频输出：屏上仍只可能是切集起点的原片画面。
+        switchOutputLive = false
         restartFromStartAfterRestore = false
         endSeekPreview(commit = false)
         _subtitleTracks.value = emptyList()
@@ -1200,11 +1199,9 @@ class PlaybackController(
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
-        // 目标已接管视频输出：屏上不再是原片画面。
-        originFrameOnSurface = false
-        // 只有「首帧已可显示」这条强信号才算画面已上屏；需确认的重配信号不算。
-        if (!needsFrameConfirmation) frameOnSurface = true
-        settlePresentation()
+        // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
+        // 撤帧只发生在确认接管的 [handleReadySignal] 强信号与 [confirmFrame]。
+        switchOutputLive = true
         if (!resumeLookupDone) {
             // 期间若已收到无需确认的首帧，它是更强的信号，不能被后续重配覆盖。
             if (deferredReadyNeedsFrame != false) {
@@ -1238,6 +1235,9 @@ class PlaybackController(
      */
     private fun handleReadySignal(phase: LoadPhase, needsFrameConfirmation: Boolean) {
         if (!needsFrameConfirmation) {
+            // 首帧已可显示：屏上就是当前加载的画面，切集起点的旧帧到此撤掉、比例同时换新。
+            screenFrame = ScreenFrame.Target
+            settlePresentation()
             finishReady(phase)
             return
         }
@@ -1248,7 +1248,7 @@ class PlaybackController(
         }
         if (phase == LoadPhase.Switching) {
             if (paused) {
-                // 切集中用户又暂停：按暂停收尾，屏幕上的旧画面留到用户继续播放后真正出帧。
+                // 切集中用户又暂停：按暂停收尾；暂停态就绪即撤旧帧，直接露新集首帧。
                 finishReady(phase)
                 return
             }
@@ -1361,9 +1361,8 @@ class PlaybackController(
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
         }
-        // 新帧真的上屏：屏上就是当前加载的画面。
-        originFrameOnSurface = false
-        frameOnSurface = true
+        // 新帧真的上屏：屏上就是当前加载的画面。撤旧帧只认这一处与就绪强信号。
+        screenFrame = ScreenFrame.Target
         settlePresentation()
         if (switchFramePending) clearPendingSwitchFrame()
         if (readyState == ReadyState.AwaitingFrame) finishReady(loadPhase, frameConfirmed = true)
@@ -1522,7 +1521,9 @@ class PlaybackController(
             switchOriginIndex = NO_MEDIA
             switchOriginEnded = false
         }
-        // 切集就绪（播放态与暂停态都经过这里）：撤旧帧与比例采纳在这一处一起生效。
+        // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
+        // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
+        if (paused && _renderSurfaceAvailable.value) screenFrame = ScreenFrame.Target
         settlePresentation()
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
@@ -1631,6 +1632,12 @@ class PlaybackController(
         switchFailureReported = true
         switchFramePending = false
         _switching.value = true
+        // 收到过目标的重配或首帧信号却迟迟等不到帧：旧帧可能已经不在屏上，按黑底回退原片。
+        // 完全没有接管信号时，原片画面还停在屏上，继续沿用、不铺黑底。
+        if (switchOutputLive) {
+            screenFrame = ScreenFrame.None
+            settlePresentation()
+        }
         restoreOrigin()
         _playbackFailures.tryEmit(Unit)
     }
@@ -1647,12 +1654,11 @@ class PlaybackController(
 
     /**
      * 失败或取消切集：重新打开原视频，停在切集前的位置。
-     * 屏幕上还有原片画面时继续沿用、不铺黑底；片尾自动切集或画面已被覆盖时按黑底等待。
+     * 屏幕上还有原片画面时继续沿用、不铺黑底；片尾自动切集按黑底等待，
+     * 目标已接管视频输出却等不到帧的情形由 60 秒兜底先撤帧，恢复期同样按黑底等原片重新出帧。
      */
     private fun restoreOrigin() {
         val origin = restoreOriginBaseState() ?: return
-        // 失败或取消：屏上还有原片画面就继续沿用，被目标覆盖过或片尾自动切集则按黑底等待。
-        settlePresentation()
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
@@ -1664,6 +1670,8 @@ class PlaybackController(
         loadGeneration++
         loadPhase = LoadPhase.Restoring
         _restoring.value = true
+        // 进入恢复阶段后再派生：恢复期的黑底与沿用旧帧按这一阶段的规则判定。
+        settlePresentation()
         beginLoadWatchdog()
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
@@ -1682,13 +1690,13 @@ class PlaybackController(
         val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
         restartFromStartAfterRestore = false
         // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
-        val endBlackHold = switchOriginEnded && paused
+        // 判据只有 [endBlackHold] 一处，这里只把结论挂成持续黑底。
+        val blackHold = endBlackHold()
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
         _switching.value = false
         _restoring.value = false
-        originFrameOnSurface = false
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
@@ -1696,10 +1704,10 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         // 片尾没有可显示的首帧：直到下一次用户操作或新加载前保持黑底。
-        holdBlack = endBlackHold
+        holdBlack = blackHold
         settlePresentation()
         // 普通恢复成功后允许后续真实失败重新提示；黑底期间保持去重到用户操作。
-        if (!endBlackHold) switchFailureReported = false
+        if (!blackHold) switchFailureReported = false
         if (restartFromStart) {
             // 以新的加载从 0 开始，暂停意图已在用户操作时记为播放。
             playIndex(_currentIndex.value)
@@ -1863,9 +1871,13 @@ class PlaybackController(
         if (clearFrame) replaceBackgroundRestoreFrame(null)
     }
 
-    /** 换掉后台恢复帧；同样交给 GC，不手动回收。 */
+    /**
+     * 换掉后台恢复帧；同样交给 GC，不手动回收。
+     * 缓存帧也是屏幕该显示什么的一部分：抓帧在线程池里完成，这里只做原子更新，不碰其它派生状态。
+     */
     private fun replaceBackgroundRestoreFrame(frame: Bitmap?) {
         _backgroundRestoreFrame.value = frame
+        _surfacePresentation.update { it.copy(heldFrame = frame) }
     }
 
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */
@@ -1898,8 +1910,8 @@ class PlaybackController(
         expectedLoadToken = 0
         switchFailureReported = false
         holdBlack = false
-        originFrameOnSurface = false
-        frameOnSurface = false
+        screenFrame = ScreenFrame.None
+        switchOutputLive = false
         originAspectRatio = null
         settlePresentation()
         resetBackgroundCapture()
@@ -1939,14 +1951,15 @@ class PlaybackController(
     private fun beginReadyTracking() {
         readyState = ReadyState.Idle
         targetHasVideo = true
-        // 新一轮加载还没有画面。
-        frameOnSurface = false
+        // 上一轮加载自己的画面不再算数；切集起点的原片画面仍然沿用。
+        if (screenFrame == ScreenFrame.Target) screenFrame = ScreenFrame.None
         switchFramePending = false
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         frameWaitJob?.cancel()
         frameWaitJob = null
         cancelSurfaceRestore()
+        settlePresentation()
     }
 
     /**

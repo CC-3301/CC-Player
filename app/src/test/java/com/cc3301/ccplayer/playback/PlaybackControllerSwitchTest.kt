@@ -166,6 +166,45 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `a weak frame signal does not withdraw the frame on screen`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+
+        // 需要确认的重配只说明目标接管了视频输出，画面可能还没上屏：屏上的原片画面与比例都不动。
+        engine.reportVideoReconfigured()
+
+        assertTrue(controller.switching.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a rejected late receipt does not withdraw the frame on screen`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+
+        // 这条信号早于续播那一跳，不在接受范围内：不能撤掉屏上的原片画面与比例。
+        engine.reportFirstFrameReady(fromSeek = false)
+
+        assertTrue(controller.switching.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
     fun `a switch to a file without video stops keeping the surface frame`() = runTest {
         val controller = playingController()
 
@@ -259,9 +298,11 @@ class PlaybackControllerSwitchTest {
         // 就绪后又暂停：不能再等位置前进，直接按已就绪暂停收尾。
         controller.pause()
 
+        // 暂停态没有更靠后的出帧信号：收尾即撤旧帧，屏上是新集首帧，不铺黑底。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertFalse(showsPicture(controller))
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -924,9 +965,9 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
-        // 视频输出已重配但首帧还没上屏：按黑底等它。
-        assertFalse(showsPicture(controller))
-        assertTrue(blackLayer(controller))
+        // 重配只说明视频输出重建了，画面可能还没上屏：屏上的旧帧不撤，等真正出帧再换。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
 
         engine.reportFramePresented()
         assertTrue(showsPicture(controller))
@@ -1286,7 +1327,7 @@ class PlaybackControllerSwitchTest {
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
-        // 暂停态已加载的文件也按暂停收尾；还没收到目标画面信号，屏上仍是原片画面。
+        // 暂停态已加载的文件也按暂停收尾：就绪即露新集首帧，不铺黑底。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
@@ -1336,8 +1377,8 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertTrue(failures.isEmpty())
-        // 视频输出已重配、首帧还没上屏：按黑底等它，等到帧再撤。
-        assertTrue(blackLayer(controller))
+        // 视频输出已重配、首帧还没上屏：屏上的旧帧继续沿用，不铺黑底。
+        assertFalse(blackLayer(controller))
 
         engine.reportFramePresented()
         assertFalse(blackLayer(controller))
@@ -1970,7 +2011,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a paused switch drops the old frame and takes the new ratio on ready`() = runTest {
+    fun `a paused switch shows the new frame and ratio on ready`() = runTest {
         val controller = playingController()
         engine.reportVideoSizeChanged(1920, 1080)
         engine.reportFramePresented()
@@ -1987,9 +2028,10 @@ class PlaybackControllerSwitchTest {
         controller.pause()
         engine.reportVideoReconfigured()
 
-        // 暂停态就绪：撤掉旧帧，比例同时切到新文件，不等播放。
+        // 暂停态就绪：同一次派生里撤掉旧帧、换成新文件比例，直接露新集首帧，不铺黑底。
         assertFalse(controller.switching.value)
-        assertFalse(showsPicture(controller))
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
         assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 

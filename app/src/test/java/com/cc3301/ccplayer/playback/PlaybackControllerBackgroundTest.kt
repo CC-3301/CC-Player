@@ -36,7 +36,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -49,7 +49,7 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
         capture(controller)
 
-        assertSame(first, controller.backgroundRestoreFrame.value)
+        assertSame(first, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -58,7 +58,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -68,7 +68,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -81,7 +81,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -92,7 +92,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -107,7 +107,7 @@ class PlaybackControllerBackgroundTest {
 
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -116,7 +116,27 @@ class PlaybackControllerBackgroundTest {
 
         engine.reportFramePresented()
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
+    }
+
+    @Test
+    fun `回前台缓存帧与画面判据无关并在收到新帧后撤掉`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+
+        reattach(controller)
+        runCurrent()
+
+        // Surface 重建后屏上没有画面：缓存帧仍要盖在黑底之上，先把离开前那一帧显示出来。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
+
+        engine.reportFramePresented()
+        runCurrent()
+
+        // 播放核心输出新帧：屏上是新画面，缓存帧撤掉。
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -133,7 +153,7 @@ class PlaybackControllerBackgroundTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -151,7 +171,7 @@ class PlaybackControllerBackgroundTest {
         assertEquals(1, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
 
         // 只翻转一次：之后不再翻转、不 seek。
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
@@ -173,7 +193,7 @@ class PlaybackControllerBackgroundTest {
 
         assertEquals(0, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -253,7 +273,7 @@ class PlaybackControllerBackgroundTest {
         // Surface 一直可用，没有进入恢复等待：画面本来就在，缓存帧多余。
         controller.onReturnedToForeground()
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
         assertEquals(0, engine.flipVideoOutputCalls)
     }
 
@@ -266,7 +286,7 @@ class PlaybackControllerBackgroundTest {
         // 已进入恢复等待：缓存帧留到播放核心的首个新帧。
         controller.onReturnedToForeground()
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -278,7 +298,7 @@ class PlaybackControllerBackgroundTest {
         // onStart 可能早于 surfaceCreated：没有可用画面时不清帧，也不进入恢复等待。
         controller.onReturnedToForeground()
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
         assertEquals(0, engine.flipVideoOutputCalls)
     }
 
@@ -324,7 +344,7 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
 
         // 片尾黑底没有画面可盖：未进入恢复等待，清帧路径不产生遮罩。
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
         assertEquals(0, engine.flipVideoOutputCalls)
     }
 
@@ -385,7 +405,7 @@ class PlaybackControllerBackgroundTest {
         engine.reportPositionChanged(1_000, 600_000)
         engine.reportFramePresented()
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
@@ -395,7 +415,7 @@ class PlaybackControllerBackgroundTest {
 
         controller.playAt(controller.currentIndex.value + 1)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -418,7 +438,7 @@ class PlaybackControllerBackgroundTest {
         // 回前台走重挂后的出帧路径：位置前进过一次，不再 seek、不翻转。
         engine.reportPositionChanged(31_000, 600_000)
         engine.reportFramePresented()
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
         assertTrue(engine.seekPositions.isEmpty())
@@ -443,7 +463,7 @@ class PlaybackControllerBackgroundTest {
 
         // 暂停态回前台不 seek：缓存帧盖住画面，保持暂停。
         assertTrue(engine.seekPositions.isEmpty())
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
@@ -460,7 +480,7 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(false)
         capture(controller)
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -472,7 +492,7 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(false)
         capture(controller)
 
-        assertNull(controller.backgroundRestoreFrame.value)
+        assertNull(controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -485,7 +505,7 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(false)
         capture(controller)
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -499,7 +519,7 @@ class PlaybackControllerBackgroundTest {
         policy.setAppInForeground(false)
         capture(controller)
 
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
@@ -542,7 +562,7 @@ class PlaybackControllerBackgroundTest {
             gate.countDown()
             job?.join()
 
-            assertNull(controller.backgroundRestoreFrame.value)
+            assertNull(controller.surfacePresentation.value.heldFrame)
         } finally {
             dispatcher.close()
         }
@@ -569,7 +589,7 @@ class PlaybackControllerBackgroundTest {
             gate.countDown()
             job?.join()
 
-            assertNull(controller.backgroundRestoreFrame.value)
+            assertNull(controller.surfacePresentation.value.heldFrame)
         } finally {
             dispatcher.close()
         }
@@ -625,7 +645,7 @@ class PlaybackControllerBackgroundTest {
         engine.frameToGrab = PlaybackEngine.Frame(frame)
         val controller = pausedController()
         capture(controller)
-        assertSame(frame, controller.backgroundRestoreFrame.value)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
         return controller
     }
 

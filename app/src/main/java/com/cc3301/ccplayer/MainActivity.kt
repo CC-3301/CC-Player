@@ -7,7 +7,6 @@ import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -223,7 +222,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var loopMode by mutableStateOf(LoopMode.Sequential)
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
     private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
-    private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var switching by mutableStateOf(false)
     private var restoring by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
@@ -248,8 +246,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
     private var surfacePresentation by mutableStateOf(SurfacePresentation())
 
-    /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
-    private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -280,12 +276,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.loopMode.collect { loopMode = it } }
                 launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
-                launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.surfacePresentation.collect { surfacePresentation = it } }
-                launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
                         // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
@@ -358,7 +352,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
                 // 播放页按方向设置与角度施加朝向；离开播放页把方向交回系统。
-                LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
+                // 比例只读屏上那一帧的比例：切集期间跟随旧画面，不会因新文件先上报尺寸就转屏。
+                LaunchedEffect(
+                    playerVisible,
+                    orientationMode,
+                    surfacePresentation.aspectRatio,
+                    sessionOrientation.override,
+                ) {
                     playerOrientationMode = orientationMode
                     if (playerVisible) {
                         applyPlayerOrientationFromUser()
@@ -451,7 +451,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             restoring = restoring,
                             buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
-                            backgroundRestoreFrame = backgroundRestoreFrame,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -848,7 +847,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         loopMode = LoopMode.Sequential
         sleepTimerState = SleepTimerState.Off
         sleepTimerOption = null
-        videoAspectRatio = null
         switching = false
         restoring = false
         buffering = false
@@ -915,7 +913,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 当前方向设置与传感器角度下要施加的朝向。 */
     private fun playerOrientationTarget(): ScreenOrientation =
         sensorScreenOrientation(
-            sessionOrientation.resolve(playerOrientationMode, videoAspectRatio),
+            sessionOrientation.resolve(playerOrientationMode, surfacePresentation.aspectRatio),
             sensorAngle,
             appliedScreenOrientation,
         )

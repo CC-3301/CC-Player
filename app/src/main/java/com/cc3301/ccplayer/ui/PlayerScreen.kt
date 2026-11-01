@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.ui
 
-import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -331,7 +330,6 @@ fun PlayerScreen(
     restoring: Boolean,
     buffering: Boolean,
     initialLoading: Boolean,
-    backgroundRestoreFrame: Bitmap?,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -488,10 +486,12 @@ fun PlayerScreen(
                     .background(Color.Black),
             )
         }
-        // 后台回来先盖住离开前的画面；与控制层同一判据，黑底期间不盖。
-        if (surfacePresentation.showsPicture && backgroundRestoreFrame != null) {
+        // 回前台先盖住离开前的那一帧：缓存帧与画面判据无关，黑底之上也要盖。
+        // 收到播放核心的首个新帧后由控制层撤掉。
+        val heldFrame = surfacePresentation.heldFrame
+        if (heldFrame != null) {
             Image(
-                bitmap = backgroundRestoreFrame.asImageBitmap(),
+                bitmap = heldFrame.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
