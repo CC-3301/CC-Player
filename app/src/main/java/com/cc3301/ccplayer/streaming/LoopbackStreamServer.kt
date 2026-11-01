@@ -378,13 +378,13 @@ class LoopbackStreamServer(
         /** 取字节源；建立失败或等待超时都抛出，下次请求会重试。关闭后不再建立新源。 */
         fun source(): ByteSource {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
-            var round: Rebuild? = null
             var started = false
-            synchronized(lock) {
+            // 内联块里要么给出本轮轮次，要么已经返回或抛出。
+            val pending = synchronized(lock) {
                 check(!closed) { "流已关闭" }
                 val inFlight = rebuilding
                 if (inFlight != null) {
-                    round = inFlight
+                    inFlight
                 } else {
                     val current = source
                     if (current != null && !stale) return current
@@ -392,18 +392,25 @@ class LoopbackStreamServer(
                     consumeStale()
                     val created = Rebuild()
                     rebuilding = created
-                    round = created
                     started = true
+                    created
                 }
             }
-            val pending = round ?: throw IllegalStateException("流已关闭")
-            if (started) runAsync { rebuild(pending) }
+            if (started) submitRebuild(pending)
             val remaining = deadline - System.nanoTime()
             if (remaining <= 0L || !pending.finished.await(remaining, TimeUnit.NANOSECONDS)) {
                 throw TimeoutException("重建字节源超时")
             }
             pending.failure?.let { throw it }
             return pending.result ?: throw IllegalStateException("流已关闭")
+        }
+
+        /** 把这一轮重建交给建源线程；投递被拒时立即结算这一轮，请求按失败收尾。 */
+        private fun submitRebuild(round: Rebuild) {
+            val rejected = runCatching { runAsync { rebuild(round) } }.exceptionOrNull() ?: return
+            round.failure = rejected
+            synchronized(lock) { if (rebuilding === round) rebuilding = null }
+            round.finished.countDown()
         }
 
         /**

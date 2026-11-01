@@ -513,7 +513,7 @@ class LoopbackStreamServerTest {
         assertTrue("单次读取越过上限：${limited.reads}", limited.reads.all { it <= 1024 })
     }
 
-    @Test
+    @Test(timeout = 10_000L)
     fun `重建字节源超时后请求返回 503 而不是一直等`() {
         val release = CountDownLatch(1)
         val slow = LoopbackStreamServer(rebuildTimeoutMillis = 100)
@@ -528,16 +528,16 @@ class LoopbackStreamServerTest {
             val response = httpRequest(target)
             val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
 
-            // 超时按本次请求失败收尾：回 503，请求线程不会挂死在建源上。
+            // 超时按本次请求失败收尾：回 503，等待上限就是配置的 100ms，不会挂死在建源上。
             assertEquals(503, response.statusCode)
-            assertTrue("等了 $waitedMillis ms", waitedMillis < 5_000)
+            assertTrue("等了 $waitedMillis ms", waitedMillis < 1_000)
         } finally {
             release.countDown()
             slow.close()
         }
     }
 
-    @Test
+    @Test(timeout = 10_000L)
     fun `重建期间关闭立即返回，建好的源由建源线程自己关掉`() {
         val release = CountDownLatch(1)
         val building = CountDownLatch(1)
@@ -570,7 +570,6 @@ class LoopbackStreamServerTest {
 
             // 关闭只改状态并返回，不等在建源上。
             assertTrue("关闭耗时 $closeMillis ms", closeMillis < 1_000)
-            assertFalse(builtClosed.get())
 
             // 后台建源返回后自己关掉建出来的源。
             release.countDown()

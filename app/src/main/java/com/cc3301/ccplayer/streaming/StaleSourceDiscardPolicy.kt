@@ -5,8 +5,8 @@ package com.cc3301.ccplayer.streaming
  * 后台且（后台播放关闭 或 当前暂停）才丢；加载期间先记待丢弃，
  * 加载结束（仍在后台）或回到前台时补做一次。
  *
- * 标志只在 [discard] 真的执行之后才清：没丢成的那一次留着等下一次补做，
- * 不会被「标志已消费」吞掉。
+ * 补做的标志只在 [discard] 交出去之后才清：没交出去的那一次留着等下一次补做，
+ * 不会被「标志已消费」吞掉。退到后台当场丢的那一次不记标志，直接返回 true 由调用方立刻丢。
  */
 class StaleSourceDiscardPolicy {
 
@@ -33,7 +33,7 @@ class StaleSourceDiscardPolicy {
 
     /**
      * 加载结束：按当前是否仍在后台重新判定——已回到前台就留给回前台补做，标志不动。
-     * [discard] 返回是否真的丢了。
+     * [discard] 返回丢弃是否已经交出去。
      */
     fun onLoadingFinished(inBackground: Boolean, discard: () -> Boolean): Boolean {
         if (!inBackground) return false
