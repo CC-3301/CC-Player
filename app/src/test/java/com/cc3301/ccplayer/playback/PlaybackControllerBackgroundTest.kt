@@ -17,7 +17,6 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -325,25 +324,6 @@ class PlaybackControllerBackgroundTest {
         // 片尾黑底没有画面可盖：未进入恢复等待，清帧路径不产生遮罩。
         assertNull(controller.backgroundRestoreFrame.value)
         assertEquals(0, engine.flipVideoOutputCalls)
-    }
-
-    @Test
-    fun `旧加载的迟到帧不撤切集冻结画面`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(10_000, 600_000)
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
-
-        controller.next()
-        val freeze = controller.freezeFrame.value
-        assertNotNull(freeze)
-
-        // 原片代际的迟到出帧不能撤掉切集冻结画面。
-        engine.reportFramePresented(loadToken = 1)
-        assertSame(freeze, controller.freezeFrame.value)
-
-        // 当前目标加载的帧才能撤。
-        engine.reportFramePresented(loadToken = engine.currentLoadToken)
-        assertNull(controller.freezeFrame.value)
     }
 
     @Test

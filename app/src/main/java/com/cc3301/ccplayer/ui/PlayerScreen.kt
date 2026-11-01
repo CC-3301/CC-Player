@@ -276,7 +276,7 @@ private fun PlayerTextButton(
     }
 }
 
-/** 缓冲指示：转圈与“正在缓冲”，首次打开叠在黑屏上，切集叠在冻结画面上。 */
+/** 缓冲指示：转圈与“正在缓冲”，首次打开叠在黑屏上，切集叠在屏幕上停住的旧画面上。 */
 @Composable
 private fun BufferingIndicator(modifier: Modifier = Modifier) {
     Column(
@@ -330,8 +330,6 @@ fun PlayerScreen(
     restoring: Boolean,
     buffering: Boolean,
     initialLoading: Boolean,
-    freezeFrame: Bitmap?,
-    freezeFramePending: Boolean,
     switchKeepsSurfaceFrame: Boolean,
     backgroundRestoreFrame: Bitmap?,
     holdBlack: Boolean,
@@ -460,18 +458,10 @@ fun PlayerScreen(
             }
         }) {
         val density = LocalDensity.current
-        // 冻结画面保留到新帧上屏；撤帧与换比例同时生效，画面不会先缩回再变一次。
-        val freezeOverlayVisible = showFreezeOverlay(freezeFrame != null, holdBlack)
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
-            // 冻结画面在屏上时沿用原片比例，新文件的比例不参与，不把视频区铺满全屏。
-            videoAspectRatio = frozenVideoAspectRatio(
-                videoAspectRatio = videoAspectRatio,
-                freezeOverlayVisible = freezeOverlayVisible,
-                freezeFrameWidth = freezeFrame?.width ?: 0,
-                freezeFrameHeight = freezeFrame?.height ?: 0,
-            ),
+            videoAspectRatio = videoAspectRatio,
         )
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
@@ -491,14 +481,12 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲、切集时没有画面可显示，或片尾恢复就绪后保持黑底。
+        // 黑底画在视频视图之后：首次缓冲、失败回退，或片尾恢复就绪后保持黑底。
         if (
             showPlayerBlackLayer(
                 holdBlack = holdBlack,
                 buffering = buffering,
                 switching = switching,
-                hasFreezeFrame = freezeFrame != null,
-                freezeFramePending = freezeFramePending,
                 keepsSurfaceFrame = switchKeepsSurfaceFrame,
             )
         ) {
@@ -506,21 +494,6 @@ fun PlayerScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color.Black),
-            )
-        }
-        val freezeBitmap = freezeFrame
-        if (freezeOverlayVisible && freezeBitmap != null) {
-            Image(
-                bitmap = freezeBitmap.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                // 冻结画面按视频区绘制：保持原片比例，不居中放大。
-                modifier = Modifier
-                    .offset { IntOffset(viewport.left.roundToInt(), viewport.top.roundToInt()) }
-                    .size(
-                        width = with(density) { viewport.width.toDp() },
-                        height = with(density) { viewport.height.toDp() },
-                    ),
             )
         }
         // 后台回来先盖住离开前的画面；播放核心重新出帧后由控制层撤掉这一层。

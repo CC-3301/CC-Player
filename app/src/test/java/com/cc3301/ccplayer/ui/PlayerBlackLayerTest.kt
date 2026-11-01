@@ -4,46 +4,28 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 黑底层只在片尾、首次缓冲或切集时没有画面可显示时出现。 */
+/** 黑底层只在需要黑底、或切集时不沿用屏幕上停住的旧帧时出现。 */
 class PlayerBlackLayerTest {
 
     @Test
-    fun `a switch while the freeze frame is still being grabbed keeps the old picture`() {
+    fun `a switch keeps the old picture instead of a black layer`() {
         assertFalse(
             showPlayerBlackLayer(
                 holdBlack = false,
                 buffering = true,
                 switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = true,
-                keepsSurfaceFrame = false,
+                keepsSurfaceFrame = true,
             ),
         )
     }
 
     @Test
-    fun `a switch with no frame after the grab falls back to black`() {
+    fun `a switch that does not keep the surface frame falls back to black`() {
         assertTrue(
             showPlayerBlackLayer(
                 holdBlack = false,
                 buffering = false,
                 switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `an available freeze frame covers the surface`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                hasFreezeFrame = true,
-                freezeFramePending = false,
                 keepsSurfaceFrame = false,
             ),
         )
@@ -56,8 +38,6 @@ class PlayerBlackLayerTest {
                 holdBlack = true,
                 buffering = false,
                 switching = false,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
                 keepsSurfaceFrame = false,
             ),
         )
@@ -70,9 +50,7 @@ class PlayerBlackLayerTest {
                 holdBlack = false,
                 buffering = true,
                 switching = false,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
+                keepsSurfaceFrame = true,
             ),
         )
     }

@@ -38,57 +38,15 @@ fun videoViewport(
 }
 
 /**
- * 冻结画面在册期间视频区的比例：冻结画面就是原片，按它的比例铺满可视区；还没有冻结画面时沿用
- * 最近一次上报；两者都没有时保持未知。新文件的比例不参与判定，旧画面才不会放大或跳变。
- */
-fun switchFreezeAspectRatio(
-    videoAspectRatio: Double?,
-    freezeFrameWidth: Int,
-    freezeFrameHeight: Int,
-): Double? {
-    if (freezeFrameWidth > 0 && freezeFrameHeight > 0) {
-        val frameRatio = freezeFrameWidth.toDouble() / freezeFrameHeight
-        if (frameRatio.isFinite() && frameRatio > 0.0) return frameRatio
-    }
-    return videoAspectRatio?.takeIf { it.isFinite() && it > 0.0 }
-}
-
-/**
- * 冻结画面覆盖层：冻结画面还在就盖住视频输出；铺黑底期间不盖。
- * 冻结画面保留到新帧真正上屏，不随切集阶段结束而撤；撤帧与新画面比例在同一次重绘里生效。
- */
-fun showFreezeOverlay(hasFreezeFrame: Boolean, holdBlack: Boolean): Boolean =
-    hasFreezeFrame && !holdBlack
-
-/**
- * 视频区比例：冻结画面可见期间一直按原片比例绘制，撤帧后才换成播放核心当前上报的比例。
- * 切集就绪时上报的比例可能已经是新文件的比例。
- */
-fun frozenVideoAspectRatio(
-    videoAspectRatio: Double?,
-    freezeOverlayVisible: Boolean,
-    freezeFrameWidth: Int,
-    freezeFrameHeight: Int,
-): Double? =
-    if (freezeOverlayVisible) {
-        switchFreezeAspectRatio(videoAspectRatio, freezeFrameWidth, freezeFrameHeight)
-    } else {
-        videoAspectRatio
-    }
-
-/**
- * 播放页黑底层规则：只有片尾、首次缓冲、或切集时已明确没有画面可显示才铺黑底。
- * 抓帧还在途、或片尾切集沿用屏幕上停住的末帧时，原画面仍留在 Surface 上，不铺黑底。
+ * 播放页黑底层规则：需要黑底（片尾保持、首次缓冲、失败回退）或切集时不沿用屏幕上停住的旧帧才铺黑底。
+ * 切集沿用旧帧时原画面还留在 Surface 上，不铺黑底。
  */
 fun showPlayerBlackLayer(
     holdBlack: Boolean,
     buffering: Boolean,
     switching: Boolean,
-    hasFreezeFrame: Boolean,
-    freezeFramePending: Boolean,
     keepsSurfaceFrame: Boolean,
-): Boolean = holdBlack || (buffering && !switching) ||
-    (switching && !keepsSurfaceFrame && !hasFreezeFrame && !freezeFramePending)
+): Boolean = holdBlack || (buffering && !switching) || (switching && !keepsSurfaceFrame)
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
