@@ -54,12 +54,13 @@ fun playerOrientation(
 fun awaitsVideoOrientation(
     mode: OrientationMode,
     videoAspectRatio: Double?,
-    playingVideo: Boolean,
+    audioOnly: Boolean,
     rotationOverride: ScreenOrientation?,
 ): Boolean {
     if (mode != OrientationMode.FollowVideo) return false
     if (rotationOverride != null) return false
-    if (!playingVideo) return false
+    // 纯音频没有视频方向，等下去会永久占住方向。
+    if (audioOnly) return false
     return videoAspectRatio == null || !videoAspectRatio.isFinite() || videoAspectRatio <= 0.0
 }
 

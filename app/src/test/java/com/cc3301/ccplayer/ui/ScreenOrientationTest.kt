@@ -95,20 +95,20 @@ class ScreenOrientationTest {
             awaitsVideoOrientation(
                 mode = OrientationMode.FollowVideo,
                 videoAspectRatio = null,
-                playingVideo = true,
+                audioOnly = false,
                 rotationOverride = null,
             ),
         )
     }
 
     @Test
-    fun `其他档位与音频不等视频方向`() {
+    fun `其他档位与纯音频不等视频方向`() {
         listOf(OrientationMode.System, OrientationMode.Portrait, OrientationMode.Landscape).forEach { mode ->
             assertFalse(
                 awaitsVideoOrientation(
                     mode = mode,
                     videoAspectRatio = null,
-                    playingVideo = true,
+                    audioOnly = false,
                     rotationOverride = null,
                 ),
             )
@@ -117,7 +117,7 @@ class ScreenOrientationTest {
             awaitsVideoOrientation(
                 mode = OrientationMode.FollowVideo,
                 videoAspectRatio = null,
-                playingVideo = false,
+                audioOnly = true,
                 rotationOverride = null,
             ),
         )
@@ -125,14 +125,24 @@ class ScreenOrientationTest {
 
     @Test
     fun `比例已知或已手动转屏后不再等待`() {
-        listOf(1.78, 0.56, 0.0, -1.0, Double.NaN).forEachIndexed { index, aspect ->
-            assertEquals(
-                "第 $index 个比例",
-                index >= 2,
+        listOf(2.39, 1.78, 1.0, 0.56).forEach { aspect ->
+            assertFalse(
+                "比例 $aspect",
                 awaitsVideoOrientation(
                     mode = OrientationMode.FollowVideo,
                     videoAspectRatio = aspect,
-                    playingVideo = true,
+                    audioOnly = false,
+                    rotationOverride = null,
+                ),
+            )
+        }
+        listOf(0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { aspect ->
+            assertTrue(
+                "比例 $aspect",
+                awaitsVideoOrientation(
+                    mode = OrientationMode.FollowVideo,
+                    videoAspectRatio = aspect,
+                    audioOnly = false,
                     rotationOverride = null,
                 ),
             )
@@ -141,7 +151,7 @@ class ScreenOrientationTest {
             awaitsVideoOrientation(
                 mode = OrientationMode.FollowVideo,
                 videoAspectRatio = null,
-                playingVideo = true,
+                audioOnly = false,
                 rotationOverride = ScreenOrientation.Landscape,
             ),
         )
