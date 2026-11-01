@@ -10,20 +10,28 @@ package com.cc3301.ccplayer.playback
  * 结算只认「已下发且序号相等」的那一跳：[onReceipt] 拿 ready 携带的序号比对，命令还没下发或序号不符时什么都不做；
  * 超时结算并补发下一跳之后，前一跳迟到的回执因此不会结算新的一跳。
  * 在途这一跳执行完（回执或超时）后立即补发被覆盖的最后一个目标，并回报它自己的 seekId 与目标毫秒。
+ * 预览跳转的 [retarget] 就地改写仍在执行的那一跳：目标换成新值、待执行丢弃、按同一身份重新下发，
+ * 队列里因此只剩当前最后目标，被替换的旧目标不会再出帧。
  * 新加载或停止时在途与待执行一并作废。
  * 字段只在同一把锁内读写。
  */
 internal class MpvSeekQueue(
-    private val post: (seekId: Long, targetMillis: Long) -> Unit,
+    private val post: (seekId: Long) -> Unit,
     private val onExecuted: (seekId: Long, targetMillis: Long) -> Unit,
     private val armTimeout: (onTimeout: () -> Unit) -> Unit,
     private val cancelTimeout: () -> Unit,
 ) {
 
-    /** 一跳 seek：身份、mpv 命令序号与目标毫秒；[issued] 表示 mpv 命令已经下发。 */
-    private class Entry(val seekId: Long, val serial: Int, val targetMillis: Long) {
+    /** 一跳 seek：身份、mpv 命令序号与目标毫秒；目标可被预览改写，[issued] 表示 mpv 命令已经下发。 */
+    private class Entry(val seekId: Long, val serial: Int, var targetMillis: Long) {
         var issued = false
+
+        /** 已下发的那个目标：改写前投递的任务不能把同一个目标再发一次。 */
+        var issuedTargetMillis: Long? = null
     }
+
+    /** 改写后仍是同一个在途身份：落定按这个 seekId 认这一跳。 */
+    data class Active(val seekId: Long, val serial: Int)
 
     /** 一次「执行完」：刚执行的一跳，以及接着要下发的待执行一跳。 */
     private class Completion(val executed: Entry, val next: Entry?)
@@ -51,7 +59,24 @@ internal class MpvSeekQueue(
             }
         } ?: return
         startTimeout()
-        post(toPost.seekId, toPost.targetMillis)
+        post(toPost.seekId)
+    }
+
+    /**
+     * 预览目标改写仍在执行的那一跳：目标就地更新、待执行被丢弃，随后按同一身份重新下发命令。
+     * 队列里只剩当前最后目标，被改写掉的旧目标不会再出帧；命令序号沿用原来的，ready 仍按它认这一跳。
+     * 没有在途时返回 null，由调用方按新的一跳入队。
+     */
+    fun retarget(targetMillis: Long): Active? {
+        val retargeted = synchronized(lock) {
+            val entry = inFlight ?: return null
+            entry.targetMillis = targetMillis
+            pending = null
+            entry
+        }
+        startTimeout()
+        post(retargeted.seekId)
+        return Active(retargeted.seekId, retargeted.serial)
     }
 
     /**
@@ -59,16 +84,24 @@ internal class MpvSeekQueue(
      * 持锁是为与 release/destroy 互斥；[issue] 里只登记归属与下发命令，不读属性、不写诊断。
      * 命令抛异常时这一跳停在「在途但未下发」，回执与超时都不会结算它；这里就地结清，
      * 否则后续 seek 只能堆在待执行槽里，落定没有出口。
+     * [firstIssue] 为假表示这是预览改写目标后的再次下发：命令照发，序号与诊断归属不重复登记。
      * 返回这一跳的命令序号；已不是当前在途时返回 null，命令不下发。
      */
-    fun issueIfCurrent(seekId: Long, issue: (serial: Int) -> Unit): Int? {
+    fun issueIfCurrent(
+        seekId: Long,
+        issue: (serial: Int, targetMillis: Long, firstIssue: Boolean) -> Unit,
+    ): Int? {
         var failure: Throwable? = null
         val serial = synchronized(lock) {
             val entry = inFlight ?: return null
             if (entry.seekId != seekId) return null
+            // 目标已经按这个值下发过：改写前投递的重复任务不再下发。
+            if (entry.issued && entry.issuedTargetMillis == entry.targetMillis) return null
+            val firstIssue = !entry.issued
             try {
-                issue(entry.serial)
+                issue(entry.serial, entry.targetMillis, firstIssue)
                 entry.issued = true
+                entry.issuedTargetMillis = entry.targetMillis
                 entry.serial
             } catch (error: Throwable) {
                 failure = error
@@ -145,7 +178,7 @@ internal class MpvSeekQueue(
         onExecuted(completion.executed.seekId, completion.executed.targetMillis)
         completion.next?.let { next ->
             startTimeout()
-            post(next.seekId, next.targetMillis)
+            post(next.seekId)
         }
     }
 

@@ -48,6 +48,13 @@ interface PlaybackEngine {
     fun seekTo(positionMillis: Long): SeekRequest
 
     /**
+     * 预览跳到指定播放位置，单位毫秒。
+     * 仍在执行的那一跳直接被这个目标替换，队列里只留当前最后目标，被替换的旧目标不再出帧；
+     * 返回的凭据属于那一跳（seekId 不变），落定仍按它认。没有在途时与新入队的一跳相同。
+     */
+    fun previewSeekTo(positionMillis: Long): SeekRequest
+
+    /**
      * 一次 seek 的下发凭据。
      * [seekId] 是这一跳的身份：进程内单调递增且永不复用，加载归零也不影响它；
      * 被合并进待执行槽时返回的仍是它自己的 seekId，[Listener.onSeekExecuted] 带上同一个身份。

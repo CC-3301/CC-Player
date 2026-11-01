@@ -145,6 +145,17 @@ class FakePlaybackEngine : PlaybackEngine {
         return PlaybackEngine.SeekRequest(seekId, serial)
     }
 
+    /** 与真实引擎一致：预览目标就地改写仍在执行的那一跳，待执行被丢弃，身份不变。 */
+    override fun previewSeekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+        val inFlightId = seekInFlightId ?: return seekTo(positionMillis)
+        pendingSeekId = null
+        pendingSeekMillis = null
+        seekInFlightMillis = positionMillis
+        seekPositions += positionMillis
+        seekAudioCalls += "seek($positionMillis)"
+        return PlaybackEngine.SeekRequest(inFlightId, seekInFlightSerial)
+    }
+
     private fun issueSeek(seekId: Long, serial: Int, positionMillis: Long) {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"

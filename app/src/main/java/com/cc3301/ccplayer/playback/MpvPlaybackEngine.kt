@@ -207,31 +207,45 @@ class MpvPlaybackEngine(
         return PlaybackEngine.SeekRequest(seekId, serial)
     }
 
+    /**
+     * 预览跳转：在途那一跳就地改成新目标并按原来的身份重新下发，队列里不会留下旧目标。
+     * 没有在途时按普通跳转入队。
+     */
+    override fun previewSeekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+        seekQueue.retarget(positionMillis)?.let { return PlaybackEngine.SeekRequest(it.seekId, it.serial) }
+        return seekTo(positionMillis)
+    }
+
     /** 把这一跳交给命令线程；此时还没有碰 mpv。 */
-    private fun postSeekCommand(seekId: Long, targetMillis: Long) {
+    private fun postSeekCommand(seekId: Long) {
         synchronized(seekTimeoutLock) {
             if (released) return
-            seekCommandExecutor.execute { issueSeekCommand(seekId, targetMillis) }
+            seekCommandExecutor.execute { issueSeekCommand(seekId) }
         }
     }
 
     /**
      * 命令线程上真正下发一次 seek：这一跳已不是当前在途就丢弃，迟到任务不打到新文件上。
      * 队列锁内只登记归属并下发命令；诊断属性读取与写盘放在 [seekTimeoutLock] 内与释放互斥。
+     * 目标取队列里的当前值：预览改写后重新下发的仍是同一跳，命令序号与诊断归属不重复登记。
      * 命令失败时队列已按失败结清这一跳并补发待执行，这里只收回诊断归属，不再向上抛。
      */
-    private fun issueSeekCommand(seekId: Long, positionMillis: Long) {
+    private fun issueSeekCommand(seekId: Long) {
         var registered: MpvSeekDiagnostics.PendingSeek? = null
+        var firstIssuedTargetMillis: Long? = null
         try {
-            val serial = seekQueue.issueIfCurrent(seekId) { entrySerial ->
-                positionSeconds = positionMillis / 1000.0
+            val serial = seekQueue.issueIfCurrent(seekId) { entrySerial, targetMillis, firstIssue ->
+                positionSeconds = targetMillis / 1000.0
                 // 跳转本身不是播放推进；跳转后的首个位置事件只重建基线。
-                positionGate.onSeek(positionMillis)
-                loadCoordinator.onSeekIssued(entrySerial)
-                registered = seekDiagnostics.register(positionMillis, entrySerial)
-                MPVLib.command(arrayOf("seek", formatSeconds(positionMillis), "absolute"))
+                positionGate.onSeek(targetMillis)
+                if (firstIssue) {
+                    loadCoordinator.onSeekIssued(entrySerial)
+                    registered = seekDiagnostics.register(targetMillis, entrySerial)
+                    firstIssuedTargetMillis = targetMillis
+                }
+                MPVLib.command(arrayOf("seek", formatSeconds(targetMillis), "absolute"))
             } ?: return
-            logSeekIssued(positionMillis, serial)
+            firstIssuedTargetMillis?.let { logSeekIssued(it, serial) }
         } catch (failure: Throwable) {
             registered?.let { seekDiagnostics.discard(it, failure) }
         }

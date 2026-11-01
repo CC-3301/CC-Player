@@ -957,12 +957,12 @@ class PlaybackController(
         return true
     }
 
-    /** 下发一次预览 seek；是否重发由界面按像素死区判定，队列由引擎收敛到「1 执行 + 1 待执行」。 */
+    /** 下发一次预览 seek；是否重发由界面按像素死区判定，仍在执行的那一跳被新目标替换，队列只留最后目标。 */
     private fun issuePreviewSeek(target: Long) {
         val clamped = previewSeekTarget(target)
         acquirePreviewMute()
         lastPreviewSeekTargetMillis = clamped
-        lastPreviewSeekId = engine.seekTo(clamped).seekId
+        lastPreviewSeekId = engine.previewSeekTo(clamped).seekId
     }
 
     /**
@@ -1037,11 +1037,14 @@ class PlaybackController(
         pausedAtEpisodeEnd = false
         // 外部跳转改写这一代加载的落点：就绪时进度从它开始，不回到加载起点。
         if (external && loadPhase != LoadPhase.None) loadStartPositionMillis = target
-        // 同一目标再下发一次会让画面先闪一下再落定：目标完全相同时复用最后一跳，否则落点会停在旧目标上。
-        val seekId = if (lastIssuedTarget != null && lastIssuedSeekId != null && target == lastIssuedTarget) {
-            lastIssuedSeekId
-        } else {
-            engine.seekTo(target).seekId
+        // 同一目标再下发一次会让画面先闪一下再落定：目标完全相同时复用最后一跳；
+        // 预览落定就地改写仍在执行的那一跳，落点不会先经过旧目标；外部跳转照常排队。
+        val seekId = when {
+            lastIssuedTarget != null && lastIssuedSeekId != null && target == lastIssuedTarget ->
+                lastIssuedSeekId
+
+            external -> engine.seekTo(target).seekId
+            else -> engine.previewSeekTo(target).seekId
         }
         // 外部跳转（带目标）是普通 seek；没有外部目标时落定的是预览位置。
         landSeek(target, seekId, fromPreview = commitTarget == null)

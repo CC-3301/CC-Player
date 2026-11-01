@@ -27,7 +27,7 @@ class PlaybackControllerSeekPreviewTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `拖动期间在途预览 seek 恒不超过一个，新目标只覆盖旧目标`() = runTest {
+    fun `快速连续拖动只执行最后一个目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
@@ -36,13 +36,32 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
         advanceTimeBy(PlaybackController.PREVIEW_HEARTBEAT_MILLIS)
 
-        // 在途只留一个 seek；中途目标被最后一个覆盖，队列不随拖动增长。
-        assertEquals(listOf(70_000L), engine.seekPositions)
+        // 在途那一跳被新目标就地改写：中途目标不排队，队列里只剩当前最后目标。
+        assertNull(engine.pendingSeekMillis)
         assertEquals(120_000L, controller.seekPreviewMillis.value)
 
-        // 回执到达后只补发被覆盖的最后一个目标。
+        // 只有最后目标出帧，中途目标不再各执行一次。
         engine.reportFirstFrameReady()
-        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
+        assertEquals(listOf(120_000L), engine.seekExecutions.map { it.second })
+    }
+
+    @Test
+    fun `快速拖动松手不产生额外 seek`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        val issuedBeforeRelease = engine.seekPositions.size
+
+        controller.commitSeekPreview()
+
+        // 落定目标就是最后一次下发的那一跳：不补发，也不复用被替换掉的旧目标。
+        assertEquals(issuedBeforeRelease, engine.seekPositions.size)
+        assertEquals(120_000L, controller.progress.value.positionMillis)
+
+        engine.reportFirstFrameReady()
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
     }
 
     @Test
@@ -156,10 +175,6 @@ class PlaybackControllerSeekPreviewTest {
         controller.commitSeekPreview()
 
         // 收尾目标与最后一次下发相同：复用那一跳，声音等它执行完再恢复。
-        assertEquals(listOf(70_000L), engine.seekPositions)
-        assertEquals(listOf(true), engine.muteCalls)
-
-        engine.reportFirstFrameReady()
         assertEquals(listOf(70_000L, 80_000L), engine.seekPositions)
         assertEquals(listOf(true), engine.muteCalls)
 
@@ -180,19 +195,17 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 130_000)
-        assertEquals(listOf(70_000L), engine.seekPositions)
+        // 被覆盖掉的中间目标不再补发：在途那一跳已就地改成最后目标。
+        assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
 
-        // 被覆盖掉的中间位置由收尾目标补齐：它已在引擎的待执行槽里，不重复下发。
         controller.commitSeekPreview()
-        assertEquals(listOf(70_000L), engine.seekPositions)
+        assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
         assertNull(controller.seekPreviewMillis.value)
         assertEquals(130_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
         assertEquals(130_000L, controller.progress.value.positionMillis)
-
-        engine.reportFirstFrameReady()
         assertEquals(130_000L, controller.seekSettlement.value?.targetMillis)
     }
 
@@ -571,24 +584,20 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `上一发在途时收尾目标进待执行槽，回执后只补发一次`() = runTest {
+    fun `上一发在途时收尾目标就地替换，不补发也不重放旧目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 90_000)
         controller.commitSeekPreview()
-        // 上一发还没回执：收尾目标替换待执行，命令队列只有一发。
-        assertEquals(listOf(70_000L), engine.seekPositions)
-        assertEquals(90_000L, engine.pendingSeekMillis)
+        // 上一发还没回执：收尾目标就地改写那一跳，队列里没有待执行。
+        assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
+        assertNull(engine.pendingSeekMillis)
         assertEquals(90_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(listOf(70_000L, 90_000L), engine.seekPositions)
-        // 补发的收尾仍要等它自己的执行回报。
-        assertNull(controller.seekSettlement.value)
-
-        engine.reportFirstFrameReady()
         assertEquals(90_000L, controller.seekSettlement.value?.targetMillis)
     }
 
@@ -602,14 +611,10 @@ class PlaybackControllerSeekPreviewTest {
         controller.commitSeekPreview()
         assertEquals(listOf(true), engine.muteCalls)
 
-        // 引擎在途超时：视为这一跳已执行并补发待执行目标，回报带的是那一跳自己的身份。
+        // 引擎在途超时：视为这一跳已执行，回报带的是这一跳自己的身份与改写后的目标。
         engine.reportSeekExecuted()
         assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
-        assertEquals(listOf(1L to 70_000L), engine.seekExecutions)
-        assertNull(controller.seekSettlement.value)
-
-        engine.reportSeekExecuted()
-        assertEquals(listOf(1L to 70_000L, 2L to 120_000L), engine.seekExecutions)
+        assertEquals(listOf(1L to 120_000L), engine.seekExecutions)
         assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
         assertEquals(listOf(true, false), engine.muteCalls)
         assertNull(engine.pendingSeekMillis)
@@ -659,7 +664,7 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
-    fun `引擎在途时再来预览与收尾，待执行只保留最后一个目标`() = runTest {
+    fun `预留的中途目标被替换，只补发最后目标`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(60_000, 600_000)
 
@@ -668,17 +673,12 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(requestSeek = true, positionMillis = 130_000)
         controller.commitSeekPreview()
 
-        // 队列恒为「1 执行 + 1 待执行」：待执行只剩最后一个目标。
-        assertEquals(listOf(70_000L), engine.seekPositions)
-        assertEquals(130_000L, engine.pendingSeekMillis)
-
-        engine.reportSeekExecuted()
-        assertEquals(listOf(70_000L, 130_000L), engine.seekPositions)
+        // 队列里只剩当前最后目标：中途目标既不进待执行，也不会各执行一次。
         assertNull(engine.pendingSeekMillis)
-        assertNull(controller.seekSettlement.value)
+        assertEquals(listOf(70_000L, 90_000L, 130_000L), engine.seekPositions)
 
-        // 补发的最后一跳也要等它自己的执行回报。
         engine.reportSeekExecuted()
+        assertEquals(listOf(1L to 130_000L), engine.seekExecutions)
         assertEquals(130_000L, controller.seekSettlement.value?.targetMillis)
     }
 
@@ -1021,12 +1021,9 @@ class PlaybackControllerSeekPreviewTest {
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
         controller.commitSeekPreview()
 
-        assertEquals(listOf(120_000L, 180_000L), engine.seekPositions)
+        assertEquals(listOf(120_000L, 180_000L, 120_000L), engine.seekPositions)
         assertTrue(engine.currentSeekId > firstSeekId)
         // 第一跳已经执行完，但落定认的是新的一跳，不能拿旧回报当场结算。
-        assertNull(controller.seekSettlement.value)
-
-        engine.reportSeekExecuted()
         assertNull(controller.seekSettlement.value)
 
         engine.reportSeekExecuted()
