@@ -42,7 +42,7 @@ class PlayerControlsVisibilityTest {
     @Test
     fun `操作后重新计时`() {
         now = 2_000L
-        controls.show()
+        controls.showByUserAction()
 
         now = 6_999L
         controls.hideIfExpired()
@@ -59,7 +59,7 @@ class PlayerControlsVisibilityTest {
         controls.hideIfExpired()
         assertEquals(false, controls.visible)
 
-        controls.show()
+        controls.showByUserAction()
 
         assertEquals(true, controls.visible)
     }
@@ -79,7 +79,7 @@ class PlayerControlsVisibilityTest {
     @Test
     fun `显示时手势重置计时但不改变显隐`() {
         now = 1_000L
-        controls.show()
+        controls.showByUserAction()
 
         now = 5_999L
         controls.resetTimer()
@@ -102,7 +102,7 @@ class PlayerControlsVisibilityTest {
         now = 1_000L
         assertEquals(4_000L, controls.millisUntilAutoHide())
 
-        controls.show()
+        controls.showByUserAction()
         assertEquals(5_000L, controls.millisUntilAutoHide())
 
         now = 3_500L

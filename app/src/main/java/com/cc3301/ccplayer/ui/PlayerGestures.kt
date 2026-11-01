@@ -213,6 +213,28 @@ fun doubleTapFeedbackAllowed(
 fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
     !locked || input == PlayerInput.UnlockButton
 
+/**
+ * 顶/底栏是否可见：锁定与抽屉打开时不显示，控制层隐藏时也不显示。
+ * 首次缓冲期例外，此时顶/底栏保持可见但只放行返回入口。
+ * 缓冲指示与错误提示不属于控制层，不受此判据影响。
+ */
+fun playerBarsVisible(
+    locked: Boolean,
+    controlsVisible: Boolean,
+    panelBarsVisible: Boolean,
+    firstBuffering: Boolean,
+): Boolean = inputAllowed(PlayerInput.ControlBar, locked) &&
+    (controlsVisible || firstBuffering) &&
+    panelBarsVisible
+
+/** 首次缓冲：本次播放还没有切过集时的加载阶段。 */
+fun isFirstBuffering(initialLoading: Boolean, switchedSinceOpen: Boolean): Boolean =
+    initialLoading && !switchedSinceOpen
+
+/** 本次播放是否已经切过集：切过之后加载阶段不再算首次缓冲。 */
+fun switchedSinceOpen(switching: Boolean, alreadySwitched: Boolean): Boolean =
+    alreadySwitched || switching
+
 /** 播放页上受切集缓冲限制的操作。 */
 enum class PlayerAction {
     Back,

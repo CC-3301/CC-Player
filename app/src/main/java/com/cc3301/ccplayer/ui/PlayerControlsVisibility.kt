@@ -36,11 +36,11 @@ class PlayerControlsVisibility(
 
     /** 点击画面：显示时隐藏，隐藏时显示并重新计时。 */
     fun toggle() {
-        if (visible) visible = false else show()
+        if (visible) visible = false else showByUserAction()
     }
 
-    /** 显示控制层并重新计时；点击画面或控件时使用。 */
-    fun show() {
+    /** 点击画面或控件时显示控制层并重新计时；只有用户操作路径可以显示控制层。 */
+    fun showByUserAction() {
         visible = true
         lastInteractionAtMillis = elapsedMillis()
     }

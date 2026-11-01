@@ -1,0 +1,122 @@
+package com.cc3301.ccplayer.ui
+
+import androidx.compose.ui.geometry.Offset
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class PlayerBarsVisibilityTest {
+
+    private var now = 0L
+    private val controls = PlayerControlsVisibility(elapsedMillis = { now })
+    private val pointer = PlayerPointerVisibility(elapsedMillis = { now })
+
+    /** 未锁定、抽屉关闭时，按控制层显隐与首次缓冲判定顶/底栏。 */
+    private fun barsVisible(firstBuffering: Boolean = false): Boolean = playerBarsVisible(
+        locked = false,
+        controlsVisible = controls.visible,
+        panelBarsVisible = true,
+        firstBuffering = firstBuffering,
+    )
+
+    @Test
+    fun `控制层隐藏时顶底栏不显示`() {
+        controls.toggle()
+
+        assertFalse(barsVisible())
+    }
+
+    @Test
+    fun `隐藏态切集阶段变化后顶底栏仍不显示`() {
+        controls.toggle()
+        assertFalse(controls.visible)
+
+        now = 6_000L
+        controls.onLoadingPhaseChanged()
+
+        assertFalse(barsVisible())
+    }
+
+    @Test
+    fun `首次缓冲期顶底栏保持可见`() {
+        controls.toggle()
+        val firstBuffering = isFirstBuffering(
+            initialLoading = true,
+            switchedSinceOpen = switchedSinceOpen(switching = false, alreadySwitched = false),
+        )
+
+        assertTrue(barsVisible(firstBuffering = firstBuffering))
+    }
+
+    @Test
+    fun `首次缓冲切过集后不再显示顶底栏`() {
+        controls.toggle()
+        val switched = switchedSinceOpen(switching = true, alreadySwitched = false)
+        val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
+
+        assertFalse(firstBuffering)
+        assertFalse(barsVisible(firstBuffering = firstBuffering))
+    }
+
+    @Test
+    fun `锁定时顶底栏不显示`() {
+        assertFalse(
+            playerBarsVisible(
+                locked = true,
+                controlsVisible = true,
+                panelBarsVisible = true,
+                firstBuffering = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `抽屉打开时顶底栏不显示`() {
+        assertFalse(
+            playerBarsVisible(
+                locked = false,
+                controlsVisible = true,
+                panelBarsVisible = false,
+                firstBuffering = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `指针跟随栏的可见性`() {
+        pointer.onPointerEnter(Offset.Zero)
+
+        pointerFollowsBars(barsVisible = false, pointer = pointer)
+        assertFalse(pointer.visible)
+
+        pointerFollowsBars(barsVisible = true, pointer = pointer)
+        assertTrue(pointer.visible)
+    }
+
+    @Test
+    fun `锁定或抽屉打开时指针随栏一起隐藏`() {
+        pointer.onPointerEnter(Offset.Zero)
+        pointerFollowsBars(
+            barsVisible = playerBarsVisible(
+                locked = true,
+                controlsVisible = true,
+                panelBarsVisible = true,
+                firstBuffering = false,
+            ),
+            pointer = pointer,
+        )
+        assertFalse(pointer.visible)
+
+        pointer.onPointerEnter(Offset.Zero)
+        pointerFollowsBars(
+            barsVisible = playerBarsVisible(
+                locked = false,
+                controlsVisible = true,
+                panelBarsVisible = false,
+                firstBuffering = false,
+            ),
+            pointer = pointer,
+        )
+        assertFalse(pointer.visible)
+    }
+}

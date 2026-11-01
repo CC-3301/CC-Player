@@ -330,6 +330,19 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
+    // 本次播放已经切过集之后，加载阶段不再算首次缓冲。
+    var switchedThisSession by remember { mutableStateOf(false) }
+    LaunchedEffect(switching) {
+        switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
+    }
+    val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
+    // 顶/底栏是否可见同时决定指针是否跟随出现。
+    val barsVisible = playerBarsVisible(
+        locked = locked,
+        controlsVisible = controlsVisible,
+        panelBarsVisible = panels.controlBarsVisible,
+        firstBuffering = firstBuffering,
+    )
     // 面板可见性统一由此判定；不可见的面板不能拦截手势。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -402,17 +415,17 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 指针跟随控制层：控制层隐藏时一并隐藏，唤出控制层时一并出现。其它界面不处理指针。
+    // 指针跟随顶/底栏的实际可见性；栏隐藏时指针一并隐藏，有效移动只唤出指针。其它界面不处理指针。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(controlsVisible) {
-        pointer.followControls(controlsVisible)
+    LaunchedEffect(barsVisible) {
+        pointerFollowsBars(barsVisible, pointer)
     }
-    // 指针静止满 3 秒隐藏；控制层隐藏期间的有效移动只唤出指针。
-    LaunchedEffect(pointer.visible) {
+    // 指针静止满 3 秒隐藏；移动与显示都会重置计时，计时键同时包含可见性与最近活动时刻。
+    LaunchedEffect(pointer.visible, pointer.lastActivityAtMillis) {
         while (pointer.visible) {
             val remaining = pointer.millisUntilHide()
             if (remaining < 0L) break
@@ -424,6 +437,7 @@ fun PlayerScreen(
         }
     }
 
+    val pointerDensity = LocalDensity.current
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)
@@ -431,8 +445,7 @@ fun PlayerScreen(
             icon = if (pointer.visible) PointerIcon.Default else hiddenPointerIcon,
             overrideDescendants = true,
         )
-        .pointerInput(Unit) {
-            val deadZonePx = PlayerPointerMoveDeadZone.toPx()
+        .pointerInput(pointerDensity.density) {
             awaitPointerEventScope {
                 while (true) {
                     val event = awaitPointerEvent()
@@ -440,7 +453,7 @@ fun PlayerScreen(
                     if (event.type == PointerEventType.Enter) {
                         pointer.onPointerEnter(position)
                     } else {
-                        pointer.onPointerMove(position, deadZonePx)
+                        pointer.onPointerMove(position, pointerDensity)
                     }
                 }
             }
@@ -583,10 +596,6 @@ fun PlayerScreen(
                     .semantics { contentDescription = lockedHint },
             )
         }
-        // 控制层隐藏时顶/底栏一并隐藏；缓冲指示与错误提示不属于控制层，照常显示。
-        val barsVisible = inputAllowed(PlayerInput.ControlBar, locked) &&
-            controlsVisible &&
-            panels.controlBarsVisible
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
@@ -620,11 +629,11 @@ fun PlayerScreen(
                 ),
                 onBack = onClose,
                 onRotate = {
-                    controls.show()
+                    controls.showByUserAction()
                     onToggleRotation()
                 },
                 onToggleMore = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.More)
                 },
             )
@@ -651,15 +660,15 @@ fun PlayerScreen(
                 restoring = restoring,
                 interactive = barsVisible,
                 onTogglePlayPause = {
-                    controls.show()
+                    controls.showByUserAction()
                     onTogglePlayPause()
                 },
                 onPrevious = {
-                    controls.show()
+                    controls.showByUserAction()
                     onPrevious()
                 },
                 onNext = {
-                    controls.show()
+                    controls.showByUserAction()
                     onNext()
                 },
                 onSeekPreview = { position, requestSeek ->
@@ -672,11 +681,11 @@ fun PlayerScreen(
                 },
                 onSeekHeartbeat = onSeekHeartbeat,
                 onTogglePlaylist = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.Playlist)
                 },
                 onToggleSubtitleMenu = {
-                    controls.show()
+                    controls.showByUserAction()
                     panels.toggle(PlayerPanel.Subtitles)
                 },
                 onLock = { lock.tapLockButton() },
@@ -730,7 +739,7 @@ fun PlayerScreen(
             UnlockButton(
                 onTap = {
                     lock.tapLockButton()
-                    controls.show()
+                    controls.showByUserAction()
                 },
                 modifier = Modifier
                     .align(Alignment.TopStart)
