@@ -361,6 +361,11 @@ fun PlayerScreen(
         switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
     }
     val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
+    // 本次播放是否已经摆过视频比例：比例到达过一次就一直为真，之后不再按比例盖黑底。
+    var aspectRatioPlaced by remember { mutableStateOf(false) }
+    LaunchedEffect(surfacePresentation.aspectRatio) {
+        if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
+    }
     // 顶/底栏是否可见同时决定指针是否跟随出现。
     val barsVisible = playerBarsVisible(
         locked = locked,
@@ -511,7 +516,14 @@ fun PlayerScreen(
                 ),
         )
         // 黑底画在视频视图之后：屏幕上没有可显示的画面时铺黑底（首次打开、片尾恢复、切集无画面、无视频轨）。
-        if (showPlayerBlackLayer(surfacePresentation.showsPicture)) {
+        // 刚进播放页、比例还没到时也盖住，避免视频区先按整屏摆好、比例到达后再缩一次。
+        if (
+            showPlayerBlackLayer(
+                showsPicture = surfacePresentation.showsPicture,
+                videoAspectRatio = surfacePresentation.aspectRatio,
+                aspectRatioPlaced = aspectRatioPlaced,
+            )
+        ) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
