@@ -52,16 +52,42 @@ class PlaybackControllerSeekPreviewTest {
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
-        val issuedBeforeRelease = engine.seekPositions.size
+        // 松手前只有这两条真实下发：中途目标不排队，队列里只剩当前最后目标。
+        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
 
         controller.commitSeekPreview()
 
         // 落定目标就是最后一次下发的那一跳：不补发，也不复用被替换掉的旧目标。
-        assertEquals(issuedBeforeRelease, engine.seekPositions.size)
+        assertEquals(listOf(70_000L, 120_000L), engine.seekPositions)
         assertEquals(120_000L, controller.progress.value.positionMillis)
 
         engine.reportFirstFrameReady()
         assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+    }
+
+    @Test
+    fun `预览改写后旧序号的 ready 不结算新目标`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 120_000)
+        // 改写会换新序号：两次下发各占一条。
+        val staleSerial = engine.issuedSeekSerials.first()
+        val currentSerial = engine.issuedSeekSerials.last()
+        assertTrue(currentSerial > staleSerial)
+
+        controller.commitSeekPreview()
+
+        // 旧目标那条命令的 ready 迟到：序号对不上当前这一跳，不结算落定。
+        engine.reportReadyForSerial(staleSerial)
+        assertNull(controller.seekSettlement.value)
+        assertEquals(listOf(true), engine.muteCalls)
+
+        // 当前序号的那一条才结算，落点是手指目标。
+        engine.reportReadyForSerial(currentSerial)
+        assertEquals(120_000L, controller.seekSettlement.value?.targetMillis)
+        assertEquals(listOf(true, false), engine.muteCalls)
     }
 
     @Test

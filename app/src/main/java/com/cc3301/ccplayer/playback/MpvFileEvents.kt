@@ -404,11 +404,16 @@ internal class MpvLoadCoordinator(
     @Synchronized
     fun reserveSeekSerial(): Int = readySignals.reserve()
 
+    /** 一条 seek 命令已下发：序号进入待认队列，ready 按它认这一跳。 */
     @Synchronized
     fun onSeekIssued(serial: Int) {
-        // seek 发起表示真正离开片尾，允同一代际再次上报播完。
-        fileEvents.onSeekIssued()
         readySignals.onSeekIssued(serial)
+    }
+
+    /** 一轮跳转开始：离开片尾与序号登记是两件事，每条真正下发的命令都要做一次。 */
+    @Synchronized
+    fun onSeekStarted() {
+        fileEvents.onSeekIssued()
     }
 
     @Synchronized
