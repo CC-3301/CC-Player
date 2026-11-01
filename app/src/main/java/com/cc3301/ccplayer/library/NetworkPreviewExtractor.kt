@@ -8,6 +8,7 @@ import com.cc3301.ccplayer.streaming.ReadKind
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -29,18 +30,18 @@ fun interface NetworkPreviewDecoder {
  * 已打开句柄、已发起定点预读的网络取图。
  *
  * [decode] 只跑原生解码，由调用方放在解码许可内；字节预读已经在许可外发起，并在解码期间继续推进。
- * 用完必须 [close]：解码成功、失败或取消都要关句柄。
+ * 解码与关闭都在 IO 线程执行，不跟随调用方所在线程。用完必须 [close]：解码成功、失败或取消都要关句柄。
  */
 class NetworkPreviewPreparation(
     private val decodeBlock: suspend (Int) -> ByteArray?,
-    private val closeBlock: () -> Unit,
+    private val closeBlock: suspend () -> Unit,
 ) {
 
     /** 在解码许可内取图；没有可用图时返回 null。 */
     suspend fun decode(targetWidth: Int): ByteArray? = decodeBlock(targetWidth)
 
-    /** 关闭句柄与预读；可重复调用。 */
-    fun close() = closeBlock()
+    /** 关闭句柄与预读；可重复调用。取消时也要关，不能随请求一起丢弃。 */
+    suspend fun close() = closeBlock()
 }
 
 /**
@@ -101,29 +102,38 @@ class NetworkPreviewExtractor(
                 window = previewWindow
                 previewWindow.startMetadataReadAhead()
                 NetworkPreviewPreparation(
+                    // 系统抽帧器在调用线程上回调读字节：解码固定在本模块的 IO 线程发起，不跟随调用方所在线程。
                     decodeBlock = { targetWidth ->
-                        try {
-                            decode(previewWindow, kind, targetWidth)
-                        } finally {
-                            // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
-                            diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
+                        withContext(Dispatchers.IO) {
+                            try {
+                                decode(previewWindow, kind, targetWidth)
+                            } finally {
+                                // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
+                                diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
+                            }
                         }
                     },
-                    closeBlock = { runCatching { previewWindow.close() } },
+                    // 关闭句柄同样可能阻塞在网络上：取消时也要执行，固定在本模块的 IO 线程收尾。
+                    closeBlock = {
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
+                    },
                 ).also { opened = it }
             }
         } catch (failure: Throwable) {
             // 取消可能在 withContext 返回后才生效并丢弃结果：已打开的资源在这里兜底关闭。
-            val preparation = opened
-            val openedWindow = window
-            if (preparation != null) {
-                runCatching { preparation.close() }
-            } else if (openedWindow != null) {
-                // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
-                runCatching { openedWindow.close() }
-            } else {
-                runCatching { primary?.close() }
-                runCatching { readAheadHandle?.close() }
+            // 关闭句柄可能阻塞在网络上：取消时也要执行，固定在本模块的 IO 线程收尾。
+            withContext(NonCancellable + Dispatchers.IO) {
+                val preparation = opened
+                val openedWindow = window
+                if (preparation != null) {
+                    runCatching { preparation.close() }
+                } else if (openedWindow != null) {
+                    // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
+                    runCatching { openedWindow.close() }
+                } else {
+                    runCatching { primary?.close() }
+                    runCatching { readAheadHandle?.close() }
+                }
             }
             throw failure
         }
