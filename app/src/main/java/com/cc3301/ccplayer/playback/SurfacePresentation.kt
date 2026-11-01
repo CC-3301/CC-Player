@@ -29,8 +29,10 @@ data class SurfacePresentation(
 /**
  * 唯一的派生规则。
  *
- * 有画面：屏上有帧（[ScreenFrame.Origin] 或 [ScreenFrame.Target]）、当前集有视频轨，且不在片尾黑底期。
- * 没有画面（铺黑底）：当前集没有视频轨；片尾自动恢复的黑底期；屏上没有可沿用的帧。
+ * 有画面：屏上有帧（[ScreenFrame.Origin] 或 [ScreenFrame.Target]）、当前集有视频轨，且没有挂起黑底。
+ * 没有画面（铺黑底）：当前集没有视频轨；[holdBlack] 挂起；屏上没有可沿用的帧。
+ *
+ * [holdBlack] 是控制层已经判定好的显式事实（片尾黑底、无帧兜底），这里不再跨阶段现算。
  *
  * 比例随屏上那一帧取：原片画面用切集起点的原片比例（未知就是未知，不回退读引擎当前值，
  * 否则会被新文件上报的比例带偏），当前画面用引擎上报的比例，没有帧时没有比例。
@@ -38,14 +40,14 @@ data class SurfacePresentation(
 internal fun deriveSurfacePresentation(
     screenFrame: ScreenFrame,
     targetHasVideo: Boolean,
-    endBlackHold: Boolean,
+    holdBlack: Boolean,
     originAspectRatio: Double?,
     targetAspectRatio: Double?,
     heldFrame: Bitmap?,
 ): SurfacePresentation {
     val showsPicture = when {
         !targetHasVideo -> false
-        endBlackHold -> false
+        holdBlack -> false
         else -> screenFrame != ScreenFrame.None
     }
     val aspectRatio = when (screenFrame) {

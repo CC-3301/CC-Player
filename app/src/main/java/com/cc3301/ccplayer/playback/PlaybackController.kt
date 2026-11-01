@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -111,7 +110,10 @@ class PlaybackController(
 
     /**
      * 屏幕上现在该显示什么：界面只读这个派生结果（有无画面、该用的比例与回前台的缓存帧），
-     * 不再自行组合加载阶段、黑底与视频轨。只在 [settlePresentation] 里写。
+     * 不再自行组合加载阶段、黑底与视频轨。
+     *
+     * 只有 [settlePresentation] 一个写点，且只在控制层线程调用；抓帧等后台结果先落到各自字段，
+     * 回到控制层线程后再派生。
      */
     private val _surfacePresentation = MutableStateFlow(SurfacePresentation())
     val surfacePresentation: StateFlow<SurfacePresentation> = _surfacePresentation.asStateFlow()
@@ -534,7 +536,11 @@ class PlaybackController(
             val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
             backgroundCaptureInFlight = false
             if (frame == null || token != backgroundCaptureToken) return@launch
-            replaceBackgroundRestoreFrame(frame)
+            // 抓帧在后台线程：结果交回控制层线程落地并派生，派生结果不在后台线程碰。
+            scope.launch {
+                if (token != backgroundCaptureToken) return@launch
+                replaceBackgroundRestoreFrame(frame)
+            }
         }
         backgroundCaptureJob = job
         return job
@@ -651,20 +657,12 @@ class PlaybackController(
         _surfacePresentation.value = deriveSurfacePresentation(
             screenFrame = screenFrame,
             targetHasVideo = targetHasVideo,
-            endBlackHold = endBlackHold(),
+            holdBlack = holdBlack,
             originAspectRatio = originAspectRatio,
             targetAspectRatio = _videoAspectRatio.value,
             heldFrame = _backgroundRestoreFrame.value,
         )
     }
-
-    /**
-     * 片尾黑底：片尾自动切集结束、且停在暂停等待时成立；已挂起的黑底同样算。
-     * 切集进行中不判：片尾的末帧要继续留在屏上，直到目标画面接管。
-     * 派生与恢复收尾共用这一处判据。
-     */
-    private fun endBlackHold(): Boolean =
-        holdBlack || (loadPhase != LoadPhase.Switching && switchOriginEnded && paused)
 
     /** 切集目标切换时共用的状态重置；缓冲计时由调用方决定。 */
     private fun applySwitchTarget(index: Int, media: MediaFile) {
@@ -1636,6 +1634,7 @@ class PlaybackController(
         // 完全没有接管信号时，原片画面还停在屏上，继续沿用、不铺黑底。
         if (switchOutputLive) {
             screenFrame = ScreenFrame.None
+            holdBlack = true
             settlePresentation()
         }
         restoreOrigin()
@@ -1667,6 +1666,9 @@ class PlaybackController(
                 )
         watchedToEnd = restoreAtEndOfEpisode
         pausedAtEpisodeEnd = restoreAtEndOfEpisode
+        // 片尾自动切集失败不能续播：恢复期不沿用旧帧，按黑底等原片重新出帧。
+        // 无帧兜底已经挂起黑底时保持，恢复结束时再按用户意图收尾。
+        holdBlack = holdBlack || (switchOriginEnded && paused)
         loadGeneration++
         loadPhase = LoadPhase.Restoring
         _restoring.value = true
@@ -1690,8 +1692,8 @@ class PlaybackController(
         val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
         restartFromStartAfterRestore = false
         // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
-        // 判据只有 [endBlackHold] 一处，这里只把结论挂成持续黑底。
-        val blackHold = endBlackHold()
+        // 恢复到片尾时用户按过播放就从 0 重开，黑底随之解除。
+        val blackHold = switchOriginEnded && paused
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
@@ -1873,11 +1875,11 @@ class PlaybackController(
 
     /**
      * 换掉后台恢复帧；同样交给 GC，不手动回收。
-     * 缓存帧也是屏幕该显示什么的一部分：抓帧在线程池里完成，这里只做原子更新，不碰其它派生状态。
+     * 缓存帧也是屏幕该显示什么的一部分，换掉后立刻派生。只在控制层线程调用。
      */
     private fun replaceBackgroundRestoreFrame(frame: Bitmap?) {
         _backgroundRestoreFrame.value = frame
-        _surfacePresentation.update { it.copy(heldFrame = frame) }
+        settlePresentation()
     }
 
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */

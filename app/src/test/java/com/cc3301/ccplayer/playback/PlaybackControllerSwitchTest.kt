@@ -151,18 +151,23 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `a switch stops keeping the surface frame once the frame shows`() = runTest {
         val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
 
         engine.reportPlaybackEnded()
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
 
         engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
         engine.reportFirstFrameReady()
 
         assertFalse(controller.switching.value)
-        // 首帧已可显示：屏上是新画面，不铺黑底。
+        // 首帧已可显示：撤掉旧帧，屏上是新画面与新文件比例，不铺黑底。
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 
     @Test
@@ -289,20 +294,26 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `pausing after the target started settles the switch paused`() = runTest {
         val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
         controller.next()
         engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
         engine.reportVideoReconfigured()
         assertTrue(controller.switching.value)
         assertEquals(1, engine.resumeCalls)
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
 
         // 就绪后又暂停：不能再等位置前进，直接按已就绪暂停收尾。
         controller.pause()
 
-        // 暂停态没有更靠后的出帧信号：收尾即撤旧帧，屏上是新集首帧，不铺黑底。
+        // 暂停态没有更靠后的出帧信号：收尾即撤旧帧，屏上是新集首帧与新文件比例，不铺黑底。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 
     @Test
@@ -2067,6 +2078,86 @@ class PlaybackControllerSwitchTest {
         controller.next()
 
         // 没有原片画面可沿用：这一段切集按黑底等目标首帧，不误判为有画面。
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+    }
+
+    @Test
+    fun `a presented frame withdraws the old frame and takes the new ratio`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+        // 还没有真正的出帧：屏上是原片画面与原片比例。
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+
+        // 播放位置前进：新帧真的上屏，撤旧帧并换成新文件比例。
+        engine.reportFramePresented()
+
+        assertTrue(controller.switching.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a paused natural end switch shows the target frame instead of black`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+        engine.reportPositionChanged(600_000, 600_000)
+
+        // 片尾自然播完触发切集：切集起点被标记为片尾结束。
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+        engine.reportVideoReconfigured()
+        assertEquals(1, engine.resumeCalls)
+
+        // 就绪后暂停：退后台与音频输出中断走同一条收尾路径。
+        controller.pauseForBackground()
+
+        // 片尾标记不能把暂停态刚露出的新集首帧盖成黑底。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a paused natural end switch that never gets a frame restores black`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+        engine.reportPositionChanged(600_000, 600_000)
+        val failures = collectFailures(controller)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        controller.pauseForBackground()
+        assertTrue(showsPicture(controller))
+
+        // 继续播放后仍等不到帧：60 秒兜底回退原片，片尾恢复不再沿用旧帧。
+        controller.resume()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+
+        // 片尾恢复就绪后仍保持黑底：原片重新出帧也不露，等用户操作。
+        engine.reportFileLoaded()
+        engine.reportFramePresented()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
         assertFalse(showsPicture(controller))
         assertTrue(blackLayer(controller))
     }

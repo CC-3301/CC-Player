@@ -13,24 +13,24 @@ class SurfacePresentationTest {
     private data class Row(
         val screenFrame: ScreenFrame,
         val targetHasVideo: Boolean,
-        val endBlackHold: Boolean,
+        val holdBlack: Boolean,
         val showsPicture: Boolean,
         val aspectRatio: Double?,
     )
 
     private val rows = listOf(
         // 屏上没有可沿用的帧：只有黑底，没有比例。
-        Row(ScreenFrame.None, targetHasVideo = true, endBlackHold = false, showsPicture = false, aspectRatio = null),
-        Row(ScreenFrame.None, targetHasVideo = true, endBlackHold = true, showsPicture = false, aspectRatio = null),
-        Row(ScreenFrame.None, targetHasVideo = false, endBlackHold = false, showsPicture = false, aspectRatio = null),
+        Row(ScreenFrame.None, targetHasVideo = true, holdBlack = false, showsPicture = false, aspectRatio = null),
+        Row(ScreenFrame.None, targetHasVideo = true, holdBlack = true, showsPicture = false, aspectRatio = null),
+        Row(ScreenFrame.None, targetHasVideo = false, holdBlack = false, showsPicture = false, aspectRatio = null),
         // 屏上是原片画面：比例锁在原片。
-        Row(ScreenFrame.Origin, targetHasVideo = true, endBlackHold = false, showsPicture = true, aspectRatio = ORIGIN_RATIO),
-        Row(ScreenFrame.Origin, targetHasVideo = true, endBlackHold = true, showsPicture = false, aspectRatio = ORIGIN_RATIO),
-        Row(ScreenFrame.Origin, targetHasVideo = false, endBlackHold = false, showsPicture = false, aspectRatio = ORIGIN_RATIO),
+        Row(ScreenFrame.Origin, targetHasVideo = true, holdBlack = false, showsPicture = true, aspectRatio = ORIGIN_RATIO),
+        Row(ScreenFrame.Origin, targetHasVideo = true, holdBlack = true, showsPicture = false, aspectRatio = ORIGIN_RATIO),
+        Row(ScreenFrame.Origin, targetHasVideo = false, holdBlack = false, showsPicture = false, aspectRatio = ORIGIN_RATIO),
         // 屏上是当前加载的画面：比例换成新文件。
-        Row(ScreenFrame.Target, targetHasVideo = true, endBlackHold = false, showsPicture = true, aspectRatio = TARGET_RATIO),
-        Row(ScreenFrame.Target, targetHasVideo = true, endBlackHold = true, showsPicture = false, aspectRatio = TARGET_RATIO),
-        Row(ScreenFrame.Target, targetHasVideo = false, endBlackHold = false, showsPicture = false, aspectRatio = TARGET_RATIO),
+        Row(ScreenFrame.Target, targetHasVideo = true, holdBlack = false, showsPicture = true, aspectRatio = TARGET_RATIO),
+        Row(ScreenFrame.Target, targetHasVideo = true, holdBlack = true, showsPicture = false, aspectRatio = TARGET_RATIO),
+        Row(ScreenFrame.Target, targetHasVideo = false, holdBlack = false, showsPicture = false, aspectRatio = TARGET_RATIO),
     )
 
     @Test
@@ -39,7 +39,7 @@ class SurfacePresentationTest {
             val presentation = deriveSurfacePresentation(
                 screenFrame = row.screenFrame,
                 targetHasVideo = row.targetHasVideo,
-                endBlackHold = row.endBlackHold,
+                holdBlack = row.holdBlack,
                 originAspectRatio = ORIGIN_RATIO,
                 targetAspectRatio = TARGET_RATIO,
                 heldFrame = null,
@@ -54,7 +54,7 @@ class SurfacePresentationTest {
         val origin = deriveSurfacePresentation(
             screenFrame = ScreenFrame.Origin,
             targetHasVideo = true,
-            endBlackHold = false,
+            holdBlack = false,
             originAspectRatio = null,
             targetAspectRatio = TARGET_RATIO,
             heldFrame = null,
@@ -64,7 +64,7 @@ class SurfacePresentationTest {
         val target = deriveSurfacePresentation(
             screenFrame = ScreenFrame.Target,
             targetHasVideo = true,
-            endBlackHold = false,
+            holdBlack = false,
             originAspectRatio = ORIGIN_RATIO,
             targetAspectRatio = null,
             heldFrame = null,
@@ -79,7 +79,7 @@ class SurfacePresentationTest {
         val black = deriveSurfacePresentation(
             screenFrame = ScreenFrame.None,
             targetHasVideo = false,
-            endBlackHold = true,
+            holdBlack = true,
             originAspectRatio = null,
             targetAspectRatio = null,
             heldFrame = frame,
@@ -90,7 +90,7 @@ class SurfacePresentationTest {
         val picture = deriveSurfacePresentation(
             screenFrame = ScreenFrame.Target,
             targetHasVideo = true,
-            endBlackHold = false,
+            holdBlack = false,
             originAspectRatio = null,
             targetAspectRatio = TARGET_RATIO,
             heldFrame = frame,

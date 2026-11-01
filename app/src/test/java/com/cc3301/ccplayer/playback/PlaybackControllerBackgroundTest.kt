@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -137,6 +138,47 @@ class PlaybackControllerBackgroundTest {
         // 播放核心输出新帧：屏上是新画面，缓存帧撤掉。
         assertTrue(controller.surfacePresentation.value.showsPicture)
         assertNull(controller.surfacePresentation.value.heldFrame)
+    }
+
+    @Test
+    fun `抓帧结果回到控制层线程后才进派生结果`() = runTest {
+        val frame = testBitmap()
+        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        // 控制层用排队的调度器：后台线程完成抓帧后不能自己写派生结果。
+        val controller = PlaybackController(
+            engine,
+            progress,
+            CoroutineScope(StandardTestDispatcher(testScheduler)),
+            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
+            nowMillis = { testScheduler.currentTime },
+        )
+        openPaused(controller)
+        runCurrent()
+
+        capture(controller)
+        // 抓帧已完成，但结果还没轮到控制层线程：派生结果里没有缓存帧。
+        assertNull(controller.surfacePresentation.value.heldFrame)
+
+        runCurrent()
+
+        // 回到控制层线程才落地并派生。
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
+    }
+
+    @Test
+    fun `迟到加载令牌的帧不撤缓存帧也不改画面`() = runTest {
+        val frame = testBitmap()
+        val controller = capturedController(frame)
+        val staleToken = engine.currentLoadToken - 1
+        reattach(controller)
+        runCurrent()
+
+        engine.reportFramePresented(loadToken = staleToken)
+        runCurrent()
+
+        // 旧加载的迟到帧不能撤缓存帧，也不能把画面说成已经上屏。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertSame(frame, controller.surfacePresentation.value.heldFrame)
     }
 
     @Test
