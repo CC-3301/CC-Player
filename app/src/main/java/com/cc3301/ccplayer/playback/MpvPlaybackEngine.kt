@@ -96,10 +96,6 @@ class MpvPlaybackEngine(
     @Volatile
     private var released = false
 
-    /** 播放核心已初始化：属性读取只在初始化之后可用。 */
-    @Volatile
-    private var initialized = false
-
     @Volatile
     private var positionSeconds = 0.0
 
@@ -132,7 +128,6 @@ class MpvPlaybackEngine(
         MPVLib.observeProperty(WIDTH_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(HEIGHT_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(EOF_REACHED_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
-        initialized = true
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -440,14 +435,6 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }
 
-    /** 当前音频输出：后台卡顿时用来确认走的是哪条输出。 */
-    override fun audioOutputSummary(): String? {
-        if (released || !initialized) return null
-        val audioOutput = readMpvProperty { MPVLib.getPropertyString(AO_PROPERTY) } ?: return null
-        val currentAudioOutput = readMpvProperty { MPVLib.getPropertyString(CURRENT_AO_PROPERTY) }
-        return "ao=$audioOutput current-ao=${currentAudioOutput ?: "-"}"
-    }
-
     /**
      * 在等待上限内释放引擎持有的原生资源；闸门超时就放弃销毁，实例随进程退出回收。
      * 还挂着 Surface 时先投一条分离再排空视频输出线程：闸门跑到的分支，销毁播放核心之前一定分离过；
@@ -495,7 +482,6 @@ class MpvPlaybackEngine(
         }
         loadCoordinator.reset()
         MPVLib.destroy()
-        initialized = false
     }
 
     override fun event(eventId: Int) {

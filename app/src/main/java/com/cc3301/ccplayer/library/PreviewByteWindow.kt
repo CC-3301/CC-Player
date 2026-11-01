@@ -1,10 +1,7 @@
 package com.cc3301.ccplayer.library
 
-import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
-import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicInteger
 
 /** 字节预读窗口上限：每条目常驻内存的字节上限。 */
 internal const val PREVIEW_READ_WINDOW_BYTES = 8L * 1024 * 1024
@@ -20,12 +17,6 @@ internal const val PREVIEW_METADATA_TAIL_BYTES = 1024 * 1024
 
 /** 解码命中一块后向后扩 1 块。 */
 private const val FOLLOW_READ_AHEAD_CHUNKS = 1
-
-/** 同一窗口最多写出的读失败行数。 */
-private const val PREVIEW_FAILURE_LOG_LINES = 3
-
-/** 窗口状态里最多列出的已缓存块区间段数。 */
-private const val PREVIEW_SUMMARY_SPANS = 10
 
 /**
  * 本地字节窗口：解码只读本地字节，缺失的块由本层向底层补齐。
@@ -47,14 +38,7 @@ internal class PreviewByteWindow(
     readAheadSource: ByteSource? = null,
     private val readAhead: PreviewReadAhead = previewReadAhead,
     private val readAheadRank: Long = PREVIEW_PREFETCH_RANK,
-    /** 诊断日志出口：读失败与关闭各记一行，按 [label] 归属条目。 */
-    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    /** 日志条目标识，通常取文件名；为空时按通用窗口记。 */
-    label: String = "",
 ) : ByteSource {
-
-    /** 日志行首；窗口没有名字时也能独立成行。 */
-    private val logPrefix: String = if (label.isEmpty()) "封面诊断: 预览窗口" else "封面诊断: $label 预览窗口"
 
     /** 块粒度：不越过底层协商上限，64 KiB 服务器上一块正好一次读取。 */
     private val chunkBytes: Int = origin.maxReadBytes.takeIf { it in 1 until chunkBytes } ?: chunkBytes
@@ -84,38 +68,19 @@ internal class PreviewByteWindow(
 
     private var closed = false
 
-    /** 正在窗口里读的线程数：关闭时据此判断还有没有解码在等字节。 */
-    private val readingThreads = AtomicInteger()
-
-    /** 已经写出的读失败行数：同一窗口最多三条，避免坏块把日志刷满。 */
-    private val failureLines = AtomicInteger()
-
-    /** 最近一次读失败的块起点；-1 表示还没有失败。 */
-    @Volatile
-    private var lastFailedChunk = -1L
-
-    /** 预读完成块数与累计耗时；关闭时随窗口状态一起记。 */
-    private var readAheadBlocks = 0
-    private var readAheadMillis = 0L
-
     override val size: Long get() = origin.size
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (length <= 0) return 0
         if (position < 0 || position >= size) return 0
-        readingThreads.incrementAndGet()
-        try {
-            val start = chunkStart(position)
-            val bytes = chunkAt(start, position)
-            val from = (position - start).toInt()
-            if (from >= bytes.size) return 0
-            val count = minOf(length, bytes.size - from)
-            System.arraycopy(bytes, from, buffer, offset, count)
-            followReadAhead(start)
-            return count
-        } finally {
-            readingThreads.decrementAndGet()
-        }
+        val start = chunkStart(position)
+        val bytes = chunkAt(start, position)
+        val from = (position - start).toInt()
+        if (from >= bytes.size) return 0
+        val count = minOf(length, bytes.size - from)
+        System.arraycopy(bytes, from, buffer, offset, count)
+        followReadAhead(start)
+        return count
     }
 
     /**
@@ -136,31 +101,15 @@ internal class PreviewByteWindow(
         queueMetadata(tailStart, total)
     }
 
-    override fun close() = close("未标注")
-
-    /**
-     * 带调用点标识的关闭：日志能看出是谁关的，以及关闭时还有没有解码在读。
-     * 重复调用无副作用。
-     */
-    fun close(reason: String) {
-        var cachedChunks = 0
-        var aheadBlocks = 0
-        var aheadMillis = 0L
+    override fun close() {
         synchronized(lock) {
             if (closed) return
             closed = true
-            cachedChunks = chunks.size
-            aheadBlocks = readAheadBlocks
-            aheadMillis = readAheadMillis
             queued.clear()
             pending.clear()
             chunks.clear()
             residentBytes = 0
             lock.notifyAll()
-        }
-        diagnostics.log {
-            "$logPrefix 窗口关闭 来源=$reason 解码在读=${if (readingThreads.get() > 0) "是" else "否"} " +
-                "缓存块=$cachedChunks 预读=${aheadBlocks}块/${aheadMillis}ms"
         }
         runCatching { origin.close() }
         if (aheadSource !== origin) runCatching { aheadSource.close() }
@@ -193,43 +142,25 @@ internal class PreviewByteWindow(
                 }
             }
         }
-        var readBytes = 0
-        val result = runCatching { load(start) { readBytes = it } }
+        val result = runCatching { load(start) }
         var closedWhileLoading = false
-        var failureLine: String? = null
         synchronized(lock) {
             pending -= start
             closedWhileLoading = closed
             if (!closedWhileLoading) {
                 result.fold(
                     onSuccess = { bytes -> putChunkLocked(start, bytes) },
-                    onFailure = { failure ->
-                        failures[start] = failure.asPreviewReadFailure()
-                        lastFailedChunk = start
-                        if (failureLines.getAndIncrement() < PREVIEW_FAILURE_LOG_LINES) {
-                            failureLine = "$logPrefix 读取失败 块=$start 期望=${expectedChunkBytes(start)}B " +
-                                "实读=${readBytes}B 异常=${failure.javaClass.simpleName}: ${failure.message ?: "-"} 窗口已关闭=否"
-                        }
-                    },
+                    onFailure = { failure -> failures[start] = failure.asPreviewReadFailure() },
                 )
             }
             lock.notifyAll()
         }
-        failureLine?.let { diagnostics.log(it) }
-        if (closedWhileLoading) {
-            if (failureLines.getAndIncrement() < PREVIEW_FAILURE_LOG_LINES) {
-                diagnostics.log {
-                    "$logPrefix 读取被关闭打断 块=$start 期望=${expectedChunkBytes(start)}B " +
-                        "实读=${readBytes}B 窗口已关闭=是"
-                }
-            }
-            throw IOException("预览读取已取消")
-        }
+        if (closedWhileLoading) throw IOException("预览读取已取消")
         return result.getOrThrow()
     }
 
     /** 从底层补齐一块：文件剩不下整块时按实际长度收口，读不到字节时给空块。 */
-    private fun load(start: Long, onRead: (Int) -> Unit = {}): ByteArray {
+    private fun load(start: Long): ByteArray {
         val limit = minOf(chunkBytes.toLong(), size - start).toInt()
         if (limit <= 0) return ByteArray(0)
         val bytes = ByteArray(limit)
@@ -239,14 +170,9 @@ internal class PreviewByteWindow(
             if (count <= 0) break
             read += count
         }
-        onRead(read)
         // 读不到字节（读到底或被关闭）按文件末尾处理，不当作失败扩散。
         return if (read == limit) bytes else bytes.copyOf(read)
     }
-
-    /** 一次补齐最多要读的字节数：窗口末尾按实际剩余收口。 */
-    private fun expectedChunkBytes(start: Long): Long =
-        minOf(chunkBytes.toLong(), size - start).coerceAtLeast(0)
 
     /** 解码命中后向后扩 2 块；已在本地或读完的位置不排队。 */
     private fun followReadAhead(start: Long) {
@@ -300,7 +226,6 @@ internal class PreviewByteWindow(
             if (chunks[chunk]?.let { it.size >= to - chunk } == true) return
             pending += chunk
         }
-        val startedAt = systemMonotonicMillis()
         val result = runCatching {
             val bytes = ByteArray((to - chunk).toInt())
             var read = 0
@@ -311,63 +236,14 @@ internal class PreviewByteWindow(
             }
             if (read == bytes.size) bytes else bytes.copyOf(read)
         }
-        var failureLine: String? = null
         synchronized(lock) {
             pending -= chunk
-            readAheadBlocks++
-            readAheadMillis += systemMonotonicMillis() - startedAt
             // 关闭后不回写；既有的失败记录由下一次读取暴露。
             if (!closed) {
-                result.fold(
-                    onSuccess = { bytes -> if (bytes.isNotEmpty()) putChunkLocked(chunk, bytes) },
-                    onFailure = { failure ->
-                        if (failureLines.getAndIncrement() < PREVIEW_FAILURE_LOG_LINES) {
-                            failureLine = "$logPrefix 预读失败 块=$chunk 期望=${to - chunk}B " +
-                                "异常=${failure.javaClass.simpleName}: ${failure.message ?: "-"} 窗口已关闭=否"
-                        }
-                    },
-                )
+                result.onSuccess { bytes -> if (bytes.isNotEmpty()) putChunkLocked(chunk, bytes) }
             }
             lock.notifyAll()
         }
-        failureLine?.let { diagnostics.log(it) }
-    }
-
-    /**
-     * 窗口状态一行：已缓存块区间（最多 10 段）、窗口总长与最近一次失败读的位置。
-     * 只在解码失败时调用；块列表压成区间，不逐块刷日志。
-     */
-    fun stateSummary(): String {
-        val spans = ArrayList<String>()
-        var failedChunk = -1L
-        synchronized(lock) {
-            failedChunk = lastFailedChunk
-            var spanStart = 0L
-            var spanEnd = 0L
-            var open = false
-            for (start in chunks.keys.sorted()) {
-                val end = start + (chunks[start]?.size ?: 0)
-                if (!open) {
-                    spanStart = start
-                    spanEnd = end
-                    open = true
-                } else if (start <= spanEnd) {
-                    if (end > spanEnd) spanEnd = end
-                } else {
-                    spans += "[$spanStart,$spanEnd)"
-                    spanStart = start
-                    spanEnd = end
-                }
-            }
-            if (open) spans += "[$spanStart,$spanEnd)"
-        }
-        val shown = if (spans.size <= PREVIEW_SUMMARY_SPANS) {
-            spans.joinToString(",")
-        } else {
-            spans.take(PREVIEW_SUMMARY_SPANS).joinToString(",") + ",…"
-        }
-        val failed = if (failedChunk < 0) "-" else failedChunk.toString()
-        return "已缓存块=[$shown] 窗口长=${size}B 最近失败读=$failed"
     }
 
     /** 写回一块并按最近使用淘汰窗口外的块。 */

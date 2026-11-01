@@ -95,9 +95,6 @@ interface PlaybackEngine {
 
     fun setSurfaceSize(width: Int, height: Int)
 
-    /** 当前音频输出摘要（播放核心的 ao 与 current-ao）；取不到时为空。 */
-    fun audioOutputSummary(): String? = null
-
     /** 释放引擎持有的全部原生资源。 */
     fun release()
 

@@ -176,7 +176,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             onAvailabilityChanged = { available ->
                 playback?.controller?.setRenderSurfaceAvailable(available)
             },
-            diagnostics = diagnostics,
         )
     }
 
@@ -518,7 +517,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             },
                             onClose = { handlePlayerBack() },
                             onButtonClickDebounced = { line -> diagnostics.log(line) },
-                            diagnostics = diagnostics,
                         )
                     }
 
@@ -771,12 +769,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
-        diagnostics.log {
-            "前后台诊断: 退到后台 状态=${binder?.controller?.state?.value ?: "未连接"} " +
-                "策略暂停=${if (binder?.blocksBackgroundPlayback == true) "是" else "否"} " +
-                "Surface=${if (surfaceSession.hasSurface) "在" else "无"} " +
-                "音频输出=${binder?.engine?.audioOutputSummary() ?: "未知"}"
-        }
         // 退后台时手势不会再收尾：落定预览并恢复声音，后台播放开着也一样。
         binder?.controller?.commitSeekPreview()
         // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
@@ -831,12 +823,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
-        diagnostics.log {
-            "前后台诊断: 回到前台 状态=${playback?.controller?.state?.value ?: "未连接"} " +
-                "策略暂停=${if (playback?.blocksBackgroundPlayback == true) "是" else "否"} " +
-                "Surface=${if (surfaceSession.hasSurface) "在" else "无"} " +
-                "音频输出=${playback?.engine?.audioOutputSummary() ?: "未知"}"
-        }
         // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
         // Surface 未销毁时画面一直在，缓存帧多余；已经重挂则等播放核心的首个新帧。
@@ -954,11 +940,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         rotationOverride = sessionOrientation.override,
     )
 
-    /** 钉住进入播放页时的方向；只在首次钉住时记一条诊断。 */
+    /** 钉住进入播放页时的方向；只在首次钉住时确定。 */
     private fun holdOrientationUntilVideoKnown() {
         val held = heldScreenOrientation ?: currentScreenOrientation().also {
             heldScreenOrientation = it
-            diagnostics.log { "方向等待: 视频方向未知，钉住 " + screenOrientationLabel(it) }
         }
         appliedScreenOrientation = held
         applyOrientation(held)

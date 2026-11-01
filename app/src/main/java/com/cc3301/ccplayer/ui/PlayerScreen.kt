@@ -133,8 +133,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.cc3301.ccplayer.R
-import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
-import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
@@ -346,8 +344,6 @@ fun PlayerScreen(
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     onButtonClickDebounced: (String) -> Unit = {},
-    /** 诊断日志出口：画面区尺寸变化记一行。 */
-    diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
@@ -496,11 +492,6 @@ fun PlayerScreen(
             containerHeight = with(density) { maxHeight.toPx() },
             videoAspectRatio = surfacePresentation.aspectRatio,
         )
-        // 画面区只随比例与容器变化重设尺寸；只在真的变了时记一行，不按每帧写。
-        val viewportLog = remember { ViewportLog() }
-        LaunchedEffect(viewport, surfacePresentation.aspectRatio) {
-            viewportLog.log(diagnostics, viewport, surfacePresentation.aspectRatio)
-        }
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
             .coerceAtLeast(72.dp)
@@ -2422,22 +2413,4 @@ private fun subtitleItemLabel(item: SubtitleMenuItem): String = when (item) {
     is SubtitleMenuItem.Embedded -> stringResource(R.string.player_subtitle_embedded, item.label)
     is SubtitleMenuItem.External -> item.label
     is SubtitleMenuItem.Off -> stringResource(R.string.player_subtitle_off)
-}
-
-/** 画面区尺寸的日志游标：只在尺寸变化时写一行。 */
-private class ViewportLog {
-    private var last: VideoViewport? = null
-
-    fun log(diagnostics: DiagnosticsLog, viewport: VideoViewport, aspectRatio: Double?) {
-        val previous = last
-        if (previous == viewport) return
-        last = viewport
-        diagnostics.log {
-            "进页诊断: 画面区尺寸 ${viewport.sizeLabel()} " +
-                "偏移=(${viewport.left.roundToInt()},${viewport.top.roundToInt()}) " +
-                "比例=${aspectRatio ?: "-"} 上次=${previous?.sizeLabel() ?: "-"}"
-        }
-    }
-
-    private fun VideoViewport.sizeLabel(): String = "${width.roundToInt()}x${height.roundToInt()}"
 }
