@@ -6,8 +6,8 @@ const val PREVIEW_PREFETCH_RANK = Long.MAX_VALUE - 1
 /** 时长补读的 rank：排在最后。 */
 const val PREVIEW_DURATION_RANK = Long.MAX_VALUE
 
-/** 预读线程数：两条，够跨条目重叠，又不让内存与 SMB 并发继续变大。 */
-private const val PREVIEW_READ_AHEAD_THREADS = 2
+/** 预读线程数：一条。同一 SMB 会话不支持并发读，超出一条会丢会话。 */
+private const val PREVIEW_READ_AHEAD_THREADS = 1
 
 private const val PREVIEW_READ_AHEAD_THREAD_NAME = "preview-byte-read-ahead"
 
@@ -26,11 +26,11 @@ fun interface PreviewReadAhead {
     fun submit(rank: Long, key: Any, task: Runnable)
 }
 
-/** 进程内唯一的预读池：整个进程只有两条线程，切源不重建。 */
+/** 进程内唯一的预读池：整个进程只有一条线程，切源不重建。 */
 val previewReadAhead: PreviewReadAheadPool by lazy { PreviewReadAheadPool() }
 
 /**
- * 预读线程池：固定两条线程，按 rank 派发，同一条字节源同一时刻只有一个读。
+ * 预读线程池：固定一条线程，按 rank 派发，同一时刻只有一个读。
  *
  * 派发取队列里 rank 最小者，rank 相同按提交顺序；已在跑的读取不抢占。
  * [key] 相同的任务不并发，一条字节源上的两次读不会交叉，保持单读假设。
