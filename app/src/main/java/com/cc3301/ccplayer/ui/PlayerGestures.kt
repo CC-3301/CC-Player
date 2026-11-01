@@ -213,10 +213,6 @@ fun doubleTapFeedbackAllowed(
 fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
     !locked || input == PlayerInput.UnlockButton
 
-/** 首次加载禁用画面手势，顶栏返回入口不受控制层显隐影响。 */
-fun backEntryVisible(controlsVisible: Boolean, initialLoading: Boolean): Boolean =
-    controlsVisible || initialLoading
-
 /** 播放页上受切集缓冲限制的操作。 */
 enum class PlayerAction {
     Back,

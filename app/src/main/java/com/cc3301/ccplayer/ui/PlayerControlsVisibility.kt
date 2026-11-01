@@ -50,6 +50,14 @@ class PlayerControlsVisibility(
         lastInteractionAtMillis = elapsedMillis()
     }
 
+    /**
+     * 首次加载与切集的阶段变化：显示状态重新计时，隐藏状态保持隐藏。
+     * 控制层显隐只由点击决定，加载与切集不主动显示。
+     */
+    fun onLoadingPhaseChanged() {
+        if (visible) resetTimer()
+    }
+
     /** 面板显隐状态；打开期间暂停自动隐藏，关闭后重新计时。 */
     fun updatePanelOpen(open: Boolean) {
         panelOpen = open

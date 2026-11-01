@@ -158,4 +158,30 @@ class PlayerControlsVisibilityTest {
 
         assertEquals(true, controls.visible)
     }
+
+    @Test
+    fun `隐藏态加载阶段变化不显示控制层`() {
+        now = 5_000L
+        controls.hideIfExpired()
+        assertEquals(false, controls.visible)
+
+        now = 6_000L
+        controls.onLoadingPhaseChanged()
+
+        assertEquals(false, controls.visible)
+    }
+
+    @Test
+    fun `显示态加载阶段变化重新计时`() {
+        now = 4_000L
+        controls.onLoadingPhaseChanged()
+
+        now = 8_999L
+        controls.hideIfExpired()
+        assertEquals(true, controls.visible)
+
+        now = 9_000L
+        controls.hideIfExpired()
+        assertEquals(false, controls.visible)
+    }
 }

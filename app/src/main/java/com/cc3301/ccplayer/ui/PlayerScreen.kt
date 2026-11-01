@@ -99,7 +99,6 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -189,41 +188,10 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
     }
 }
 
-/** 鼠标移动或进入才算指针活动；触摸与手写笔不参与指针显隐。 */
-private fun PointerEvent.isMouseActivity(): Boolean =
-    (type == PointerEventType.Enter || type == PointerEventType.Move) &&
-        changes.any { it.type == PointerType.Mouse }
-
-/** 等到下一次鼠标活动，期间到达的其它事件不写状态。 */
-private suspend fun AwaitPointerEventScope.awaitMouseActivity() {
-    while (!awaitPointerEvent().isMouseActivity()) {
-        // 忽略触摸与手写笔事件。
-    }
-}
-
-/**
- * 鼠标静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 隐藏指针，再有任何鼠标活动立即恢复。
- * 计时只在鼠标真正出现后开始，触屏用户不会进入这段逻辑；
- * 每次鼠标移动只重置倒计时，只有可见性真正翻转时才回调，避免逐帧重组。
- */
-private suspend fun AwaitPointerEventScope.autoHidePointer(onVisibilityChange: (Boolean) -> Unit) {
-    var hidden = false
-    while (true) {
-        awaitMouseActivity()
-        if (hidden) {
-            hidden = false
-            onVisibilityChange(false)
-        }
-        // 超时仍未收到鼠标活动即视为静止；期间收到活动则回到外层重新计时。
-        val idle = withTimeoutOrNull(PLAYER_POINTER_HIDE_DELAY_MILLIS) {
-            awaitMouseActivity()
-            false
-        } ?: true
-        if (idle) {
-            hidden = true
-            onVisibilityChange(true)
-        }
-    }
+/** 鼠标移动或进入时的指针位置；触摸与手写笔不参与指针显隐，返回 null。 */
+private fun PointerEvent.mousePosition(): Offset? {
+    if (type != PointerEventType.Enter && type != PointerEventType.Move) return null
+    return changes.firstOrNull { it.type == PointerType.Mouse }?.position
 }
 
 /** 播放页点击：按压反馈由目标区域决定，覆盖范围外不显示涟漪。 */
@@ -372,10 +340,9 @@ fun PlayerScreen(
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
 
-    // 首次加载与切集缓冲期间控制条保持可见：首次加载只允许返回，切集允许返回与上下集。
+    // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
     LaunchedEffect(switching, initialLoading) {
-        // 加载阶段变化时重新计时；加载结束进入空闲后从此刻起算自动隐藏。
-        controls.show()
+        controls.onLoadingPhaseChanged()
         panels.closeWhenBlocked(switching, initialLoading)
     }
 
@@ -435,23 +402,47 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 播放页内鼠标静止 3 秒隐藏指针，移动或离开播放页时恢复。其它界面不处理指针。
+    // 指针跟随控制层：控制层隐藏时一并隐藏，唤出控制层时一并出现。其它界面不处理指针。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
-    var pointerHidden by remember { mutableStateOf(false) }
+    val pointer = remember { PlayerPointerVisibility() }
+    LaunchedEffect(controlsVisible) {
+        pointer.followControls(controlsVisible)
+    }
+    // 指针静止满 3 秒隐藏；控制层隐藏期间的有效移动只唤出指针。
+    LaunchedEffect(pointer.visible) {
+        while (pointer.visible) {
+            val remaining = pointer.millisUntilHide()
+            if (remaining < 0L) break
+            if (remaining == 0L) {
+                pointer.hideIfExpired()
+                break
+            }
+            delay(remaining)
+        }
+    }
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)
         .pointerHoverIcon(
-            icon = if (pointerHidden) hiddenPointerIcon else PointerIcon.Default,
+            icon = if (pointer.visible) PointerIcon.Default else hiddenPointerIcon,
             overrideDescendants = true,
         )
         .pointerInput(Unit) {
+            val deadZonePx = PlayerPointerMoveDeadZone.toPx()
             awaitPointerEventScope {
-                autoHidePointer { hidden -> pointerHidden = hidden }
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val position = event.mousePosition() ?: continue
+                    if (event.type == PointerEventType.Enter) {
+                        pointer.onPointerEnter(position)
+                    } else {
+                        pointer.onPointerMove(position, deadZonePx)
+                    }
+                }
             }
         }) {
         val density = LocalDensity.current
@@ -592,8 +583,9 @@ fun PlayerScreen(
                     .semantics { contentDescription = lockedHint },
             )
         }
+        // 控制层隐藏时顶/底栏一并隐藏；缓冲指示与错误提示不属于控制层，照常显示。
         val barsVisible = inputAllowed(PlayerInput.ControlBar, locked) &&
-            backEntryVisible(controlsVisible, initialLoading) &&
+            controlsVisible &&
             panels.controlBarsVisible
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
