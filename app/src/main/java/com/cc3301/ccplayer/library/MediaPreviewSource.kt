@@ -400,7 +400,6 @@ class CachedMediaPreviewSource(
         if (cached != null) {
             // 命中缓存立即出图，不等同键在途抽取；网络条目不显示时长，命中不补读。
             if (cached.file != null) forgetNoImage(key)
-            diagnostics.log { "封面诊断: ${file.name} 缓存命中 出图=${cached.file != null} 耗时=0ms" }
             return LoadedPreview(image = cached.file, durationMillis = null)
         }
         // 入队即记：没有这一行说明请求根本没进来，可与后续的取许可等待、等播放读区分。
@@ -414,12 +413,7 @@ class CachedMediaPreviewSource(
                 if (!mayExtract(file.location, priority)) {
                     LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
-                    val slotsRequestedAt = monotonicClockMillis()
-                    var slotsWaitMillis = 0L
-                    preparedSlots.withPermit(priority) {
-                        slotsWaitMillis = monotonicClockMillis() - slotsRequestedAt
-                        prepareAndDecode(file, key, targetWidth, priority, slotsWaitMillis)
-                    }
+                    preparedSlots.withPermit(priority) { prepareAndDecode(file, key, targetWidth, priority) }
                 }
             },
         )
@@ -453,8 +447,6 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
-        /** 取网络读取会话名额的等待时长；只用于把排队与打开、解码分开记。 */
-        slotsWaitMillis: Long = 0,
     ): LoadedPreview {
         // 没有可用的读取会话时直接按无图收尾，不再另开一条完整句柄取图。
         val prepared = openOutsideRequest(file, priority)
@@ -493,10 +485,6 @@ class CachedMediaPreviewSource(
                 LoadedPreview(image = null, durationMillis = null)
             } else {
                 forgetNoImage(key)
-                diagnostics.log {
-                    "封面诊断: ${file.name} 现算出图 字节=${bytes.size}B " +
-                        "取名额等待=${slotsWaitMillis}ms 取许可等待=${queuedMillis}ms"
-                }
                 // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
                 LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
             }
@@ -661,9 +649,6 @@ class CachedMediaPreviewSource(
         throw cancellation
     } catch (failure: Exception) {
         diagnostics.log { "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName})" }
-        // 失败明细分两行：类名与 cause 链一行、栈前三行一行，单条目失败合计三行。
-        diagnostics.log { "封面诊断: ${file.name} 失败异常 ${failureChain(failure)}" }
-        diagnostics.log { "封面诊断: ${file.name} 失败栈 ${failureStack(failure)}" }
         LoadedPreview(image = null, durationMillis = null, failed = true)
     }
 
@@ -904,25 +889,4 @@ private class PrioritySemaphore(
         val priority: PreviewPriority,
         val granted: CompletableDeferred<Unit>,
     )
-}
-
-/** 异常链摘要：类名与 message，最多三层 cause。 */
-private fun failureChain(failure: Throwable): String {
-    val parts = ArrayList<String>(3)
-    var current: Throwable? = failure
-    while (current != null && parts.size < 3) {
-        val node = current
-        parts += "${node.javaClass.name}: ${node.message ?: "-"}"
-        current = node.cause?.takeIf { it !== node }
-    }
-    return parts.joinToString(" <- ")
-}
-
-/** 栈前 3 行压成一行；没有栈帧时记为空值符。 */
-private fun failureStack(failure: Throwable): String {
-    val frames = failure.stackTrace.take(3)
-    if (frames.isEmpty()) return "-"
-    return frames.joinToString("; ") { frame ->
-        "${frame.className}.${frame.methodName}(${frame.fileName}:${frame.lineNumber})"
-    }
 }
