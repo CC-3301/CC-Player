@@ -13,6 +13,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -117,6 +118,60 @@ class NetworkPreviewExtractorTest {
         extractor.imageBytes(movie, targetWidth = 320)
 
         assertEquals(320, askedWidth)
+    }
+
+    @Test
+    fun `解码与关闭句柄在调用方之外的线程执行`() = runTest {
+        val callerThread = Thread.currentThread()
+        var decodeThread: Thread? = null
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ ->
+                decodeThread = Thread.currentThread()
+                ByteArray(1)
+            },
+            readAhead = StepExecutor(),
+        )
+
+        extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)
+
+        assertNotNull("解码应当执行", decodeThread)
+        assertTrue("解码不得在调用方线程执行", callerThread !== decodeThread)
+        assertEquals("解码与预读各开一条句柄", 2, reads.sources.size)
+        assertTrue("两条句柄都应关闭", reads.sources.all { source -> source.closed })
+        assertTrue(
+            "关闭句柄不得在调用方线程执行",
+            reads.sources.all { source -> source.closedOn != null && source.closedOn !== callerThread },
+        )
+    }
+
+    @Test
+    fun `取消后仍执行关闭且不在调用方线程`() = runBlocking {
+        val callerThread = Thread.currentThread()
+        val decoding = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ ->
+                decoding.countDown()
+                release.await(5, TimeUnit.SECONDS)
+                ByteArray(1)
+            },
+            readAhead = StepExecutor(),
+        )
+
+        val job = launch(Dispatchers.Default) { extractor.imageBytes(movie, NETWORK_TARGET_WIDTH) }
+        assertTrue("解码应当开始", decoding.await(5, TimeUnit.SECONDS))
+        job.cancel()
+        release.countDown()
+        withTimeout(5_000) { job.join() }
+
+        assertEquals("解码与预读各开一条句柄", 2, reads.sources.size)
+        assertTrue("取消后两条句柄都要关闭", reads.sources.all { source -> source.closed })
+        assertTrue(
+            "取消后的关闭不得在调用方线程执行",
+            reads.sources.all { source -> source.closedOn != null && source.closedOn !== callerThread },
+        )
     }
 
     @Test
@@ -317,6 +372,9 @@ private class RejectingExecutor(private val failAt: Int) : PreviewReadAhead {
 private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
 
     var closed = false
+
+    /** 关闭发生的线程：句柄关闭不得落在调用方线程。 */
+    var closedOn: Thread? = null
     val reads = mutableListOf<Long>()
 
     override val size: Long get() = bytes.size.toLong()
@@ -331,6 +389,7 @@ private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
 
     override fun close() {
         closed = true
+        closedOn = Thread.currentThread()
     }
 }
 

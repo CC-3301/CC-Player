@@ -542,7 +542,7 @@ class CachedMediaPreviewSource(
      * 争不到（返回 false）说明子方已经交付，这一次成功打开的结果由父方接手关闭，不能丢。
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    private fun abandonOpen(
+    private suspend fun abandonOpen(
         opened: CompletableDeferred<Result<NetworkPreviewPreparation?>>,
         opening: Job,
         reason: CancellationException,
