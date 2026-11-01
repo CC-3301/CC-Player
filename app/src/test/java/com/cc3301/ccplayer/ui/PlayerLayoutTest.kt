@@ -200,13 +200,40 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `屏上有画面时不铺黑底`() {
-        assertFalse(showPlayerBlackLayer(showsPicture = true))
+    fun `进页比例未知时视频区整屏摆放并被黑底盖住`() {
+        val viewport = videoViewport(
+            containerWidth = 1600f,
+            containerHeight = 2560f,
+            videoAspectRatio = null,
+        )
+
+        // 比例未知期间视频区仍按整屏摆放，这次摆放由黑底挡住。
+        assertViewport(0f, 0f, 1600f, 2560f, viewport)
+        assertTrue(
+            showPlayerBlackLayer(
+                showsPicture = true,
+                videoAspectRatio = null,
+                aspectRatioPlaced = false,
+            ),
+        )
     }
 
     @Test
-    fun `屏上没有画面时铺黑底`() {
-        assertTrue(showPlayerBlackLayer(showsPicture = false))
+    fun `比例到达后视频区落位并且黑底撤掉`() {
+        val viewport = videoViewport(
+            containerWidth = 1600f,
+            containerHeight = 2560f,
+            videoAspectRatio = 0.5625,
+        )
+
+        assertViewport(80f, 0f, 1440f, 2560f, viewport)
+        assertFalse(
+            showPlayerBlackLayer(
+                showsPicture = true,
+                videoAspectRatio = 0.5625,
+                aspectRatioPlaced = false,
+            ),
+        )
     }
 
     private fun assertViewport(

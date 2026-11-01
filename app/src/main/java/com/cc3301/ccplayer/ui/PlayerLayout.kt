@@ -12,6 +12,13 @@ import kotlin.math.roundToLong
 data class VideoViewport(val left: Float, val top: Float, val width: Float, val height: Float)
 
 /**
+ * 比例是否能用来摆放视频区：非空、有限且大于 0。
+ * 视频区摆放与「比例未知期间铺黑」共用这一判据，两处不会各判一套。
+ */
+fun hasKnownVideoAspectRatio(videoAspectRatio: Double?): Boolean =
+    videoAspectRatio != null && videoAspectRatio.isFinite() && videoAspectRatio > 0.0
+
+/**
  * 视频区矩形：按 [videoAspectRatio]（宽/高）等比缩放后居中，不拉伸不裁剪。
  * 比例未知、非正或非有限时铺满容器；容器尺寸非正时给出零尺寸矩形。
  */
@@ -22,7 +29,7 @@ fun videoViewport(
 ): VideoViewport {
     val width = containerWidth.coerceAtLeast(0f)
     val height = containerHeight.coerceAtLeast(0f)
-    val ratio = videoAspectRatio?.takeIf { it.isFinite() && it > 0.0 }
+    val ratio = videoAspectRatio.takeIf { hasKnownVideoAspectRatio(it) }
     if (width <= 0f || height <= 0f || ratio == null) {
         return if (width <= 0f || height <= 0f) VideoViewport(0f, 0f, 0f, 0f)
         else VideoViewport(0f, 0f, width, height)
@@ -38,10 +45,17 @@ fun videoViewport(
 }
 
 /**
- * 播放页黑底层规则：屏幕上没有可显示的画面就铺黑底。
+ * 播放页黑底层规则：屏幕上没有可显示的画面，或本次播放还没摆过视频比例，就铺黑底。
+ * 比例未知期间视频区先按整屏摆放，黑底挡住这次摆放；比例到达即第一次摆位，并在同一次重绘里撤掉黑底。
+ *
+ * [aspectRatioPlaced] 表示本次播放已经摆过视频比例：比例到达过一次就一直为真，之后不再按比例盖。
  * 有没有画面只由控制层派生的 SurfacePresentation 给出，界面不再自行组合加载阶段、黑底与视频轨。
  */
-fun showPlayerBlackLayer(showsPicture: Boolean): Boolean = !showsPicture
+fun showPlayerBlackLayer(
+    showsPicture: Boolean,
+    videoAspectRatio: Double?,
+    aspectRatioPlaced: Boolean,
+): Boolean = !showsPicture || (!aspectRatioPlaced && !hasKnownVideoAspectRatio(videoAspectRatio))
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
