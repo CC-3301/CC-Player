@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import android.view.Surface
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 
 /**
  * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
@@ -17,6 +19,8 @@ class SurfaceSession(
     private val resize: (Int, Int) -> Unit,
     private val onAvailabilityChanged: (Boolean) -> Unit,
     private val isValid: (Surface) -> Boolean = { it.isValid },
+    /** 诊断日志出口：挂载、设尺寸、开输出与分离各记一行。 */
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) {
 
     enum class State { Detached, Attached, Ready }
@@ -43,12 +47,14 @@ class SurfaceSession(
         this.surface = surface
         attachCurrent()
         publish()
+        diagnostics.log { "前后台诊断: surfaceCreated 尺寸=${surfaceWidth}x$surfaceHeight 会话=$state" }
     }
 
     fun onSurfaceChanged(width: Int, height: Int) {
         surfaceWidth = width
         surfaceHeight = height
-        if (mounted) resize(width, height)
+        diagnostics.log { "前后台诊断: surfaceChanged ${width}x$height 已挂载=$mounted" }
+        if (mounted) applySurfaceSize(width, height)
     }
 
     /** Surface 已销毁：只标记不可用，分离由调用方在后台抓帧结束后调用 [detach] 完成。 */
@@ -56,6 +62,7 @@ class SurfaceSession(
         surface = null
         if (mounted) mountedSurfaceDestroyed = true
         publish()
+        diagnostics.log { "前后台诊断: surfaceDestroyed 会话=$state" }
     }
 
     /** 当前是否可渲染；服务重连时由调用方同步一次。 */
@@ -90,17 +97,31 @@ class SurfaceSession(
         val target = surface?.takeIf(isValid) ?: return
         // 同一个 Surface 且没有被销毁才是幂等挂载；对象身份不能当作会话 ID。
         if (mountedSurface === target && !mountedSurfaceDestroyed) return
+        diagnostics.log {
+            "前后台诊断: Surface 挂载请求 之前=${if (mounted) "已挂" else "未挂"} 尺寸=${surfaceWidth}x$surfaceHeight"
+        }
         detachIfMounted()
-        if (!attach(target)) return
+        if (!attach(target)) {
+            diagnostics.log("前后台诊断: Surface 挂载失败 引擎不可用")
+            return
+        }
         mountedSurface = target
         mountedSurfaceDestroyed = false
         // 挂载顺序：先挂 Surface，再设尺寸，最后开窗口并恢复视频输出。
-        if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
+        if (surfaceWidth > 0 && surfaceHeight > 0) applySurfaceSize(surfaceWidth, surfaceHeight)
+        diagnostics.log("前后台诊断: startVideoOutput 下发")
         startOutput()
+    }
+
+    /** 设尺寸：挂载后与 Surface 尺寸变化走同一条日志。 */
+    private fun applySurfaceSize(width: Int, height: Int) {
+        diagnostics.log { "前后台诊断: setSurfaceSize ${width}x$height" }
+        resize(width, height)
     }
 
     private fun detachIfMounted() {
         if (!mounted) return
+        diagnostics.log("前后台诊断: Surface 分离下发")
         detachEngine()
         mountedSurface = null
         mountedSurfaceDestroyed = false

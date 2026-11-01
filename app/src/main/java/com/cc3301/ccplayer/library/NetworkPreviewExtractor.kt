@@ -87,8 +87,25 @@ class NetworkPreviewExtractor(
         try {
             return withContext(Dispatchers.IO) {
                 val kind = mediaKindOf(file.name) ?: return@withContext null
-                val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
-                    waitedMillis.addAndGet(millis)
+                val primaryStartedAt = systemMonotonicMillis()
+                val source = try {
+                    readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
+                        waitedMillis.addAndGet(millis)
+                    }
+                } catch (cancellation: CancellationException) {
+                    diagnostics.log {
+                        "封面诊断: ${file.name} 主句柄打开取消 用时${systemMonotonicMillis() - primaryStartedAt}ms"
+                    }
+                    throw cancellation
+                } catch (failure: Throwable) {
+                    diagnostics.log {
+                        "封面诊断: ${file.name} 主句柄打开失败 用时${systemMonotonicMillis() - primaryStartedAt}ms " +
+                            "${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
+                    }
+                    throw failure
+                }
+                diagnostics.log {
+                    "封面诊断: ${file.name} 主句柄打开成功 用时${systemMonotonicMillis() - primaryStartedAt}ms"
                 }
                 primary = source
                 readAheadHandle = openReadAhead(file, waitedMillis)
@@ -97,19 +114,21 @@ class NetworkPreviewExtractor(
                     readAheadSource = readAheadHandle,
                     readAhead = readAhead,
                     readAheadRank = readAheadRank,
+                    diagnostics = diagnostics,
+                    label = file.name,
                 )
                 window = previewWindow
                 previewWindow.startMetadataReadAhead()
                 NetworkPreviewPreparation(
                     decodeBlock = { targetWidth ->
                         try {
-                            decode(previewWindow, kind, targetWidth)
+                            decode(previewWindow, kind, targetWidth, file.name)
                         } finally {
                             // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
                             diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
                         }
                     },
-                    closeBlock = { runCatching { previewWindow.close() } },
+                    closeBlock = { runCatching { previewWindow.close("准备对象关闭") } },
                 ).also { opened = it }
             }
         } catch (failure: Throwable) {
@@ -120,7 +139,7 @@ class NetworkPreviewExtractor(
                 runCatching { preparation.close() }
             } else if (openedWindow != null) {
                 // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
-                runCatching { openedWindow.close() }
+                runCatching { openedWindow.close("准备失败兜底") }
             } else {
                 runCatching { primary?.close() }
                 runCatching { readAheadHandle?.close() }
@@ -130,24 +149,43 @@ class NetworkPreviewExtractor(
     }
 
     /** 预读用的第二条句柄；让给播放读取的时长与主句柄一起累计。打不开就退回与解码共用一条。 */
-    private suspend fun openReadAhead(file: MediaFile, waitedMillis: AtomicLong): ByteSource? = try {
-        readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
-            waitedMillis.addAndGet(millis)
+    private suspend fun openReadAhead(file: MediaFile, waitedMillis: AtomicLong): ByteSource? {
+        val startedAt = systemMonotonicMillis()
+        return try {
+            readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
+                waitedMillis.addAndGet(millis)
+            }.also {
+                diagnostics.log {
+                    "封面诊断: ${file.name} 预读句柄打开成功 用时${systemMonotonicMillis() - startedAt}ms"
+                }
+            }
+        } catch (cancellation: CancellationException) {
+            diagnostics.log { "封面诊断: ${file.name} 预读句柄打开取消 用时${systemMonotonicMillis() - startedAt}ms" }
+            throw cancellation
+        } catch (failure: Exception) {
+            // 退回共用一条句柄：单列一行，能区分「本来就只有一条」与「第二条打不开」。
+            diagnostics.log {
+                "封面诊断: ${file.name} 预读句柄打开失败 用时${systemMonotonicMillis() - startedAt}ms " +
+                    "退回共用主句柄 ${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
+            }
+            null
         }
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (failure: Exception) {
-        null
     }
 
     /**
      * 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。
      * 解码侧的异常先收在子协程里：关闭句柄会让阻塞读抛错，取消收尾时按取消上报，不当成抽取失败。
      */
-    private suspend fun decode(window: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
+    private suspend fun decode(
+        window: PreviewByteWindow,
+        kind: MediaKind,
+        targetWidth: Int,
+        name: String,
+    ): ByteArray? =
         coroutineScope {
             var image: ByteArray? = null
             var failure: Throwable? = null
+            val startedAt = systemMonotonicMillis()
             val decoding = async {
                 try {
                     image = decoder.imageBytes(window, kind, targetWidth)
@@ -158,14 +196,22 @@ class NetworkPreviewExtractor(
             try {
                 decoding.await()
             } catch (cancellation: CancellationException) {
-                runCatching { window.close() }
+                runCatching { window.close("解码取消兜底") }
                 throw cancellation
             }
             failure?.let { error ->
-                runCatching { window.close() }
+                // 关窗会清空块表：窗口状态必须在关闭之前取。
+                diagnostics.log {
+                    "封面诊断: $name 解码失败 用时${systemMonotonicMillis() - startedAt}ms " +
+                        "${error.javaClass.simpleName}: ${error.message ?: "-"} ${window.stateSummary()}"
+                }
+                runCatching { window.close("解码失败") }
                 // 已经取消时结果是关闭句柄造成的，按取消收尾。
                 currentCoroutineContext().ensureActive()
                 throw error
+            }
+            diagnostics.log {
+                "封面诊断: $name 解码成功 用时${systemMonotonicMillis() - startedAt}ms 字节=${image?.size ?: 0}"
             }
             image
         }
