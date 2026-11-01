@@ -262,9 +262,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch {
                     binder.controller.state.collect {
                         playbackState = it
-                        // 退后台时加载中没丢成的字节源，加载一结束就补做。
-                        if (it != PlaybackState.Loading && staleSourceDiscardPolicy.onLoadingFinished()) {
-                            discardByteSources()
+                        // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
+                        if (it != PlaybackState.Loading) {
+                            staleSourceDiscardPolicy.onLoadingFinished(
+                                inBackground = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                                discard = ::discardByteSources,
+                            )
                         }
                     }
                 }
@@ -761,10 +764,15 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         }
     }
 
-    /** 丢弃已建立的字节源：只打陈旧标记，放到后台线程避免撞上正在建立源的长阻塞。 */
-    private fun discardByteSources() {
-        val networkStreams = streams ?: return
-        lifecycleScope.launch(Dispatchers.IO) { networkStreams.discardByteSources() }
+    /**
+     * 丢弃已建立的字节源：只打陈旧标记，不取锁也不碰 I/O，当场做完——
+     * 回前台后的第一条请求一定读到标记，不会先用旧源读一段再重建。
+     * 返回是否真的丢了；还没有流时返回 false，待丢弃标志留着等下一次补做。
+     */
+    private fun discardByteSources(): Boolean {
+        val networkStreams = streams ?: return false
+        networkStreams.discardByteSources()
+        return true
     }
 
     /**
@@ -791,8 +799,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
-        // 退后台时因加载中没丢成的字节源，回前台发起请求前补做。
-        if (staleSourceDiscardPolicy.onReturnedToForeground()) discardByteSources()
+        // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。
+        staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
         // Surface 未销毁时画面一直在，缓存帧多余；已经重挂则等播放核心的首个新帧。
         playback?.controller?.onReturnedToForeground()
     }
