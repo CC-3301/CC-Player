@@ -87,6 +87,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -146,6 +147,7 @@ import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -330,7 +332,7 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
-    // 本次播放已经切过集之后，加载阶段不再算首次缓冲。
+    // 本次播放开始过切集之后，加载阶段不再算首次缓冲。
     var switchedThisSession by remember { mutableStateOf(false) }
     LaunchedEffect(switching) {
         switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
@@ -424,17 +426,13 @@ fun PlayerScreen(
     LaunchedEffect(barsVisible) {
         pointerFollowsBars(barsVisible, pointer)
     }
-    // 指针静止满 3 秒隐藏；移动与显示都会重置计时，计时键同时包含可见性与最近活动时刻。
-    LaunchedEffect(pointer.visible, pointer.lastActivityAtMillis) {
-        while (pointer.visible) {
-            val remaining = pointer.millisUntilHide()
-            if (remaining < 0L) break
-            if (remaining == 0L) {
-                pointer.hideIfExpired()
-                break
-            }
-            delay(remaining)
-        }
+    // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
+    LaunchedEffect(pointer) {
+        runPointerAutoHide(
+            pointer = pointer,
+            awaitVisible = { snapshotFlow { pointer.visible }.first { it } },
+            delayMillis = { delay(it) },
+        )
     }
 
     val pointerDensity = LocalDensity.current

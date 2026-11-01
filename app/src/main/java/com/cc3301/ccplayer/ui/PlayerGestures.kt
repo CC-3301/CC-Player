@@ -227,11 +227,11 @@ fun playerBarsVisible(
     (controlsVisible || firstBuffering) &&
     panelBarsVisible
 
-/** 首次缓冲：本次播放还没有切过集时的加载阶段。 */
+/** 首次缓冲：本次播放还没有开始过切集时的加载阶段。 */
 fun isFirstBuffering(initialLoading: Boolean, switchedSinceOpen: Boolean): Boolean =
     initialLoading && !switchedSinceOpen
 
-/** 本次播放是否已经切过集：切过之后加载阶段不再算首次缓冲。 */
+/** 本次播放是否开始过切集：开始过之后加载阶段不再算首次缓冲，切集失败回退也算。 */
 fun switchedSinceOpen(switching: Boolean, alreadySwitched: Boolean): Boolean =
     alreadySwitched || switching
 

@@ -2,7 +2,6 @@ package com.cc3301.ccplayer.ui
 
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
@@ -21,8 +20,8 @@ class PlayerPointerVisibility(
     var visible by mutableStateOf(true)
         private set
 
-    /** 最近一次有效移动或显式显示的时刻；作为自动隐藏计时的键参与重组。 */
-    var lastActivityAtMillis by mutableLongStateOf(elapsedMillis())
+    /** 最近一次有效移动或显式显示的时刻；只被计时协程读取，不参与重组。 */
+    var lastActivityAtMillis: Long = elapsedMillis()
         private set
 
     /** 位移死区的锚点：最后一次有效移动的位置。 */
@@ -67,6 +66,23 @@ class PlayerPointerVisibility(
         if (elapsedMillis() - lastActivityAtMillis >= PLAYER_POINTER_HIDE_DELAY_MILLIS) {
             visible = false
         }
+    }
+}
+
+/**
+ * 指针自动隐藏循环：指针隐藏期间挂起等它重新出现，出现后按剩余时间等待，到点隐藏。
+ * 循环常驻不退出，指针被重新唤起后计时自然继续，不存在计时中断的空档。
+ */
+suspend fun runPointerAutoHide(
+    pointer: PlayerPointerVisibility,
+    awaitVisible: suspend () -> Unit,
+    delayMillis: suspend (Long) -> Unit,
+) {
+    while (true) {
+        awaitVisible()
+        val remaining = pointer.millisUntilHide()
+        if (remaining > 0L) delayMillis(remaining)
+        pointer.hideIfExpired()
     }
 }
 

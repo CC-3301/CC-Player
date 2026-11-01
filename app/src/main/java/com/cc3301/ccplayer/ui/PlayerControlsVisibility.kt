@@ -20,6 +20,9 @@ const val CONTROLS_FADE_MILLIS = 200L
  *
  * 显示状态下 [CONTROLS_AUTO_HIDE_MILLIS] 内无操作即隐藏；任意操作重新计时；
  * 面板打开期间不隐藏，关闭后重新计时（ADR-0025）。
+ *
+ * 显示只由用户操作触发：点击画面 [toggle]、点击控件 [showByUserAction]、用户在面板里打开抽屉
+ * 或菜单 [updatePanelOpen]；首次加载与切集不显示控制层。
  */
 class PlayerControlsVisibility(
     private val elapsedMillis: () -> Long = { SystemClock.elapsedRealtime() },
@@ -39,7 +42,7 @@ class PlayerControlsVisibility(
         if (visible) visible = false else showByUserAction()
     }
 
-    /** 点击画面或控件时显示控制层并重新计时；只有用户操作路径可以显示控制层。 */
+    /** 点击画面或控件时显示控制层并重新计时。 */
     fun showByUserAction() {
         visible = true
         lastInteractionAtMillis = elapsedMillis()
@@ -58,7 +61,7 @@ class PlayerControlsVisibility(
         if (visible) resetTimer()
     }
 
-    /** 面板显隐状态；打开期间暂停自动隐藏，关闭后重新计时。 */
+    /** 面板显隐状态：用户打开面板时控制层一并发显示，打开期间暂停自动隐藏，关闭后重新计时。 */
     fun updatePanelOpen(open: Boolean) {
         panelOpen = open
         if (open) {

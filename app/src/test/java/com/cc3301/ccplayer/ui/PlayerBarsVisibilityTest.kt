@@ -59,6 +59,17 @@ class PlayerBarsVisibilityTest {
     }
 
     @Test
+    fun `开始过切集后即使切集已结束也不再按首载显示顶底栏`() {
+        controls.toggle()
+        val switched = switchedSinceOpen(switching = false, alreadySwitched = true)
+        assertTrue(switched)
+
+        val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
+        assertFalse(firstBuffering)
+        assertFalse(barsVisible(firstBuffering = firstBuffering))
+    }
+
+    @Test
     fun `锁定时顶底栏不显示`() {
         assertFalse(
             playerBarsVisible(
