@@ -13,20 +13,24 @@ import org.junit.Test
 class MpvSeekQueueTest {
 
     /** 交给命令线程的下发任务；测试自己决定何时执行。 */
-    private val commands = mutableListOf<Pair<Long, Long>>()
+    private val commands = mutableListOf<Long>()
     private val issued = mutableListOf<Long>()
+    private val issuedSerials = mutableListOf<Int>()
+
+    /** 改写后的再次下发从这里取新序号。 */
+    private var serialSource = 100
     private val executed = mutableListOf<Pair<Long, Long>>()
     private var timeoutTask: (() -> Unit)? = null
 
     private val queue = MpvSeekQueue(
-        post = { seekId, targetMillis -> commands += seekId to targetMillis },
+        post = { seekId -> commands += seekId },
         onExecuted = { seekId, targetMillis -> executed += seekId to targetMillis },
         armTimeout = { task -> timeoutTask = task },
         cancelTimeout = { timeoutTask = null },
     )
 
     /** 取走交给命令线程的下发任务；测试自己决定何时执行。 */
-    private fun takeCommands(): List<Pair<Long, Long>> {
+    private fun takeCommands(): List<Long> {
         val tasks = commands.toList()
         commands.clear()
         return tasks
@@ -34,8 +38,14 @@ class MpvSeekQueueTest {
 
     /** 在命令线程上执行排队中的下发任务：只有仍是当前在途的那一跳才真正下发。 */
     private fun runCommandThread() {
-        takeCommands().forEach { (seekId, _) ->
-            queue.issueIfCurrent(seekId) { issued += seekId }
+        takeCommands().forEach { seekId ->
+            queue.issueIfCurrent(seekId) { currentSerial, _, firstIssue ->
+                // 首次下发用入队时预留的序号；改写后的再次下发换新序号。
+                val serial = if (firstIssue) currentSerial else ++serialSource
+                issued += seekId
+                issuedSerials += serial
+                serial
+            }
         }
     }
 
@@ -158,7 +168,7 @@ class MpvSeekQueueTest {
         queue.onReceipt(1)
 
         // 第一跳的旧任务重复执行：它已不是当前在途，不能再下发。
-        queue.issueIfCurrent(1) { issued += 1 }
+        queue.issueIfCurrent(1) { serial, _, _ -> issued += 1; serial }
         assertEquals(listOf(1L), issued)
     }
 
@@ -183,17 +193,17 @@ class MpvSeekQueueTest {
 
         // mpv 命令抛异常：这一跳不可能再有回执，按执行完结清，异常照常交给调用方。
         try {
-            queue.issueIfCurrent(failing.single().first) { throw IllegalStateException("命令失败") }
+            queue.issueIfCurrent(failing.single()) { _, _, _ -> throw IllegalStateException("命令失败") }
         } catch (_: IllegalStateException) {
         }
 
         assertEquals(listOf(1L to 1_000L), executed)
         // 待执行那一跳已补发，不会再卡在「在途但未下发」。
         val next = takeCommands()
-        assertEquals(listOf(2L), next.map { it.first })
+        assertEquals(listOf(2L), next)
 
         // 后续 seek 照常下发并按自己的回执结算，落定有出口。
-        queue.issueIfCurrent(next.single().first) { issued += 2L }
+        queue.issueIfCurrent(next.single()) { serial, _, _ -> issued += 2L; serial }
         assertEquals(listOf(2L), issued)
         assertEquals(2L, queue.onReceipt(2))
         assertEquals(listOf(1L to 1_000L, 2L to 2_000L), executed)
@@ -224,6 +234,83 @@ class MpvSeekQueueTest {
         queue.onTimeout()
 
         assertEquals(emptyList<Pair<Long, Long>>(), executed)
-        assertEquals(emptyList<Pair<Long, Long>>(), commands)
+        assertEquals(emptyList<Long>(), commands)
+    }
+
+    @Test
+    fun `预览目标改写仍在执行的那一跳，待执行被丢弃`() {
+        queue.seek(1, 1, 1_000, preview = true)
+        queue.seek(2, 2, 2_000, preview = true)
+        runCommandThread()
+        assertEquals(listOf(1L), issued)
+        assertEquals(listOf(1), issuedSerials)
+
+        // 预览目标就地改写：预览的待执行被丢弃，按新序号重新下发。
+        assertEquals(MpvSeekQueue.Active(1, 1), queue.retarget(3_000))
+        runCommandThread()
+        assertEquals(listOf(1L, 1L), issued)
+        assertEquals(listOf(1, 101), issuedSerials)
+
+        // 旧序号的 ready 对不上这一跳，不结算；新序号的那条才结算改写后的目标。
+        assertNull(queue.onReceipt(1))
+        assertEquals(emptyList<Pair<Long, Long>>(), executed)
+        assertEquals(1L, queue.onReceipt(101))
+        assertEquals(listOf(1L to 3_000L), executed)
+        assertEquals(emptyList<Long>(), commands)
+    }
+
+    @Test
+    fun `预览改写只动预览条目，普通跳转照常排队`() {
+        queue.seek(1, 1, 1_000)
+        queue.seek(2, 2, 2_000)
+
+        // 在途是普通跳转：不改写，也不丢它的待执行。
+        assertNull(queue.retarget(3_000))
+        runCommandThread()
+        assertEquals(listOf(1L), issued)
+
+        queue.onReceipt(1)
+        runCommandThread()
+        assertEquals(listOf(1L, 2L), issued)
+    }
+
+    @Test
+    fun `预览改写保留普通跳转的待执行`() {
+        queue.seek(1, 1, 1_000, preview = true)
+        queue.seek(2, 2, 2_000)
+        queue.retarget(3_000)
+        runCommandThread()
+        // 改写抢在下发前：这次只下发一条命令，用入队时预留的序号。
+        assertEquals(listOf(1L), issued)
+        assertEquals(listOf(1), issuedSerials)
+
+        // 普通跳转的待执行不随预览改写一起丢：预览这一跳结算后照常补发。
+        assertEquals(1L, queue.onReceipt(1))
+        runCommandThread()
+        assertEquals(listOf(1L, 2L), issued)
+        assertEquals(listOf(1, 2), issuedSerials)
+    }
+
+    @Test
+    fun `预览改写抢在下发前时只下发最后目标`() {
+        queue.seek(1, 1, 1_000, preview = true)
+        queue.retarget(2_000)
+
+        // 两次投递排在同一跳上：只有最后目标真正下发一次。
+        runCommandThread()
+        assertEquals(listOf(1L), issued)
+        assertEquals(listOf(1), issuedSerials)
+    }
+
+    @Test
+    fun `没有在途时预览改写返回空`() {
+        assertNull(queue.retarget(1_000))
+
+        queue.seek(1, 1, 1_000)
+        runCommandThread()
+        assertEquals(1L, queue.onReceipt(1))
+
+        // 执行完之后没有在途可改写，调用方按新的一跳入队。
+        assertNull(queue.retarget(2_000))
     }
 }

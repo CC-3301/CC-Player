@@ -34,6 +34,12 @@ class FakePlaybackEngine : PlaybackEngine {
         private set
     val seekPositions = mutableListOf<Long>()
 
+    /** 本代每次真正下发的命令序号，按顺序；预览改写后的再次下发也各占一条。 */
+    val issuedSeekSerials = mutableListOf<Int>()
+
+    /** 已按 ready 结算过的命令序号：同一序号再来一条只上报，不重复结算。 */
+    private val settledReadySerials = mutableSetOf<Int>()
+
     /** 最近一次下发的 seek 身份；与真实引擎一致，进程级单调，加载不重置。 */
     var currentSeekId = 0L
         private set
@@ -76,6 +82,8 @@ class FakePlaybackEngine : PlaybackEngine {
         pendingSeekMillis = null
         currentSeekSerial = 0
         acceptedSeekSerial = 0
+        issuedSeekSerials.clear()
+        settledReadySerials.clear()
         return ++currentLoadToken
     }
 
@@ -133,9 +141,30 @@ class FakePlaybackEngine : PlaybackEngine {
         return PlaybackEngine.SeekRequest(seekId, serial)
     }
 
+    /**
+     * 与真实引擎一致：预览目标就地改写仍在执行的那一跳，待执行被丢弃，身份不变、序号换新。
+     * 旧序号的那条 ready 因此对不上这一跳。
+     */
+    override fun previewSeekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+        val inFlightId = seekInFlightId ?: return seekTo(positionMillis)
+        pendingSeekId = null
+        pendingSeekMillis = null
+        issueSeek(inFlightId, ++currentSeekSerial, positionMillis)
+        return PlaybackEngine.SeekRequest(inFlightId, seekInFlightSerial)
+    }
+
+    /** 一条 ready（PLAYBACK_RESTART）：[serial] 是它所属的命令序号，与在途那一跳不符时丢弃。 */
+    fun reportReadyForSerial(serial: Int, loadToken: Int = currentLoadToken) {
+        listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        if (seekInFlightId == null || serial != seekInFlightSerial) return
+        if (!settledReadySerials.add(serial)) return
+        completeSeek()
+    }
+
     private fun issueSeek(seekId: Long, serial: Int, positionMillis: Long) {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"
+        issuedSeekSerials += serial
         seekInFlightId = seekId
         seekInFlightSerial = serial
         seekInFlightMillis = positionMillis
@@ -149,6 +178,7 @@ class FakePlaybackEngine : PlaybackEngine {
         seekInFlightId = null
         seekInFlightMillis = null
         acceptedSeekSerial = executedSerial
+        settledReadySerials += executedSerial
         seekExecutions += executedId to executedMillis
         listener?.onSeekExecuted(executedId, executedMillis)
         val pendingId = pendingSeekId ?: return

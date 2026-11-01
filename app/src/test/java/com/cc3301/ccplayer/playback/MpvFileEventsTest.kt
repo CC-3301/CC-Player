@@ -41,7 +41,7 @@ class MpvFileEventsTest {
         assertEquals(null, coordinator.onEofChanged(true))
 
         // 拖回片尾外再播到结尾：同一代际要能再次上报播完。
-        coordinator.onSeekIssued(coordinator.reserveSeekSerial())
+        coordinator.onSeekStarted()
         assertEquals(spec.token, coordinator.onEofChanged(true))
     }
 
