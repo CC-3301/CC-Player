@@ -4,76 +4,16 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 黑底层只在片尾、首次缓冲或切集时没有画面可显示时出现。 */
+/** 黑底层只由控制层派生的画面判据决定：没有可显示的画面就铺黑底。 */
 class PlayerBlackLayerTest {
 
     @Test
-    fun `a switch while the freeze frame is still being grabbed keeps the old picture`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = true,
-                switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = true,
-                keepsSurfaceFrame = false,
-            ),
-        )
+    fun `a visible picture keeps the black layer off`() {
+        assertFalse(showPlayerBlackLayer(showsPicture = true))
     }
 
     @Test
-    fun `a switch with no frame after the grab falls back to black`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `an available freeze frame covers the surface`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                hasFreezeFrame = true,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `the end hold stays black`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = true,
-                buffering = false,
-                switching = false,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `initial buffering keeps the black background`() {
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = true,
-                switching = false,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
+    fun `no picture on the surface draws the black layer`() {
+        assertTrue(showPlayerBlackLayer(showsPicture = false))
     }
 }

@@ -21,10 +21,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /**
@@ -110,27 +108,27 @@ class PlaybackController(
     private val _buffering = MutableStateFlow(false)
     val buffering: StateFlow<Boolean> = _buffering.asStateFlow()
 
-    /** 切集期间盖在画面上的冻结帧；没有切集或已就绪时为 null。 */
-    private val _freezeFrame = MutableStateFlow<Bitmap?>(null)
-    val freezeFrame: StateFlow<Bitmap?> = _freezeFrame.asStateFlow()
+    /**
+     * 屏幕上现在该显示什么：界面只读这个派生结果（有无画面、该用的比例与回前台的缓存帧），
+     * 不再自行组合加载阶段、黑底与视频轨。
+     *
+     * 只有 [settlePresentation] 一个写点，且只在控制层线程调用；抓帧等后台结果先落到各自字段，
+     * 回到控制层线程后再派生。
+     */
+    private val _surfacePresentation = MutableStateFlow(SurfacePresentation())
+    val surfacePresentation: StateFlow<SurfacePresentation> = _surfacePresentation.asStateFlow()
 
-    /** 切集抓帧仍在后台执行：此时原画面还在 Surface 上，不能铺黑底。 */
-    private val _freezeFramePending = MutableStateFlow(false)
-    val freezeFramePending: StateFlow<Boolean> = _freezeFramePending.asStateFlow()
+    /** 屏幕上停着的是哪一帧；撤旧帧与比例切换都只认它。 */
+    private var screenFrame = ScreenFrame.None
 
     /**
-     * 片尾自动切集期间沿用屏幕上停住的末帧：不抓帧，也不铺黑底。
-     * 只在自然播完触发的那次切集为真；切集结束、失败回退或目标没有视频轨时清零。
+     * 本次切集的目标是否已接管视频输出（收到过重配或首帧信号）。
+     * 它不撤屏上的旧帧，只在无帧兜底时区分「旧帧可能已不在屏上」与「旧帧还在屏上」。
      */
-    private val _switchKeepsSurfaceFrame = MutableStateFlow(false)
-    val switchKeepsSurfaceFrame: StateFlow<Boolean> = _switchKeepsSurfaceFrame.asStateFlow()
+    private var switchOutputLive = false
 
-    /**
-     * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
-     * 片尾没有首帧可显示，不能用冻结画面占位。
-     */
-    private val _holdBlack = MutableStateFlow(false)
-    val holdBlack: StateFlow<Boolean> = _holdBlack.asStateFlow()
+    /** 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。 */
+    private var holdBlack = false
 
     /**
      * 当前是否有可渲染的 Surface。退到后台后为假：此时抓不到帧，
@@ -140,11 +138,10 @@ class PlaybackController(
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
 
     /**
-     * 暂停态退到后台前缓存的画面。回前台先盖在视频视图上，
-     * 等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
+     * 暂停态退到后台前缓存的画面，对外只作为 [SurfacePresentation.heldFrame] 出现：
+     * 回前台先盖在视频视图上，等播放核心重新输出画面后撤掉，避免恢复期间黑屏。
      */
     private val _backgroundRestoreFrame = MutableStateFlow<Bitmap?>(null)
-    val backgroundRestoreFrame: StateFlow<Bitmap?> = _backgroundRestoreFrame.asStateFlow()
 
     /** 抓帧进行中；抓帧线程写，界面线程读。 */
     @Volatile
@@ -182,6 +179,9 @@ class PlaybackController(
      */
     private val _videoAspectRatio = MutableStateFlow<Double?>(null)
     val videoAspectRatio: StateFlow<Double?> = _videoAspectRatio.asStateFlow()
+
+    /** 切集起点屏幕上的原片比例；原片画面还在时视频区按它绘制。 */
+    private var originAspectRatio: Double? = null
 
     /** 起播位置设置，默认播放上次位置。 */
     private val _resumeMode = MutableStateFlow(ResumeMode.LastPosition)
@@ -246,7 +246,7 @@ class PlaybackController(
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
-    /** 当前加载目标是否有视频轨；纯音频没有新视频帧，冻结画面按黑底处理。 */
+    /** 当前加载目标是否有视频轨；纯音频没有可显示的画面。 */
     private var targetHasVideo = true
 
     /** 本次加载所处的阶段；[LoadPhase.None] 表示没有进行中的加载。 */
@@ -299,7 +299,7 @@ class PlaybackController(
 
     private var readyState = ReadyState.Idle
 
-    /** 加载就绪后的新帧等待；超时按就绪收尾，冻结画面继续等真正出帧。 */
+    /** 加载就绪后的新帧等待；超时按就绪收尾，屏幕上的旧画面继续等真正出帧。 */
     private var frameWaitJob: Job? = null
 
     /** 切集状态已就绪但新视频帧仍未上屏；用于无帧超时回退原片。 */
@@ -328,15 +328,6 @@ class PlaybackController(
 
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
-
-    /** 切集抓帧的令牌；取消、重定向或开始新加载后，迟到的抓帧不能开新目标。 */
-    private var switchCaptureToken = 0
-
-    /** 切集抓帧任务；抓帧完成后才向引擎下发 loadfile。 */
-    private var switchCaptureJob: Job? = null
-
-    /** 切集目标已确定但 loadfile 还没下发：抓帧仍在后台执行。 */
-    private var switchStartPending = false
 
     /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
     private var loadStartPositionMillis = 0L
@@ -462,6 +453,9 @@ class PlaybackController(
             }
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
+            // Surface 销毁后屏幕上没有画面：回前台按黑底等首个新帧。
+            screenFrame = ScreenFrame.None
+            settlePresentation()
             cancelSurfaceRestore()
             suspendSwitchFrameWatchdog()
         }
@@ -494,7 +488,7 @@ class PlaybackController(
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
         if (loadPhase != LoadPhase.None) return false
         // 片尾黑底不显示画面，不需要恢复。
-        if (_holdBlack.value) return false
+        if (holdBlack) return false
         awaitingSurfaceFrame = true
         diagnostics.log("Surface 重挂: 等待新帧")
         surfaceRestoreJob = scope.launch {
@@ -535,14 +529,18 @@ class PlaybackController(
         if (backgroundCaptureInFlight) return null
         // 新周期不复用旧帧，避免上一次后台留下的画面跨周期出现。
         replaceBackgroundRestoreFrame(null)
-        if (!active || !paused || loadPhase != LoadPhase.None || _holdBlack.value) return null
+        if (!active || !paused || loadPhase != LoadPhase.None || holdBlack) return null
         val token = ++backgroundCaptureToken
         backgroundCaptureInFlight = true
         val job = scope.launch(frameProbeDispatcher) {
             val frame = runCatching { engine.grabFrame() }.getOrNull()?.bitmap
             backgroundCaptureInFlight = false
             if (frame == null || token != backgroundCaptureToken) return@launch
-            _backgroundRestoreFrame.value = frame
+            // 抓帧在后台线程：结果交回控制层线程落地并派生，派生结果不在后台线程碰。
+            scope.launch {
+                if (token != backgroundCaptureToken) return@launch
+                replaceBackgroundRestoreFrame(frame)
+            }
         }
         backgroundCaptureJob = job
         return job
@@ -569,7 +567,7 @@ class PlaybackController(
         if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
-    /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾，保留冻结画面。 */
+    /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾。 */
     private fun settleStartedSwitchAsPaused() {
         if (loadPhase != LoadPhase.Switching || !switchPlaybackStarted) return
         finishReady(LoadPhase.Switching)
@@ -596,17 +594,19 @@ class PlaybackController(
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
         switchFailureReported = false
-        _holdBlack.value = false
-        _switchKeepsSurfaceFrame.value = false
+        holdBlack = false
+        // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
+        screenFrame = ScreenFrame.None
+        switchOutputLive = false
+        originAspectRatio = null
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
         loadPhase = LoadPhase.Initial
         beginLoadTracking()
+        settlePresentation()
         _switching.value = false
         _restoring.value = false
         restartFromStartAfterRestore = false
-        cancelSwitchCapture()
-        replaceFreezeFrame(null)
         resetBackgroundCapture()
         updateState(PlaybackState.Loading)
         beginBufferingIndicator()
@@ -631,7 +631,11 @@ class PlaybackController(
         switchOriginExternalSubtitles = _externalSubtitles.value
         switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
-        _holdBlack.value = false
+        // 切集起点屏幕上的画面与比例都取自派生结果：黑底期间没有画面可沿用。
+        val presentation = _surfacePresentation.value
+        screenFrame = if (presentation.showsPicture) ScreenFrame.Origin else ScreenFrame.None
+        originAspectRatio = presentation.aspectRatio
+        holdBlack = false
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
         paused = false
@@ -639,23 +643,28 @@ class PlaybackController(
         applySwitchTarget(index, media)
         beginBufferingIndicator()
         beginLoadWatchdog()
-        // 先停住原视频，再取当前帧，最后才替换文件：抓帧必须早于 loadfile。
+        // 先停住原视频再替换文件：屏幕上停住的旧帧就是切集期间的等待画面。
         engine.pause()
-        // 片尾切集不抓帧：原片已停在末帧，取帧只会把加载往后拖。
-        if (originAtEnd) {
-            cancelSwitchCapture()
-            // 上一条切换遗留的冻结画面要撤掉，否则片尾切集会停在前一集的旧帧上。
-            replaceFreezeFrame(null)
-            // 没有冻结帧也没有待抓帧：屏幕上停住的末帧就是等待画面，切集期间不铺黑底。
-            _switchKeepsSurfaceFrame.value = true
-            startSwitchTarget()
-        } else {
-            _switchKeepsSurfaceFrame.value = false
-            captureThenStartSwitch()
-        }
+        startSwitchTarget()
     }
 
-    /** 切集目标切换时共用的状态重置；抓帧与缓冲计时由调用方决定。 */
+    /**
+     * 唯一的派生点：把当前事实交给 [deriveSurfacePresentation]，得出屏幕该显示什么。
+     * 切集起点、新帧上屏、切集就绪、失败或取消回原片、新加载开始、会话结束、Surface 重建时调用；
+     * 「撤旧帧」与「比例采纳」都只在这里一起发生。
+     */
+    private fun settlePresentation() {
+        _surfacePresentation.value = deriveSurfacePresentation(
+            screenFrame = screenFrame,
+            targetHasVideo = targetHasVideo,
+            holdBlack = holdBlack,
+            originAspectRatio = originAspectRatio,
+            targetAspectRatio = _videoAspectRatio.value,
+            heldFrame = _backgroundRestoreFrame.value,
+        )
+    }
+
+    /** 切集目标切换时共用的状态重置；缓冲计时由调用方决定。 */
     private fun applySwitchTarget(index: Int, media: MediaFile) {
         _currentIndex.value = index
         loadTargetIndex = index
@@ -665,6 +674,8 @@ class PlaybackController(
         restartSwitchFrameDeadline()
         _switching.value = true
         _restoring.value = false
+        // 新目标还没接管视频输出：屏上仍只可能是切集起点的原片画面。
+        switchOutputLive = false
         restartFromStartAfterRestore = false
         endSeekPreview(commit = false)
         _subtitleTracks.value = emptyList()
@@ -682,80 +693,14 @@ class PlaybackController(
 
     /**
      * 切集缓冲期间再次选择上一集/下一集：只把目标前移，直接加载最终目标。
-     * 冻结画面与缓冲计时沿用第一次切集，不重新抓帧。
+     * 缓冲计时沿用第一次切集，沿用旧帧的标记按新目标重算。
      */
     private fun retargetSwitch(index: Int) {
         val media = _playlist.value.getOrNull(index) ?: return
         diagnostics.log { "切集目标变更: ${media.name}" }
         applySwitchTarget(index, media)
         beginLoadWatchdog()
-        // 抓帧还没返回时只改目标，由抓帧任务直接加载最终集。
-        if (switchStartPending) return
         startSwitchTarget()
-    }
-
-    /**
-     * 切集抓帧：在 [frameProbeDispatcher] 执行，完成后回到控制层线程再下发 loadfile。
-     * 调用线程立即返回；取消、重定向或新加载会让迟到的抓帧失效。
-     */
-    private fun captureThenStartSwitch() {
-        cancelSwitchCapture()
-        val token = switchCaptureToken
-        switchStartPending = true
-        _freezeFramePending.value = true
-        switchCaptureJob = scope.launch {
-            val grab = async(frameProbeDispatcher) {
-                runCatching { engine.grabFrame() }.getOrNull()
-            }
-            val frame = withTimeoutOrNull(SWITCH_GRAB_TIMEOUT_MILLIS) { grab.await() }
-            // 超时返回时抓帧可能恰好完成：已完成就重读结果，有帧仍按有帧处理。
-            val resolved = if (frame == null && grab.isCompleted) grab.await() else frame
-            // 抓帧仍在原生调用里：thumbnail 与 loadfile 共用 mpv 核心命令队列，
-            // 继续下发 loadfile 会被卡住的抓帧拖住；直接按切集失败收尾，不下发目标加载。
-            if (resolved == null && !grab.isCompleted) {
-                grab.cancel()
-                abortSwitchAfterStuckGrab(token)
-                return@launch
-            }
-            if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return@launch
-            switchStartPending = false
-            switchCaptureJob = null
-            _freezeFramePending.value = false
-            // 抓帧无结果时保留屏幕上原有的画面，不主动换成黑底。
-            resolved?.bitmap?.let { replaceFreezeFrame(it) }
-            startSwitchTarget()
-        }
-    }
-
-    /**
-     * 抓帧卡在原生调用：不向引擎下发目标加载，原视频保持暂停在原位置与暂停。
-     * 这样失败在 [SWITCH_GRAB_TIMEOUT_MILLIS] 内给出，不落到 60 秒看门狗。
-     */
-    private fun abortSwitchAfterStuckGrab(token: Int) {
-        if (token != switchCaptureToken || loadPhase != LoadPhase.Switching) return
-        // 先记录失败日志：日志要指向失败的切集目标，随后状态会回到原片。
-        switchCaptureJob = null
-        val originEnded = switchOriginEnded
-        logLoadFailure("切集失败", LoadFailureSource.GrabTimeout, phase = LoadPhase.Switching)
-        restoreOriginBaseState() ?: return
-        loadPhase = LoadPhase.None
-        // 原文件仍在引擎里暂停，没有重新加载。
-        mediaLoaded = true
-        watchedToEnd = originEnded
-        pausedAtEpisodeEnd = originEnded
-        switchOriginIndex = NO_MEDIA
-        switchOriginEnded = false
-        restoreAtEndOfEpisode = false
-        _switching.value = false
-        _switchKeepsSurfaceFrame.value = false
-        // 片尾失败保持黑底暂停；撤掉冻结帧与后台缓存帧。
-        _holdBlack.value = originEnded
-        if (originEnded) {
-            replaceFreezeFrame(null)
-            replaceBackgroundRestoreFrame(null)
-        }
-        switchFailureReported = true
-        _playbackFailures.tryEmit(Unit)
     }
 
     /**
@@ -769,7 +714,6 @@ class PlaybackController(
             resetLoadState()
             return null
         }
-        cancelSwitchCapture()
         endBufferingIndicator()
         endLoadWatchdog()
         beginReadyTracking()
@@ -800,22 +744,13 @@ class PlaybackController(
         return origin
     }
 
-    /** 用当前目标向引擎下发 loadfile；抓帧任务与切集重定向共用。 */
+    /** 用当前目标向引擎下发 loadfile；切集与重定向共用。 */
     private fun startSwitchTarget() {
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
         resetSeekForNewLoad()
         expectedLoadToken = engine.start(media.playbackLocation, paused = true)
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(loadTargetIndex, media)
-    }
-
-    /** 作废在途的切集抓帧；已在抓帧后加载的目标不受影响。 */
-    private fun cancelSwitchCapture() {
-        switchCaptureToken++
-        switchCaptureJob?.cancel()
-        switchCaptureJob = null
-        switchStartPending = false
-        _freezeFramePending.value = false
     }
 
     fun pause() {
@@ -1215,6 +1150,7 @@ class PlaybackController(
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         mediaLoaded = true
         targetHasVideo = hasVideo
+        settlePresentation()
         when (loadPhase) {
             LoadPhase.Initial -> {
                 applyResumePosition()
@@ -1246,7 +1182,7 @@ class PlaybackController(
      * 暂停态只有 VIDEO_RECONFIG，它可能早于首帧上屏，切集要等播放位置真正前进才算数。
      * 续播位置未查明时不能判定就绪；发出续播 seek 后只认序号不小于该 seek 的信号，
      * 就绪判定按加载代际与该代序号，不与 seekId 混用。
-     * 真正就绪时才停掉缓冲计时并撤冻结层；等待出帧不设独立短超时。
+     * 真正就绪时才停掉缓冲计时；等待出帧不设独立短超时。
      */
     override fun onFirstFrameReady(
         needsFrameConfirmation: Boolean,
@@ -1261,6 +1197,9 @@ class PlaybackController(
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
+        // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
+        // 撤帧只发生在确认接管的 [handleReadySignal] 强信号与 [confirmFrame]。
+        switchOutputLive = true
         if (!resumeLookupDone) {
             // 期间若已收到无需确认的首帧，它是更强的信号，不能被后续重配覆盖。
             if (deferredReadyNeedsFrame != false) {
@@ -1289,11 +1228,14 @@ class PlaybackController(
 
     /**
      * 就绪判定：无需确认的首帧可直接算数；暂停态信号不能证明画面已上屏。
-     * 切集目标此时开始播放，等位置前进或 2 秒兜底收尾；冻结画面留到真正出帧。
-     * 恢复与首次打开没有可等待的播放推进，按文件就绪收尾；恢复的冻结画面留到真正出帧。
+     * 切集目标此时开始播放，等位置前进或 2 秒兜底收尾；屏幕上的旧画面留到真正出帧。
+     * 恢复与首次打开没有可等待的播放推进，按文件就绪收尾。
      */
     private fun handleReadySignal(phase: LoadPhase, needsFrameConfirmation: Boolean) {
         if (!needsFrameConfirmation) {
+            // 首帧已可显示：屏上就是当前加载的画面，切集起点的旧帧到此撤掉、比例同时换新。
+            screenFrame = ScreenFrame.Target
+            settlePresentation()
             finishReady(phase)
             return
         }
@@ -1304,7 +1246,7 @@ class PlaybackController(
         }
         if (phase == LoadPhase.Switching) {
             if (paused) {
-                // 切集中用户又暂停：按暂停收尾，冻结画面留到用户继续播放后真正出帧。
+                // 切集中用户又暂停：按暂停收尾；暂停态就绪即撤旧帧，直接露新集首帧。
                 finishReady(phase)
                 return
             }
@@ -1320,7 +1262,7 @@ class PlaybackController(
 
     /**
      * 切集起播后等位置前进。2 秒内等不到时按就绪收尾，不落到 60 秒看门狗；
-     * 续播查询或 seek 未完成时顺延，冻结画面不受这次收尾影响。
+     * 续播查询或 seek 未完成时顺延，屏幕上的旧画面不受这次收尾影响。
      */
     private fun beginFrameWait() {
         frameWaitJob?.cancel()
@@ -1399,8 +1341,7 @@ class PlaybackController(
 
     /**
      * 新画面已真正输出到 Surface：加载就绪后播放位置前进，或 Surface 重挂后再次前进。
-     * 新帧确认在这里撤冻结画面与后台缓存帧。例外：切集目标无视频轨时由
-     * [finishSwitch] 按黑底撤帧；片尾恢复由 [finishRestore] 保持或撤掉黑底。
+     * 新帧确认在这里撤掉后台缓存帧。片尾恢复的黑底由 [finishRestore] 保持或撤掉。
      */
     override fun onFramePresented(loadToken: Int) {
         if (!active) return
@@ -1408,17 +1349,19 @@ class PlaybackController(
     }
 
     /**
-     * 新帧确认：撤掉冻结画面与后台缓存帧，并结束等待中的就绪或 Surface 恢复。
-     * 只有当前加载的帧才能撤冻结画面，迟到或旧加载的帧不能把切集提前撤成黑底。
+     * 新帧确认：撤掉后台缓存帧，并结束等待中的就绪或 Surface 恢复。
+     * 只有当前加载的帧才能撤掉这一层，迟到或旧加载的帧不能提前撤掉它。
      */
     private fun confirmFrame(loadToken: Int) {
         if (loadToken != expectedLoadToken) return
-        replaceFreezeFrame(null)
         replaceBackgroundRestoreFrame(null)
         if (awaitingSurfaceFrame) {
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
         }
+        // 新帧真的上屏：屏上就是当前加载的画面。撤旧帧只认这一处与就绪强信号。
+        screenFrame = ScreenFrame.Target
+        settlePresentation()
         if (switchFramePending) clearPendingSwitchFrame()
         if (readyState == ReadyState.AwaitingFrame) finishReady(loadPhase, frameConfirmed = true)
     }
@@ -1455,7 +1398,7 @@ class PlaybackController(
         // 只看当前加载的自然播完标记；keep-open 自动暂停的回声不能把播完吞掉。
         if (loadToken != expectedLoadToken || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
-        if (_holdBlack.value) return
+        if (holdBlack) return
         // 预览 seek 或预览来源的落定还没执行完都不算播完：切集会打断拖动，
         // 落定的 seek 会把播放带离片尾；普通 seek 落到片尾照常连播。
         if (previewLandingInFlight()) {
@@ -1493,7 +1436,8 @@ class PlaybackController(
     /** 用户恢复播放操作：解除片尾黑底，并允许后续失败重新提示。 */
     private fun clearRestoreHoldOnUserAction() {
         if (loadPhase != LoadPhase.None) return
-        _holdBlack.value = false
+        holdBlack = false
+        settlePresentation()
         switchFailureReported = false
     }
 
@@ -1503,7 +1447,7 @@ class PlaybackController(
         if (_seekPreviewMillis.value != null) return
         // 落定 seek 未执行完：位置可能还是 seek 前后的旧样本，进度停在目标上不回跳。
         if (pendingLanding != null) return
-        // 加载中的位置属于新文件，切集时不能覆盖冻结画面上的原进度；时长要留下供就绪初始化。
+        // 加载中的位置属于新文件，切集时不能覆盖原片保留的进度；时长要留下供就绪初始化。
         if (loadPhase != LoadPhase.None) {
             if (mediaLoaded && durationMillis > 0) loadDurationMillis = durationMillis
             return
@@ -1560,7 +1504,7 @@ class PlaybackController(
         updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
     }
 
-    /** 切集就绪：目标画面直接替换冻结画面，进度从新文件开始。 */
+    /** 切集就绪：目标画面直接替换屏幕上的旧画面，进度从新文件开始。 */
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
         diagnostics.log { "切集成功: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
@@ -1569,16 +1513,16 @@ class PlaybackController(
         endBufferingIndicator()
         endLoadWatchdog()
         _switching.value = false
-        _switchKeepsSurfaceFrame.value = false
         // 状态就绪但新帧还没上屏时保留原片信息，60 秒仍无帧就回退。
         switchFramePending = targetHasVideo && !frameConfirmed
         if (!switchFramePending) {
             switchOriginIndex = NO_MEDIA
             switchOriginEnded = false
         }
-        // 冻结画面在确认新帧上屏（位置前进或抓帧成功）后才撤；暂停收尾没有后续位置事件，
-        // 就绪即撤，直接露新集首帧；目标没有视频轨时没有新视频帧可等，按黑底处理。
-        if (!targetHasVideo || paused) replaceFreezeFrame(null)
+        // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
+        // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
+        if (paused && _renderSurfaceAvailable.value) screenFrame = ScreenFrame.Target
+        settlePresentation()
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
         playedDurationMillis = duration
@@ -1686,6 +1630,13 @@ class PlaybackController(
         switchFailureReported = true
         switchFramePending = false
         _switching.value = true
+        // 收到过目标的重配或首帧信号却迟迟等不到帧：旧帧可能已经不在屏上，按黑底回退原片。
+        // 完全没有接管信号时，原片画面还停在屏上，继续沿用、不铺黑底。
+        if (switchOutputLive) {
+            screenFrame = ScreenFrame.None
+            holdBlack = true
+            settlePresentation()
+        }
         restoreOrigin()
         _playbackFailures.tryEmit(Unit)
     }
@@ -1700,23 +1651,29 @@ class PlaybackController(
         switchOriginEnded = false
     }
 
-    /** 失败或取消切集：重新打开原视频，停在切集前的位置；冻结画面留到它重新出帧。 */
+    /**
+     * 失败或取消切集：重新打开原视频，停在切集前的位置。
+     * 屏幕上还有原片画面时继续沿用、不铺黑底；片尾自动切集按黑底等待，
+     * 目标已接管视频输出却等不到帧的情形由 60 秒兜底先撤帧，恢复期同样按黑底等原片重新出帧。
+     */
     private fun restoreOrigin() {
         val origin = restoreOriginBaseState() ?: return
-        // 切集失败：不再沿用屏幕上的旧画面，按原规则黑底等待或恢复原片画面。
-        _switchKeepsSurfaceFrame.value = false
-        // 自然播完以显式标记为准；位置兜底只在抓不到末帧时补充。
+        // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
-                _freezeFrame.value == null &&
-                    switchOriginDurationMillis > 0 &&
+                switchOriginDurationMillis > 0 &&
                     switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
                 )
         watchedToEnd = restoreAtEndOfEpisode
         pausedAtEpisodeEnd = restoreAtEndOfEpisode
+        // 片尾自动切集失败不能续播：恢复期不沿用旧帧，按黑底等原片重新出帧。
+        // 无帧兜底已经挂起黑底时保持，恢复结束时再按用户意图收尾。
+        holdBlack = holdBlack || (switchOriginEnded && paused)
         loadGeneration++
         loadPhase = LoadPhase.Restoring
         _restoring.value = true
+        // 进入恢复阶段后再派生：恢复期的黑底与沿用旧帧按这一阶段的规则判定。
+        settlePresentation()
         beginLoadWatchdog()
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
@@ -1728,14 +1685,15 @@ class PlaybackController(
         )
     }
 
-    /** 原视频重新出帧：撤掉冻结画面；恢复期间按过播放就继续，否则保持暂停。 */
+    /** 原视频重新出帧：撤掉黑底；恢复期间按过播放就继续，否则保持暂停。 */
     private fun finishRestore() {
         if (loadPhase != LoadPhase.Restoring) return
         // 片尾恢复没有可续播位置：用户按过播放就从 0 重开，不能在片尾 resume。
         val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
         restartFromStartAfterRestore = false
-        // 片尾恢复且没有用户要求播放时保持黑底；用户已按播放则直接继续。
-        val holdBlack = restoreAtEndOfEpisode && paused
+        // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
+        // 恢复到片尾时用户按过播放就从 0 重开，黑底随之解除。
+        val blackHold = switchOriginEnded && paused
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
@@ -1748,11 +1706,10 @@ class PlaybackController(
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         // 片尾没有可显示的首帧：直到下一次用户操作或新加载前保持黑底。
-        _holdBlack.value = holdBlack
+        holdBlack = blackHold
+        settlePresentation()
         // 普通恢复成功后允许后续真实失败重新提示；黑底期间保持去重到用户操作。
-        if (!holdBlack) switchFailureReported = false
-        // 片尾恢复按黑底等待；普通恢复的冻结画面保留到真正出帧或用户继续播放。
-        if (holdBlack) replaceFreezeFrame(null)
+        if (!blackHold) switchFailureReported = false
         if (restartFromStart) {
             // 以新的加载从 0 开始，暂停意图已在用户操作时记为播放。
             playIndex(_currentIndex.value)
@@ -1826,7 +1783,7 @@ class PlaybackController(
     }
 
     /** 失败来源；无帧超时与加载看门狗、播放核心主动报错分开记录。 */
-    private enum class LoadFailureSource { Core, Watchdog, NoFrame, GrabTimeout }
+    private enum class LoadFailureSource { Core, Watchdog, NoFrame }
 
     /** 失败日志包含目标、加载令牌、阶段与来源，便于区分看门狗与播放核心主动报错。 */
     private fun logLoadFailure(
@@ -1840,8 +1797,6 @@ class PlaybackController(
                 "看门狗超时（${LOAD_WATCHDOG_MILLIS / 1_000} 秒无加载事件）"
             LoadFailureSource.NoFrame ->
                 "无帧超时（${NO_FRAME_WINDOW_MILLIS / 1_000} 秒未出帧）"
-            LoadFailureSource.GrabTimeout ->
-                "抓帧超时（${SWITCH_GRAB_TIMEOUT_MILLIS / 1_000} 秒无结果）"
             LoadFailureSource.Core ->
                 "播放核心报错（${errorText?.takeIf { it.isNotBlank() } ?: "无错误文本"}）"
         }
@@ -1907,11 +1862,6 @@ class PlaybackController(
         loadWatchdogJob = null
     }
 
-    /** 换掉冻结帧；位图交给 GC，不在 Compose 可能仍绘制时手动回收。 */
-    private fun replaceFreezeFrame(frame: Bitmap?) {
-        _freezeFrame.value = frame
-    }
-
     /**
      * 新一次加载、会话开始或前后台周期切换：作废尚未完成的后台抓帧，允许下一周期重新抓。
      * [clearFrame] 为假时保留当前缓存帧，只作废在途结果。
@@ -1923,9 +1873,13 @@ class PlaybackController(
         if (clearFrame) replaceBackgroundRestoreFrame(null)
     }
 
-    /** 换掉后台恢复帧；同样交给 GC，不手动回收。 */
+    /**
+     * 换掉后台恢复帧；同样交给 GC，不手动回收。
+     * 缓存帧也是屏幕该显示什么的一部分，换掉后立刻派生。只在控制层线程调用。
+     */
     private fun replaceBackgroundRestoreFrame(frame: Bitmap?) {
         _backgroundRestoreFrame.value = frame
+        settlePresentation()
     }
 
     /** 清掉进行中的加载与切集状态，不改变会话本身。 */
@@ -1938,7 +1892,6 @@ class PlaybackController(
         frameWaitJob?.cancel()
         frameWaitJob = null
         cancelSurfaceRestore()
-        cancelSwitchCapture()
         switchPlaybackStarted = false
         switchFramePending = false
         suspendSwitchFrameWatchdog()
@@ -1958,9 +1911,11 @@ class PlaybackController(
         switchOriginEnded = false
         expectedLoadToken = 0
         switchFailureReported = false
-        _holdBlack.value = false
-        _switchKeepsSurfaceFrame.value = false
-        replaceFreezeFrame(null)
+        holdBlack = false
+        screenFrame = ScreenFrame.None
+        switchOutputLive = false
+        originAspectRatio = null
+        settlePresentation()
         resetBackgroundCapture()
     }
 
@@ -1998,12 +1953,15 @@ class PlaybackController(
     private fun beginReadyTracking() {
         readyState = ReadyState.Idle
         targetHasVideo = true
+        // 上一轮加载自己的画面不再算数；切集起点的原片画面仍然沿用。
+        if (screenFrame == ScreenFrame.Target) screenFrame = ScreenFrame.None
         switchFramePending = false
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         frameWaitJob?.cancel()
         frameWaitJob = null
         cancelSurfaceRestore()
+        settlePresentation()
     }
 
     /**
@@ -2094,6 +2052,8 @@ class PlaybackController(
     override fun onVideoSizeChanged(width: Int, height: Int) {
         if (!active || width <= 0 || height <= 0) return
         _videoAspectRatio.value = width.toDouble() / height
+        // 屏上仍是原片画面时比例不跟着换；目标画面接管后才用这个新比例。
+        settlePresentation()
     }
 
     /** 更新播放状态并记录迁移；相同状态不重复写日志。 */
@@ -2199,9 +2159,6 @@ class PlaybackController(
 
         /** 切集后等新帧上屏的总窗口；从切集开始或最后一次加载事件起算。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
-
-        /** 切集抓帧上限：原生已返回时有帧/无帧都继续加载；原生未返回则按切集失败收尾。 */
-        const val SWITCH_GRAB_TIMEOUT_MILLIS = 2_000L
 
         private const val NO_MEDIA = -1
 

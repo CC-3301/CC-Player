@@ -7,7 +7,6 @@ import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.graphics.Bitmap
 import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
@@ -71,6 +70,7 @@ import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SleepTimerState
 import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
+import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
@@ -222,11 +222,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var loopMode by mutableStateOf(LoopMode.Sequential)
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
     private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
-    private var videoAspectRatio by mutableStateOf<Double?>(null)
     private var switching by mutableStateOf(false)
     private var restoring by mutableStateOf(false)
     private var buffering by mutableStateOf(false)
-    private var holdBlack by mutableStateOf(false)
 
     /** 浏览页进入播放页的准备态与首次加载门禁。 */
     private val playbackEntry = PlaybackEntryState()
@@ -245,17 +243,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         )
     }
 
-    /** 切集时冻结的原视频画面，覆盖在视频 Surface 上直到目标画面就绪。 */
-    private var freezeFrame by mutableStateOf<Bitmap?>(null)
+    /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
+    private var surfacePresentation by mutableStateOf(SurfacePresentation())
 
-    /** 切集抓帧仍在后台执行：原画面还在 Surface 上，不铺黑底。 */
-    private var freezeFramePending by mutableStateOf(false)
-
-    /** 片尾自动切集沿用屏幕上停住的末帧：不抓帧、不铺黑底。 */
-    private var switchKeepsSurfaceFrame by mutableStateOf(false)
-
-    /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
-    private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -286,15 +276,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.loopMode.collect { loopMode = it } }
                 launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
-                launch { binder.controller.videoAspectRatio.collect { videoAspectRatio = it } }
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
-                launch { binder.controller.holdBlack.collect { holdBlack = it } }
-                launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
-                launch { binder.controller.freezeFramePending.collect { freezeFramePending = it } }
-                launch { binder.controller.switchKeepsSurfaceFrame.collect { switchKeepsSurfaceFrame = it } }
-                launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
+                launch { binder.controller.surfacePresentation.collect { surfacePresentation = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
                         // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
@@ -367,7 +352,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
                 // 播放页按方向设置与角度施加朝向；离开播放页把方向交回系统。
-                LaunchedEffect(playerVisible, orientationMode, videoAspectRatio, sessionOrientation.override) {
+                // 比例只读屏上那一帧的比例：切集期间跟随旧画面，不会因新文件先上报尺寸就转屏。
+                LaunchedEffect(
+                    playerVisible,
+                    orientationMode,
+                    surfacePresentation.aspectRatio,
+                    sessionOrientation.override,
+                ) {
                     playerOrientationMode = orientationMode
                     if (playerVisible) {
                         applyPlayerOrientationFromUser()
@@ -455,16 +446,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             autoPlayNext = autoPlayNext,
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
-                            videoAspectRatio = videoAspectRatio,
+                            surfacePresentation = surfacePresentation,
                             switching = switching,
                             restoring = restoring,
                             buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
-                            freezeFrame = freezeFrame,
-                            freezeFramePending = freezeFramePending,
-                            switchKeepsSurfaceFrame = switchKeepsSurfaceFrame,
-                            backgroundRestoreFrame = backgroundRestoreFrame,
-                            holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -861,14 +847,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         loopMode = LoopMode.Sequential
         sleepTimerState = SleepTimerState.Off
         sleepTimerOption = null
-        videoAspectRatio = null
         switching = false
         restoring = false
         buffering = false
-        holdBlack = false
-        freezeFrame = null
-        freezeFramePending = false
-        switchKeepsSurfaceFrame = false
+        surfacePresentation = SurfacePresentation()
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off
@@ -931,7 +913,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 当前方向设置与传感器角度下要施加的朝向。 */
     private fun playerOrientationTarget(): ScreenOrientation =
         sensorScreenOrientation(
-            sessionOrientation.resolve(playerOrientationMode, videoAspectRatio),
+            sessionOrientation.resolve(playerOrientationMode, surfacePresentation.aspectRatio),
             sensorAngle,
             appliedScreenOrientation,
         )

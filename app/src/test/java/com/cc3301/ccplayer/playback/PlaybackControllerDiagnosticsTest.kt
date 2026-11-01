@@ -4,11 +4,8 @@ import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -300,42 +297,6 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("加载令牌: $token"))
         assertTrue(text.contains("阶段: 切集"))
         assertTrue(text.contains("来源: 无帧超时"))
-    }
-
-    @Test
-    fun `抓帧卡死超时记录来源与定位字段`() = runTest {
-        val sink = MemoryDiagnosticsSink()
-        val diagnostics = diagnostics(sink, enabled = true)
-        val gate = CountDownLatch(1)
-        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        try {
-            val controller = PlaybackController(
-                engine,
-                FakePlaybackProgressRepository(),
-                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-                frameProbeDispatcher = executor,
-                diagnostics = diagnostics,
-                nowMillis = { testScheduler.currentTime },
-            )
-            val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
-            val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-            controller.openPlaylist(listOf(first, second), first)
-            engine.reportMediaLoaded()
-            engine.beforeGrab = { gate.await() }
-
-            controller.next()
-            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
-            runCurrent()
-
-            val text = sink.lines.joinToString("\n")
-            assertTrue(text.contains("切集失败: ep2.mkv"))
-            assertTrue(text.contains("目标: root/ep2.mkv"))
-            assertTrue(text.contains("阶段: 切集"))
-            assertTrue(text.contains("来源: 抓帧超时（2 秒无结果）"))
-        } finally {
-            gate.countDown()
-            executor.close()
-        }
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =

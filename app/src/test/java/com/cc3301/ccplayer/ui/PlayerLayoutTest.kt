@@ -5,7 +5,6 @@ import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.ui.theme.AppColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -208,98 +207,13 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `切集期间按冻结画面的原片比例绘制`() {
-        // 新文件已上报 2.0：旧画面还在，视频区仍按原片比例，不跟着新文件改。
-        assertEquals(
-            16.0 / 9.0,
-            switchFreezeAspectRatio(videoAspectRatio = 2.0, freezeFrameWidth = 1600, freezeFrameHeight = 900)!!,
-            RATIO_TOLERANCE,
-        )
+    fun `屏上有画面时不铺黑底`() {
+        assertFalse(showPlayerBlackLayer(showsPicture = true))
     }
 
     @Test
-    fun `切集期间还没有冻结画面时沿用已上报的比例`() {
-        assertEquals(
-            2.0,
-            switchFreezeAspectRatio(videoAspectRatio = 2.0, freezeFrameWidth = 0, freezeFrameHeight = 0)!!,
-            RATIO_TOLERANCE,
-        )
-    }
-
-    @Test
-    fun `切集期间没有可用比例时保持未知并交给铺满容器`() {
-        assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = 0, freezeFrameHeight = 0))
-        assertNull(switchFreezeAspectRatio(videoAspectRatio = null, freezeFrameWidth = -4, freezeFrameHeight = 90))
-    }
-
-    @Test
-    fun `切集就绪后冻结画面仍盖住视频输出`() {
-        // 切集阶段结束不撤帧：覆盖层只看冻结画面在不在。
-        assertTrue(showFreezeOverlay(hasFreezeFrame = true, holdBlack = false))
-        assertFalse(showFreezeOverlay(hasFreezeFrame = false, holdBlack = false))
-    }
-
-    @Test
-    fun `片尾黑底不显示冻结画面`() {
-        assertFalse(showFreezeOverlay(hasFreezeFrame = true, holdBlack = true))
-    }
-
-    @Test
-    fun `冻结画面可见期间视频区一直按原片比例`() {
-        // 播放核心此时可能已上报新文件的比例：冻结画面还在，视频区不跟着换。
-        assertEquals(
-            16.0 / 9.0,
-            frozenVideoAspectRatio(
-                videoAspectRatio = 2.0,
-                freezeOverlayVisible = true,
-                freezeFrameWidth = 1600,
-                freezeFrameHeight = 900,
-            )!!,
-            RATIO_TOLERANCE,
-        )
-    }
-
-    @Test
-    fun `冻结画面撤掉后视频区换成当前上报的比例`() {
-        assertEquals(
-            2.0,
-            frozenVideoAspectRatio(
-                videoAspectRatio = 2.0,
-                freezeOverlayVisible = false,
-                freezeFrameWidth = 1600,
-                freezeFrameHeight = 900,
-            )!!,
-            RATIO_TOLERANCE,
-        )
-    }
-
-    @Test
-    fun `片尾自动切集沿用屏幕末帧时不铺黑底`() {
-        assertFalse(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `切集时没有画面可显示才铺黑底`() {
-        // 切集态且没有冻结帧、没有待抓帧、也不沿用末帧，才铺黑底。
-        assertTrue(
-            showPlayerBlackLayer(
-                holdBlack = false,
-                buffering = false,
-                switching = true,
-                hasFreezeFrame = false,
-                freezeFramePending = false,
-                keepsSurfaceFrame = false,
-            ),
-        )
+    fun `屏上没有画面时铺黑底`() {
+        assertTrue(showPlayerBlackLayer(showsPicture = false))
     }
 
     private fun assertViewport(
@@ -317,8 +231,5 @@ class PlayerLayoutTest {
 
     private companion object {
         const val TOLERANCE = 0.001f
-
-        /** 宽高比按双精度比较。 */
-        const val RATIO_TOLERANCE = 0.0001
     }
 }

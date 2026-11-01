@@ -5,10 +5,7 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import com.cc3301.ccplayer.progress.MediaProgress
 import com.cc3301.ccplayer.ui.showPlayerBlackLayer
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -20,7 +17,6 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -100,168 +96,30 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `switching pauses the old video and grabs a frame`() = runTest {
+    fun `a manual switch keeps the surface frame without grabbing`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        // 抓帧还配着结果：切集不该再去抓。
+        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
 
         controller.next()
 
         assertEquals(PlaybackState.Loading, controller.state.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
-        // 抓帧必须早于 loadfile，否则冻结画面会来自目标文件。
-        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
+        // 先停下原视频，再直接加载目标：屏幕上停住的旧帧就是等待画面。
+        assertEquals(listOf("pause", "start"), engine.actions.takeLast(2))
+        assertFalse(engine.actions.contains("grab"))
         assertEquals(1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
-        assertSame(frame, controller.freezeFrame.value)
         assertEquals(0, engine.resumeCalls)
         assertTrue(controller.switching.value)
-        // 只有片尾切集沿用屏幕上停住的末帧；手动切集仍交给冻结画面。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        // 与片尾自动切集同一条路：沿用屏幕上停住的旧帧，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
     }
 
     @Test
-    fun `a switch grabs the frame off the caller before loading the target`() = runTest {
-        val probeDispatcher = StandardTestDispatcher(testScheduler)
-        val controller = PlaybackController(
-            engine,
-            progress,
-            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = probeDispatcher,
-            nowMillis = { testScheduler.currentTime },
-        )
-        open(controller, "ep1.mkv", "ep2.mkv")
-        engine.reportMediaLoaded()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-
-        controller.next()
-
-        // 抓帧不占调用线程：loadfile 必须等后台抓帧返回后再下发。
-        assertEquals(listOf("pause"), engine.actions.takeLast(1))
-        assertNull(controller.freezeFrame.value)
-        assertTrue(controller.freezeFramePending.value)
-
-        runCurrent()
-
-        assertEquals(listOf("pause", "grab", "start"), engine.actions.takeLast(3))
-        assertSame(frame, controller.freezeFrame.value)
-        assertFalse(controller.freezeFramePending.value)
-    }
-
-    @Test
-    fun `a stuck grab fails the switch before the watchdog without loading the target`() = runTest {
-        val gate = CountDownLatch(1)
-        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        try {
-            val controller = PlaybackController(
-                engine,
-                progress,
-                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-                frameProbeDispatcher = executor,
-                nowMillis = { testScheduler.currentTime },
-            )
-            open(controller, "ep1.mkv", "ep2.mkv")
-            engine.reportMediaLoaded()
-            val failures = collectFailures(controller)
-            engine.beforeGrab = { gate.await() }
-
-            controller.next()
-            assertTrue(controller.freezeFramePending.value)
-            assertEquals(1, engine.startedUrls.size)
-
-            // 抓帧卡在原生命令队列：不下发会被拖住的 loadfile，直接按失败收尾。
-            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
-            runCurrent()
-
-            assertEquals(1, engine.startedUrls.size)
-            assertEquals(0, controller.currentIndex.value)
-            assertEquals(PlaybackState.Paused, controller.state.value)
-            assertFalse(controller.switching.value)
-            assertNull(controller.freezeFrame.value)
-            assertFalse(controller.freezeFramePending.value)
-            assertEquals(1, failures.size)
-        } finally {
-            gate.countDown()
-            executor.close()
-        }
-    }
-
-    @Test
-    fun `a grab that returns no frame still loads the target`() = runTest {
-        val controller = playingController()
-        engine.frameToGrab = null
-
-        controller.next()
-
-        assertEquals("root/ep2.mkv", engine.startedUrls.last())
-        assertNull(controller.freezeFrame.value)
-        assertFalse(controller.freezeFramePending.value)
-    }
-
-    @Test
-    fun `a frame without a bitmap does not replace the freeze`() = runTest {
-        val controller = playingController()
-        engine.frameToGrab = PlaybackEngine.Frame(bitmap = null)
-
-        controller.next()
-
-        assertEquals("root/ep2.mkv", engine.startedUrls.last())
-        assertNull(controller.freezeFrame.value)
-        assertFalse(controller.freezeFramePending.value)
-    }
-
-    @Test
-    fun `a stuck grab restores the origin subtitle state without engine commands`() = runTest {
-        val gate = CountDownLatch(1)
-        val executor = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
-        try {
-            val controller = PlaybackController(
-                engine,
-                progress,
-                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-                frameProbeDispatcher = executor,
-                nowMillis = { testScheduler.currentTime },
-            )
-            val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
-            val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-            val subtitle = MediaFile(name = "ep1.srt", location = "root/ep1.srt")
-            engine.embeddedTracks = listOf(SubtitleTrack(id = 3, language = "chs", title = null, isDefault = true))
-            controller.openPlaylist(
-                listOf(first, second),
-                first,
-                directoryEntries = listOf(first, second, subtitle),
-            )
-            engine.reportMediaLoaded()
-            controller.selectExternalSubtitle(subtitle.location)
-            val tracks = controller.subtitleTracks.value
-            val externals = controller.externalSubtitles.value
-            val selection = controller.subtitleSelection.value
-            val addedSubtitles = engine.addedExternalSubtitles.size
-            val selectedEmbedded = engine.selectedEmbeddedTracks.size
-            val selectedExternal = engine.selectedExternalSubtitles.size
-            engine.beforeGrab = { gate.await() }
-
-            controller.next()
-            advanceTimeBy(PlaybackController.SWITCH_GRAB_TIMEOUT_MILLIS)
-            runCurrent()
-
-            assertEquals(tracks, controller.subtitleTracks.value)
-            assertEquals(externals, controller.externalSubtitles.value)
-            assertEquals(selection, controller.subtitleSelection.value)
-            // 失败回滚不向卡住的引擎下发字幕命令。
-            assertEquals(addedSubtitles, engine.addedExternalSubtitles.size)
-            assertEquals(selectedEmbedded, engine.selectedEmbeddedTracks.size)
-            assertEquals(selectedExternal, engine.selectedExternalSubtitles.size)
-        } finally {
-            gate.countDown()
-            executor.close()
-        }
-    }
-
-    @Test
-    fun `a natural end switch skips the grab and loads the target right away`() = runTest {
+    fun `a natural end switch loads the target right away`() = runTest {
         val probeDispatcher = StandardTestDispatcher(testScheduler)
         val controller = PlaybackController(
             engine,
@@ -278,13 +136,11 @@ class PlaybackControllerSwitchTest {
 
         // 片尾没有可抓的帧：不排抓帧，目标立刻开始加载，屏幕上停住的末帧继续显示。
         assertFalse(engine.actions.contains("grab"))
-        assertFalse(controller.freezeFramePending.value)
-        assertNull(controller.freezeFrame.value)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
         assertEquals(listOf("pause", "start"), engine.actions.takeLast(2))
         assertTrue(controller.switching.value)
-        // 没有冻结帧也没有待抓帧，但旧画面仍在屏上：不铺黑底。
-        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        // 旧画面仍在屏上：沿用末帧，不铺黑底。
+        assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
 
         // 抓帧调度器处理完也不再补抓。
@@ -293,58 +149,79 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a natural end switch drops the stale freeze frame`() = runTest {
-        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
+    fun `a switch stops keeping the surface frame once the frame shows`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
+        engine.reportPlaybackEnded()
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+        engine.reportFirstFrameReady()
+
+        assertFalse(controller.switching.value)
+        // 首帧已可显示：撤掉旧帧，屏上是新画面与新文件比例，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a weak frame signal does not withdraw the frame on screen`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
         controller.next()
         engine.reportFileLoaded()
-        engine.reportFirstFrameReady()
-        // 新帧还没上屏：上一条切换抓到的冻结画面仍在屏幕上。
-        assertSame(frame, controller.freezeFrame.value)
-        assertFalse(controller.switching.value)
+        engine.reportVideoSizeChanged(1080, 1920)
 
-        engine.reportPlaybackEnded()
+        // 需要确认的重配只说明目标接管了视频输出，画面可能还没上屏：屏上的原片画面与比例都不动。
+        engine.reportVideoReconfigured()
 
-        // 片尾没有可抓的帧：旧冻结画面撤掉，不停在前一集的旧帧上，也不铺黑底。
-        assertNull(controller.freezeFrame.value)
         assertTrue(controller.switching.value)
-        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
-        assertEquals(2, controller.currentIndex.value)
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 
     @Test
-    fun `a natural end switch keeps no freeze frame or black layer once the frame shows`() = runTest {
+    fun `a rejected late receipt does not withdraw the frame on screen`() = runTest {
+        progress.records["root/ep2.mkv"] = MediaProgress("root/ep2.mkv", 20_000, 600_000, 0)
         val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
 
-        engine.reportPlaybackEnded()
-        assertTrue(controller.switchKeepsSurfaceFrame.value)
-
+        controller.next()
         engine.reportFileLoaded()
-        engine.reportFirstFrameReady()
+        engine.reportVideoSizeChanged(1080, 1920)
 
-        assertFalse(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
-        assertFalse(controller.holdBlack.value)
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        // 这条信号早于续播那一跳，不在接受范围内：不能撤掉屏上的原片画面与比例。
+        engine.reportFirstFrameReady(fromSeek = false)
+
+        assertTrue(controller.switching.value)
+        assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 
     @Test
-    fun `a natural end switch to a file without video stops keeping the surface frame`() = runTest {
+    fun `a switch to a file without video stops keeping the surface frame`() = runTest {
         val controller = playingController()
 
         engine.reportPlaybackEnded()
-        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(showsPicture(controller))
 
         engine.hasVideoTrack = false
         engine.reportMediaLoaded()
 
-        // 目标没有视频轨：切集结束即撤掉沿用标记与冻结画面，黑底按原有规则处理。
+        // 目标没有视频轨：切集结束即撤掉沿用标记，黑底按原有规则处理。
         assertFalse(controller.switching.value)
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertNull(controller.freezeFrame.value)
+        assertFalse(showsPicture(controller))
     }
 
     @Test
@@ -362,7 +239,6 @@ class PlaybackControllerSwitchTest {
         assertEquals(1, engine.resumeCalls)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertFalse(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
     }
 
     @Test
@@ -416,23 +292,28 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `pausing after the target started settles the switch paused and drops the freeze`() = runTest {
+    fun `pausing after the target started settles the switch paused`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
         controller.next()
         engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
         engine.reportVideoReconfigured()
         assertTrue(controller.switching.value)
         assertEquals(1, engine.resumeCalls)
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
 
         // 就绪后又暂停：不能再等位置前进，直接按已就绪暂停收尾。
         controller.pause()
 
+        // 暂停态没有更靠后的出帧信号：收尾即撤旧帧，屏上是新集首帧与新文件比例，不铺黑底。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
-        // 暂停收尾不会再有位置前进，就绪即撤冻结画面，直接露出新集首帧。
-        assertNull(controller.freezeFrame.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
     }
 
     @Test
@@ -466,8 +347,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `repeated next during a switch advances the target to the final episode`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
 
         controller.next()
         controller.next()
@@ -476,8 +355,8 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep3.mkv", engine.startedUrls.last())
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
-        // 重定目标不再抓帧，冻结画面沿用第一次切集的结果。
-        assertSame(frame, controller.freezeFrame.value)
+        // 重定目标不重新抓帧，屏幕上停住的旧帧继续沿用。
+        assertTrue(showsPicture(controller))
 
         // 被跳过的第 2 集迟到的就绪不能结束切换。
         engine.reportFirstFrameReady(targetUrl = "root/ep2.mkv")
@@ -538,8 +417,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(pauseCallsBefore + 1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(0, engine.resumeCalls)
-        // 自然播完后已无帧可抓：冻结画面为空，屏幕上停住的末帧继续显示。
-        assertNull(controller.freezeFrame.value)
+        // 自然播完不抓帧：屏幕上停住的末帧继续显示，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -616,17 +496,16 @@ class PlaybackControllerSwitchTest {
         assertEquals(600_000L, controller.progress.value.positionMillis)
         assertEquals(600_000L, engine.startedPositions.last())
         assertTrue(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
         // 片尾切集失败回退：不再沿用屏幕上停住的末帧，恢复期间按黑底等待。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(showsPicture(controller))
         assertTrue(blackLayer(controller))
         assertEquals(1, failures.size)
 
         // 片尾恢复没有首帧可等：文件加载完成即结束恢复，保持黑底暂停。
         engine.reportFileLoaded()
         assertFalse(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
-        assertTrue(controller.holdBlack.value)
+        // 片尾恢复保持黑底。
+        assertFalse(showsPicture(controller))
         assertEquals(PlaybackState.Paused, controller.state.value)
 
         advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
@@ -638,11 +517,10 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackFailed()
         assertEquals(1, failures.size)
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertTrue(controller.holdBlack.value)
+        assertFalse(showsPicture(controller))
 
         // 用户重新操作后才解除黑底与失败去重；片尾恢复后播放从 0 重开。
         dispatch(controller, MediaSessionAction.Play)
-        assertFalse(controller.holdBlack.value)
         assertTrue(controller.switching.value)
         assertEquals(0L, engine.startedPositions.last())
     }
@@ -660,46 +538,31 @@ class PlaybackControllerSwitchTest {
 
         engine.reportFileLoaded()
         assertFalse(controller.switching.value)
-        assertTrue(controller.holdBlack.value)
+        assertFalse(showsPicture(controller))
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
     @Test
-    fun `a manual switch at the end with a grabbed frame waits for a real frame`() = runTest {
-        val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-        engine.reportPositionChanged(600_000, 600_000)
-
-        controller.next()
-        assertEquals(frame, controller.freezeFrame.value)
-
-        engine.reportPlaybackFailed()
-        assertFalse(controller.holdBlack.value)
-
-        // 抓到了末帧就按冻结帧规则恢复：等原视频重新出帧。
-        engine.reportFileLoaded()
-        assertTrue(controller.switching.value)
-        engine.reportFirstFrameReady()
-        assertFalse(controller.switching.value)
-        assertFalse(controller.holdBlack.value)
-        assertEquals(PlaybackState.Paused, controller.state.value)
-    }
-
-    @Test
-    fun `a manual switch at the end without a frame restores black paused`() = runTest {
+    fun `a manual switch at the end keeps the old frame while the origin is restored`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
 
         controller.next()
-        assertNull(controller.freezeFrame.value)
         engine.reportPlaybackFailed()
 
-        // 抓不到末帧时按位置兜底：片尾恢复等文件加载完成，黑底暂停。
+        // 手动切集的失败回退沿用屏幕上停住的旧帧，不落到片尾黑底那条规则里。
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.restoring.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+
         engine.reportFileLoaded()
         assertFalse(controller.switching.value)
-        assertTrue(controller.holdBlack.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+
+        // 原片重新出帧后画面回来，不落到片尾黑底那条规则里。
+        engine.reportFramePresented()
+        assertTrue(showsPicture(controller))
     }
 
     @Test
@@ -717,7 +580,6 @@ class PlaybackControllerSwitchTest {
 
         assertTrue(controller.switching.value)
         assertEquals(0L, engine.startedPositions.last())
-        assertFalse(controller.holdBlack.value)
     }
 
     @Test
@@ -727,13 +589,15 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        assertFalse(showsPicture(controller))
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 0)
         controller.commitSeekPreview()
 
-        assertFalse(controller.holdBlack.value)
         assertEquals(0L, engine.seekPositions.last())
+        // 落定 seek 后重新出帧：画面回来，不再是片尾黑底。
+        engine.reportFramePresented()
+        assertTrue(showsPicture(controller))
     }
 
     @Test
@@ -743,11 +607,12 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        assertFalse(showsPicture(controller))
 
         controller.stop()
 
-        assertFalse(controller.holdBlack.value)
+        assertEquals(PlaybackState.Idle, controller.state.value)
+        assertFalse(showsPicture(controller))
     }
 
     @Test
@@ -758,7 +623,7 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
-        assertTrue(controller.holdBlack.value)
+        assertFalse(showsPicture(controller))
         progress.records.clear()
 
         controller.stop()
@@ -839,7 +704,6 @@ class PlaybackControllerSwitchTest {
 
         assertTrue(controller.switching.value)
         assertEquals(0L, engine.startedPositions.last())
-        assertFalse(controller.holdBlack.value)
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
@@ -882,7 +746,6 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
-        assertFalse(controller.holdBlack.value)
 
         engine.reportPlaybackFailed()
         assertEquals(2, failures.size)
@@ -925,42 +788,41 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a grabbed frame stays frozen until the target frame reaches the surface`() = runTest {
+    fun `switching to an audio file does not keep the old video frame on screen`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
 
         controller.next()
-
-        assertSame(frame, controller.freezeFrame.value)
-
-        engine.reportFileLoaded()
-        engine.reportFirstFrameReady()
-
-        // 就绪信号先到也不能撤冻结画面：等新帧真正上屏。
-        assertSame(frame, controller.freezeFrame.value)
-        assertEquals(PlaybackState.Playing, controller.state.value)
-
-        engine.reportFramePresented()
-        assertNull(controller.freezeFrame.value)
-    }
-
-    @Test
-    fun `switching to an audio file does not leave the frozen video frame on screen`() = runTest {
-        val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-
-        controller.next()
-        assertSame(frame, controller.freezeFrame.value)
+        assertTrue(showsPicture(controller))
 
         engine.hasVideoTrack = false
         engine.reportMediaLoaded()
 
-        // 纯音频没有新视频帧可等，冻结画面按黑底处理。
+        // 纯音频没有新视频帧可等，不再沿用旧画面，切完保持黑底。
         assertFalse(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
+        assertFalse(showsPicture(controller))
         assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(blackLayer(controller))
+    }
+
+    @Test
+    fun `retargeting after a target without video keeps the surface frame again`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        controller.next()
+
+        // 目标没有视频轨，但文件刚加载、还没就绪：这一次切集内不再沿用旧画面。
+        engine.hasVideoTrack = false
+        engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+
+        engine.hasVideoTrack = true
+        controller.next()
+
+        // 重定目标到有视频轨的集：按新的目标恢复沿用屏幕上停住的旧帧。
+        assertEquals(2, controller.currentIndex.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -997,6 +859,23 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `next during a restore that still keeps the old frame does not go black`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
+        assertTrue(showsPicture(controller))
+
+        controller.next()
+
+        // 恢复期屏幕上仍是原片画面（沿用旧帧）：这一段切集接着沿用，不铺黑底。
+        assertEquals(1, controller.currentIndex.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+    }
+
+    @Test
     fun `next during a restore starts a switch from the origin`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
         engine.reportPositionChanged(40_000, 600_000)
@@ -1010,6 +889,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
+        // 恢复期屏幕上仍是原片画面：这一路继续沿用，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
@@ -1033,14 +915,17 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(true, engine.startedPaused.last())
         assertEquals(40_000L, engine.startedPositions.last())
+        // 手动切集失败：过渡期继续沿用屏幕上停住的旧帧，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         assertTrue(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
 
         engine.reportFirstFrameReady()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -1048,13 +933,13 @@ class PlaybackControllerSwitchTest {
         val controller = playingController()
 
         engine.reportPlaybackEnded()
-        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(showsPicture(controller))
 
         assertTrue(controller.cancelSwitch())
 
         // 取消后不再沿用末帧：恢复原片期间按黑底等待它重新出帧。
         assertTrue(controller.restoring.value)
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(showsPicture(controller))
         assertTrue(blackLayer(controller))
     }
 
@@ -1072,8 +957,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `back cancels the switch and leaves the original video paused`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         engine.reportPositionChanged(12_000, 600_000)
 
         controller.next()
@@ -1086,38 +969,21 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.cancelSwitch())
         assertEquals(12_000L, engine.startedPositions.last())
 
+        // 取消同样沿用屏幕上停住的旧帧，恢复原片期间不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
-        // 暂停态没有位置前进，冻结画面留到真正出帧。
-        assertEquals(frame, controller.freezeFrame.value)
+        // 重配只说明视频输出重建了，画面可能还没上屏：屏上的旧帧不撤，等真正出帧再换。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
 
         engine.reportFramePresented()
-        assertNull(controller.freezeFrame.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
         assertEquals(PlaybackState.Paused, controller.state.value)
-    }
-
-    @Test
-    fun `a paused switch keeps the frozen frame until the target frame reaches the surface`() = runTest {
-        val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-        controller.pause()
-
-        controller.next()
-        engine.reportFileLoaded()
-        engine.reportVideoReconfigured()
-        runCurrent()
-
-        // 视频链已重配、离屏也能抓到帧，但画面还没上屏：冻结画面不能撤。
-        assertSame(frame, controller.freezeFrame.value)
-        assertTrue(controller.switching.value)
-
-        engine.reportFramePresented()
-
-        assertNull(controller.freezeFrame.value)
-        assertFalse(controller.switching.value)
-        assertEquals(PlaybackState.Playing, controller.state.value)
     }
 
     @Test
@@ -1163,8 +1029,6 @@ class PlaybackControllerSwitchTest {
     fun `a switched target with no frame for sixty seconds restores the original`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(40_000, 600_000)
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1173,8 +1037,8 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
-        // 状态已就绪，但新帧仍未上屏，冻结画面保留。
-        assertSame(frame, controller.freezeFrame.value)
+        // 状态已就绪，但新帧仍未上屏：旧画面还留在屏上，不铺黑底。
+        assertFalse(blackLayer(controller))
         assertTrue(failures.isEmpty())
 
         // 60 秒从切集开始算，兜底收尾占用的 2 秒不顺延。
@@ -1182,7 +1046,7 @@ class PlaybackControllerSwitchTest {
             PlaybackController.NO_FRAME_WINDOW_MILLIS - PlaybackController.FRAME_FALLBACK_MILLIS - 1,
         )
         runCurrent()
-        assertSame(frame, controller.freezeFrame.value)
+        assertFalse(blackLayer(controller))
         assertTrue(failures.isEmpty())
 
         advanceTimeBy(1)
@@ -1193,15 +1057,37 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(controller.restoring.value)
         assertEquals(1, failures.size)
+        // 一直没有目标画面的证据：屏幕仍是原片画面，回退继续沿用，不铺黑底。
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(40_000L, engine.startedPositions.last())
     }
 
     @Test
+    fun `a switched target that reconfigured video without a frame falls back to black`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(40_000, 600_000)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        // 视频输出已经重配：屏幕不再是原片画面，只是还没有新帧上屏。
+        engine.reportVideoReconfigured()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+
+        // 60 秒仍无新帧：回退原片，屏上已没有旧画面，按黑底等待它重新出帧。
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+    }
+
+    @Test
     fun `pausing and resuming preserves the remaining no-frame window`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1262,8 +1148,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `late load events do not reset the remaining no-frame window`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1290,8 +1174,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `surface detach pauses the no-frame window and reattach continues it`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1321,7 +1203,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `stopping or starting a new load cancels the no-frame watchdog`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1348,8 +1229,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `a presented frame cancels the no-frame failure watchdog`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1452,9 +1331,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `a paused target settles ready after two seconds on load completion`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
-
         controller.next()
         controller.pause()
         engine.reportFileLoaded()
@@ -1462,11 +1338,11 @@ class PlaybackControllerSwitchTest {
         advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
         runCurrent()
 
-        // 暂停态已加载的文件也按暂停收尾；没有后续位置事件，就绪即撤冻结画面。
+        // 暂停态已加载的文件也按暂停收尾：就绪即露新集首帧，不铺黑底。
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
-        assertNull(controller.freezeFrame.value)
+        assertTrue(showsPicture(controller))
     }
 
     @Test
@@ -1494,8 +1370,6 @@ class PlaybackControllerSwitchTest {
     @Test
     fun `a switch settles ready after two seconds without a presented frame`() = runTest {
         val controller = playingController()
-        val frame = testBitmap()
-        engine.frameToGrab = PlaybackEngine.Frame(frame)
         val failures = collectFailures(controller)
 
         controller.next()
@@ -1514,11 +1388,11 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
         assertTrue(failures.isEmpty())
-        // 没有新帧证据：冻结画面继续保留。
-        assertSame(frame, controller.freezeFrame.value)
+        // 视频输出已重配、首帧还没上屏：屏上的旧帧继续沿用，不铺黑底。
+        assertFalse(blackLayer(controller))
 
         engine.reportFramePresented()
-        assertNull(controller.freezeFrame.value)
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -1916,12 +1790,11 @@ class PlaybackControllerSwitchTest {
         controller.next()
         engine.reportFileLoaded()
 
-        // 后台抓不到帧不算失败：文件加载完成即就绪。
+        // 后台没有可渲染画面：文件加载完成即就绪。
         assertEquals(1, controller.currentIndex.value)
         assertFalse(controller.switching.value)
         assertFalse(controller.buffering.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
-        assertNull(controller.freezeFrame.value)
 
         // 回前台重挂 Surface 不应重新进入加载；刷新后出帧才结束无帧窗口。
         controller.setRenderSurfaceAvailable(true)
@@ -2000,7 +1873,6 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Ended, controller.state.value)
         assertEquals(1, failures.size)
         assertFalse(controller.switching.value)
-        assertNull(controller.freezeFrame.value)
     }
 
     @Test
@@ -2149,15 +2021,158 @@ class PlaybackControllerSwitchTest {
         assertFalse(gate.shouldIgnore(LoadActivity.PlaybackRestart, 7))
     }
 
-    /** 界面按同一判据决定是否铺黑底；这里用控制器上报的状态复算一次。 */
-    private fun blackLayer(controller: PlaybackController): Boolean = showPlayerBlackLayer(
-        holdBlack = controller.holdBlack.value,
-        buffering = controller.buffering.value,
-        switching = controller.switching.value,
-        hasFreezeFrame = controller.freezeFrame.value != null,
-        freezeFramePending = controller.freezeFramePending.value,
-        keepsSurfaceFrame = controller.switchKeepsSurfaceFrame.value,
-    )
+    @Test
+    fun `a paused switch shows the new frame and ratio on ready`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+
+        // 屏上仍是原片画面：比例不跟着新文件换。
+        assertTrue(showsPicture(controller))
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+
+        controller.pause()
+        engine.reportVideoReconfigured()
+
+        // 暂停态就绪：同一次派生里撤掉旧帧、换成新文件比例，直接露新集首帧，不铺黑底。
+        assertFalse(controller.switching.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `the first load stays black until the first frame is ready`() = runTest {
+        val controller = controller()
+        open(controller, "ep1.mkv")
+
+        // 还没有任何画面信号：按黑底等首帧。
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+
+        engine.reportMediaLoaded()
+
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+    }
+
+    @Test
+    fun `next after a background round trip during a restore stays black`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
+        assertTrue(showsPicture(controller))
+
+        // 退后台再回来：Surface 重建，屏上原有的画面不再可信。
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        assertFalse(showsPicture(controller))
+
+        controller.next()
+
+        // 没有原片画面可沿用：这一段切集按黑底等目标首帧，不误判为有画面。
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+    }
+
+    @Test
+    fun `a presented frame withdraws the old frame and takes the new ratio`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+        // 还没有真正的出帧：屏上是原片画面与原片比例。
+        assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+
+        // 播放位置前进：新帧真的上屏，撤旧帧并换成新文件比例；出帧即完成切集。
+        engine.reportFramePresented()
+
+        assertFalse(controller.switching.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a paused natural end switch shows the target frame instead of black`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+        engine.reportPositionChanged(600_000, 600_000)
+
+        // 片尾自然播完触发切集：切集起点被标记为片尾结束。
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        engine.reportVideoSizeChanged(1080, 1920)
+        engine.reportVideoReconfigured()
+        assertEquals(1, engine.resumeCalls)
+
+        // 就绪后暂停：退后台与音频输出中断走同一条收尾路径。
+        controller.pauseForBackground()
+
+        // 片尾标记不能把暂停态刚露出的新集首帧盖成黑底。
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(showsPicture(controller))
+        assertFalse(blackLayer(controller))
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
+    }
+
+    @Test
+    fun `a paused natural end switch that never gets a frame restores black`() = runTest {
+        val controller = playingController()
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportFramePresented()
+        engine.reportPositionChanged(600_000, 600_000)
+        val failures = collectFailures(controller)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        controller.pauseForBackground()
+        assertTrue(showsPicture(controller))
+
+        // 继续播放后仍等不到帧：60 秒兜底回退原片，片尾恢复不再沿用旧帧。
+        controller.resume()
+        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+
+        // 片尾恢复就绪后仍保持黑底：原片重新出帧也不露，等用户操作。
+        engine.reportFileLoaded()
+        engine.reportFramePresented()
+        assertFalse(controller.switching.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertFalse(showsPicture(controller))
+        assertTrue(blackLayer(controller))
+    }
+
+    private companion object {
+        const val RATIO_TOLERANCE = 0.0001
+    }
+
+    /** 控制层派生的画面判据：屏幕上有没有可显示的画面。 */
+    private fun showsPicture(controller: PlaybackController): Boolean =
+        controller.surfacePresentation.value.showsPicture
+
+    /** 界面按同一判据决定是否铺黑底。 */
+    private fun blackLayer(controller: PlaybackController): Boolean =
+        showPlayerBlackLayer(showsPicture(controller))
 
     private fun dispatch(controller: PlaybackController, action: MediaSessionAction) {
         dispatchMediaAction(
