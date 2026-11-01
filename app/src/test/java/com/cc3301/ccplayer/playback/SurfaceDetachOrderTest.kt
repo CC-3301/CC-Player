@@ -1,9 +1,12 @@
 package com.cc3301.ccplayer.playback
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.Executors
 
-/** 视频输出队列的先后：分离一定执行到，挂载一定排在分离之后。 */
+/** 分离的下发顺序，以及分离与挂载在视频输出投递队列上的先后。 */
 class SurfaceDetachOrderTest {
 
     private val pending = ArrayDeque<() -> Unit>()
@@ -11,6 +14,19 @@ class SurfaceDetachOrderTest {
 
     private fun runPending() {
         while (pending.isNotEmpty()) pending.removeFirst()()
+    }
+
+    @Test
+    fun `分离先关输出再撤窗口，最后摘挂载`() {
+        val calls = mutableListOf<String>()
+
+        detachVideoOutput(
+            setProperty = { name, value -> calls += "property:$name=$value" },
+            setOption = { name, value -> calls += "option:$name=$value" },
+            detachSurface = { calls += "detach" },
+        )
+
+        assertEquals(listOf("property:vo=null", "option:force-window=no", "detach"), calls)
     }
 
     @Test
@@ -37,15 +53,59 @@ class SurfaceDetachOrderTest {
     }
 
     @Test
-    fun `挂载排在分离之后`() {
+    fun `等不到排空时挂载排到分离之后，不放行当场挂`() {
         val calls = mutableListOf<String>()
-        // 分离还在排队时，挂载只能排在它后面：先摘后挂，不能抢跑。
         queue.postAlways { calls += "detach" }
-        queue.postAlways { calls += "attach" }
-        queue.postOutput { calls += "open" }
+
+        // 这条线程没有真执行器：闸门跑不到，排空一定等不到。
+        val attachedNow = queue.attach(
+            awaitMillis = 50,
+            stillCurrent = { true },
+            attach = { calls += "attach" },
+            onSkipped = { calls += "skipped" },
+        )
+
+        assertFalse(attachedNow)
+        assertEquals(emptyList<String>(), calls)
 
         runPending()
+        assertEquals(listOf("detach", "attach"), calls)
+    }
 
-        assertEquals(listOf("detach", "attach", "open"), calls)
+    @Test
+    fun `排队的挂载在校验不过时跳过`() {
+        val calls = mutableListOf<String>()
+        queue.postAlways { calls += "detach" }
+
+        queue.attach(
+            awaitMillis = 50,
+            stillCurrent = { false },
+            attach = { calls += "attach" },
+            onSkipped = { calls += "skipped" },
+        )
+        runPending()
+
+        assertEquals(listOf("detach", "skipped"), calls)
+    }
+
+    @Test
+    fun `队列跑空时当场挂`() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val live = VideoOutputQueue { task -> executor.execute { task() } }
+            val calls = mutableListOf<String>()
+
+            val attachedNow = live.attach(
+                awaitMillis = 2_000,
+                stillCurrent = { true },
+                attach = { calls += "attach" },
+                onSkipped = { calls += "skipped" },
+            )
+
+            assertTrue(attachedNow)
+            assertEquals(listOf("attach"), calls)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 }

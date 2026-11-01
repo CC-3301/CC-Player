@@ -358,13 +358,14 @@ class MpvPlaybackEngine(
     override fun attachSurface(surface: Surface) {
         if (released || attachedSurface === surface) return
         attachedSurface = surface
-        if (awaitVideoOutputDrained()) {
-            MPVLib.attachSurface(surface)
-            return
-        }
-        videoOutputQueue.postAlways {
-            if (!released && attachedSurface === surface) MPVLib.attachSurface(surface)
-        }
+        videoOutputQueue.attach(
+            awaitMillis = VIDEO_OUTPUT_DRAIN_WAIT_MILLIS,
+            stillCurrent = { !released && attachedSurface === surface },
+            attach = { MPVLib.attachSurface(surface) },
+            onSkipped = {
+                diagnostics.log("挂载: 排队到分离之后的挂载没执行（Surface 已换或视频输出线程已关）")
+            },
+        )
     }
 
     /**
@@ -401,31 +402,21 @@ class MpvPlaybackEngine(
         if (released || attachedSurface == null) return
         awaitingSurfaceFrame = false
         videoOutputQueue.invalidate()
-        videoOutputQueue.postAlways {
+        postDetach()
+        attachedSurface = null
+        videoOutputStopped = true
+    }
+
+    /** 投递分离任务：先关输出再撤窗口，最后摘挂载；投递被拒时留痕。 */
+    private fun postDetach() {
+        val accepted = videoOutputQueue.postAlways {
             detachVideoOutput(
                 setProperty = { name, value -> MPVLib.setPropertyString(name, value) },
                 setOption = { name, value -> MPVLib.setOptionString(name, value) },
                 detachSurface = { MPVLib.detachSurface() },
             )
         }
-        attachedSurface = null
-        videoOutputStopped = true
-    }
-
-    /**
-     * 等视频输出线程跑完已投递的任务；返回是否在 [VIDEO_OUTPUT_DRAIN_WAIT_MILLIS] 内排空。
-     * 闸门任务排在已有任务之后，它跑完就说明前面的任务都执行过了；
-     * 等不到排空说明排队的分离还在跑，调用方要把挂载排到它后面，不能当场挂。
-     */
-    private fun awaitVideoOutputDrained(): Boolean {
-        val drained = CountDownLatch(1)
-        val queued = runCatching {
-            videoOutputExecutor.execute { drained.countDown() }
-            true
-        }.getOrDefault(false)
-        return queued && runCatching {
-            drained.await(VIDEO_OUTPUT_DRAIN_WAIT_MILLIS, TimeUnit.MILLISECONDS)
-        }.getOrDefault(false)
+        if (!accepted) diagnostics.log("分离: 视频输出线程不再受理，分离任务没投递")
     }
 
     /** 把开输出属性交给专用线程；拆挂之后到点的任务作废，释放后不再受理。 */
@@ -439,6 +430,11 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }
 
+    /**
+     * 释放引擎持有的全部原生资源。
+     * 还挂着 Surface 时先投一条分离再排空视频输出线程：闸门跑到的分支，销毁播放核心之前一定分离过；
+     * 闸门没跑到的分支放弃销毁，那条分支不承诺分离。
+     */
     override fun release() {
         // 重复释放：第一次已经销毁或明确放弃销毁，不再动已释放的实例。
         if (released) return
@@ -457,9 +453,13 @@ class MpvPlaybackEngine(
         // 闸门在 [VIDEO_OUTPUT_RELEASE_WAIT_MILLIS] 内没跑到，说明重建还没结束：
         // 此时放弃销毁，晚到的属性调用不会踩到已销毁的实例，实例随进程退出回收。
         // 作废排队中的开输出：唯一的等待就是下面有上限的闸门。
-        // 已投递的分离不参与作废，闸门排在它后面，销毁播放核心之前一定分离过。
-        val drained = CountDownLatch(1)
+        // 还挂着 Surface 就先投分离：分离不参与作废，闸门排在它后面，闸门跑到就说明分离过。
         videoOutputQueue.invalidate()
+        if (attachedSurface != null) {
+            awaitingSurfaceFrame = false
+            postDetach()
+        }
+        val drained = CountDownLatch(1)
         val queued = runCatching {
             videoOutputExecutor.execute { drained.countDown() }
             true
