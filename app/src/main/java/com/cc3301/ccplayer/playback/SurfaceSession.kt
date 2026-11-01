@@ -6,9 +6,8 @@ import android.view.Surface
  * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
  *
  * Surface 回调、尺寸变化与服务连接只向这里转发。
- * 拆挂只由 SurfaceHolder 回调触发：surfaceCreated 挂载，surfaceDestroyed 只标记不可用；
- * Activity 的停止与恢复不拆不挂。挂载与分离幂等，可重复、可乱序。
- * 后台抓帧完成前不主动分离，由调用方在抓帧结束后调用 [detach]。
+ * 拆挂只由 SurfaceHolder 回调触发：surfaceCreated 挂载，surfaceDestroyed 先标记不可用、
+ * 再由回调路径调用 [detach] 分离；Activity 的停止与恢复不拆不挂。挂载与分离幂等，可重复、可乱序。
  */
 class SurfaceSession(
     private val attach: (Surface) -> Boolean,
@@ -26,7 +25,7 @@ class SurfaceSession(
 
     private var surface: Surface? = null
 
-    /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，后台销毁后仍要等抓帧结束再分离。 */
+    /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，销毁时先标记不可用。 */
     private var mountedSurface: Surface? = null
 
     /** 已挂载的 Surface 已被销毁；即使对象身份被复用，也必须先分离再重挂。 */
@@ -51,7 +50,7 @@ class SurfaceSession(
         if (mounted) resize(width, height)
     }
 
-    /** Surface 已销毁：只标记不可用，分离由调用方在后台抓帧结束后调用 [detach] 完成。 */
+    /** Surface 已销毁：只标记不可用，分离由 SurfaceHolder 回调路径随后调用 [detach] 完成。 */
     fun onSurfaceDestroyed() {
         surface = null
         if (mounted) mountedSurfaceDestroyed = true
@@ -74,7 +73,7 @@ class SurfaceSession(
         publish()
     }
 
-    /** 后台抓帧结束后分离；重复调用无副作用。 */
+    /** 分离当前挂载；重复调用无副作用。 */
     fun detach() {
         detachIfMounted()
         publish()

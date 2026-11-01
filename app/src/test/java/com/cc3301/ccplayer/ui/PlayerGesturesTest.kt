@@ -14,16 +14,16 @@ class PlayerGesturesTest {
     private val threshold = 9f
 
     @Test
-    fun `左右两侧音量区各占两成，中间为跳转区`() {
-        // 音量区固定占屏宽 18%。
-        assertEquals(0.18f, VOLUME_ZONE_FRACTION)
+    fun `左右两侧音量区各占一成，中间为跳转区`() {
+        // 音量区固定占屏宽 10%。
+        assertEquals(0.10f, VOLUME_ZONE_FRACTION)
 
         assertEquals(GestureZone.LeftVolume, gestureZone(0f, width))
-        assertEquals(GestureZone.LeftVolume, gestureZone(161.9f, width))
-        assertEquals(GestureZone.Center, gestureZone(162f, width))
+        assertEquals(GestureZone.LeftVolume, gestureZone(89.9f, width))
+        assertEquals(GestureZone.Center, gestureZone(90f, width))
         assertEquals(GestureZone.Center, gestureZone(450f, width))
-        assertEquals(GestureZone.Center, gestureZone(737.9f, width))
-        assertEquals(GestureZone.RightVolume, gestureZone(738f, width))
+        assertEquals(GestureZone.Center, gestureZone(809.9f, width))
+        assertEquals(GestureZone.RightVolume, gestureZone(810f, width))
         assertEquals(GestureZone.RightVolume, gestureZone(899.9f, width))
     }
 
@@ -46,11 +46,21 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `双击分区边界归中间与右侧`() {
-        assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(161.9f, width))
-        assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(162f, width))
-        assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(737.9f, width))
-        assertEquals(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right), doubleTapAction(738f, width))
+    fun `双击分区左右各占一成半`() {
+        assertEquals(0.15f, DOUBLE_TAP_ZONE_FRACTION)
+
+        assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(134.9f, width))
+        assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(135f, width))
+        assertEquals(DoubleTapAction.TogglePlayPause, doubleTapAction(764.9f, width))
+        assertEquals(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right), doubleTapAction(765f, width))
+    }
+
+    @Test
+    fun `音量区比双击区窄，一成名到一成半之间双击仍按快退快进`() {
+        assertEquals(GestureZone.Center, gestureZone(100f, width))
+        assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(100f, width))
+        assertEquals(GestureZone.Center, gestureZone(800f, width))
+        assertEquals(DoubleTapAction.Seek(10_000L, DoubleTapSide.Right), doubleTapAction(800f, width))
     }
 
     @Test

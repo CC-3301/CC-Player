@@ -60,7 +60,6 @@ class SettlementSequenceTest {
             engine,
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
         controller.openPlaylist(files, files.first())

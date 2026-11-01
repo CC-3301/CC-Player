@@ -1,7 +1,5 @@
 package com.cc3301.ccplayer.playback
 
-import android.graphics.Bitmap
-
 /** 屏幕上停着的是哪一帧；画面事实只有这一个枚举。 */
 enum class ScreenFrame {
     /** 屏幕上没有可沿用的画面：首次打开还没出帧、Surface 重建、目标接管后仍无帧。 */
@@ -17,13 +15,11 @@ enum class ScreenFrame {
 /**
  * 屏幕上现在该显示什么：界面只读这个派生结果，不再自行组合加载阶段、黑底与视频轨。
  *
- * [showsPicture] 为假时铺黑底；[aspectRatio] 是视频区与朝向解析该用的比例；
- * [heldFrame] 是回前台先盖在画面上的缓存帧，与 [showsPicture] 无关。
+ * [showsPicture] 为假时铺黑底；[aspectRatio] 是视频区与朝向解析该用的比例。
  */
 data class SurfacePresentation(
     val showsPicture: Boolean = false,
     val aspectRatio: Double? = null,
-    val heldFrame: Bitmap? = null,
 )
 
 /**
@@ -43,7 +39,6 @@ internal fun deriveSurfacePresentation(
     holdBlack: Boolean,
     originAspectRatio: Double?,
     targetAspectRatio: Double?,
-    heldFrame: Bitmap?,
 ): SurfacePresentation {
     val showsPicture = when {
         !targetHasVideo -> false
@@ -58,6 +53,5 @@ internal fun deriveSurfacePresentation(
     return SurfacePresentation(
         showsPicture = showsPicture,
         aspectRatio = aspectRatio,
-        heldFrame = heldFrame,
     )
 }

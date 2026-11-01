@@ -13,14 +13,8 @@ class FakePlaybackEngine : PlaybackEngine {
     val startedPaused = mutableListOf<Boolean>()
     val startedPositions = mutableListOf<Long>()
 
-    /** 指令顺序，用于验证先暂停、再抓帧、再换文件。 */
+    /** 指令顺序，用于验证先暂停、再换文件。 */
     val actions = mutableListOf<String>()
-
-    /** 抓帧返回的画面；测试用不含位图的 Frame 模拟“有帧”。 */
-    var frameToGrab: PlaybackEngine.Frame? = null
-
-    /** 抓帧前执行，用于模拟不可中断的原生调用。 */
-    var beforeGrab: (() -> Unit)? = null
 
     /** 最近一次 start 的目标与代际，回调带上它们供控制层过滤迟到事件。 */
     var currentTargetUrl: String? = null
@@ -83,12 +77,6 @@ class FakePlaybackEngine : PlaybackEngine {
         currentSeekSerial = 0
         acceptedSeekSerial = 0
         return ++currentLoadToken
-    }
-
-    override fun grabFrame(): PlaybackEngine.Frame? {
-        actions += "grab"
-        beforeGrab?.invoke()
-        return frameToGrab
     }
 
     override fun pause() {

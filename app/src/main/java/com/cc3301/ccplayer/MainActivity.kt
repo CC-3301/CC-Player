@@ -16,6 +16,7 @@ import android.os.IBinder
 import android.view.Display
 import android.view.OrientationEventListener
 import android.view.Surface
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -114,7 +115,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
@@ -188,8 +188,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 退到后台丢弃字节源的判定：加载期间记待丢弃，加载结束或回前台前补做。 */
     private val staleSourceDiscardPolicy = StaleSourceDiscardPolicy()
 
-    /** 退后台时等待抓帧的分离任务；新的生命周期切换会取消旧任务。 */
-    private var backgroundDetachJob: Job? = null
+    /** 屏幕常亮标志：仅前台且在播放时打开，其余时候释放。 */
+    private val screenOn = ScreenOnFlag { keepOn ->
+        if (keepOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
 
     private var playerVisible by mutableStateOf(false)
 
@@ -263,6 +269,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch {
                     binder.controller.state.collect {
                         playbackState = it
+                        updateKeepScreenOn()
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
                         if (it != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
@@ -763,16 +770,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    /** 退到后台：不拆挂画面；暂停态先抓一帧备用。是否暂停由播放服务按后台播放设置决定。 */
+    /** 退到后台：不拆挂画面，屏幕停住的最后一帧原样保留。是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
         diagnostics.log("应用退到后台")
         val binder = playback
         binder?.setAppInForeground(false)
+        // 退后台立即释放常亮，不等播放状态回调。
+        updateKeepScreenOn()
         // 退后台时手势不会再收尾：落定预览并恢复声音，后台播放开着也一样。
         binder?.controller?.commitSeekPreview()
-        // 后台上报可能已把播放暂停；暂停态先抓帧，分离等 Surface 销毁回调再收尾。
-        binder?.controller?.beginBackgroundCapture()
         // 后台且（后台播放关闭或已暂停）时才丢，地址不变，只打陈旧标记；
         // 加载中不能丢：当前响应正踩在这些源上，先记待丢弃，加载结束或回前台前补做。
         if (binder != null) {
@@ -799,34 +806,21 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         return true
     }
 
-    /**
-     * Surface 销毁时先抓帧再分离。抓帧在后台调度执行，最多等待
-     * [BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS]；超时放弃结果并照常分离，避免挂住已销毁的 Surface。
-     * 回到前台后同样放弃本周期结果，不再分离。
-     */
-    private fun detachAfterBackgroundCapture(shouldDetach: () -> Boolean) {
-        val binder = playback ?: return
-        backgroundDetachJob?.cancel()
-        val capture = binder.controller.beginBackgroundCapture()
-        backgroundDetachJob = lifecycleScope.launch {
-            awaitCaptureThenDetach(
-                capture = capture,
-                timeoutMillis = BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS,
-                shouldDetach = shouldDetach,
-                abandonCapture = binder.controller::abandonBackgroundCapture,
-                detachSurface = surfaceSession::detach,
-            )
-        }
-    }
-
     override fun onStart() {
         super.onStart()
         diagnostics.log("应用进入前台")
         playback?.setAppInForeground(true)
+        updateKeepScreenOn()
         // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
-        // Surface 未销毁时画面一直在，缓存帧多余；已经重挂则等播放核心的首个新帧。
-        playback?.controller?.onReturnedToForeground()
+    }
+
+    /** 仅前台且在播放时保持屏幕常亮；暂停、退后台立即释放。 */
+    private fun updateKeepScreenOn() {
+        screenOn.update(
+            foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+            playing = playbackState == PlaybackState.Playing,
+        )
     }
 
     override fun onSurfaceReady(surface: Surface) {
@@ -844,16 +838,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onSurfaceReleased() {
+        // 分离由 SurfaceHolder 回调触发：销毁回调一到就摘掉视频输出。
         surfaceSession.onSurfaceDestroyed()
-        // 后台离开时先等暂停态抓帧结束再分离；转屏或关闭播放页不抓，直接分离。
-        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            detachAfterBackgroundCapture { !surfaceSession.hasSurface }
-        } else {
-            val binder = playback ?: return
-            backgroundDetachJob?.cancel()
-            binder.controller.abandonBackgroundCapture()
-            surfaceSession.detach()
-        }
+        surfaceSession.detach()
     }
 
     private fun closePlayer() {
@@ -866,6 +853,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         restoreBrowserSystemUi()
         playerVisible = false
         playbackState = PlaybackState.Idle
+        updateKeepScreenOn()
         progress = PlaybackProgress()
         seekPreviewMillis = null
         seekSettlement = null
@@ -1043,32 +1031,5 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private companion object {
         const val NO_MEDIA = -1
-
-        /** 后台暂停态抓帧的等待上限；超时放弃结果并先分离 Surface，回前台由 Surface 重挂恢复画面。 */
-        const val BACKGROUND_CAPTURE_DETACH_WAIT_MILLIS = 2_000L
     }
-}
-
-/**
- * 等待后台抓帧后决定是否分离 Surface：[capture] 为空或超时都放弃本周期结果并照常分离；
- * 已回到前台时只放弃结果，不分离。
- */
-internal suspend fun awaitCaptureThenDetach(
-    capture: Job?,
-    timeoutMillis: Long,
-    shouldDetach: () -> Boolean,
-    abandonCapture: () -> Unit,
-    detachSurface: () -> Unit,
-) {
-    val captured = capture != null && withTimeoutOrNull(timeoutMillis) {
-        capture.join()
-        true
-    } == true
-    if (!shouldDetach()) {
-        abandonCapture()
-        return
-    }
-    // 超时或没有抓帧任务都放弃本周期结果，照常分离 Surface。
-    if (!captured) abandonCapture()
-    detachSurface()
 }

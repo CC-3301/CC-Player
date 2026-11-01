@@ -357,7 +357,6 @@ class PlaybackControllerDiagnosticsTest {
             engine,
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
         )
