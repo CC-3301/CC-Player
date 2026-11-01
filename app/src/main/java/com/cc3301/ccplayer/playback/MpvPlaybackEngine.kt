@@ -355,6 +355,10 @@ class MpvPlaybackEngine(
 
     override fun attachSurface(surface: Surface) {
         if (released || attachedSurface === surface) return
+        // 排队中的分离会摘掉刚挂上的 Surface：先等视频输出线程跑完，挂载不能抢在分离前面。
+        if (!awaitVideoOutputDrained()) {
+            diagnostics.log("挂载: 视频输出线程未收尾，按当前状态继续")
+        }
         attachedSurface = surface
         MPVLib.attachSurface(surface)
     }
@@ -385,21 +389,41 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * 分离 Surface：先关输出再摘挂载，顺序不能变。
-     * 与开输出在同一把锁上互斥：排队中的开输出在这里作废，拆挂之后 vo 不会被重新打开。
-     * 摘挂载本身要跟着 Surface 生命周期走，留在调用线程。
+     * 分离 Surface：先关输出再摘挂载，顺序不能变；三步作为一条任务交给视频输出线程，
+     * 调用线程不再承担重建整条输出的耗时。
+     * 紧随其后的挂载在 [attachSurface] 里等这条任务跑完，顺序不会被颠倒。
      */
     override fun detachSurface() {
         if (released || attachedSurface == null) return
         awaitingSurfaceFrame = false
         synchronized(videoOutputLock) {
+            // 排队中的开输出在这里作废：拆挂之后 vo 不会被重新打开。
             videoOutputGeneration.incrementAndGet()
-            MPVLib.setPropertyString("vo", "null")
-            MPVLib.setOptionString("force-window", "no")
-            MPVLib.detachSurface()
+        }
+        postVideoOutput {
+            detachVideoOutput(
+                setProperty = { name, value -> MPVLib.setPropertyString(name, value) },
+                setOption = { name, value -> MPVLib.setOptionString(name, value) },
+                detachSurface = { MPVLib.detachSurface() },
+            )
         }
         attachedSurface = null
         videoOutputStopped = true
+    }
+
+    /**
+     * 等视频输出线程跑完已投递的任务；返回是否在 [VIDEO_OUTPUT_DRAIN_WAIT_MILLIS] 内排空。
+     * 闸门任务排在已有任务之后，它跑完就说明前面的任务都执行过了。
+     */
+    private fun awaitVideoOutputDrained(): Boolean {
+        val drained = CountDownLatch(1)
+        val queued = runCatching {
+            videoOutputExecutor.execute { drained.countDown() }
+            true
+        }.getOrDefault(false)
+        return queued && runCatching {
+            drained.await(VIDEO_OUTPUT_DRAIN_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
     }
 
     /** 把视频输出属性交给专用线程；拆挂之后到点的任务按序号作废，释放后不再受理。 */
@@ -625,6 +649,9 @@ class MpvPlaybackEngine(
         /** 释放时等视频输出线程排空队列的上限；超时即放弃销毁，不能把退出挂住。 */
         const val VIDEO_OUTPUT_RELEASE_WAIT_MILLIS = 2_000L
 
+        /** 挂载前等视频输出线程排空队列的上限；超时照常挂载，不能把 Surface 回调挂住。 */
+        const val VIDEO_OUTPUT_DRAIN_WAIT_MILLIS = 2_000L
+
         /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
         val nextSeekId = AtomicLong(0)
 
@@ -662,6 +689,24 @@ class MpvPlaybackEngine(
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
     }
+}
+
+/** 视频输出属性名。 */
+private const val VIDEO_OUTPUT_PROPERTY = "vo"
+private const val FORCE_WINDOW_PROPERTY = "force-window"
+
+/**
+ * 分离 Surface 的下发序列：先关输出、再撤窗口，最后摘挂载，三步顺序不能变。
+ * 三者作为一条任务投递到视频输出线程，中间不会插进别的输出任务。
+ */
+internal fun detachVideoOutput(
+    setProperty: (String, String) -> Unit,
+    setOption: (String, String) -> Unit,
+    detachSurface: () -> Unit,
+) {
+    setProperty(VIDEO_OUTPUT_PROPERTY, "null")
+    setOption(FORCE_WINDOW_PROPERTY, "no")
+    detachSurface()
 }
 
 /**
