@@ -77,8 +77,8 @@ fun frozenVideoAspectRatio(
     }
 
 /**
- * 播放页黑底层规则：只有片尾、首次缓冲、或切集时已明确没有冻结画面才铺黑底。
- * 抓帧还在途时原画面仍留在 Surface 上，不铺黑底。
+ * 播放页黑底层规则：只有片尾、首次缓冲、或切集时已明确没有画面可显示才铺黑底。
+ * 抓帧还在途、或片尾切集沿用屏幕上停住的末帧时，原画面仍留在 Surface 上，不铺黑底。
  */
 fun showPlayerBlackLayer(
     holdBlack: Boolean,
@@ -86,8 +86,9 @@ fun showPlayerBlackLayer(
     switching: Boolean,
     hasFreezeFrame: Boolean,
     freezeFramePending: Boolean,
+    keepsSurfaceFrame: Boolean,
 ): Boolean = holdBlack || (buffering && !switching) ||
-    (switching && !hasFreezeFrame && !freezeFramePending)
+    (switching && !keepsSurfaceFrame && !hasFreezeFrame && !freezeFramePending)
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp

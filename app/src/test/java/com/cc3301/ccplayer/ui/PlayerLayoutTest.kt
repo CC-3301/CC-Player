@@ -273,6 +273,35 @@ class PlayerLayoutTest {
         )
     }
 
+    @Test
+    fun `片尾自动切集沿用屏幕末帧时不铺黑底`() {
+        assertFalse(
+            showPlayerBlackLayer(
+                holdBlack = false,
+                buffering = false,
+                switching = true,
+                hasFreezeFrame = false,
+                freezeFramePending = false,
+                keepsSurfaceFrame = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `切集时没有画面可显示才铺黑底`() {
+        // 目标没有视频轨、抓帧没有结果、或 60 秒无帧回退：控制器不再沿用旧画面。
+        assertTrue(
+            showPlayerBlackLayer(
+                holdBlack = false,
+                buffering = false,
+                switching = true,
+                hasFreezeFrame = false,
+                freezeFramePending = false,
+                keepsSurfaceFrame = false,
+            ),
+        )
+    }
+
     private fun assertViewport(
         left: Float,
         top: Float,

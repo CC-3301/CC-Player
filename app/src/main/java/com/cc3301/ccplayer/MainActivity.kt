@@ -251,6 +251,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 切集抓帧仍在后台执行：原画面还在 Surface 上，不铺黑底。 */
     private var freezeFramePending by mutableStateOf(false)
 
+    /** 片尾自动切集沿用屏幕上停住的末帧：不抓帧、不铺黑底。 */
+    private var switchKeepsSurfaceFrame by mutableStateOf(false)
+
     /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
     private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
@@ -287,6 +290,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.freezeFrame.collect { freezeFrame = it } }
                 launch { binder.controller.freezeFramePending.collect { freezeFramePending = it } }
+                launch { binder.controller.switchKeepsSurfaceFrame.collect { switchKeepsSurfaceFrame = it } }
                 launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -455,6 +459,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             freezeFrame = freezeFrame,
                             freezeFramePending = freezeFramePending,
+                            switchKeepsSurfaceFrame = switchKeepsSurfaceFrame,
                             backgroundRestoreFrame = backgroundRestoreFrame,
                             holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
@@ -855,6 +860,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         holdBlack = false
         freezeFrame = null
         freezeFramePending = false
+        switchKeepsSurfaceFrame = false
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off
