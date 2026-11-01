@@ -2094,10 +2094,10 @@ class PlaybackControllerSwitchTest {
         // 还没有真正的出帧：屏上是原片画面与原片比例。
         assertEquals(1920.0 / 1080.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
 
-        // 播放位置前进：新帧真的上屏，撤旧帧并换成新文件比例。
+        // 播放位置前进：新帧真的上屏，撤旧帧并换成新文件比例；出帧即完成切集。
         engine.reportFramePresented()
 
-        assertTrue(controller.switching.value)
+        assertFalse(controller.switching.value)
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
         assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, RATIO_TOLERANCE)
