@@ -15,6 +15,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 class LoopbackStreamServerTest {
@@ -509,6 +512,107 @@ class LoopbackStreamServerTest {
         assertArrayEquals(limited.bytes, response.body)
         assertTrue(limited.reads.isNotEmpty())
         assertTrue("单次读取越过上限：${limited.reads}", limited.reads.all { it <= 1024 })
+    }
+
+    @Test(timeout = 10_000L)
+    fun `重建字节源超时后请求返回 503 而不是一直等`() {
+        val release = CountDownLatch(1)
+        val slow = LoopbackStreamServer(rebuildTimeoutMillis = 100)
+        try {
+            val target = slow.serve("smb://nas/media/慢重连.mkv") {
+                // 模拟 SMB 重连卡住：建源一直不返回。
+                release.await()
+                RecordingByteSource(payload)
+            }
+
+            val started = System.nanoTime()
+            val response = httpRequest(target)
+            val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+            // 超时按本次请求失败收尾：回 503，等待上限就是配置的 100ms，不会挂死在建源上。
+            assertEquals(503, response.statusCode)
+            assertTrue("等了 $waitedMillis ms", waitedMillis < 1_000)
+        } finally {
+            release.countDown()
+            slow.close()
+        }
+    }
+
+    @Test(timeout = 10_000L)
+    fun `重建期间关闭立即返回，建好的源由建源线程自己关掉`() {
+        val release = CountDownLatch(1)
+        val building = CountDownLatch(1)
+        val builtClosed = AtomicBoolean(false)
+        val built = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+            override fun close() {
+                builtClosed.set(true)
+            }
+        }
+        val fresh = LoopbackStreamServer(rebuildTimeoutMillis = 10_000)
+        val target = fresh.serve("smb://nas/media/在途建源.mkv") {
+            building.countDown()
+            release.await()
+            built
+        }
+        val request = Thread { runCatching { httpRequest(target) } }.apply {
+            isDaemon = true
+            start()
+        }
+        try {
+            assertTrue("建源没有开始", building.await(2_000, TimeUnit.MILLISECONDS))
+
+            val started = System.nanoTime()
+            fresh.close()
+            val closeMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+            // 关闭只改状态并返回，不等在建源上：建源还卡着，源也确实还没建出来。
+            assertTrue("关闭耗时 $closeMillis ms", closeMillis < 1_000)
+            assertFalse("关闭不该等建源返回", builtClosed.get())
+
+            // 后台建源返回后自己关掉建出来的源。
+            release.countDown()
+            awaitCondition { builtClosed.get() }
+            assertTrue(builtClosed.get())
+        } finally {
+            release.countDown()
+            runCatching { fresh.close() }
+            request.join(5_000)
+        }
+    }
+
+    @Test(timeout = 10_000L)
+    fun `建源线程已关时请求当场失败，不把超时走满`() {
+        val rejected = Executors.newSingleThreadExecutor().apply { shutdown() }
+        val fresh = LoopbackStreamServer(rebuildTimeoutMillis = 10_000, sourceOpener = rejected)
+        try {
+            val target = fresh.serve("smb://nas/media/拒绝.mkv") { RecordingByteSource(payload) }
+
+            val first = System.nanoTime()
+            val response = httpRequest(target)
+            val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - first)
+
+            // 投递被拒就当场结算这一轮：回 503，不是等满 10 秒超时。
+            assertEquals(503, response.statusCode)
+            assertTrue("等了 $waitedMillis ms", waitedMillis < 1_000)
+
+            // 在途轮次已清空：下一次请求同样当场失败，不会挂在前一轮上。
+            assertEquals(503, httpRequest(target).statusCode)
+        } finally {
+            fresh.close()
+        }
+    }
+
+    private fun awaitCondition(timeoutMillis: Long = 2_000, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+        while (System.nanoTime() < deadline) {
+            if (condition()) return
+            Thread.sleep(10)
+        }
+        assertTrue("等待超时", condition())
     }
 
     private fun requestThroughBoundary(url: String): HttpResponse {
