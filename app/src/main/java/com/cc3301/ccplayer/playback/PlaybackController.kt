@@ -243,9 +243,6 @@ class PlaybackController(
     /** 切集目标已提前 resume，等位置前进；收尾时不再重复下发 resume。 */
     private var switchPlaybackStarted = false
 
-    /** 切集期间排队、尚未落地的播放意图：true 暂停、false 继续、null 没有排队。 */
-    private var switchPlayPauseQueued: Boolean? = null
-
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
@@ -377,7 +374,7 @@ class PlaybackController(
         playAt(index)
     }
 
-    /** 切换到播放列表第 [index] 项；超出范围、首次加载、切集或恢复期间不动作。 */
+    /** 切换到播放列表索引 [index] 的条目；超出范围、首次加载、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
         // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
         if (loadPhase != LoadPhase.None) {
@@ -424,8 +421,8 @@ class PlaybackController(
         when (loadPhase) {
             // 目标回到原集时直接取消切集，回原位置恢复，不再重新加载同一集。
             LoadPhase.Switching -> if (index == switchOriginIndex) cancelSwitch() else retargetSwitch(index)
-            // 首次加载缓冲期间只允许返回，上一集/下一集不生效。
-            LoadPhase.Initial -> diagnostics.log { "相邻集未执行: 首次加载期间只放行返回" }
+            // 首次加载缓冲期间只允许返回；相邻集在控制层已被拦下，这里不再有可执行的动作。
+            LoadPhase.Initial -> Unit
             // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
             else -> playIndex(index)
         }
@@ -598,7 +595,6 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         active = true
         paused = false
-        switchPlayPauseQueued = null
         playedPositionMillis = 0
         playedDurationMillis = 0
         savedPositionMillis = 0
@@ -750,11 +746,10 @@ class PlaybackController(
         watchedToEnd = false
         pausedAtEpisodeEnd = false
         mediaLoaded = false
-        // 回退一律保持暂停：排队的继续播放意图在这里被丢弃，留一行日志。
-        if (switchPlayPauseQueued == false) {
-            diagnostics.log { "切集回退保持暂停: 丢弃排队的继续播放" }
+        // 回退一律保持暂停：当前意图是继续播放时，这个意图在这里被丢弃。
+        if (!paused) {
+            diagnostics.log { "切集回退保持暂停: 丢弃继续播放的意图" }
         }
-        switchPlayPauseQueued = null
         paused = true
         _restoring.value = false
         _subtitleTracks.value = switchOriginSubtitleTracks
@@ -834,13 +829,12 @@ class PlaybackController(
     }
 
     /**
-     * 播放/暂停：切集加载中只记意图，切集就绪后由就绪流程按同一意图生效。
-     * 意图取自当前暂停标记，连按两次回到原意图。
+     * 播放/暂停：切集期间的意图直接写进暂停标记，切集就绪时由就绪流程按它收尾。
+     * 一次按下就生效于标记，不需要另存排队状态。
      */
     fun togglePlayPause() {
         if (loadPhase == LoadPhase.Switching) {
             val pauseIntent = !paused
-            switchPlayPauseQueued = pauseIntent
             if (pauseIntent) pause() else resume()
             diagnostics.log { "切集期间播放键: 排队${if (pauseIntent) "暂停" else "继续"}" }
             return
@@ -1541,8 +1535,6 @@ class PlaybackController(
         diagnostics.log { "切集成功: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
-        // 排队的播放意图在这里落地，之后不再算排队。
-        switchPlayPauseQueued = null
         endBufferingIndicator()
         endLoadWatchdog()
         _switching.value = false
@@ -1927,7 +1919,6 @@ class PlaybackController(
         cancelSurfaceRestore()
         switchPlaybackStarted = false
         switchFramePending = false
-        switchPlayPauseQueued = null
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         _switching.value = false

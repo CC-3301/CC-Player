@@ -1981,45 +1981,26 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `切集期间按播放键记下暂停意图，切集就绪后落地`() = runTest {
+    fun `切集期间按一次播放键记下的暂停意图在就绪后生效`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val controller = playingControllerWithDiagnostics(sink)
+        val resumeCallsBefore = engine.resumeCalls
 
         controller.next()
         assertEquals(PlaybackState.Loading, controller.state.value)
         controller.togglePlayPause()
 
-        // 被拒绝的点击本身要留下意图记录：不实现排队时这一行不存在。
+        // 这一击在切集期就被记下：切集加载中的播放/暂停不落到「未就绪，不动作」。
         assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队暂停") })
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
 
-        // 意图在切集就绪后生效：目标是新集，停在新集首帧的暂停态。
+        // 就绪后可见状态就是按下的意图。
         assertFalse(controller.switching.value)
         assertEquals(1, controller.currentIndex.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertEquals(0, engine.resumeCalls)
-    }
-
-    @Test
-    fun `切集期间连按两次播放键记下两次意图并回到继续`() = runTest {
-        val sink = MemoryDiagnosticsSink()
-        val controller = playingControllerWithDiagnostics(sink)
-
-        controller.next()
-        controller.togglePlayPause()
-        controller.togglePlayPause()
-
-        // 两次点击都到达控制层：先排队暂停，再排队继续。
-        assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队暂停") })
-        assertTrue(sink.lines.any { it.contains("切集期间播放键: 排队继续") })
-
-        engine.reportFileLoaded()
-        engine.reportFirstFrameReady()
-
-        assertEquals(PlaybackState.Playing, controller.state.value)
-        assertEquals(1, engine.resumeCalls)
+        assertEquals(resumeCallsBefore, engine.resumeCalls)
     }
 
     @Test

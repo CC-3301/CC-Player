@@ -32,9 +32,10 @@ class PlayerButtonDebounceTest {
     }
 
     @Test
-    fun `只有播放暂停去抖，上一集与下一集不参与`() {
-        // 上一集/下一集每一击都要前移切集目标，加入去抖就会吞掉目标前移。
-        assertEquals(listOf(PlayerPressButton.PlayPause), PlayerPressButton.entries)
+    fun `去抖入口只有播放暂停`() {
+        // 上一集/下一集每一击都要前移切集目标，去抖会吞掉目标前移。
+        // 类型只有一个成员：这两类按钮没有能传给 accept 的入口，回归会先在编译期消失。
+        assertEquals(setOf(PlayerPressButton.PlayPause), PlayerPressButton.entries.toSet())
     }
 
     @Test
