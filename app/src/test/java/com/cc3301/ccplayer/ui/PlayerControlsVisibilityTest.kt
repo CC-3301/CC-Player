@@ -26,12 +26,10 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
-    fun `控制层淡入淡出为 200 毫秒`() {
-        assertEquals(200L, CONTROLS_FADE_MILLIS)
-    }
-
-    @Test
     fun `点击切换控制层显隐`() {
+        // 显隐过渡固定 200 毫秒。
+        assertEquals(200L, CONTROLS_FADE_MILLIS)
+
         controls.toggle()
         assertEquals(false, controls.visible)
 

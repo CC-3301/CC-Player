@@ -33,6 +33,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -217,7 +218,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
     private var seekSettlement by mutableStateOf<SeekSettlement?>(null)
     private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
-    private var currentIndex by mutableStateOf(NO_MEDIA)
+    private var currentIndex by mutableIntStateOf(NO_MEDIA)
     private var decodeMode by mutableStateOf(DecodeMode.Hardware)
     private var loopMode by mutableStateOf(LoopMode.Sequential)
     private var sleepTimerState by mutableStateOf(SleepTimerState.Off)

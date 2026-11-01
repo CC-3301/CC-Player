@@ -38,6 +38,9 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `不带 Range 的 GET 返回 200 与全量字节`() {
+        // 一次拷贝固定一兆字节。
+        assertEquals(1024 * 1024, COPY_BUFFER_BYTES)
+
         val response = httpRequest(url)
 
         assertEquals(200, response.statusCode)
@@ -415,10 +418,6 @@ class LoopbackStreamServerTest {
         assertThrows(IOException::class.java) { httpRequest(address) }
     }
 
-    @Test
-    fun `拷贝块固定为一兆字节`() {
-        assertEquals(1024 * 1024, COPY_BUFFER_BYTES)
-    }
 
     @Test
     fun `关闭后接受线程退出`() {

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- targetSdk 升版是产品决策，不在代码门禁内。 -->
+    <issue id="OldTargetApi" severity="ignore" />
+    <!-- 依赖与编译版本升版是产品决策，不在代码门禁内。 -->
+    <issue id="GradleDependency" severity="ignore" />
+    <!-- Gradle 与 AGP 版本升版是产品决策，不在代码门禁内。 -->
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <!-- 启动图标是否带单色层属于图标设计，不在代码门禁内。 -->
+    <issue id="MonochromeLauncherIcon" severity="ignore" />
+</lint>

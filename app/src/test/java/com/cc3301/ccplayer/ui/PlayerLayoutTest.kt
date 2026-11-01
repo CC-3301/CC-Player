@@ -56,17 +56,10 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `播放列表序号与标题均为白色`() {
+    fun `播放列表与抽屉的配色取值`() {
+        // 序号与标题纯白；当前项深蓝三成；抽屉统一半透明黑。
         assertEquals(Color.White, PlayerPlaylistTextColor)
-    }
-
-    @Test
-    fun `播放列表当前项底色为深蓝 30 个百分点`() {
         assertEquals(Color(0xFF1A73E8).copy(alpha = 0.30f), PlayerPlaylistCurrentItemColor)
-    }
-
-    @Test
-    fun `抽屉底色为统一 50 个百分点黑`() {
         assertEquals(Color(0xFF020509).copy(alpha = 0.50f), PlayerPlaylistBackgroundColor)
     }
 

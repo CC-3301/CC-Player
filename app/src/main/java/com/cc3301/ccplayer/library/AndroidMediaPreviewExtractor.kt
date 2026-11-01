@@ -5,9 +5,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
-import android.net.Uri
 import androidx.core.graphics.get
 import androidx.core.graphics.scale
+import androidx.core.net.toUri
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
@@ -85,7 +85,7 @@ class AndroidMediaPreviewExtractor(
     private fun <T> withRetriever(file: MediaFile, block: (MediaMetadataRetriever) -> T): T {
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(context, Uri.parse(file.location))
+            retriever.setDataSource(context, file.location.toUri())
             block(retriever)
         } finally {
             retriever.release()

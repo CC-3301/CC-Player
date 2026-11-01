@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.playback.DecodeMode
@@ -212,7 +213,7 @@ private fun SettingSwitch(checked: Boolean) {
     ) {
         Box(
             modifier = Modifier
-                .offset(x = thumbOffset)
+                .offset { IntOffset(x = thumbOffset.roundToPx(), y = 0) }
                 .size(20.dp)
                 .clip(CircleShape)
                 .background(if (checked) Color.White else AppColors.SwitchThumb),

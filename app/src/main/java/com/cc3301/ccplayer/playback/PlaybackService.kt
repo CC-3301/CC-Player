@@ -17,6 +17,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
+import androidx.core.graphics.createBitmap
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.CcPlayerApplication
 import com.cc3301.ccplayer.R
@@ -319,7 +320,7 @@ class PlaybackService : Service() {
      */
     private fun appIconBitmap(): Bitmap {
         appIconBitmap?.let { return it }
-        val bitmap = Bitmap.createBitmap(APP_ICON_SIZE, APP_ICON_SIZE, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(APP_ICON_SIZE, APP_ICON_SIZE, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
         canvas.drawColor(getColor(R.color.ic_launcher_background))
         getDrawable(R.drawable.ic_launcher_foreground)?.let { foreground ->
