@@ -15,6 +15,9 @@ class PlayerGesturesTest {
 
     @Test
     fun `左右两侧音量区各占两成，中间为跳转区`() {
+        // 音量区固定占屏宽 18%。
+        assertEquals(0.18f, VOLUME_ZONE_FRACTION)
+
         assertEquals(GestureZone.LeftVolume, gestureZone(0f, width))
         assertEquals(GestureZone.LeftVolume, gestureZone(161.9f, width))
         assertEquals(GestureZone.Center, gestureZone(162f, width))
@@ -26,6 +29,9 @@ class PlayerGesturesTest {
 
     @Test
     fun `左侧双击后退 10 秒`() {
+        // 两次点击的间隔窗口固定 300 毫秒。
+        assertEquals(300L, DOUBLE_TAP_WINDOW_MILLIS)
+
         assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(100f, width))
     }
 
@@ -74,6 +80,9 @@ class PlayerGesturesTest {
 
     @Test
     fun `音量位移未超过 9dp 不进入调整`() {
+        // 进入调整的位移阈值固定 9dp。
+        assertEquals(9f, VOLUME_DRAG_THRESHOLD_DP)
+
         assertNull(dragGesture(GestureZone.LeftVolume, 0f, 9f, threshold))
         assertNull(dragGesture(GestureZone.RightVolume, 0f, -9f, threshold))
     }
@@ -97,16 +106,6 @@ class PlayerGesturesTest {
         assertNull(dragGesture(GestureZone.RightVolume, -20f, 0f, threshold))
     }
 
-    @Test
-    fun `双击窗口为 300 毫秒`() {
-        assertEquals(300L, DOUBLE_TAP_WINDOW_MILLIS)
-    }
-
-    @Test
-    fun `位移阈值与音量区宽度`() {
-        assertEquals(9f, VOLUME_DRAG_THRESHOLD_DP)
-        assertEquals(0.18f, VOLUME_ZONE_FRACTION)
-    }
 
     @Test
     fun `未锁定且无面板时手势放行`() {

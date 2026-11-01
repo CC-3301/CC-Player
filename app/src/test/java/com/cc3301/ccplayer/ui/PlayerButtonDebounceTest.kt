@@ -11,12 +11,10 @@ class PlayerButtonDebounceTest {
     private val debounce = PlayerButtonDebounce(elapsedMillis = { now })
 
     @Test
-    fun `去抖窗口为 300 毫秒`() {
-        assertEquals(300L, PLAYER_BUTTON_DEBOUNCE_MILLIS)
-    }
-
-    @Test
     fun `同一按钮 300 毫秒内只放行第一击`() {
+        // 窗口固定 300 毫秒。
+        assertEquals(300L, PLAYER_BUTTON_DEBOUNCE_MILLIS)
+
         assertTrue(debounce.accept(PlayerPressButton.PlayPause))
 
         now = 299L

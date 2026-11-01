@@ -35,6 +35,9 @@ class PlayerLockTest {
 
     @Test
     fun `解锁按钮显示五秒后自动隐藏`() {
+        // 自动隐藏时长与控制层一致。
+        assertEquals(UNLOCK_AUTO_HIDE_MILLIS, CONTROLS_AUTO_HIDE_MILLIS)
+
         lock.tapLockButton()
         now = 4_999L
         lock.hideUnlockIfExpired()
@@ -47,10 +50,6 @@ class PlayerLockTest {
         assertEquals(false, lock.unlockVisible)
     }
 
-    @Test
-    fun `解锁按钮自动隐藏时长与控制层一致`() {
-        assertEquals(UNLOCK_AUTO_HIDE_MILLIS, CONTROLS_AUTO_HIDE_MILLIS)
-    }
 
     @Test
     fun `锁定态点画面重新显示解锁按钮`() {

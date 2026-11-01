@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.network
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
@@ -9,13 +10,13 @@ import androidx.security.crypto.MasterKey
 class EncryptedCredentialStore(private val preferences: SharedPreferences) : CredentialStore {
 
     override suspend fun put(key: String, secret: String) {
-        preferences.edit().putString(key, secret).apply()
+        preferences.edit { putString(key, secret) }
     }
 
     override suspend fun get(key: String): String? = preferences.getString(key, null)
 
     override suspend fun remove(key: String) {
-        preferences.edit().remove(key).apply()
+        preferences.edit { remove(key) }
     }
 
     companion object {

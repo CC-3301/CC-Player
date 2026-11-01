@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
@@ -25,7 +26,7 @@ class PlayerLock(
         private set
 
     /** 解锁按钮本次出现的时刻，用于自动隐藏计时。 */
-    var unlockShownAtMillis by mutableStateOf(0L)
+    var unlockShownAtMillis by mutableLongStateOf(0L)
         private set
 
     /** 点锁定按钮：未锁定时上锁并显示解锁按钮，锁定时点一次立即解锁。 */

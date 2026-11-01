@@ -4,6 +4,7 @@ import android.content.Context
 import android.database.Cursor
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -21,7 +22,7 @@ class SafMediaFileTree(context: Context) : MediaFileTree {
 
     override suspend fun resolve(location: String): MediaFile? = withContext(Dispatchers.IO) {
         try {
-            val documentUri = documentUriOf(Uri.parse(location))
+            val documentUri = documentUriOf(location.toUri())
             readDocument(documentUri)
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -31,7 +32,7 @@ class SafMediaFileTree(context: Context) : MediaFileTree {
     }
 
     override suspend fun children(directory: MediaFile): List<MediaFile> = withContext(Dispatchers.IO) {
-        val directoryUri = Uri.parse(directory.location)
+        val directoryUri = directory.location.toUri()
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
             directoryUri,
             DocumentsContract.getDocumentId(directoryUri),

@@ -24,12 +24,10 @@ class PlaybackControllerAudioTest {
     )
 
     @Test
-    fun `fade in lasts the fixed 500 milliseconds`() {
-        assertEquals(500L, PlaybackController.FADE_IN_MILLIS)
-    }
-
-    @Test
     fun `starting a media asks for a fade in`() {
+        // 淡入时长固定 500 毫秒。
+        assertEquals(500L, PlaybackController.FADE_IN_MILLIS)
+
         open(media)
 
         assertEquals(listOf(PlaybackController.FADE_IN_MILLIS), engine.fadeInDurations)

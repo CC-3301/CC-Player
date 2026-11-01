@@ -84,6 +84,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -340,8 +342,8 @@ fun PlayerScreen(
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onToggleRotation: () -> Unit,
     onClose: () -> Unit,
-    onButtonClickDebounced: (String) -> Unit = {},
     modifier: Modifier = Modifier,
+    onButtonClickDebounced: (String) -> Unit = {},
 ) {
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
@@ -1642,24 +1644,24 @@ private fun SeekBar(
     durationMillis: Long,
     previewMillis: Long?,
     seekSettlement: SeekSettlement?,
-    enabled: Boolean = true,
-    appearanceEnabled: Boolean = true,
     onPreview: (Long, Boolean) -> Unit,
     onCommit: () -> Unit,
     onHeartbeat: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    appearanceEnabled: Boolean = true,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
     // 预览状态绑定到当前媒体与时长：切集后不沿用上一集的 seek 目标。
     var dragMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     var heldMillis by remember(mediaKey, durationMillis) { mutableStateOf<Long?>(null) }
     // 已撤到的落定通知序号：只有更大的 id 才能撤掉当前保持值。
-    var heldSettlementId by remember(mediaKey) { mutableStateOf(0L) }
+    var heldSettlementId by remember(mediaKey) { mutableLongStateOf(0L) }
     var sliderDragging by remember(mediaKey) { mutableStateOf(false) }
     // 滑杆落点先取当前播放位置：没有值变化就收尾时不能提交 0。
-    var sliderMillis by remember(mediaKey) { mutableStateOf(positionMillis) }
-    var leftTimeWidthPx by remember { mutableStateOf(0f) }
-    var rightTimeWidthPx by remember { mutableStateOf(0f) }
+    var sliderMillis by remember(mediaKey) { mutableLongStateOf(positionMillis) }
+    var leftTimeWidthPx by remember { mutableFloatStateOf(0f) }
+    var rightTimeWidthPx by remember { mutableFloatStateOf(0f) }
     var dragTimeWidthPx by remember(mediaKey, durationMillis) { mutableStateOf<Float?>(null) }
     val previewForDisplay = dragMillis ?: previewMillis ?: heldMillis
     val progress = seekBarProgressMillis(positionMillis, durationMillis, previewForDisplay)

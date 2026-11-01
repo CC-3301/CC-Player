@@ -33,13 +33,10 @@ class PlaybackControllerSwitchTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `the buffer indicator delay is one second`() {
-        assertEquals(1000L, PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
-    }
-
-    @Test
     fun `initial loading shows the indicator after the buffer delay`() = runTest {
         val controller = controller()
+        // 起算点固定为一秒。
+        assertEquals(1000L, PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
 
         open(controller, "ep1.mkv")
         assertFalse(controller.buffering.value)
