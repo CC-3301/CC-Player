@@ -499,6 +499,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 sessionOrientation.toggle(currentScreenOrientation())
                             },
                             onClose = { handlePlayerBack() },
+                            onButtonClickDebounced = { line -> diagnostics.log(line) },
                         )
                     }
 

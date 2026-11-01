@@ -318,6 +318,58 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `恢复期停在首集时上一集不可用`() {
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = false,
+                canGoNext = true,
+                switching = false,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Next,
+                canGoPrevious = false,
+                canGoNext = true,
+                switching = false,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `恢复期停在末集时下一集不可用`() {
+        assertEquals(
+            false,
+            actionLooksEnabled(
+                PlayerAction.Next,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.Previous,
+                canGoPrevious = true,
+                canGoNext = false,
+                switching = false,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
+    }
+
+    @Test
     fun `上下一集不可用时外观禁用`() {
         assertEquals(
             false,

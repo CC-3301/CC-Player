@@ -185,6 +185,24 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
+    fun `多指按住时先抬起一指仍算按住`() {
+        controls.onPressDown()
+        controls.onPressDown()
+
+        controls.onPressUp()
+        assertEquals(true, controls.pressing)
+        now = 30_000L
+        assertEquals(-1L, controls.millisUntilAutoHide())
+        controls.hideIfExpired()
+        assertEquals(true, controls.visible)
+
+        // 最后一指抬起才恢复计时。
+        controls.onPressUp()
+        assertEquals(false, controls.pressing)
+        assertEquals(30_000L, controls.lastInteractionAtMillis)
+    }
+
+    @Test
     fun `抬起后从抬起时刻重新计时`() {
         controls.onPressDown()
         now = 20_000L

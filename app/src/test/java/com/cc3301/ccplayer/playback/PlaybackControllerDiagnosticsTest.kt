@@ -280,6 +280,41 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
+    fun `首次加载期间的相邻集切换记录未执行`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+
+        controller.next()
+
+        assertTrue(sink.lines.any { it.contains("相邻集未执行: 首次加载期间只放行返回") })
+    }
+
+    @Test
+    fun `切集回退丢弃排队的继续播放时记录日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val diagnostics = diagnostics(sink, enabled = true)
+        val controller = controller(diagnostics)
+        val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
+        val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
+        controller.openPlaylist(listOf(first, second), first)
+        engine.reportMediaLoaded()
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        controller.next()
+        // 切集期间先排队暂停、再排队继续：失败回退保持暂停时这个「继续」被丢弃。
+        controller.togglePlayPause()
+        controller.togglePlayPause()
+        engine.reportPlaybackFailed()
+
+        assertTrue(sink.lines.any { it.contains("切集回退保持暂停: 丢弃排队的继续播放") })
+        assertEquals(PlaybackState.Paused, controller.state.value)
+    }
+
+    @Test
     fun `播放会话未就绪时播放键未被执行的记录`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)

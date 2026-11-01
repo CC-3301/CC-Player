@@ -32,22 +32,20 @@ class PlayerButtonDebounceTest {
     }
 
     @Test
-    fun `不同按钮互不吞掉`() {
-        assertTrue(debounce.accept(PlayerPressButton.PlayPause))
-
-        assertTrue(debounce.accept(PlayerPressButton.Previous))
-        assertTrue(debounce.accept(PlayerPressButton.Next))
+    fun `只有播放暂停去抖，上一集与下一集不参与`() {
+        // 上一集/下一集每一击都要前移切集目标，加入去抖就会吞掉目标前移。
+        assertEquals(listOf(PlayerPressButton.PlayPause), PlayerPressButton.entries)
     }
 
     @Test
     fun `被压掉的重复点击不延长窗口`() {
-        assertTrue(debounce.accept(PlayerPressButton.Next))
+        assertTrue(debounce.accept(PlayerPressButton.PlayPause))
 
         now = 200L
-        assertFalse(debounce.accept(PlayerPressButton.Next))
+        assertFalse(debounce.accept(PlayerPressButton.PlayPause))
 
         // 窗口仍从上一击生效的时刻起算。
         now = 300L
-        assertTrue(debounce.accept(PlayerPressButton.Next))
+        assertTrue(debounce.accept(PlayerPressButton.PlayPause))
     }
 }

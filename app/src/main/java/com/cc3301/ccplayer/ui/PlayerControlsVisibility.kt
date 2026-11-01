@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import android.os.SystemClock
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -37,9 +38,11 @@ class PlayerControlsVisibility(
     var lastInteractionAtMillis by mutableLongStateOf(elapsedMillis())
         private set
 
-    /** 控件按住中：按下即重新计时，按住全程不自动隐藏。 */
-    var pressing by mutableStateOf(false)
-        private set
+    private var pressedCount by mutableIntStateOf(0)
+
+    /** 有控件按住中：按下即重新计时，最后一指抬起前不自动隐藏。 */
+    val pressing: Boolean
+        get() = pressedCount > 0
 
     /** 点击画面：显示时隐藏，隐藏时显示并重新计时。 */
     fun toggle() {
@@ -57,16 +60,16 @@ class PlayerControlsVisibility(
         lastInteractionAtMillis = elapsedMillis()
     }
 
-    /** 控件按下：按操作重新计时并保持显示，抬起前不隐藏。 */
+    /** 控件按下：按操作重新计时并保持显示，抬起前不隐藏；多指同时按住按各自计数。 */
     fun onPressDown() {
-        pressing = true
+        pressedCount += 1
         lastInteractionAtMillis = elapsedMillis()
     }
 
-    /** 控件抬起：恢复计时，隐藏倒计时从抬起时刻重新起算。 */
+    /** 控件抬起：最后一指抬起后恢复计时，隐藏倒计时从这一刻重新起算。 */
     fun onPressUp() {
-        pressing = false
-        lastInteractionAtMillis = elapsedMillis()
+        pressedCount = (pressedCount - 1).coerceAtLeast(0)
+        if (pressedCount == 0) lastInteractionAtMillis = elapsedMillis()
     }
 
     /**

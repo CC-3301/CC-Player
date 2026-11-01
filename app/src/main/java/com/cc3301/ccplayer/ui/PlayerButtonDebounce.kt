@@ -5,11 +5,14 @@ import android.os.SystemClock
 /** 同一按钮两次生效点击之间的最短间隔，毫秒。 */
 const val PLAYER_BUTTON_DEBOUNCE_MILLIS = 300L
 
-/** 播放页上带按压去抖的按钮。 */
+/**
+ * 播放页上带按压去抖的按钮。
+ *
+ * 只有播放/暂停：它是状态开关，重复的一击会把刚生效的状态又切回去。
+ * 上一集/下一集每击都要前移切集目标，不去抖。
+ */
 enum class PlayerPressButton {
     PlayPause,
-    Previous,
-    Next,
 }
 
 /**

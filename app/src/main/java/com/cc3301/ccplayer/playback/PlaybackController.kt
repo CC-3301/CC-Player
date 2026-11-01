@@ -243,6 +243,9 @@ class PlaybackController(
     /** 切集目标已提前 resume，等位置前进；收尾时不再重复下发 resume。 */
     private var switchPlaybackStarted = false
 
+    /** 切集期间排队、尚未落地的播放意图：true 暂停、false 继续、null 没有排队。 */
+    private var switchPlayPauseQueued: Boolean? = null
+
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
@@ -378,7 +381,7 @@ class PlaybackController(
     fun playAt(index: Int) {
         // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
         if (loadPhase != LoadPhase.None) {
-            diagnostics.log { "播放列表选择未执行: " + loadPhaseLabel(loadPhase) + "阶段（第 " + (index + 1) + " 项）" }
+            diagnostics.log { "播放列表选择未执行: ${loadPhaseLabel(loadPhase)}阶段（索引 $index）" }
             return
         }
         playIndex(index)
@@ -387,7 +390,7 @@ class PlaybackController(
     private fun playIndex(index: Int, originAtEnd: Boolean = false) {
         val media = _playlist.value.getOrNull(index)
         if (media == null) {
-            diagnostics.log { "播放目标不存在: 第 " + (index + 1) + " 项" }
+            diagnostics.log { "播放目标不存在: 索引 $index" }
             return
         }
         if (active) {
@@ -401,7 +404,7 @@ class PlaybackController(
     fun play(media: MediaFile) {
         val index = _playlist.value.indexOfFirst { it.location == media.location }
         if (index < 0) {
-            diagnostics.log { "播放列表不含该条目: " + media.name }
+            diagnostics.log { "播放列表不含该条目: ${media.name}" }
             return
         }
         playAt(index)
@@ -422,7 +425,7 @@ class PlaybackController(
             // 目标回到原集时直接取消切集，回原位置恢复，不再重新加载同一集。
             LoadPhase.Switching -> if (index == switchOriginIndex) cancelSwitch() else retargetSwitch(index)
             // 首次加载缓冲期间只允许返回，上一集/下一集不生效。
-            LoadPhase.Initial -> Unit
+            LoadPhase.Initial -> diagnostics.log { "相邻集未执行: 首次加载期间只放行返回" }
             // 恢复阶段再次选择相邻集：以原视频为起点开始新的切集。
             else -> playIndex(index)
         }
@@ -595,6 +598,7 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         active = true
         paused = false
+        switchPlayPauseQueued = null
         playedPositionMillis = 0
         playedDurationMillis = 0
         savedPositionMillis = 0
@@ -746,6 +750,11 @@ class PlaybackController(
         watchedToEnd = false
         pausedAtEpisodeEnd = false
         mediaLoaded = false
+        // 回退一律保持暂停：排队的继续播放意图在这里被丢弃，留一行日志。
+        if (switchPlayPauseQueued == false) {
+            diagnostics.log { "切集回退保持暂停: 丢弃排队的继续播放" }
+        }
+        switchPlayPauseQueued = null
         paused = true
         _restoring.value = false
         _subtitleTracks.value = switchOriginSubtitleTracks
@@ -831,8 +840,9 @@ class PlaybackController(
     fun togglePlayPause() {
         if (loadPhase == LoadPhase.Switching) {
             val pauseIntent = !paused
+            switchPlayPauseQueued = pauseIntent
             if (pauseIntent) pause() else resume()
-            diagnostics.log { "切集期间播放键: 排队" + if (pauseIntent) "暂停" else "继续" }
+            diagnostics.log { "切集期间播放键: 排队${if (pauseIntent) "暂停" else "继续"}" }
             return
         }
         when (_state.value) {
@@ -840,7 +850,7 @@ class PlaybackController(
             PlaybackState.Paused -> resume()
             // 播完或失败后引擎已卸载，播放键重开当前文件。
             PlaybackState.Ended -> if (_currentIndex.value != NO_MEDIA) playAt(_currentIndex.value)
-            else -> diagnostics.log { "播放键未执行: 会话未就绪（" + loadPhaseLabel(loadPhase) + "）" }
+            else -> diagnostics.log { "播放键未执行: 会话未就绪（${loadPhaseLabel(loadPhase)}）" }
         }
     }
 
@@ -1531,6 +1541,8 @@ class PlaybackController(
         diagnostics.log { "切集成功: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""}" }
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
+        // 排队的播放意图在这里落地，之后不再算排队。
+        switchPlayPauseQueued = null
         endBufferingIndicator()
         endLoadWatchdog()
         _switching.value = false
@@ -1915,6 +1927,7 @@ class PlaybackController(
         cancelSurfaceRestore()
         switchPlaybackStarted = false
         switchFramePending = false
+        switchPlayPauseQueued = null
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
         _switching.value = false

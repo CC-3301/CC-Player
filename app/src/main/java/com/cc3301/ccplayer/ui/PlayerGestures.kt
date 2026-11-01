@@ -281,10 +281,21 @@ fun actionAllowed(
     else -> true
 }
 
+/** 该操作是否还取决于相邻条目：上一集/下一集分别看列表边界。 */
+private fun adjacencyAvailable(
+    action: PlayerAction,
+    canGoPrevious: Boolean,
+    canGoNext: Boolean,
+): Boolean = when (action) {
+    PlayerAction.Previous -> canGoPrevious
+    PlayerAction.Next -> canGoNext
+    else -> true
+}
+
 /**
  * 控件外观是否可用：首次加载只保留返回入口，其余按不可用外观显示；
  * 切集期间与点击判据同源，被拦截的操作一并置灰，不出现能看到却点不动的控件；
- * 恢复原片只拦截点击，不改变外观（ADR-0025）。上一集/下一集还要看相邻条目。
+ * 恢复原片只拦截点击、不改变亮度（ADR-0025）。上一集/下一集在列表边界始终置灰。
  */
 fun actionLooksEnabled(
     action: PlayerAction,
@@ -295,11 +306,7 @@ fun actionLooksEnabled(
     restoring: Boolean,
 ): Boolean {
     if (initialLoading) return action == PlayerAction.Back
-    if (restoring) return true
-    return actionAllowed(action, switching, initialLoading, restoring) &&
-        when (action) {
-            PlayerAction.Previous -> canGoPrevious
-            PlayerAction.Next -> canGoNext
-            else -> true
-        }
+    val adjacency = adjacencyAvailable(action, canGoPrevious, canGoNext)
+    if (restoring) return adjacency
+    return adjacency && actionAllowed(action, switching, initialLoading, restoring)
 }

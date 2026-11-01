@@ -340,6 +340,7 @@ fun PlayerScreen(
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
     onToggleRotation: () -> Unit,
     onClose: () -> Unit,
+    onButtonClickDebounced: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val lock = remember { PlayerLock() }
@@ -623,7 +624,7 @@ fun PlayerScreen(
         }
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
-        // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出期间不再接收触摸。
+        // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
             visible = barsVisible,
             enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
@@ -697,15 +698,22 @@ fun PlayerScreen(
                 interactive = bottomBarInteractive,
                 onTogglePlayPause = {
                     controls.showByUserAction()
-                    if (buttonDebounce.accept(PlayerPressButton.PlayPause)) onTogglePlayPause()
+                    // 播放/暂停是状态开关：距上一击不足 300 毫秒的重复点击只算一次，并把被压掉的一击记下来。
+                    if (buttonDebounce.accept(PlayerPressButton.PlayPause)) {
+                        onTogglePlayPause()
+                    } else {
+                        onButtonClickDebounced("播放键重复点击被忽略: 距上一击不足 ${PLAYER_BUTTON_DEBOUNCE_MILLIS} 毫秒")
+                    }
                 },
                 onPrevious = {
+                    // 上一集每一击都要把切集目标前移，不去抖。
                     controls.showByUserAction()
-                    if (buttonDebounce.accept(PlayerPressButton.Previous)) onPrevious()
+                    onPrevious()
                 },
                 onNext = {
+                    // 下一集每一击都要把切集目标前移，不去抖。
                     controls.showByUserAction()
-                    if (buttonDebounce.accept(PlayerPressButton.Next)) onNext()
+                    onNext()
                 },
                 onSeekPreview = { position, requestSeek ->
                     controls.resetTimer()
@@ -1360,14 +1368,7 @@ private fun Controls(
             previewMillis = seekPreviewMillis,
             seekSettlement = seekSettlement,
             enabled = interactive && actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
-            appearanceEnabled = actionLooksEnabled(
-                PlayerAction.Seek,
-                canGoPrevious = false,
-                canGoNext = false,
-                switching = switching,
-                initialLoading = initialLoading,
-                restoring = restoring,
-            ),
+            appearanceEnabled = !initialLoading,
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
             onHeartbeat = onSeekHeartbeat,
