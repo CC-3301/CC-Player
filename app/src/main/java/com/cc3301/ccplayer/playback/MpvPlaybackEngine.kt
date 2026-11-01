@@ -102,7 +102,7 @@ class MpvPlaybackEngine(
     @Volatile
     private var durationSeconds = 0.0
 
-    /** mpv 事件线程写，抓帧线程读；冻结画面按这对尺寸裁切。 */
+    /** mpv 事件线程写，抓帧线程读；缓存帧按这对尺寸裁切。 */
     @Volatile
     private var videoWidth = 0
 
@@ -157,7 +157,7 @@ class MpvPlaybackEngine(
 
     /**
      * mpv 的缩略图接口直接取当前视频帧；没有画面时返回 null。
-     * 接口只给中心正方形，按当前视频宽高比裁出中心区域，冻结画面才不会显示成正方形。
+     * 接口只给中心正方形，按当前视频宽高比裁出中心区域，缓存帧才不会显示成正方形。
      */
     override fun grabFrame(): PlaybackEngine.Frame? {
         val bitmap = runCatching { MPVLib.grabThumbnail(GRAB_DIMENSION) }.getOrNull() ?: return null
@@ -546,7 +546,7 @@ class MpvPlaybackEngine(
 
     /**
      * 播放位置前进且 Surface 已挂时，才算新画面真正输出。
-     * 暂停态没有位置前进，不会上报，冻结画面与后台缓存帧得以保留。
+     * 暂停态没有位置前进，不会上报，屏上的旧画面与后台缓存帧得以保留。
      */
     private fun notifyProgressFrame() {
         if (isPaused()) return
@@ -683,7 +683,7 @@ class MpvPlaybackEngine(
         const val VIDEO_TRACK_TYPE = "video"
         const val SUB_ADD_SELECT = "select"
 
-        /** 抓冻结画面的目标像素边长。 */
+        /** 抓缓存帧的目标像素边长。 */
         const val GRAB_DIMENSION = 1920
 
         /** `sid` 取该值表示不显示字幕。 */

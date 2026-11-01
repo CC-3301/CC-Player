@@ -6,8 +6,8 @@ import kotlin.math.roundToInt
 internal data class FrameCrop(val x: Int, val y: Int, val width: Int, val height: Int)
 
 /**
- * 冻结画面裁切：抓帧接口只返回中心正方形的图，按视频宽高比取中心区域，
- * 避免冻结画面以正方形铺在屏幕上。视频尺寸未知时保留整张抓帧。
+ * 缓存帧裁切：抓帧接口只返回中心正方形的图，按视频宽高比取中心区域，
+ * 避免缓存帧以正方形铺在屏幕上。视频尺寸未知时保留整张抓帧。
  */
 internal fun freezeFrameCrop(
     sourceWidth: Int,

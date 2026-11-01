@@ -4,7 +4,7 @@ import android.graphics.Bitmap
 
 /** 屏幕上停着的是哪一帧；画面事实只有这一个枚举。 */
 enum class ScreenFrame {
-    /** 屏幕上没有可沿用的画面：首次打开还没出帧、Surface 重建、片尾黑底。 */
+    /** 屏幕上没有可沿用的画面：首次打开还没出帧、Surface 重建、目标接管后仍无帧。 */
     None,
 
     /** 切集前那次播放的画面；目标画面接管前一直留在屏上。 */
