@@ -45,6 +45,24 @@ fun playerOrientation(
     rotationOverride: ScreenOrientation?,
 ): ScreenOrientation = rotationOverride ?: resolvedOrientation(mode, videoAspectRatio)
 
+/**
+ * 跟随视频时是否正在等视频方向：设置为跟随视频、比例未知、当前条目是视频，且没有手动转屏。
+ *
+ * 等待期内不采信传感器角度，屏幕钉在进入播放页时的方向，视频方向一到达就按它施加一次。
+ * 比例为 NaN、非正等无效值时同样算未知。
+ */
+fun awaitsVideoOrientation(
+    mode: OrientationMode,
+    videoAspectRatio: Double?,
+    playingVideo: Boolean,
+    rotationOverride: ScreenOrientation?,
+): Boolean {
+    if (mode != OrientationMode.FollowVideo) return false
+    if (rotationOverride != null) return false
+    if (!playingVideo) return false
+    return videoAspectRatio == null || !videoAspectRatio.isFinite() || videoAspectRatio <= 0.0
+}
+
 /** 转屏按钮：按当前是否为横屏给出另一个方向。 */
 fun toggledOrientation(isLandscape: Boolean): ScreenOrientation =
     if (isLandscape) ScreenOrientation.Portrait else ScreenOrientation.Landscape

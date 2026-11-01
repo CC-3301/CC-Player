@@ -568,6 +568,7 @@ class PlaybackController(
      */
     fun pauseForBackground() {
         if (!active) return
+        diagnostics.log("前后台诊断: 暂停 来源=后台策略")
         paused = true
         // 退后台时手势不再有收尾；落定预览并恢复声音，避免静音留到后台。
         endSeekPreview(commit = true)
@@ -624,6 +625,7 @@ class PlaybackController(
         beginLoadWatchdog()
         resetSeekForNewLoad()
         expectedLoadToken = engine.start(media.playbackLocation, paused = false)
+        diagnostics.log { "前后台诊断: afade 时长=${FADE_IN_MILLIS}ms 来源=起播" }
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(index, media)
     }
@@ -764,12 +766,14 @@ class PlaybackController(
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
         resetSeekForNewLoad()
         expectedLoadToken = engine.start(media.playbackLocation, paused = true)
+        diagnostics.log { "前后台诊断: afade 时长=${FADE_IN_MILLIS}ms 来源=切集" }
         engine.fadeInAudio(FADE_IN_MILLIS)
         lookUpResumePosition(loadTargetIndex, media)
     }
 
     fun pause() {
         if (!active) return
+        diagnostics.log("前后台诊断: 暂停 来源=用户")
         clearRestoreHoldOnUserAction()
         paused = true
         suspendSwitchFrameWatchdog()
@@ -789,6 +793,7 @@ class PlaybackController(
             return
         }
         if (!active) return
+        diagnostics.log("前后台诊断: 继续 来源=用户")
         clearRestoreHoldOnUserAction()
         paused = false
         // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
@@ -821,6 +826,7 @@ class PlaybackController(
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
     fun handleAudioOutputLost() {
         if (!active) return
+        diagnostics.log("前后台诊断: 暂停 来源=音频输出中断")
         paused = true
         suspendSwitchFrameWatchdog()
         engine.pause()
@@ -939,6 +945,7 @@ class PlaybackController(
     fun seekTo(positionMillis: Long) {
         if (!active) return
         if (!mediaLoaded && loadPhase != LoadPhase.Switching) return
+        diagnostics.log { "前后台诊断: seek 目标=${positionMillis}ms 来源=用户" }
         // 用户自己跳转后，尚未下发的续播位置作废，不再把画面拉回续播点。
         userSeeked = true
         resumePositionMillis = null
@@ -1063,6 +1070,7 @@ class PlaybackController(
         val landing = pendingLanding ?: return
         pendingLanding = null
         releasePreviewMute()
+        diagnostics.log { "前后台诊断: afade 时长=${FADE_IN_MILLIS}ms 来源=落定" }
         engine.fadeInAudio(FADE_IN_MILLIS)
         // 预览期间吞掉的暂停回声在这里收尾：原本在播放就让引擎接着播。
         settleIgnoredPauseEcho()
@@ -1088,6 +1096,7 @@ class PlaybackController(
     private fun acquirePreviewMute() {
         if (previewMuted) return
         previewMuted = true
+        diagnostics.log("前后台诊断: 静音 来源=预览")
         engine.setAudioMuted(true)
     }
 
@@ -1095,6 +1104,7 @@ class PlaybackController(
     private fun releasePreviewMute() {
         if (!previewMuted) return
         previewMuted = false
+        diagnostics.log("前后台诊断: 恢复声音 来源=预览收尾")
         engine.setAudioMuted(false)
     }
 
@@ -1393,6 +1403,7 @@ class PlaybackController(
 
     override fun onPauseChanged(paused: Boolean) {
         if (!active) return
+        diagnostics.log { "前后台诊断: 暂停回声 paused=$paused 阶段=$loadPhase 意图=${this.paused}" }
         when (loadPhase) {
             // 首次加载中的暂停只记意图，正式状态等首帧就绪后再定。
             LoadPhase.Initial -> this.paused = paused
@@ -2027,6 +2038,7 @@ class PlaybackController(
         resumePositionMillis = null
         savedPositionMillis = position
         loadStartPositionMillis = position
+        diagnostics.log { "前后台诊断: seek 目标=${position}ms 来源=续播 阶段=$loadPhase" }
         if (loadPhase != LoadPhase.None) {
             seekPendingForReady = true
             requiredSeekSerial = engine.seekTo(position).serial
@@ -2076,7 +2088,16 @@ class PlaybackController(
 
     override fun onVideoSizeChanged(width: Int, height: Int) {
         if (!active || width <= 0 || height <= 0) return
+        val previousAspectRatio = _videoAspectRatio.value
         _videoAspectRatio.value = width.toDouble() / height
+        // 首个尺寸与之后的比例变化各一行：进页抽动先看这两行。
+        if (previousAspectRatio == null) {
+            diagnostics.log { "进页诊断: 首个视频尺寸 ${width}x$height 比例=${_videoAspectRatio.value}" }
+        } else if (previousAspectRatio != _videoAspectRatio.value) {
+            diagnostics.log {
+                "进页诊断: 宽高比变化 $previousAspectRatio -> ${_videoAspectRatio.value} 尺寸=${width}x$height"
+            }
+        }
         // 屏上仍是原片画面时比例不跟着换；目标画面接管后才用这个新比例。
         settlePresentation()
     }
