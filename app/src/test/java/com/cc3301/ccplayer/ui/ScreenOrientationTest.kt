@@ -2,6 +2,8 @@ package com.cc3301.ccplayer.ui
 
 import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ScreenOrientationTest {
@@ -84,6 +86,64 @@ class ScreenOrientationTest {
         assertEquals(
             ScreenOrientation.Portrait,
             playerOrientation(OrientationMode.FollowVideo, 0.56, null),
+        )
+    }
+
+    @Test
+    fun `跟随视频比例未知时等视频方向`() {
+        assertTrue(
+            awaitsVideoOrientation(
+                mode = OrientationMode.FollowVideo,
+                videoAspectRatio = null,
+                playingVideo = true,
+                rotationOverride = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `其他档位与音频不等视频方向`() {
+        listOf(OrientationMode.System, OrientationMode.Portrait, OrientationMode.Landscape).forEach { mode ->
+            assertFalse(
+                awaitsVideoOrientation(
+                    mode = mode,
+                    videoAspectRatio = null,
+                    playingVideo = true,
+                    rotationOverride = null,
+                ),
+            )
+        }
+        assertFalse(
+            awaitsVideoOrientation(
+                mode = OrientationMode.FollowVideo,
+                videoAspectRatio = null,
+                playingVideo = false,
+                rotationOverride = null,
+            ),
+        )
+    }
+
+    @Test
+    fun `比例已知或已手动转屏后不再等待`() {
+        listOf(1.78, 0.56, 0.0, -1.0, Double.NaN).forEachIndexed { index, aspect ->
+            assertEquals(
+                "第 $index 个比例",
+                index >= 2,
+                awaitsVideoOrientation(
+                    mode = OrientationMode.FollowVideo,
+                    videoAspectRatio = aspect,
+                    playingVideo = true,
+                    rotationOverride = null,
+                ),
+            )
+        }
+        assertFalse(
+            awaitsVideoOrientation(
+                mode = OrientationMode.FollowVideo,
+                videoAspectRatio = null,
+                playingVideo = true,
+                rotationOverride = ScreenOrientation.Landscape,
+            ),
         )
     }
 }

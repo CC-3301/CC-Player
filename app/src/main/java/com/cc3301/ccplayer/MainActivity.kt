@@ -100,6 +100,7 @@ import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
+import com.cc3301.ccplayer.ui.awaitsVideoOrientation
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.sensorScreenOrientation
@@ -211,6 +212,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 已施加的播放页方向，用于方向迟滞；[ScreenOrientation.System] 表示本次播放还没施加过。 */
     private var appliedScreenOrientation = ScreenOrientation.System
+
+    /** 等待视频方向期间钉住的方向：进入播放页时记一次，视频方向到达或离开播放页即清除。 */
+    private var heldScreenOrientation: ScreenOrientation? = null
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
@@ -362,10 +366,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     sessionOrientation.override,
                 ) {
                     playerOrientationMode = orientationMode
-                    if (playerVisible) {
-                        applyPlayerOrientationFromUser()
-                    } else {
-                        applyOrientation(ScreenOrientation.System)
+                    when {
+                        // 跟随视频但视频方向未知：钉住进入播放页时的方向，传感器不参与。
+                        playerVisible && awaitingVideoOrientation() -> holdOrientationUntilVideoKnown()
+                        playerVisible -> {
+                            heldScreenOrientation = null
+                            applyPlayerOrientationFromUser()
+                        }
+                        else -> {
+                            heldScreenOrientation = null
+                            applyOrientation(ScreenOrientation.System)
+                        }
                     }
                 }
                 // 传感器只在播放页注册，离开播放页注销；没有可用传感器时按档位施加族正向。
@@ -396,6 +407,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 return
                             }
                             sensorAngle = angle
+                            // 视频方向未知时先不动：这一步施加的方向会先于视频方向生效。
+                            if (awaitingVideoOrientation()) return
                             applyPlayerOrientationFromSensor()
                         }
                     }
@@ -928,6 +941,27 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         sensorOrientationGate.onUserApplied()
         applyPlayerOrientation()
     }
+
+    /** 跟随视频且视频方向未知：等待期内不采信传感器角度，屏幕钉在进入播放页时的方向。 */
+    private fun awaitingVideoOrientation(): Boolean = awaitsVideoOrientation(
+        mode = playerOrientationMode,
+        videoAspectRatio = surfacePresentation.aspectRatio,
+        playingVideo = currentMediaIsVideo(),
+        rotationOverride = sessionOrientation.override,
+    )
+
+    /** 钉住进入播放页时的方向；只在首次钉住时记一条诊断。 */
+    private fun holdOrientationUntilVideoKnown() {
+        val held = heldScreenOrientation ?: currentScreenOrientation().also {
+            heldScreenOrientation = it
+            diagnostics.log { "方向等待: 视频方向未知，钉住 " + screenOrientationLabel(it) }
+        }
+        applyOrientation(held)
+    }
+
+    /** 当前条目是不是视频；纯音频没有视频方向，不进入等待。 */
+    private fun currentMediaIsVideo(): Boolean =
+        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Video } ?: false
 
     /** 传感器帧：目标方向连续稳定达到阈值后才施加。 */
     private fun applyPlayerOrientationFromSensor() {
