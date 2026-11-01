@@ -15,6 +15,7 @@ class PlayerBlackLayerTest {
                 buffering = true,
                 switching = true,
                 keepsSurfaceFrame = true,
+                targetHasVideo = true,
             ),
         )
     }
@@ -27,6 +28,7 @@ class PlayerBlackLayerTest {
                 buffering = false,
                 switching = true,
                 keepsSurfaceFrame = false,
+                targetHasVideo = true,
             ),
         )
     }
@@ -39,6 +41,7 @@ class PlayerBlackLayerTest {
                 buffering = false,
                 switching = false,
                 keepsSurfaceFrame = false,
+                targetHasVideo = true,
             ),
         )
     }
@@ -51,6 +54,20 @@ class PlayerBlackLayerTest {
                 buffering = true,
                 switching = false,
                 keepsSurfaceFrame = true,
+                targetHasVideo = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a target without video keeps the black background`() {
+        assertTrue(
+            showPlayerBlackLayer(
+                holdBlack = false,
+                buffering = false,
+                switching = false,
+                keepsSurfaceFrame = false,
+                targetHasVideo = false,
             ),
         )
     }

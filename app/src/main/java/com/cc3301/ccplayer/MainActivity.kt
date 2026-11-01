@@ -245,8 +245,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         )
     }
 
-    /** 切集沿用屏幕上停住的旧帧：不抓帧、不铺黑底。 */
+    /** 切集沿用屏幕上停住的旧帧：沿用时不再铺黑底。 */
     private var switchKeepsSurfaceFrame by mutableStateOf(false)
+
+    /** 当前集是否有视频轨；纯音频没有可显示的画面，按黑底处理。 */
+    private var targetHasVideo by mutableStateOf(true)
 
     /** 暂停态退后台前缓存的画面，回前台先盖上，播放核心重新出帧后撤掉。 */
     private var backgroundRestoreFrame by mutableStateOf<Bitmap?>(null)
@@ -286,6 +289,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.holdBlack.collect { holdBlack = it } }
                 launch { binder.controller.switchKeepsSurfaceFrame.collect { switchKeepsSurfaceFrame = it } }
+                launch { binder.controller.targetHasVideo.collect { targetHasVideo = it } }
                 launch { binder.controller.backgroundRestoreFrame.collect { backgroundRestoreFrame = it } }
                 launch {
                     binder.controller.playbackFailures.collect {
@@ -453,6 +457,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             buffering = playbackEntry.showingBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
                             switchKeepsSurfaceFrame = switchKeepsSurfaceFrame,
+                            targetHasVideo = targetHasVideo,
                             backgroundRestoreFrame = backgroundRestoreFrame,
                             holdBlack = holdBlack,
                             subtitleTracks = subtitleTracks,
@@ -857,6 +862,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         buffering = false
         holdBlack = false
         switchKeepsSurfaceFrame = false
+        targetHasVideo = true
         subtitleTracks = emptyList()
         externalSubtitles = emptyList()
         subtitleSelection = SubtitleSelection.Off

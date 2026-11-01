@@ -214,6 +214,7 @@ class PlayerLayoutTest {
                 buffering = false,
                 switching = true,
                 keepsSurfaceFrame = true,
+                targetHasVideo = true,
             ),
         )
     }
@@ -227,6 +228,7 @@ class PlayerLayoutTest {
                 buffering = false,
                 switching = true,
                 keepsSurfaceFrame = false,
+                targetHasVideo = true,
             ),
         )
     }

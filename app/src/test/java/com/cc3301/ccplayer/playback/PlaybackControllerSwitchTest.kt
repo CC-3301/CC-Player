@@ -804,6 +804,23 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
+    fun `next during a restore that still keeps the old frame does not go black`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportPositionChanged(40_000, 600_000)
+        controller.next()
+        engine.reportPlaybackFailed()
+        assertTrue(controller.restoring.value)
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+
+        controller.next()
+
+        // 恢复期屏幕上仍是原片画面（沿用旧帧）：这一段切集接着沿用，不铺黑底。
+        assertEquals(1, controller.currentIndex.value)
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
+    }
+
+    @Test
     fun `next during a restore starts a switch from the origin`() = runTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
         engine.reportPositionChanged(40_000, 600_000)
@@ -817,9 +834,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
-        // 起点是恢复期的黑底，屏幕上没有旧帧可沿用：这一段切集继续按黑底等待。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertTrue(blackLayer(controller))
+        // 恢复期屏幕上仍是原片画面：这一路继续沿用，不铺黑底。
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
@@ -981,11 +998,32 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(controller.restoring.value)
         assertEquals(1, failures.size)
-        // 目标文件已经加载过，屏上不再是原片画面：回退按黑底等待原片重新出帧。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertTrue(blackLayer(controller))
+        // 一直没有目标画面的证据：屏幕仍是原片画面，回退继续沿用，不铺黑底。
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(40_000L, engine.startedPositions.last())
+    }
+
+    @Test
+    fun `a switched target that reconfigured video without a frame falls back to black`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(40_000, 600_000)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        engine.reportFileLoaded()
+        // 视频输出已经重配：屏幕不再是原片画面，只是还没有新帧上屏。
+        engine.reportVideoReconfigured()
+        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS + PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        runCurrent()
+
+        // 60 秒仍无新帧：回退原片，屏上已没有旧画面，按黑底等待它重新出帧。
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
+        assertEquals(1, failures.size)
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
     }
 
     @Test
@@ -1929,6 +1967,7 @@ class PlaybackControllerSwitchTest {
         buffering = controller.buffering.value,
         switching = controller.switching.value,
         keepsSurfaceFrame = controller.switchKeepsSurfaceFrame.value,
+        targetHasVideo = controller.targetHasVideo.value,
     )
 
     private fun dispatch(controller: PlaybackController, action: MediaSessionAction) {

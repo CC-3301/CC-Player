@@ -331,6 +331,7 @@ fun PlayerScreen(
     buffering: Boolean,
     initialLoading: Boolean,
     switchKeepsSurfaceFrame: Boolean,
+    targetHasVideo: Boolean,
     backgroundRestoreFrame: Bitmap?,
     holdBlack: Boolean,
     subtitleTracks: List<SubtitleTrack>,
@@ -481,13 +482,15 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲、切集且不沿用屏幕上停住的旧帧，或片尾恢复就绪后保持黑底。
+        // 黑底画在视频视图之后：本集没有视频轨、首次缓冲、切集且不沿用屏幕上停住的旧帧，
+        // 或片尾恢复就绪后保持黑底。
         if (
             showPlayerBlackLayer(
                 holdBlack = holdBlack,
                 buffering = buffering,
                 switching = switching,
                 keepsSurfaceFrame = switchKeepsSurfaceFrame,
+                targetHasVideo = targetHasVideo,
             )
         ) {
             Box(

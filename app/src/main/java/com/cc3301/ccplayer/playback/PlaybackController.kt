@@ -109,19 +109,22 @@ class PlaybackController(
     val buffering: StateFlow<Boolean> = _buffering.asStateFlow()
 
     /**
-     * 切集期间沿用屏幕上停住的旧帧：不抓帧，也不铺黑底。
-     * 切集起点屏幕上已有画面时置真；首次加载、恢复期与片尾黑底起点的切集不置真。
-     * 切集结束、片尾自动切集的失败回退、目标没有视频轨或屏幕上已无原片画面时清零。
+     * 切集期间沿用屏幕上停住的旧帧：沿用时不再铺黑底。
+     * 切集起点屏幕上已有画面时置真；首次加载与片尾黑底起点的切集不置真。
+     * 切集结束、片尾自动切集的失败回退或目标没有视频轨时清零。
      */
     private val _switchKeepsSurfaceFrame = MutableStateFlow(false)
     val switchKeepsSurfaceFrame: StateFlow<Boolean> = _switchKeepsSurfaceFrame.asStateFlow()
 
-    /** 本次切集起点屏幕上是否有可沿用的画面：首次加载、恢复期与片尾黑底期间都没有。 */
-    private var switchOriginPictureAvailable = false
+    /**
+     * 屏幕上是否还停着原片画面：切集起点按 [surfaceShowsPicture] 判定；
+     * 收到目标的视频输出或新帧、Surface 重建后不再成立。失败回退按它决定沿用旧帧还是黑底。
+     */
+    private var switchOriginFrameOnSurface = false
 
     /**
-     * 没有可显示的画面时保持黑底（片尾恢复、目标无视频轨），直到播放/暂停、seek、新加载或 stop。
-     * 这些情况没有首帧可显示，不能用旧画面占位。
+     * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
+     * 片尾没有首帧可显示，不能用旧画面占位。
      */
     private val _holdBlack = MutableStateFlow(false)
     val holdBlack: StateFlow<Boolean> = _holdBlack.asStateFlow()
@@ -177,7 +180,7 @@ class PlaybackController(
     private val _videoAspectRatio = MutableStateFlow<Double?>(null)
     val videoAspectRatio: StateFlow<Double?> = _videoAspectRatio.asStateFlow()
 
-    /** 切集沿用旧帧期间暂不采纳的新文件比例；切集结束时一次生效。 */
+    /** 切集沿用旧帧期间暂不采纳的新文件比例；新帧确认时一次生效，失败或取消时丢弃。 */
     private var pendingVideoAspectRatio: Double? = null
 
     /** 起播位置设置，默认播放上次位置。 */
@@ -243,8 +246,9 @@ class PlaybackController(
     /** 当前媒体是否已打开完成。 */
     private var mediaLoaded = false
 
-    /** 当前加载目标是否有视频轨；纯音频没有新视频帧，按黑底处理。 */
-    private var targetHasVideo = true
+    /** 当前加载目标是否有视频轨；纯音频没有可显示的画面，按黑底处理。 */
+    private val _targetHasVideo = MutableStateFlow(true)
+    val targetHasVideo: StateFlow<Boolean> = _targetHasVideo.asStateFlow()
 
     /** 本次加载所处的阶段；[LoadPhase.None] 表示没有进行中的加载。 */
     private var loadPhase = LoadPhase.None
@@ -450,6 +454,8 @@ class PlaybackController(
             }
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
+            // Surface 销毁后屏幕上不再有原片画面。
+            switchOriginFrameOnSurface = false
             cancelSurfaceRestore()
             suspendSwitchFrameWatchdog()
         }
@@ -617,8 +623,8 @@ class PlaybackController(
         switchOriginExternalSubtitles = _externalSubtitles.value
         switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
-        // 切集起点屏幕上没有画面时（首次加载、恢复期、片尾黑底）不走沿用旧帧那条路。
-        switchOriginPictureAvailable = loadPhase == LoadPhase.None && !_holdBlack.value
+        // 切集起点屏幕上没有画面时（首次加载、片尾黑底、恢复期黑底）不走沿用旧帧那条路。
+        switchOriginFrameOnSurface = surfaceShowsPicture()
         _holdBlack.value = false
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
@@ -630,6 +636,14 @@ class PlaybackController(
         // 先停住原视频再替换文件：屏幕上停住的旧帧就是切集期间的等待画面。
         engine.pause()
         startSwitchTarget()
+    }
+
+    /** 切集起点屏幕上是否有可沿用的画面；恢复期沿用旧帧时仍算有画面。 */
+    private fun surfaceShowsPicture(): Boolean = when (loadPhase) {
+        // 黑底期间与纯音频的当前集都没有画面。
+        LoadPhase.None -> !_holdBlack.value && _targetHasVideo.value
+        LoadPhase.Restoring -> _switchKeepsSurfaceFrame.value
+        LoadPhase.Initial, LoadPhase.Switching -> false
     }
 
     /** 切集目标切换时共用的状态重置；缓冲计时由调用方决定。 */
@@ -644,7 +658,7 @@ class PlaybackController(
         _restoring.value = false
         // 按本次切集的起点重算沿用标记：重定目标到有视频轨的集要恢复沿用旧帧，
         // 目标没有视频轨时由 [onMediaLoaded] 清掉。
-        _switchKeepsSurfaceFrame.value = switchOriginPictureAvailable
+        _switchKeepsSurfaceFrame.value = switchOriginFrameOnSurface
         pendingVideoAspectRatio = null
         restartFromStartAfterRestore = false
         endSeekPreview(commit = false)
@@ -1119,7 +1133,7 @@ class PlaybackController(
         if (loadToken != expectedLoadToken) return
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         mediaLoaded = true
-        targetHasVideo = hasVideo
+        _targetHasVideo.value = hasVideo
         // 目标没有视频轨：没有可显示的新视频帧，切集期间不再沿用屏幕上的旧画面。
         if (!hasVideo && loadPhase == LoadPhase.Switching) _switchKeepsSurfaceFrame.value = false
         when (loadPhase) {
@@ -1168,6 +1182,8 @@ class PlaybackController(
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
+        // 目标已经出画面（视频输出重配或首帧可显示）：屏幕上不再是原片画面。
+        switchOriginFrameOnSurface = false
         if (!resumeLookupDone) {
             // 期间若已收到无需确认的首帧，它是更强的信号，不能被后续重配覆盖。
             if (deferredReadyNeedsFrame != false) {
@@ -1324,7 +1340,10 @@ class PlaybackController(
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
         }
+        // 新帧真的上屏：屏幕上不再是原片画面。
+        switchOriginFrameOnSurface = false
         if (switchFramePending) clearPendingSwitchFrame()
+        applyPendingVideoAspectRatio()
         if (readyState == ReadyState.AwaitingFrame) finishReady(loadPhase, frameConfirmed = true)
     }
 
@@ -1475,16 +1494,13 @@ class PlaybackController(
         endLoadWatchdog()
         _switching.value = false
         _switchKeepsSurfaceFrame.value = false
-        // 切集结束：沿用旧帧期间暂不采纳的新文件比例一次生效，视频区换成新画面比例。
-        pendingVideoAspectRatio?.let { _videoAspectRatio.value = it }
-        pendingVideoAspectRatio = null
-        // 目标没有视频轨：没有可显示的画面，切完保持黑底直到用户操作。
-        if (!targetHasVideo) _holdBlack.value = true
         // 状态就绪但新帧还没上屏时保留原片信息，60 秒仍无帧就回退。
-        switchFramePending = targetHasVideo && !frameConfirmed
+        switchFramePending = _targetHasVideo.value && !frameConfirmed
         if (!switchFramePending) {
             switchOriginIndex = NO_MEDIA
             switchOriginEnded = false
+            // 新帧已确认（或目标没有视频轨）：暂存的新文件比例与新画面同一次重绘生效。
+            applyPendingVideoAspectRatio()
         }
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
@@ -1593,7 +1609,7 @@ class PlaybackController(
         switchFailureReported = true
         switchFramePending = false
         _switching.value = true
-        restoreOrigin(surfaceFrameLost = true)
+        restoreOrigin()
         _playbackFailures.tryEmit(Unit)
     }
 
@@ -1607,16 +1623,22 @@ class PlaybackController(
         switchOriginEnded = false
     }
 
+    /** 新帧上屏后采纳暂存的新文件比例；没有暂存值时不动作。 */
+    private fun applyPendingVideoAspectRatio() {
+        pendingVideoAspectRatio?.let { _videoAspectRatio.value = it }
+        pendingVideoAspectRatio = null
+    }
+
     /**
      * 失败或取消切集：重新打开原视频，停在切集前的位置。
-     * 手动切集的过渡期继续沿用屏幕上停住的旧帧；片尾自动切集按黑底等待原片重新出帧。
-     * [surfaceFrameLost] 表示屏幕上已经没有原片画面（目标已加载却一直没出帧）。
+     * 屏幕上还有原片画面时继续沿用、不铺黑底；片尾自动切集或画面已被覆盖时按黑底等待。
      */
-    private fun restoreOrigin(surfaceFrameLost: Boolean = false) {
-        val origin = restoreOriginBaseState() ?: return
+    private fun restoreOrigin() {
         pendingVideoAspectRatio = null
+        val origin = restoreOriginBaseState() ?: return
         _switchKeepsSurfaceFrame.value =
-            switchOriginPictureAvailable && !switchOriginEnded && !surfaceFrameLost
+            switchOriginFrameOnSurface && !switchOriginEnded
+        switchOriginFrameOnSurface = false
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
@@ -1653,6 +1675,7 @@ class PlaybackController(
         _switching.value = false
         _restoring.value = false
         _switchKeepsSurfaceFrame.value = false
+        switchOriginFrameOnSurface = false
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
@@ -1862,6 +1885,8 @@ class PlaybackController(
         switchFailureReported = false
         _holdBlack.value = false
         _switchKeepsSurfaceFrame.value = false
+        switchOriginFrameOnSurface = false
+        pendingVideoAspectRatio = null
         resetBackgroundCapture()
     }
 
@@ -1898,7 +1923,7 @@ class PlaybackController(
     /** 进入一轮加载，并清掉上一轮的新帧等待。 */
     private fun beginReadyTracking() {
         readyState = ReadyState.Idle
-        targetHasVideo = true
+        _targetHasVideo.value = true
         switchFramePending = false
         suspendSwitchFrameWatchdog()
         clearSwitchFrameDeadline()
@@ -2001,6 +2026,8 @@ class PlaybackController(
             pendingVideoAspectRatio = ratio
             return
         }
+        // 不在沿用旧帧的窗口里：直接生效，之前暂存的比例作废。
+        pendingVideoAspectRatio = null
         _videoAspectRatio.value = ratio
     }
 

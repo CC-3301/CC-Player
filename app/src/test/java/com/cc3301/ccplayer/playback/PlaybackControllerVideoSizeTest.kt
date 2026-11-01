@@ -101,7 +101,31 @@ class PlaybackControllerVideoSizeTest {
 
         engine.reportMediaLoaded()
 
-        // 切集结束：暂存的新比例一次生效。
+        // 就绪收尾但新帧还没上屏：比例仍保持原片，等新帧真正上屏。
+        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
+
+        engine.reportFramePresented()
+
+        // 新帧上屏：暂存的新比例与新画面同一次生效。
+        assertEquals(0.5625, controller.videoAspectRatio.value!!, TOLERANCE)
+    }
+
+    @Test
+    fun `a size report after the switch applies normally`() {
+        open("ep1.mkv", "ep2.mkv")
+        engine.reportVideoSizeChanged(1920, 1080)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        engine.reportMediaLoaded()
+        engine.reportFramePresented()
+
+        // 切集期间引擎一次比例都没上报：视频区沿用上一个已知比例。
+        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
+
+        engine.reportVideoSizeChanged(1080, 1920)
+
+        // 切集结束后新上报照常生效，不会被永久锁在旧比例。
         assertEquals(0.5625, controller.videoAspectRatio.value!!, TOLERANCE)
     }
 
