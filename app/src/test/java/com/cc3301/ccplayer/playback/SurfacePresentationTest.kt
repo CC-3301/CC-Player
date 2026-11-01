@@ -1,13 +1,10 @@
 package com.cc3301.ccplayer.playback
 
-import android.graphics.Bitmap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 派生规则的事实组合表：屏上那一帧、视频轨与片尾黑底决定画面、比例与缓存帧。 */
+/** 派生规则的事实组合表：屏上那一帧、视频轨与片尾黑底决定画面与比例。 */
 class SurfacePresentationTest {
 
     private data class Row(
@@ -42,7 +39,6 @@ class SurfacePresentationTest {
                 holdBlack = row.holdBlack,
                 originAspectRatio = ORIGIN_RATIO,
                 targetAspectRatio = TARGET_RATIO,
-                heldFrame = null,
             )
             assertEquals(row.toString(), row.showsPicture, presentation.showsPicture)
             assertEquals(row.toString(), row.aspectRatio, presentation.aspectRatio)
@@ -57,7 +53,6 @@ class SurfacePresentationTest {
             holdBlack = false,
             originAspectRatio = null,
             targetAspectRatio = TARGET_RATIO,
-            heldFrame = null,
         )
         assertNull(origin.aspectRatio)
 
@@ -67,47 +62,8 @@ class SurfacePresentationTest {
             holdBlack = false,
             originAspectRatio = ORIGIN_RATIO,
             targetAspectRatio = null,
-            heldFrame = null,
         )
         assertNull(target.aspectRatio)
-    }
-
-    @Test
-    fun `缓存帧与画面判据无关，黑底时同样带着`() {
-        val frame = testBitmap()
-
-        val black = deriveSurfacePresentation(
-            screenFrame = ScreenFrame.None,
-            targetHasVideo = false,
-            holdBlack = true,
-            originAspectRatio = null,
-            targetAspectRatio = null,
-            heldFrame = frame,
-        )
-        assertTrue(black.showsPicture.not())
-        assertSame(frame, black.heldFrame)
-
-        val picture = deriveSurfacePresentation(
-            screenFrame = ScreenFrame.Target,
-            targetHasVideo = true,
-            holdBlack = false,
-            originAspectRatio = null,
-            targetAspectRatio = TARGET_RATIO,
-            heldFrame = frame,
-        )
-        assertSame(frame, picture.heldFrame)
-    }
-
-    /**
-     * 测试只需要一个非空帧身份；android.jar 的 Bitmap 构造器在单测里是桩，
-     * 用 Unsafe 绕过构造器分配实例。
-     */
-    private fun testBitmap(): Bitmap {
-        val unsafeClass = Class.forName("sun.misc.Unsafe")
-        val field = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }
-        val unsafe = field.get(null)
-        val allocate = unsafeClass.getMethod("allocateInstance", Class::class.java)
-        return allocate.invoke(unsafe, Bitmap::class.java) as Bitmap
     }
 
     private companion object {

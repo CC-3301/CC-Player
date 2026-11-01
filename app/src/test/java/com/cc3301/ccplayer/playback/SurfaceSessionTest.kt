@@ -75,7 +75,7 @@ class SurfaceSessionTest {
         session.onSurfaceCreated(surface)
         session.onSurfaceDestroyed()
 
-        // 销毁只标记不可用：后台抓帧结束后由调用方分离。
+        // 销毁只标记不可用：分离由 SurfaceHolder 回调路径随后调用。
         assertEquals(1, attached.size)
         assertEquals(0, detachCalls)
         assertEquals(SurfaceSession.State.Attached, session.state)

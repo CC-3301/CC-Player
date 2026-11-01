@@ -19,7 +19,10 @@ const val DOUBLE_TAP_WINDOW_MILLIS = 300L
 const val VOLUME_DRAG_THRESHOLD_DP = 9f
 
 /** 左右两侧音量区各占屏宽的比例。 */
-const val VOLUME_ZONE_FRACTION = 0.18f
+const val VOLUME_ZONE_FRACTION = 0.10f
+
+/** 双击分区左右各占屏宽的比例；中间为跳转与暂停区。 */
+const val DOUBLE_TAP_ZONE_FRACTION = 0.15f
 
 /** 播放页上可触摸的元素。 */
 enum class PlayerInput {
@@ -118,8 +121,8 @@ sealed interface DragGesture {
 }
 
 /**
- * 触点所在分区：左边缘到 18%、右边缘向内 18% 为音量区，其余为中间区。
- * 左 18% 分界线归中间区，右 18% 分界线归右侧音量区。
+ * 触点所在分区：左边缘到 10%、右边缘向内 10% 为音量区，其余为中间区。
+ * 左 10% 分界线归中间区，右 10% 分界线归右侧音量区。
  */
 fun gestureZone(x: Float, width: Int): GestureZone {
     if (width <= 0) return GestureZone.Center
@@ -131,11 +134,15 @@ fun gestureZone(x: Float, width: Int): GestureZone {
     }
 }
 
-/** 双击落点对应的动作：左侧倒退 10 秒，中间暂停/继续，右侧前进 10 秒。 */
-fun doubleTapAction(x: Float, width: Int): DoubleTapAction = when (gestureZone(x, width)) {
-    GestureZone.LeftVolume -> DoubleTapAction.Seek(-SEEK_STEP_MILLIS, DoubleTapSide.Left)
-    GestureZone.Center -> DoubleTapAction.TogglePlayPause
-    GestureZone.RightVolume -> DoubleTapAction.Seek(SEEK_STEP_MILLIS, DoubleTapSide.Right)
+/** 双击落点对应的动作：左侧 15% 倒退 10 秒，中间暂停/继续，右侧 15% 前进 10 秒。 */
+fun doubleTapAction(x: Float, width: Int): DoubleTapAction {
+    if (width <= 0) return DoubleTapAction.TogglePlayPause
+    val edge = width * DOUBLE_TAP_ZONE_FRACTION
+    return when {
+        x < edge -> DoubleTapAction.Seek(-SEEK_STEP_MILLIS, DoubleTapSide.Left)
+        x >= width - edge -> DoubleTapAction.Seek(SEEK_STEP_MILLIS, DoubleTapSide.Right)
+        else -> DoubleTapAction.TogglePlayPause
+    }
 }
 
 /** 相对当前位置跳转的结果：目标位置与实际位移（已夹取到 0..时长）。 */

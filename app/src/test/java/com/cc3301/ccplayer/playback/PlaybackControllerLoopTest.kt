@@ -23,7 +23,6 @@ class PlaybackControllerLoopTest {
         engine,
         progress,
         CoroutineScope(dispatcher),
-        frameProbeDispatcher = dispatcher,
         nowMillis = { dispatcher.scheduler.currentTime },
     )
 

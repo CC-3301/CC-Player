@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.playback
 
-import android.graphics.Bitmap
 import com.cc3301.ccplayer.diagnostics.Diagnostics
 import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
 import com.cc3301.ccplayer.library.MediaFile
@@ -10,7 +9,6 @@ import com.cc3301.ccplayer.ui.showPlayerBlackLayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -95,10 +93,8 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a manual switch keeps the surface frame without grabbing`() = runTest {
+    fun `a manual switch keeps the surface frame`() = runTest {
         val controller = playingController()
-        // 抓帧还配着结果：切集不该再去抓。
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
 
         controller.next()
 
@@ -107,7 +103,6 @@ class PlaybackControllerSwitchTest {
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
         // 先停下原视频，再直接加载目标：屏幕上停住的旧帧就是等待画面。
         assertEquals(listOf("pause", "start"), engine.actions.takeLast(2))
-        assertFalse(engine.actions.contains("grab"))
         assertEquals(1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(0, engine.resumeCalls)
@@ -119,32 +114,19 @@ class PlaybackControllerSwitchTest {
 
     @Test
     fun `a natural end switch loads the target right away`() = runTest {
-        val probeDispatcher = StandardTestDispatcher(testScheduler)
-        val controller = PlaybackController(
-            engine,
-            progress,
-            CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = probeDispatcher,
-            nowMillis = { testScheduler.currentTime },
-        )
+        val controller = controller()
         open(controller, "ep1.mkv", "ep2.mkv")
         engine.reportMediaLoaded()
-        engine.frameToGrab = PlaybackEngine.Frame(testBitmap())
 
         engine.reportPlaybackEnded()
 
-        // 片尾没有可抓的帧：不排抓帧，目标立刻开始加载，屏幕上停住的末帧继续显示。
-        assertFalse(engine.actions.contains("grab"))
+        // 目标立刻开始加载，屏幕上停住的末帧继续显示。
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), engine.startedUrls)
         assertEquals(listOf("pause", "start"), engine.actions.takeLast(2))
         assertTrue(controller.switching.value)
         // 旧画面仍在屏上：沿用末帧，不铺黑底。
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
-
-        // 抓帧调度器处理完也不再补抓。
-        runCurrent()
-        assertFalse(engine.actions.contains("grab"))
     }
 
     @Test
@@ -354,7 +336,7 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep3.mkv", engine.startedUrls.last())
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
-        // 重定目标不重新抓帧，屏幕上停住的旧帧继续沿用。
+        // 重定目标不清屏，屏幕上停住的旧帧继续沿用。
         assertTrue(showsPicture(controller))
 
         // 被跳过的第 2 集迟到的就绪不能结束切换。
@@ -416,7 +398,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(pauseCallsBefore + 1, engine.pauseCalls)
         assertEquals(true, engine.startedPaused.last())
         assertEquals(0, engine.resumeCalls)
-        // 自然播完不抓帧：屏幕上停住的末帧继续显示，不铺黑底。
+        // 自然播完不清屏：屏幕上停住的末帧继续显示，不铺黑底。
         assertTrue(showsPicture(controller))
         assertFalse(blackLayer(controller))
     }
@@ -2248,13 +2230,12 @@ class PlaybackControllerSwitchTest {
         ) { it.applyTo(controller) }
     }
 
-    /** 控制层用即时调度，对齐生产的主线程 immediate；抓帧用同一虚拟时钟。 */
+    /** 控制层用即时调度，对齐生产的主线程 immediate。 */
     private fun TestScope.controller(): PlaybackController =
         PlaybackController(
             engine,
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             nowMillis = { testScheduler.currentTime },
         )
 
@@ -2264,7 +2245,6 @@ class PlaybackControllerSwitchTest {
             engine,
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-            frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
         )
@@ -2307,15 +2287,4 @@ class PlaybackControllerSwitchTest {
         controller.openPlaylist(files, files.first { it.name == current })
     }
 
-    /**
-     * 测试只需要一个非空帧身份；android.jar 的 Bitmap 构造器在单测里是桩，
-     * 用 Unsafe 绕过构造器分配实例。
-     */
-    private fun testBitmap(): Bitmap {
-        val unsafeClass = Class.forName("sun.misc.Unsafe")
-        val field = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }
-        val unsafe = field.get(null)
-        val allocate = unsafeClass.getMethod("allocateInstance", Class::class.java)
-        return allocate.invoke(unsafe, Bitmap::class.java) as Bitmap
-    }
 }

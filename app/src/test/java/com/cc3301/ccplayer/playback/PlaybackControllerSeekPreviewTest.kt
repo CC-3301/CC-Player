@@ -1143,7 +1143,6 @@ class PlaybackControllerSeekPreviewTest {
         engine,
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
-        frameProbeDispatcher = UnconfinedTestDispatcher(testScheduler),
         nowMillis = { testScheduler.currentTime },
     )
 

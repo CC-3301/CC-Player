@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.playback
 
-import android.graphics.Bitmap
 import android.view.Surface
 
 /**
@@ -17,14 +16,6 @@ interface PlaybackEngine {
      * 返回本次加载的代际序号；后续加载回调带上同一序号，控制层据此丢弃迟到的旧事件。
      */
     fun start(url: String, paused: Boolean = false, startPositionMillis: Long = 0): Int
-
-    /**
-     * 取当前画面的一帧。非 null 表示确实有帧可显示；位图本身可为 null 仅用于测试替身。
-     */
-    fun grabFrame(): Frame?
-
-    /** 引擎抓到的一帧画面；返回 null 表示无帧，位图可为 null 仅供测试替身。 */
-    class Frame(val bitmap: Bitmap?)
 
     fun pause()
 
