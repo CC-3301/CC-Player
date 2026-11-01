@@ -88,7 +88,7 @@ class PlaybackControllerVideoSizeTest {
     }
 
     @Test
-    fun `the new media reports its own aspect ratio`() {
+    fun `the new media ratio waits until the switch finishes`() {
         open("ep1.mkv", "ep2.mkv")
         engine.reportVideoSizeChanged(1920, 1080)
         engine.reportMediaLoaded()
@@ -96,6 +96,12 @@ class PlaybackControllerVideoSizeTest {
         controller.next()
         engine.reportVideoSizeChanged(1080, 1920)
 
+        // 切集沿用屏幕上的旧帧：新文件的比例先不采纳，屏上旧画面才不会被拉伸。
+        assertEquals(1920.0 / 1080.0, controller.videoAspectRatio.value!!, TOLERANCE)
+
+        engine.reportMediaLoaded()
+
+        // 切集结束：暂存的新比例一次生效。
         assertEquals(0.5625, controller.videoAspectRatio.value!!, TOLERANCE)
     }
 

@@ -481,7 +481,7 @@ fun PlayerScreen(
                     height = with(density) { viewport.height.toDp() },
                 ),
         )
-        // 黑底画在视频视图之后：首次缓冲、失败回退，或片尾恢复就绪后保持黑底。
+        // 黑底画在视频视图之后：首次缓冲、切集且不沿用屏幕上停住的旧帧，或片尾恢复就绪后保持黑底。
         if (
             showPlayerBlackLayer(
                 holdBlack = holdBlack,

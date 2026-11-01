@@ -491,21 +491,22 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a manual switch at the end restores black paused`() = runTest {
+    fun `a manual switch at the end keeps the old frame while the origin is restored`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
 
         controller.next()
         engine.reportPlaybackFailed()
 
-        // 手动切集也按位置兜底：失败回退不再沿用旧帧，恢复原片期间按黑底等待。
+        // 手动切集的失败回退沿用屏幕上停住的旧帧，不落到片尾黑底那条规则里。
         assertEquals(PlaybackState.Paused, controller.state.value)
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertTrue(blackLayer(controller))
+        assertTrue(controller.restoring.value)
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         assertFalse(controller.switching.value)
-        assertTrue(controller.holdBlack.value)
+        assertFalse(controller.holdBlack.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
     }
 
@@ -741,10 +742,32 @@ class PlaybackControllerSwitchTest {
         engine.hasVideoTrack = false
         engine.reportMediaLoaded()
 
-        // 纯音频没有新视频帧可等，不再沿用旧画面。
+        // 纯音频没有新视频帧可等，不再沿用旧画面，切完保持黑底。
         assertFalse(controller.switching.value)
         assertFalse(controller.switchKeepsSurfaceFrame.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
+        assertTrue(blackLayer(controller))
+    }
+
+    @Test
+    fun `retargeting after a target without video keeps the surface frame again`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        controller.next()
+
+        // 目标没有视频轨，但文件刚加载、还没就绪：这一次切集内不再沿用旧画面。
+        engine.hasVideoTrack = false
+        engine.reportFileLoaded()
+        assertTrue(controller.switching.value)
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
+
+        engine.hasVideoTrack = true
+        controller.next()
+
+        // 重定目标到有视频轨的集：按新的目标恢复沿用屏幕上停住的旧帧。
+        assertEquals(2, controller.currentIndex.value)
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
     }
 
     @Test
@@ -794,6 +817,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(true, engine.startedPaused.last())
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
+        // 起点是恢复期的黑底，屏幕上没有旧帧可沿用：这一段切集继续按黑底等待。
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
 
         engine.reportFileLoaded()
         engine.reportFirstFrameReady()
@@ -817,9 +843,9 @@ class PlaybackControllerSwitchTest {
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(true, engine.startedPaused.last())
         assertEquals(40_000L, engine.startedPositions.last())
-        // 失败回退不再沿用旧帧：恢复原片期间按黑底等待它重新出帧。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertTrue(blackLayer(controller))
+        // 手动切集失败：过渡期继续沿用屏幕上停住的旧帧，不铺黑底。
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         assertTrue(controller.switching.value)
@@ -871,9 +897,9 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.cancelSwitch())
         assertEquals(12_000L, engine.startedPositions.last())
 
-        // 取消后不再沿用旧帧：恢复原片期间按黑底等待它重新出帧。
-        assertFalse(controller.switchKeepsSurfaceFrame.value)
-        assertTrue(blackLayer(controller))
+        // 取消同样沿用屏幕上停住的旧帧，恢复原片期间不铺黑底。
+        assertTrue(controller.switchKeepsSurfaceFrame.value)
+        assertFalse(blackLayer(controller))
 
         engine.reportFileLoaded()
         engine.reportVideoReconfigured()
@@ -955,6 +981,9 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(controller.restoring.value)
         assertEquals(1, failures.size)
+        // 目标文件已经加载过，屏上不再是原片画面：回退按黑底等待原片重新出帧。
+        assertFalse(controller.switchKeepsSurfaceFrame.value)
+        assertTrue(blackLayer(controller))
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(40_000L, engine.startedPositions.last())
     }

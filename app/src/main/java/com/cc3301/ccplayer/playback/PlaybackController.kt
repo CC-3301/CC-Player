@@ -110,14 +110,18 @@ class PlaybackController(
 
     /**
      * 切集期间沿用屏幕上停住的旧帧：不抓帧，也不铺黑底。
-     * 每次切集开始时置真；切集结束、失败回退或目标没有视频轨时清零。
+     * 切集起点屏幕上已有画面时置真；首次加载、恢复期与片尾黑底起点的切集不置真。
+     * 切集结束、片尾自动切集的失败回退、目标没有视频轨或屏幕上已无原片画面时清零。
      */
     private val _switchKeepsSurfaceFrame = MutableStateFlow(false)
     val switchKeepsSurfaceFrame: StateFlow<Boolean> = _switchKeepsSurfaceFrame.asStateFlow()
 
+    /** 本次切集起点屏幕上是否有可沿用的画面：首次加载、恢复期与片尾黑底期间都没有。 */
+    private var switchOriginPictureAvailable = false
+
     /**
-     * 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。
-     * 片尾没有首帧可显示，不能用旧画面占位。
+     * 没有可显示的画面时保持黑底（片尾恢复、目标无视频轨），直到播放/暂停、seek、新加载或 stop。
+     * 这些情况没有首帧可显示，不能用旧画面占位。
      */
     private val _holdBlack = MutableStateFlow(false)
     val holdBlack: StateFlow<Boolean> = _holdBlack.asStateFlow()
@@ -172,6 +176,9 @@ class PlaybackController(
      */
     private val _videoAspectRatio = MutableStateFlow<Double?>(null)
     val videoAspectRatio: StateFlow<Double?> = _videoAspectRatio.asStateFlow()
+
+    /** 切集沿用旧帧期间暂不采纳的新文件比例；切集结束时一次生效。 */
+    private var pendingVideoAspectRatio: Double? = null
 
     /** 起播位置设置，默认播放上次位置。 */
     private val _resumeMode = MutableStateFlow(ResumeMode.LastPosition)
@@ -610,9 +617,9 @@ class PlaybackController(
         switchOriginExternalSubtitles = _externalSubtitles.value
         switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
+        // 切集起点屏幕上没有画面时（首次加载、恢复期、片尾黑底）不走沿用旧帧那条路。
+        switchOriginPictureAvailable = loadPhase == LoadPhase.None && !_holdBlack.value
         _holdBlack.value = false
-        // 所有切集都沿用屏幕上停住的旧帧：不抓帧，也不铺黑底。
-        _switchKeepsSurfaceFrame.value = true
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
         paused = false
@@ -635,6 +642,10 @@ class PlaybackController(
         restartSwitchFrameDeadline()
         _switching.value = true
         _restoring.value = false
+        // 按本次切集的起点重算沿用标记：重定目标到有视频轨的集要恢复沿用旧帧，
+        // 目标没有视频轨时由 [onMediaLoaded] 清掉。
+        _switchKeepsSurfaceFrame.value = switchOriginPictureAvailable
+        pendingVideoAspectRatio = null
         restartFromStartAfterRestore = false
         endSeekPreview(commit = false)
         _subtitleTracks.value = emptyList()
@@ -652,7 +663,7 @@ class PlaybackController(
 
     /**
      * 切集缓冲期间再次选择上一集/下一集：只把目标前移，直接加载最终目标。
-     * 缓冲计时沿用第一次切集。
+     * 缓冲计时沿用第一次切集，沿用旧帧的标记按新目标重算。
      */
     private fun retargetSwitch(index: Int) {
         val media = _playlist.value.getOrNull(index) ?: return
@@ -1464,6 +1475,11 @@ class PlaybackController(
         endLoadWatchdog()
         _switching.value = false
         _switchKeepsSurfaceFrame.value = false
+        // 切集结束：沿用旧帧期间暂不采纳的新文件比例一次生效，视频区换成新画面比例。
+        pendingVideoAspectRatio?.let { _videoAspectRatio.value = it }
+        pendingVideoAspectRatio = null
+        // 目标没有视频轨：没有可显示的画面，切完保持黑底直到用户操作。
+        if (!targetHasVideo) _holdBlack.value = true
         // 状态就绪但新帧还没上屏时保留原片信息，60 秒仍无帧就回退。
         switchFramePending = targetHasVideo && !frameConfirmed
         if (!switchFramePending) {
@@ -1577,7 +1593,7 @@ class PlaybackController(
         switchFailureReported = true
         switchFramePending = false
         _switching.value = true
-        restoreOrigin()
+        restoreOrigin(surfaceFrameLost = true)
         _playbackFailures.tryEmit(Unit)
     }
 
@@ -1591,11 +1607,16 @@ class PlaybackController(
         switchOriginEnded = false
     }
 
-    /** 失败或取消切集：重新打开原视频，停在切集前的位置；黑底等到它重新出帧。 */
-    private fun restoreOrigin() {
+    /**
+     * 失败或取消切集：重新打开原视频，停在切集前的位置。
+     * 手动切集的过渡期继续沿用屏幕上停住的旧帧；片尾自动切集按黑底等待原片重新出帧。
+     * [surfaceFrameLost] 表示屏幕上已经没有原片画面（目标已加载却一直没出帧）。
+     */
+    private fun restoreOrigin(surfaceFrameLost: Boolean = false) {
         val origin = restoreOriginBaseState() ?: return
-        // 切集失败：不再沿用屏幕上的旧画面，按原规则黑底等待或恢复原片画面。
-        _switchKeepsSurfaceFrame.value = false
+        pendingVideoAspectRatio = null
+        _switchKeepsSurfaceFrame.value =
+            switchOriginPictureAvailable && !switchOriginEnded && !surfaceFrameLost
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
@@ -1624,13 +1645,14 @@ class PlaybackController(
         // 片尾恢复没有可续播位置：用户按过播放就从 0 重开，不能在片尾 resume。
         val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
         restartFromStartAfterRestore = false
-        // 片尾恢复且没有用户要求播放时保持黑底；用户已按播放则直接继续。
-        val holdBlack = restoreAtEndOfEpisode && paused
+        // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
+        val holdBlack = switchOriginEnded && paused
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endLoadWatchdog()
         _switching.value = false
         _restoring.value = false
+        _switchKeepsSurfaceFrame.value = false
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
@@ -1972,7 +1994,14 @@ class PlaybackController(
 
     override fun onVideoSizeChanged(width: Int, height: Int) {
         if (!active || width <= 0 || height <= 0) return
-        _videoAspectRatio.value = width.toDouble() / height
+        val ratio = width.toDouble() / height
+        // 切集沿用屏幕上的旧帧期间不采纳新文件的比例，否则屏上旧画面会被拉伸；
+        // 暂存到切集结束再一次生效。
+        if (loadPhase == LoadPhase.Switching && _switchKeepsSurfaceFrame.value) {
+            pendingVideoAspectRatio = ratio
+            return
+        }
+        _videoAspectRatio.value = ratio
     }
 
     /** 更新播放状态并记录迁移；相同状态不重复写日志。 */
