@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
 
@@ -357,8 +356,6 @@ class PlaybackController(
     /** 每次开始加载、恢复或清空都递增；迟到的续播查询不能作用到新一轮加载。 */
     private var loadGeneration = 0
 
-    /** 首次打开、切集与恢复原片共用同一条累计运行时长；挂在它上面的是加载看护。 */
-
     init {
         engine.setListener(if (marshalCallbacks) MarshallingListener(this, scope) else this)
     }
@@ -401,8 +398,9 @@ class PlaybackController(
     }
 
     /**
-     * 切集预检：在 IO 线程试打开目标读取句柄并读 1 个字节，上限 [SWITCH_PRECHECK_TIMEOUT_MILLIS]。
-     * 打不开就不发起切集——当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
+     * 切集预检：试打开目标读取句柄并读 1 个字节，打不开就不发起切集。
+     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]），这里只按结果收尾：
+     * 当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
      */
     private fun startSwitchWhenTargetReadable(
         index: Int,
@@ -418,11 +416,8 @@ class PlaybackController(
             try {
                 val startedAtMillis = nowMillis()
                 var failure: Throwable? = null
-                var timedOut = false
                 val readable = try {
-                    val result = withTimeoutOrNull(SWITCH_PRECHECK_TIMEOUT_MILLIS) { probeTarget(media) }
-                    if (result == null) timedOut = true
-                    result == true
+                    probeTarget(media)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (thrown: Throwable) {
@@ -432,13 +427,9 @@ class PlaybackController(
                 if (token != precheckToken || !active) return@launch
                 if (!readable) {
                     val reason = failure?.let { "${it.javaClass.name}: ${it.message ?: "无消息"}" }
-                        ?: if (timedOut) {
-                            "超时（${SWITCH_PRECHECK_TIMEOUT_MILLIS / 1_000} 秒）"
-                        } else {
-                            "读取结果为不可读"
-                        }
+                        ?: "读取结果为不可读"
                     diagnostics.log {
-                        "加载预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | 异常: $reason"
+                        "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | 异常: $reason"
                     }
                     _playbackFailures.tryEmit(Unit)
                     return@launch
@@ -589,7 +580,6 @@ class PlaybackController(
         paused = true
         // 退后台时手势不再有收尾；落定预览并恢复声音，避免静音留到后台。
         endSeekPreview(commit = true)
-        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
@@ -799,9 +789,8 @@ class PlaybackController(
     fun pause() {
         if (!active) return
         clearRestoreHoldOnUserAction()
-        // 暂停不挂起加载看护；只挂起等新帧窗口，暂停期间本来就没有新帧可等。
+        // 暂停不挂起加载看护，也不挂起等新帧窗口。
         paused = true
-        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
@@ -820,7 +809,6 @@ class PlaybackController(
         if (!active) return
         clearRestoreHoldOnUserAction()
         paused = false
-        updatePendingFrameTimer()
         // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
         if (loadPhase == LoadPhase.Switching) {
             if (switchPlaybackStarted) resumeEngineForSwitch()
@@ -849,7 +837,6 @@ class PlaybackController(
     fun handleAudioOutputLost() {
         if (!active) return
         paused = true
-        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         updateState(PlaybackState.Paused)
@@ -1404,7 +1391,6 @@ class PlaybackController(
                     return
                 }
                 this.paused = paused
-                updatePendingFrameTimer()
                 updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
             }
         }
@@ -1505,7 +1491,6 @@ class PlaybackController(
         _sleepTimerOption.value = null
         if (!active) return
         paused = true
-        updatePendingFrameTimer()
         engine.pause()
         updateState(PlaybackState.Paused)
     }
@@ -1609,8 +1594,8 @@ class PlaybackController(
 
     /**
      * 开始一次加载的计时：累计运行时长从零起算。
-     * [newSwitch] 为真表示新的一次加载（首次打开或新切集）：事件时间线与重试预算一起重置；
-     * 为假表示目标前移：只重置计时，重试预算保留——一次加载只重试一次。
+     * [newSwitch] 为真表示新的一次加载（首次打开或新切集）：事件时间线一并重置。
+     * 目标前移时为假：保留事件时间线，但计时与重试预算都以最近一次目标重新起算。
      */
     private fun beginLoadGuard(newSwitch: Boolean) {
         // 上一轮的看护计时（例如恢复原片那条）不能留到这次加载里：先撤掉再重新排。
@@ -1624,10 +1609,11 @@ class PlaybackController(
             loadFirstFrameAtMillis = null
             loadPositionAdvancedAtMillis = null
             loadOutputLiveAtMillis = null
-            guardRetried = false
-            loadRetriedAtMillis = null
             guardSuspensions = 0
         }
+        // 目标前移同样重新给一次重试：计时与重试预算都以最近一次目标重新起算。
+        guardRetried = false
+        loadRetriedAtMillis = null
         guardElapsed.reset()
         if (loadTimingAllowed()) guardElapsed.start()
         armLoadGuard()
@@ -1797,14 +1783,11 @@ class PlaybackController(
     }
 
     /**
-     * 等新帧窗口的计时条件：前台、有可渲染 Surface，且没暂停。
-     * 暂停期间没有新帧可等，窗口一并挂起，恢复播放后再接着走。
+     * 等新帧窗口的唯一挂起/恢复点：只有退后台与 Surface 分离会让它挂起，
+     * 与加载看护同一条判据；暂停不挂起，否则暂停态下等不到帧会一直停在旧画面或黑底。
      */
-    private fun pendingFrameTimingAllowed(): Boolean = loadTimingAllowed() && !paused
-
-    /** 等新帧窗口的唯一挂起/恢复点：暂停、退后台与 Surface 分离都从这里收口。 */
     private fun updatePendingFrameTimer() {
-        if (pendingFrameTimingAllowed()) {
+        if (loadTimingAllowed()) {
             armSwitchFrameWatchdog()
             return
         }
@@ -1828,7 +1811,7 @@ class PlaybackController(
         if (pendingFrameJob != null) return
         if (!active || !switchFramePending) return
         if (loadGuardPhase()) return
-        if (!pendingFrameTimingAllowed()) return
+        if (!loadTimingAllowed()) return
         pendingFrameElapsed.start()
         val waitMillis = NO_FRAME_WINDOW_MILLIS - pendingFrameElapsed.elapsedMillis()
         if (waitMillis <= 0L) {

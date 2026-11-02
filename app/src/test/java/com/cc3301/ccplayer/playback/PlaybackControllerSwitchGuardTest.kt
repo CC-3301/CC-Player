@@ -311,7 +311,7 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `retargeting after a retry keeps the retry budget`() = runTest {
+    fun `retargeting after a retry gives the new target a fresh retry`() = runTest {
         var discards = 0
         val controller = controller(
             discard = {
@@ -328,24 +328,31 @@ class PlaybackControllerSwitchGuardTest {
         runCurrent()
         assertEquals(1, discards)
 
-        // 重试后再前移目标：计时重新起算，但重试预算已经用完。
+        // 重试后再前移目标：计时与重试预算都以新目标重新起算，新目标也获得一次重试。
         advanceTimeBy(1_000)
         controller.next()
         runCurrent()
         assertEquals(2, controller.currentIndex.value)
 
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
-        assertEquals(1, discards)
+        assertEquals(2, discards)
+        assertTrue(failures.isEmpty())
+
+        // 新目标到 10 秒才判失败，重试上限仍是一次。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        runCurrent()
+        assertEquals(2, discards)
         assertEquals(1, failures.size)
     }
 
     @Test
-    fun `an unreadable precheck times out without switching`() = runTest {
+    fun `a precheck that runs out its budget does not switch`() = runTest {
         val controller = controller(
             probe = {
-                delay(60_000)
-                true
+                // 预检接缝在预算到点时返回不可读（预算由接缝自己保证）。
+                delay(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
+                false
             },
         )
         open(controller, "ep1.mkv", "ep2.mkv")
@@ -358,6 +365,7 @@ class PlaybackControllerSwitchGuardTest {
         advanceTimeBy(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
+        assertFalse(controller.switching.value)
 
         // 预算到点按不可读处理：不发起切集，当前播放继续。
         advanceTimeBy(1)

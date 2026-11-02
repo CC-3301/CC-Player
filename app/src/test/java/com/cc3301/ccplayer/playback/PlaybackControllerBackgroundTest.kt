@@ -85,8 +85,6 @@ class PlaybackControllerBackgroundTest {
         controller.pause()
         engine.reportVideoReconfigured()
         assertFalse(controller.switching.value)
-        // 暂停期间没有新帧可等：恢复播放后窗口才从零开始走。
-        controller.resume()
         val startedLoads = engine.startedUrls.size
 
         advanceTimeBy(30_000)

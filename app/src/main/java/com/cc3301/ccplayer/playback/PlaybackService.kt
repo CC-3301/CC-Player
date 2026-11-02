@@ -28,6 +28,7 @@ import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import java.io.Closeable
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -145,8 +146,8 @@ class PlaybackService : Service() {
 
     /**
      * 切集预检：打开目标读取句柄读 1 个字节后立即关闭。
-     * 预算从预检开始算（含打开）：打开是阻塞 I/O，不响应取消，到点就放弃结果返回不可读，
-     * 让点击立刻有反馈；迟到的句柄由 [probeOnce] 自己的 finally 关掉。
+     * 3 秒预算是这条接缝唯一的等待上限，且从预检开始算（含打开）：打开是阻塞 I/O、不响应取消，
+     * 到点就放弃结果返回不可读，让点击立刻有反馈；迟到的句柄由 [probeOnce] 自己的 finally 关掉。
      * 本地走 ContentResolver，网络走与封面相同的随机读接缝；都不占解码许可。
      */
     private suspend fun probeTargetReadable(media: MediaFile): Boolean {
@@ -182,17 +183,23 @@ class PlaybackService : Service() {
 
     /**
      * 读 1 个字节后关闭。阻塞读不响应协程取消，到 [PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS]
-     * 主动关闭句柄让它退出，预检超时时点击仍有反馈。
+     * 主动关闭句柄把读打断；这是打断阻塞读的机制，不是第二份等待预算。
+     * 关闭引起的异常按不可读收尾，避免预检失败行的异常字段随机漂移。
      */
     private suspend fun <T : Closeable> probeFirstByte(target: T, read: (T) -> Boolean): Boolean =
         withContext(Dispatchers.IO) {
             // 阻塞读不响应协程取消：计时器不随预检协程一起被取消，到点主动关闭句柄把读打断。
+            val closedByTimeout = AtomicBoolean(false)
             val closeOnTimeout = scope.launch(Dispatchers.IO) {
                 delay(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
+                closedByTimeout.set(true)
                 runCatching { target.close() }
             }
             try {
                 read(target)
+            } catch (thrown: Throwable) {
+                // 到点关闭句柄会把阻塞读打断，这时按「读不出来」收尾，不把关闭引起的异常当原因。
+                if (closedByTimeout.get()) false else throw thrown
             } finally {
                 closeOnTimeout.cancel()
                 runCatching { target.close() }

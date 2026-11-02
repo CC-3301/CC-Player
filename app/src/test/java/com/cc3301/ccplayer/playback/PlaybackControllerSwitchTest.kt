@@ -1063,8 +1063,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(showsPicture(controller))
 
-        // 状态已就绪但帧没上屏：暂停期间没有新帧可等，恢复播放后窗口才开始走。
-        controller.resume()
+        // 状态已就绪但帧没上屏：等新帧窗口照常走，暂停不挂起它。
         advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
