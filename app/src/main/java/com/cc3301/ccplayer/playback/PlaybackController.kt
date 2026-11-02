@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
 
@@ -399,11 +398,12 @@ class PlaybackController(
     }
 
     /**
-     * 切集预检：试打开目标读取句柄并读 1 个字节，打不开就不发起切集。
-     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]）；
-     * 这里只留「预算 + 余量」的兜底，用于结论因实现缺陷产不出时不让调用方无限等待。
-     * 不可读时当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
-     * 预检线程正忙时跳过预检、直接发起切集，只写一行跳过日志，不提示。
+     * 切集预检：试打开目标读取句柄读 1 个字节；只有明确读不到才不发起切集。
+     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]），这里不再另加兜底。
+     * 3 秒内给不出结论（到点、读取异常、上一路未返回、预检线程已关闭）一律放行、照常发起切集：
+     * 预检是优化不是门禁，不拿一次失败提示换掉一次可能成功的切集；失败兜底交给 10 秒加载看护。
+     * 明确不可读时当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
+     * 放行只写一行跳过日志，不提示。
      */
     private fun startSwitchWhenTargetReadable(
         index: Int,
@@ -419,16 +419,12 @@ class PlaybackController(
             try {
                 val startedAtMillis = nowMillis()
                 val outcome = try {
-                    withTimeoutOrNull(
-                        SWITCH_PRECHECK_TIMEOUT_MILLIS + SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS,
-                    ) {
-                        probeTarget(media)
-                    } ?: PrecheckOutcome.Unreadable
+                    probeTarget(media)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
-                    // 读失败与超时按同一条判据：都只记「读取结果为不可读」，靠耗时区分。
-                    PrecheckOutcome.Unreadable
+                    // 接缝自己炸了也是判不出来：放行，不判不可读。
+                    PrecheckOutcome.SkippedError
                 }
                 if (token != precheckToken || !active) return@launch
                 when (outcome) {
@@ -440,7 +436,13 @@ class PlaybackController(
                         _playbackFailures.tryEmit(Unit)
                         return@launch
                     }
-                    // 跳过预检：直接放行切集、不提示，只留一行日志说明这一路没预检。
+                    // 放行：直接发起切集、不提示，只留一行日志说明这一路没预检成。
+                    PrecheckOutcome.SkippedTimeout -> diagnostics.log {
+                        "切集预检跳过: ${media.name} | 原因: 到点"
+                    }
+                    PrecheckOutcome.SkippedError -> diagnostics.log {
+                        "切集预检跳过: ${media.name} | 原因: 异常"
+                    }
                     PrecheckOutcome.SkippedBusy -> diagnostics.log {
                         "切集预检跳过: ${media.name} | 原因: 上一路未返回"
                     }
@@ -2417,11 +2419,8 @@ class PlaybackController(
         /** 加载从最近一次目标开始算的判失败时长；重试不顺延，三个阶段共用。 */
         const val LOAD_FAIL_DELAY_MILLIS = 10_000L
 
-        /** 切集预检的等待上限；超时按不可读处理，不发起切集。 */
+        /** 切集预检的等待上限；到点仍给不出结论就放行，照常发起切集。 */
         const val SWITCH_PRECHECK_TIMEOUT_MILLIS = 3_000L
-
-        /** 预检兜底超时的余量：只在结论产不出时兜底，正常路径由预检自己的 3 秒到点收尾。 */
-        const val SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS = 1_000L
 
         private const val NO_MEDIA = -1
 

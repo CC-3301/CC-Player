@@ -1,10 +1,14 @@
 package com.cc3301.ccplayer.playback
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import java.io.Closeable
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -100,7 +104,8 @@ class PlaybackControllerSwitchGuardTest {
 
     @Test
     fun `an unreadable target is not switched`() = runTest {
-        val controller = controller(probe = { PrecheckOutcome.Unreadable })
+        val diagnostics = RecordingDiagnostics()
+        val controller = controller(probe = { PrecheckOutcome.Unreadable }, diagnostics = diagnostics)
         open(controller, "ep1.mkv", "ep2.mkv")
         engine.reportMediaLoaded()
         val failures = collectFailures(controller)
@@ -116,41 +121,47 @@ class PlaybackControllerSwitchGuardTest {
         assertEquals(starts, engine.startedUrls.size)
         assertEquals(0, engine.pauseCalls)
         assertEquals(PlaybackState.Playing, controller.state.value)
+        val failureLines = diagnostics.messages.filter { it.startsWith("切集预检失败") }
+        assertEquals(1, failureLines.size)
+        assertTrue(failureLines.single().startsWith("切集预检失败: ep2.mkv | 耗时: "))
+        assertTrue(failureLines.single().endsWith("| 异常: 读取结果为不可读"))
     }
 
     @Test
-    fun `a precheck that never returns is closed by the fallback timeout`() = runTest {
-        // 预检桩永不返回：只有外层「预算 + 余量」的兜底能让调用方收尾。
-        val never = CompletableDeferred<PrecheckOutcome>()
-        val controller = controller(probe = { never.await() })
-        open(controller, "ep1.mkv", "ep2.mkv")
-        engine.reportMediaLoaded()
-        val failures = collectFailures(controller)
-        val starts = engine.startedUrls.size
+    fun `a precheck without a conclusion still switches and logs the reason`() = runTest {
+        // 给不出结论的四种情形：一律放行、照常发起切集、不提示，只写一行跳过日志。
+        val cases = listOf(
+            PrecheckOutcome.SkippedTimeout to "到点",
+            PrecheckOutcome.SkippedError to "异常",
+            PrecheckOutcome.SkippedBusy to "上一路未返回",
+            PrecheckOutcome.SkippedClosed to "预检线程已关闭",
+        )
+        for ((outcome, reason) in cases) {
+            val engine = FakePlaybackEngine()
+            val diagnostics = RecordingDiagnostics()
+            val controller = PlaybackController(
+                engine,
+                FakePlaybackProgressRepository(),
+                CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
+                nowMillis = { testScheduler.currentTime },
+                diagnostics = diagnostics,
+                probeTarget = { outcome },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv")
+            engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
 
-        controller.next()
-        runCurrent()
+            controller.next()
+            runCurrent()
 
-        // 3 秒内层预算归预检自己；兜底没到之前不判失败、不发切换。
-        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
-        runCurrent()
-        assertTrue(failures.isEmpty())
-        assertFalse(controller.switching.value)
-
-        // 4 秒兜底按不可读收尾：不发起切换、列表位置不动、只提示一次。
-        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS)
-        runCurrent()
-        assertEquals(1, failures.size)
-        assertFalse(controller.switching.value)
-        assertEquals(0, controller.currentIndex.value)
-        assertEquals(starts, engine.startedUrls.size)
-        assertEquals(PlaybackState.Playing, controller.state.value)
-
-        // 再等一轮也不会补发切换或重复提示。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
-        runCurrent()
-        assertEquals(1, failures.size)
-        assertEquals(starts, engine.startedUrls.size)
+            assertEquals("$reason: 切集仍要发起", "root/ep2.mkv", engine.startedUrls.last())
+            assertEquals("$reason: 播放列表位置要前移", 1, controller.currentIndex.value)
+            assertTrue("$reason: 不提示失败", failures.isEmpty())
+            assertEquals(
+                listOf("切集预检跳过: ep2.mkv | 原因: $reason"),
+                diagnostics.messages.filter { it.startsWith("切集预检") },
+            )
+        }
     }
 
     @Test
@@ -418,6 +429,35 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
+    fun `a readable result that arrives after the target changed loads nothing`() = runTest {
+        val firstGate = CompletableDeferred<Unit>()
+        val controller = controller(
+            probe = { media ->
+                if (media.name == "ep2.mkv") {
+                    firstGate.await()
+                }
+                PrecheckOutcome.Readable
+            },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportMediaLoaded()
+
+        // 第一路还卡在预检里，第二下把目标换成第三集并立刻切过去。
+        controller.next()
+        runCurrent()
+        controller.next()
+        runCurrent()
+        assertEquals("root/ep3.mkv", engine.startedUrls.last())
+
+        // 旧目标晚到的「可读」结果不得发起加载：只认当前这一路。
+        firstGate.complete(Unit)
+        runCurrent()
+        assertEquals(0, engine.startedUrls.count { it == "root/ep2.mkv" })
+        assertEquals(1, engine.startedUrls.count { it == "root/ep3.mkv" })
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
     fun `an initial load uses the same guard as a switch`() = runTest {
         var discards = 0
         val controller = controller(
@@ -479,13 +519,21 @@ class PlaybackControllerSwitchGuardTest {
     @Test
     fun `a stuck precheck read does not block the next switch`() = runTest {
         // 预检接缝用真的模块：第一路的读取卡在 open 里不返回。
-        val executor = Executors.newSingleThreadExecutor { Thread(it, "precheck-test").apply { isDaemon = true } }
+        val executor = ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue(),
+        ) { runnable -> Thread(runnable, "precheck-test").apply { isDaemon = true } }
         val probe = PrecheckProbe(executor, timeoutMillis = STUCK_PRECHECK_BUDGET_MILLIS)
         val readStarted = CountDownLatch(1)
         val readGate = CountDownLatch(1)
         val handle = CloseCountingHandle()
+        val diagnostics = RecordingDiagnostics()
         try {
             val controller = controller(
+                diagnostics = diagnostics,
                 probe = { media ->
                     if (media.name == "ep2.mkv") {
                         // 第一路：预检阻塞等结论，换到 IO 上等，不占控制层线程。
@@ -513,13 +561,17 @@ class PlaybackControllerSwitchGuardTest {
             runCurrent()
             assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
 
-            // 第二下：读取线程正忙，跳过预检直接发起切集，不等 4 秒兜底、不报失败。
+            // 第二下：读取线程正忙，跳过预检直接发起切集，不等预算、不报失败。
             // 虚拟时间不推进：判定只靠「上一路没返回」，与预算无关。
             controller.next()
             runCurrent()
             assertEquals("root/ep3.mkv", engine.startedUrls.last())
             assertTrue(controller.switching.value)
             assertTrue(failures.isEmpty())
+            assertEquals(
+                listOf("切集预检跳过: ep3.mkv | 原因: 上一路未返回"),
+                diagnostics.messages.filter { it.startsWith("切集预检") },
+            )
 
             // 上一路最终返回：句柄照样关闭，结果丢弃。
             readGate.countDown()
@@ -559,14 +611,27 @@ class PlaybackControllerSwitchGuardTest {
     private fun TestScope.controller(
         probe: suspend (MediaFile) -> PrecheckOutcome = alwaysReadableProbe,
         discard: suspend () -> Boolean = { true },
+        diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     ): PlaybackController = PlaybackController(
         engine,
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
+        diagnostics = diagnostics,
         probeTarget = probe,
         discardByteSources = discard,
     )
+
+    /** 记下诊断日志的出口：放行与拦截都按日志内容断言。 */
+    private class RecordingDiagnostics : DiagnosticsLog {
+        override val enabled: Boolean = true
+
+        val messages = CopyOnWriteArrayList<String>()
+
+        override fun log(message: String) {
+            messages += message
+        }
+    }
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
     private fun TestScope.playingController(

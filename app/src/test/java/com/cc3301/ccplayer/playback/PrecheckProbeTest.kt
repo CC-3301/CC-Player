@@ -3,8 +3,8 @@ package com.cc3301.ccplayer.playback
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -20,9 +20,13 @@ import org.junit.Test
  */
 class PrecheckProbeTest {
 
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "precheck-test").apply { isDaemon = true }
-    }
+    private val executor = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+    ) { runnable -> Thread(runnable, "precheck-test").apply { isDaemon = true } }
 
     @After
     fun tearDown() {
@@ -46,7 +50,7 @@ class PrecheckProbeTest {
     }
 
     @Test
-    fun `a read that outlives the budget is unreadable and its handle gets closed`() {
+    fun `a read that outlives the budget is let through and its handle gets closed`() {
         val probe = probe(BUDGET_MILLIS)
         val readStarted = CountDownLatch(1)
         val readGate = CountDownLatch(1)
@@ -54,18 +58,22 @@ class PrecheckProbeTest {
         try {
             val outcome = probe.probe({ handle }) {
                 readStarted.countDown()
-                // 不可取消的阻塞：到点只能判不可读，读本身不会被谁打断。
+                // 不可取消的阻塞：到点只能放行，读本身不会被谁打断。
                 readGate.await()
                 true
             }
 
-            assertEquals(PrecheckOutcome.Unreadable, outcome)
+            assertEquals(PrecheckOutcome.SkippedTimeout, outcome)
             assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
+            // 到点就把句柄取走交给关闭线程，不等读取返回。
+            assertTrue(handle.awaitClosed())
+            assertEquals(1, handle.closeCount)
         } finally {
             readGate.countDown()
         }
 
-        assertTrue(handle.awaitClosed())
+        // 读取晚到也不补关第二次。
+        awaitIdle()
         assertEquals(1, handle.closeCount)
     }
 
@@ -84,19 +92,20 @@ class PrecheckProbeTest {
                 true
             }
 
-            assertEquals(PrecheckOutcome.Unreadable, outcome)
+            assertEquals(PrecheckOutcome.SkippedTimeout, outcome)
         } finally {
             openGate.countDown()
         }
 
         // 晚到的句柄一落地就关，且不再继续读。
         assertTrue(handle.awaitClosed())
+        awaitIdle()
         assertEquals(1, handle.closeCount)
         assertEquals(0, reads.get())
     }
 
     @Test
-    fun `a stuck read makes the next probe skip without waiting`() {
+    fun `a stuck read lets the next probe through and the previous one still lands`() {
         val probe = probe(STUCK_BUDGET_MILLIS)
         val readStarted = CountDownLatch(1)
         val readGate = CountDownLatch(1)
@@ -124,62 +133,44 @@ class PrecheckProbeTest {
         assertEquals(PrecheckOutcome.Readable, first.get())
         assertTrue(handle.awaitClosed())
         assertEquals(1, handle.closeCount)
+
+        // 上一路收尾之后，同一模块还能再预检。
+        val next = FakeHandle()
+        val again = probe.probe({ next }) { true }
+        assertEquals(PrecheckOutcome.Readable, again)
+        assertTrue(next.awaitClosed())
+        assertEquals(1, next.closeCount)
     }
 
     @Test
-    fun `a successful read stays readable while its close outlasts the budget`() {
+    fun `a blocked close changes neither the conclusion nor the next probe`() {
         val probe = probe(BUDGET_MILLIS)
         val closeStarted = CountDownLatch(1)
         val closeGate = CountDownLatch(1)
-        val handle = FakeHandle {
+        val stuck = FakeHandle {
             closeStarted.countDown()
             closeGate.await()
         }
         try {
-            val outcome = probe.probe({ handle }) { true }
+            val outcome = probe.probe({ stuck }) { true }
 
-            // 读到就先交付结论：关闭还卡在预算窗里也不改判、不延迟。
+            // 读到就先交付结论：关闭还卡着也不改判、不延迟。
             assertEquals(PrecheckOutcome.Readable, outcome)
             assertTrue("结论之后才开始关句柄", closeStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
-            assertFalse(handle.closed)
+            assertFalse(stuck.closed)
+
+            // 关闭卡着不影响下一路：照常打开、照常读、照常给结论。
+            val next = FakeHandle()
+            val again = probe.probe({ next }) { true }
+            assertEquals(PrecheckOutcome.Readable, again)
+            assertTrue(next.awaitClosed())
+            assertEquals(1, next.closeCount)
         } finally {
             closeGate.countDown()
         }
 
-        assertTrue(handle.awaitClosed())
-        assertEquals(1, handle.closeCount)
-    }
-
-    @Test
-    fun `a blocked close does not delay the unreadable conclusion`() {
-        val probe = probe(BUDGET_MILLIS)
-        val readGate = CountDownLatch(1)
-        val closeStarted = CountDownLatch(1)
-        val closeGate = CountDownLatch(1)
-        val handle = FakeHandle {
-            closeStarted.countDown()
-            closeGate.await()
-        }
-        try {
-            val outcome = probe.probe({ handle }) {
-                readGate.await()
-                true
-            }
-
-            // 到点立刻判不可读，既不等读取也不等关闭。
-            assertEquals(PrecheckOutcome.Unreadable, outcome)
-
-            // 读取返回后句柄才交给专用线程关；关闭卡住也只影响句柄，不影响结论。
-            readGate.countDown()
-            assertTrue(closeStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
-            assertFalse(handle.closed)
-        } finally {
-            closeGate.countDown()
-            readGate.countDown()
-        }
-
-        assertTrue(handle.awaitClosed())
-        assertEquals(1, handle.closeCount)
+        assertTrue(stuck.awaitClosed())
+        assertEquals(1, stuck.closeCount)
     }
 
     @Test
@@ -196,7 +187,7 @@ class PrecheckProbeTest {
     }
 
     @Test
-    fun `an open that throws is unreadable and nothing is read`() {
+    fun `an open that throws is let through and nothing is read`() {
         val reads = AtomicInteger()
 
         val outcome = probe(NO_BUDGET_MILLIS).probe<FakeHandle>({ throw IOException("打不开") }) {
@@ -204,15 +195,15 @@ class PrecheckProbeTest {
             true
         }
 
-        assertEquals(PrecheckOutcome.Unreadable, outcome)
+        assertEquals(PrecheckOutcome.SkippedError, outcome)
         assertEquals(0, reads.get())
     }
 
     @Test
-    fun `a read that throws is unreadable and its handle gets closed`() {
+    fun `a read that reports unreadable is unreadable and its handle gets closed`() {
         val handle = FakeHandle()
 
-        val outcome = probe(NO_BUDGET_MILLIS).probe({ handle }) { throw IOException("读不出来") }
+        val outcome = probe(NO_BUDGET_MILLIS).probe({ handle }) { false }
 
         assertEquals(PrecheckOutcome.Unreadable, outcome)
         assertTrue(handle.awaitClosed())
@@ -220,8 +211,19 @@ class PrecheckProbeTest {
     }
 
     @Test
-    fun `a shut down executor skips the precheck`() {
-        val shutDown = Executors.newSingleThreadExecutor()
+    fun `a read that throws is let through and its handle gets closed`() {
+        val handle = FakeHandle()
+
+        val outcome = probe(NO_BUDGET_MILLIS).probe({ handle }) { throw IOException("读不出来") }
+
+        assertEquals(PrecheckOutcome.SkippedError, outcome)
+        assertTrue(handle.awaitClosed())
+        assertEquals(1, handle.closeCount)
+    }
+
+    @Test
+    fun `a shut down executor is let through`() {
+        val shutDown = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue())
         shutDown.shutdownNow()
         val opened = AtomicInteger()
 
@@ -234,7 +236,50 @@ class PrecheckProbeTest {
         assertEquals(0, opened.get())
     }
 
+    @Test
+    fun `a caller that stops waiting leaves the handle to the read thread`() {
+        val probe = probe(BUDGET_MILLIS)
+        val readStarted = CountDownLatch(1)
+        val readGate = CountDownLatch(1)
+        val handle = FakeHandle()
+        val outcome = AtomicReference<PrecheckOutcome?>(null)
+        val caller = Thread {
+            outcome.set(probe.probe({ handle }) {
+                readStarted.countDown()
+                readGate.await()
+                true
+            })
+        }.apply { isDaemon = true }
+        caller.start()
+        try {
+            assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
+            caller.interrupt()
+            caller.join(WATCHDOG_MILLIS)
+
+            // 调用方不再等：按放行收尾，句柄在作废时就交给关闭线程。
+            assertFalse(caller.isAlive)
+            assertEquals(PrecheckOutcome.SkippedError, outcome.get())
+            assertTrue(handle.awaitClosed())
+            assertEquals(1, handle.closeCount)
+        } finally {
+            readGate.countDown()
+        }
+
+        // 读取晚到也不补关第二次。
+        awaitIdle()
+        assertEquals(1, handle.closeCount)
+    }
+
     private fun probe(timeoutMillis: Long) = PrecheckProbe(executor, timeoutMillis)
+
+    /** 等读取线程收尾：只用于断言收尾之后的状态，不用于判定结论。 */
+    private fun awaitIdle() {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WATCHDOG_MILLIS)
+        while (executor.activeCount > 0 || !executor.queue.isEmpty()) {
+            assertTrue("预检线程没有在预算内收尾", System.nanoTime() < deadline)
+            Thread.sleep(1)
+        }
+    }
 
     private class FakeHandle(private val onClose: () -> Unit = {}) : Closeable {
         private val closeCalls = AtomicInteger()
@@ -251,7 +296,7 @@ class PrecheckProbeTest {
             closed = true
         }
 
-        /** 等句柄被关；关闭在专用线程上，断言不能只看返回值。 */
+        /** 等句柄被关；关闭在独立线程上，断言不能只看返回值。 */
         fun awaitClosed(): Boolean {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WATCHDOG_MILLIS)
             while (!closed) {
