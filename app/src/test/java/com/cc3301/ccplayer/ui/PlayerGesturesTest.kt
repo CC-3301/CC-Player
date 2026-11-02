@@ -301,9 +301,8 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `恢复期间其余控件外观保持正常`() {
+    fun `恢复期间被拦截的控件置灰`() {
         listOf(
-            PlayerAction.PlayPause,
             PlayerAction.Seek,
             PlayerAction.Lock,
             PlayerAction.More,
@@ -313,7 +312,12 @@ class PlayerGesturesTest {
         ).forEach { action ->
             assertEquals(
                 action.name,
-                true,
+                false,
+                actionAllowed(action, switching = true, initialLoading = false, restoring = true),
+            )
+            assertEquals(
+                action.name,
+                false,
                 actionLooksEnabled(
                     action,
                     canGoPrevious = true,
@@ -324,6 +328,17 @@ class PlayerGesturesTest {
                 ),
             )
         }
+        assertEquals(
+            true,
+            actionLooksEnabled(
+                PlayerAction.PlayPause,
+                canGoPrevious = true,
+                canGoNext = true,
+                switching = true,
+                initialLoading = false,
+                restoring = true,
+            ),
+        )
     }
 
     @Test

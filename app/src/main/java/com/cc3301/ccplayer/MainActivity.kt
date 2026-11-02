@@ -103,6 +103,7 @@ import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.awaitsVideoOrientation
 import com.cc3301.ccplayer.ui.mediaFailureText
+import com.cc3301.ccplayer.ui.onPlayPauseClick
 import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.sensorScreenOrientation
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
@@ -486,8 +487,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
-                            onTogglePlayPause = {
-                                playback?.controller?.togglePlayPause()
+                            onPlayPause = {
+                                playback?.controller?.onPlayPauseClick()
                                     ?: diagnostics.log { "播放键未执行: 播放会话已断开" }
                             },
                             onPrevious = {
@@ -531,7 +532,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 sessionOrientation.toggle(currentScreenOrientation())
                             },
                             onClose = { handlePlayerBack() },
-                            onButtonClickDebounced = { line -> diagnostics.log(line) },
                         )
                     }
 
