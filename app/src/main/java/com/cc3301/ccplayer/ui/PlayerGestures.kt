@@ -338,9 +338,8 @@ private fun adjacencyAvailable(
 }
 
 /**
- * 控件外观是否可用：首次加载只保留返回入口，其余按不可用外观显示；
- * 切集期间与点击判据同源，被拦截的操作一并置灰，不出现能看到却点不动的控件；
- * 恢复原片只拦截点击、不改变亮度（ADR-0025）。上一集/下一集在列表边界始终置灰。
+ * 控件外观是否可用：首次加载只保留返回入口；切集与恢复原片期间与点击判据同源，
+ * 被拦截的操作一并置灰，不出现能看到却点不动的控件。上一集/下一集在列表边界始终置灰。
  */
 fun actionLooksEnabled(
     action: PlayerAction,
@@ -352,6 +351,5 @@ fun actionLooksEnabled(
 ): Boolean {
     if (initialLoading) return action == PlayerAction.Back
     val adjacency = adjacencyAvailable(action, canGoPrevious, canGoNext)
-    if (restoring) return adjacency
     return adjacency && actionAllowed(action, switching, initialLoading, restoring)
 }

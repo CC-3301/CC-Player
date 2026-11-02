@@ -48,11 +48,6 @@ class PlayerPanelState {
         onSelect(item)
     }
 
-    /** 切集或首次加载开始时关闭当前面板。 */
-    fun closeWhenBlocked(switching: Boolean, initialLoading: Boolean) {
-        if (switching || initialLoading) close()
-    }
-
     /**
      * 控制层不可用（隐藏或锁定）时关闭当前面板。
      *

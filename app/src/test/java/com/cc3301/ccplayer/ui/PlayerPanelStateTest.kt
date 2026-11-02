@@ -121,26 +121,6 @@ class PlayerPanelStateTest {
     }
 
     @Test
-    fun `切集或首次加载开始时关闭抽屉`() {
-        panels.toggle(PlayerPanel.Playlist)
-        panels.closeWhenBlocked(switching = true, initialLoading = false)
-        assertFalse(panels.playlistOpen)
-
-        panels.toggle(PlayerPanel.Playlist)
-        panels.closeWhenBlocked(switching = false, initialLoading = true)
-        assertFalse(panels.playlistOpen)
-    }
-
-    @Test
-    fun `空闲时保持抽屉打开`() {
-        panels.toggle(PlayerPanel.Playlist)
-
-        panels.closeWhenBlocked(switching = false, initialLoading = false)
-
-        assertTrue(panels.playlistOpen)
-    }
-
-    @Test
     fun `面板可见性真值表`() {
         assertTrue(panelVisible(anyOpen = true, controlsVisible = true, locked = false))
         assertFalse(panelVisible(anyOpen = true, controlsVisible = false, locked = false))
