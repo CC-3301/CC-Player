@@ -93,7 +93,6 @@ import com.cc3301.ccplayer.ui.PendingPlayback
 import com.cc3301.ccplayer.ui.PlaybackEntryOpener
 import com.cc3301.ccplayer.ui.PlaybackEntryState
 import com.cc3301.ccplayer.ui.PlayerLevelControls
-import com.cc3301.ccplayer.ui.PlayerPlayPauseCommand
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
@@ -104,7 +103,7 @@ import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.awaitsVideoOrientation
 import com.cc3301.ccplayer.ui.mediaFailureText
-import com.cc3301.ccplayer.ui.playPauseCommand
+import com.cc3301.ccplayer.ui.onPlayPauseClick
 import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.sensorScreenOrientation
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
@@ -483,18 +482,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
                             onPlayPause = {
-                                val controller = playback?.controller
-                                if (controller == null) {
-                                    diagnostics.log { "播放键未执行: 播放会话已断开" }
-                                } else {
-                                    // 以引擎上报状态解析动作：同一命令重复投递不改变结果。
-                                    when (playPauseCommand(controller.state.value)) {
-                                        PlayerPlayPauseCommand.Pause -> controller.pause()
-                                        PlayerPlayPauseCommand.Resume -> controller.resume()
-                                        // 播完重开与未就绪交给控制层按现有规则收尾并留痕。
-                                        null -> controller.togglePlayPause()
-                                    }
-                                }
+                                playback?.controller?.onPlayPauseClick()
+                                    ?: diagnostics.log { "播放键未执行: 播放会话已断开" }
                             },
                             onPrevious = {
                                 playback?.controller?.previous()

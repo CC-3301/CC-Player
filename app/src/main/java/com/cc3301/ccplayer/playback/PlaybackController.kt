@@ -57,6 +57,12 @@ class PlaybackController(
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
+    /**
+     * 播放意图：暂停为真。切集窗口状态是 Loading，播放键按这份意图解析显式命令。
+     * 与 [state] 分开：状态由加载阶段决定，意图只记用户与切集起点要的播放结果。
+     */
+    val playPauseIntentPaused: Boolean get() = paused
+
     private val _playlist = MutableStateFlow<List<MediaFile>>(emptyList())
     val playlist: StateFlow<List<MediaFile>> = _playlist.asStateFlow()
 

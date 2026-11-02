@@ -192,6 +192,18 @@ private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
 }
 
 /**
+ * 面板打开时的栏内空白区：点击交给关闭层，不吞掉、也不产生播放动作。
+ * 只接未被按钮热区消费的按下，按钮自己的点击照常生效。
+ */
+@Composable
+private fun Modifier.tapToDismiss(onTap: () -> Unit): Modifier {
+    val latestOnTap = rememberUpdatedState(onTap)
+    return pointerInput(Unit) {
+        detectTapGestures { latestOnTap.value() }
+    }
+}
+
+/**
  * 控件按住期间不自动隐藏：按下即通知，抬起或手势取消时通知恢复。
  * 只在 Initial 阶段观察且不消费事件，点击与拖动照常传给子节点。
  */
@@ -372,9 +384,9 @@ fun PlayerScreen(
     )
     val barsShown = bars.shown
     val barsPresent = bars.present
-    // 面板可见性统一由此判定；切集与首开一开始就不可见，不等清理状态的那一帧。
+    // 面板可见性统一由此判定；不可见的面板不能拦截手势，打开期间切集不关闭面板。
     val panelVisible = panelVisible(
-        anyOpen = panels.anyOpen && !switching && !initialLoading,
+        anyOpen = panels.anyOpen,
         controlsVisible = controlsVisible,
         locked = locked,
     )
@@ -383,9 +395,9 @@ fun PlayerScreen(
     val moreVisible = panels.moreOpen
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
+    // 已打开的面板保持打开，内容按不可用外观处理。
     LaunchedEffect(switching, initialLoading) {
         controls.onLoadingPhaseChanged()
-        panels.closeWhenBlocked(switching, initialLoading)
     }
 
     // 自动隐藏计时仍以“有面板打开”为准，与可见性判定分开。
@@ -627,6 +639,8 @@ fun PlayerScreen(
         }
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
+        // 面板打开时栏内空白区让给关闭层；按钮热区在自己的点击里消费，不受影响。
+        val blankTap: (() -> Unit)? = if (panelVisible) ({ panels.dismissOutside() }) else null
         if (moreVisible && panelVisible) {
             // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
             // 先于顶栏/底栏组合：栏区画在上面，面板打开时按钮照常可点。
@@ -662,6 +676,7 @@ fun PlayerScreen(
                         onCancelSleepTimer()
                         panels.close()
                     },
+                    enabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
                     panelWidth = morePanelWidth,
                     panelMaxHeight = morePanelMaxHeight,
                     modifier = Modifier
@@ -714,6 +729,7 @@ fun PlayerScreen(
                     controls.showByUserAction()
                     panels.toggle(PlayerPanel.More)
                 },
+                onBlankTap = blankTap,
                 modifier = Modifier.holdControlsVisible { pressed ->
                     if (pressed) controls.onPressDown() else controls.onPressUp()
                 },
@@ -778,6 +794,7 @@ fun PlayerScreen(
                 },
                 onLock = { lock.tapLockButton() },
                 onSelectSubtitle = onSelectSubtitle,
+                onBlankTap = blankTap,
                 modifier = Modifier.holdControlsVisible { pressed ->
                     if (pressed) controls.onPressDown() else controls.onPressUp()
                 },
@@ -1261,13 +1278,17 @@ private fun PlayerTopBar(
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
+    onBlankTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerTopBarGradient)
-            .blockPlayerGestures()
+            .then(
+                if (onBlankTap == null) Modifier.blockPlayerGestures()
+                else Modifier.tapToDismiss(onBlankTap),
+            )
             .safeDrawingPadding(),
     ) {
         Row(
@@ -1375,6 +1396,7 @@ private fun Controls(
     onToggleSubtitleMenu: () -> Unit,
     onLock: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
+    onBlankTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     // 图标条有意全宽贴边：三键居中与右侧按钮排布需要全部可用宽度；进度条与面板仍保留水平内边距。
@@ -1382,7 +1404,10 @@ private fun Controls(
         modifier = modifier
             .fillMaxWidth()
             .background(PlayerBottomBarGradient)
-            .blockPlayerGestures()
+            .then(
+                if (onBlankTap == null) Modifier.blockPlayerGestures()
+                else Modifier.tapToDismiss(onBlankTap),
+            )
             .safeDrawingPadding()
             .padding(top = 24.dp, bottom = AppSpacing.Md),
         verticalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
@@ -1391,7 +1416,8 @@ private fun Controls(
             SubtitlePanel(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
                 onSelect = onSelectSubtitle,
-                interactive = interactive,
+                interactive = interactive &&
+                    actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
                 modifier = Modifier.padding(horizontal = AppSpacing.Lg),
             )
         }
@@ -1401,7 +1427,10 @@ private fun Controls(
             durationMillis = progress.durationMillis,
             previewMillis = seekPreviewMillis,
             seekSettlement = seekSettlement,
-            enabled = interactive && actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
+            // 面板打开时轨道让给关闭层：不拖动，也不改播放位置。
+            enabled = onBlankTap == null &&
+                interactive &&
+                actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
             appearanceEnabled = actionLooksEnabled(
                 PlayerAction.Seek,
                 canGoPrevious = currentIndex > 0,
@@ -1760,7 +1789,7 @@ private fun SeekBar(
     }
     val stateText = stringResource(R.string.player_progress_state, labels.current, labels.total)
     val timeStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
-    // 切集只拦截拖动，颜色保持可用；首次打开仍按不可用外观置灰。
+    // 切集与恢复原片期间拖动被拦截，外观同点击判据一起置灰。
     val timeColor = if (appearanceEnabled) AppColors.Foreground else DisabledToolColor
     val latestLeftTimeWidthPx = rememberUpdatedState(leftTimeWidthPx)
     val latestRightTimeWidthPx = rememberUpdatedState(rightTimeWidthPx)
@@ -1972,6 +2001,7 @@ private fun MorePanel(
     onToggleAutoPlayNext: () -> Unit,
     onSelectSleepTimer: (SleepTimerOption) -> Unit,
     onCancelSleepTimer: () -> Unit,
+    enabled: Boolean,
     panelWidth: Dp,
     panelMaxHeight: Dp,
     modifier: Modifier = Modifier,
@@ -1994,6 +2024,7 @@ private fun MorePanel(
             label = stringResource(R.string.player_decode),
             value = optionText(OptionLabel(decodeModeLabel(decodeMode))),
             expanded = expanded == MoreSection.Decode,
+            enabled = enabled,
             onClick = { toggle(MoreSection.Decode) },
         )
         if (expanded == MoreSection.Decode) {
@@ -2001,6 +2032,7 @@ private fun MorePanel(
                 MoreOptionRow(
                     label = optionText(option.label),
                     checked = isOptionChecked(option, decodeMode),
+                    enabled = enabled,
                     onClick = { onSelectDecodeMode(option.value) },
                 )
             }
@@ -2009,6 +2041,7 @@ private fun MorePanel(
             label = stringResource(R.string.player_loop),
             value = optionText(OptionLabel(loopModeLabel(loopMode))),
             expanded = expanded == MoreSection.Loop,
+            enabled = enabled,
             onClick = { toggle(MoreSection.Loop) },
         )
         if (expanded == MoreSection.Loop) {
@@ -2016,6 +2049,7 @@ private fun MorePanel(
                 MoreOptionRow(
                     label = optionText(option.label),
                     checked = isOptionChecked(option, loopMode),
+                    enabled = enabled,
                     onClick = { onSelectLoopMode(option.value) },
                 )
             }
@@ -2024,6 +2058,7 @@ private fun MorePanel(
             label = stringResource(R.string.player_orientation),
             value = optionText(OptionLabel(orientationModeLabel(orientationMode))),
             expanded = expanded == MoreSection.Orientation,
+            enabled = enabled,
             onClick = { toggle(MoreSection.Orientation) },
         )
         if (expanded == MoreSection.Orientation) {
@@ -2031,6 +2066,7 @@ private fun MorePanel(
                 MoreOptionRow(
                     label = optionText(option.label),
                     checked = isOptionChecked(option, orientationMode),
+                    enabled = enabled,
                     onClick = { onSelectOrientationMode(option.value) },
                 )
             }
@@ -2038,6 +2074,7 @@ private fun MorePanel(
         MoreSwitchRow(
             label = stringResource(R.string.player_auto_play_next),
             checked = autoPlayNext,
+            enabled = enabled,
             onToggle = onToggleAutoPlayNext,
         )
         MoreChoiceRow(
@@ -2050,6 +2087,7 @@ private fun MorePanel(
                 },
             ),
             expanded = expanded == MoreSection.SleepTimer,
+            enabled = enabled,
             onClick = { toggle(MoreSection.SleepTimer) },
         )
         if (expanded == MoreSection.SleepTimer) {
@@ -2057,14 +2095,16 @@ private fun MorePanel(
                 MoreOptionRow(
                     label = optionText(option.label),
                     checked = isSleepTimerOptionChecked(option.value, selectedSleepTimerOption),
+                    enabled = enabled,
                     onClick = { onSelectSleepTimer(option.value) },
                 )
             }
-            CustomSleepTimerRow(onSelect = onSelectSleepTimer)
+            CustomSleepTimerRow(onSelect = onSelectSleepTimer, enabled = enabled)
             if (sleepTimerState != SleepTimerState.Off) {
                 PlayerTextButton(
                     text = stringResource(R.string.player_sleep_timer_cancel),
                     onClick = onCancelSleepTimer,
+                    enabled = enabled,
                     modifier = Modifier.padding(horizontal = AppSpacing.Md),
                 )
             }
@@ -2079,6 +2119,7 @@ private fun MoreChoiceRow(
     label: String,
     value: String,
     expanded: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     val expandedState = stringResource(
@@ -2090,7 +2131,10 @@ private fun MoreChoiceRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
+                .then(
+                    if (enabled) Modifier.playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
+                    else Modifier,
+                )
                 .semantics { stateDescription = expandedState }
                 .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
             verticalAlignment = Alignment.CenterVertically,
@@ -2099,20 +2143,20 @@ private fun MoreChoiceRow(
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodyLarge,
-                color = AppColors.Foreground,
+                color = if (enabled) AppColors.Foreground else DisabledToolColor,
                 modifier = Modifier.weight(1f),
             )
             Text(
                 text = value,
                 style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.Muted,
+                color = if (enabled) AppColors.Muted else DisabledToolColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Icon(
                 imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
                 contentDescription = null,
-                tint = AppColors.Faint,
+                tint = if (enabled) AppColors.Faint else DisabledToolColor,
                 modifier = Modifier.size(18.dp),
             )
         }
@@ -2122,7 +2166,7 @@ private fun MoreChoiceRow(
 /** 展开后的勾选项。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) {
+private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     CompositionLocalProvider(
         LocalRippleConfiguration provides PlayerPressRippleConfiguration,
@@ -2132,6 +2176,7 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
                 .fillMaxWidth()
                 .selectable(
                     selected = checked,
+                    enabled = enabled,
                     onClick = onClick,
                     role = Role.RadioButton,
                     interactionSource = interaction,
@@ -2143,14 +2188,18 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodyLarge,
-                color = if (checked) AppColors.Accent else AppColors.Foreground,
+                color = when {
+                    !enabled -> DisabledToolColor
+                    checked -> AppColors.Accent
+                    else -> AppColors.Foreground
+                },
                 modifier = Modifier.weight(1f),
             )
             if (checked) {
                 Icon(
                     imageVector = Icons.Filled.Check,
                     contentDescription = null,
-                    tint = AppColors.Accent,
+                    tint = if (enabled) AppColors.Accent else DisabledToolColor,
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -2161,7 +2210,7 @@ private fun MoreOptionRow(label: String, checked: Boolean, onClick: () -> Unit) 
 /** 自动连播开关行。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
+private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onToggle: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     CompositionLocalProvider(
         LocalRippleConfiguration provides PlayerPressRippleConfiguration,
@@ -2171,6 +2220,7 @@ private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit)
                 .fillMaxWidth()
                 .toggleable(
                     value = checked,
+                    enabled = enabled,
                     onValueChange = { onToggle() },
                     role = Role.Switch,
                     interactionSource = interaction,
@@ -2183,11 +2233,12 @@ private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit)
             Text(
                 text = label,
                 style = MaterialTheme.typography.bodyLarge,
-                color = AppColors.Foreground,
+                color = if (enabled) AppColors.Foreground else DisabledToolColor,
                 modifier = Modifier.weight(1f),
             )
             Switch(
                 checked = checked,
+                enabled = enabled,
                 onCheckedChange = null,
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
@@ -2203,7 +2254,7 @@ private fun MoreSwitchRow(label: String, checked: Boolean, onToggle: () -> Unit)
 
 /** 定时暂停的自定义分钟数输入。 */
 @Composable
-private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
+private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: Boolean) {
     var customMinutes by remember { mutableStateOf("") }
     var customRejected by remember { mutableStateOf(false) }
     Row(
@@ -2220,6 +2271,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
                 customRejected = false
             },
             singleLine = true,
+            enabled = enabled,
             label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
             isError = customRejected,
             shape = RoundedCornerShape(AppRadius.Sm),
@@ -2239,6 +2291,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit) {
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
+            enabled = enabled,
             onClick = {
                 val minutes = customSleepMinutes(customMinutes)
                 if (minutes == null) {
@@ -2420,14 +2473,20 @@ private fun SubtitlePanel(
             modifier = modifier
                 .fillMaxWidth()
                 .heightIn(max = 240.dp)
-                .playerPanel(),
+                .playerPanel()
+                // 面板自己的区域拦下点击，空白处不落到栏的关闭层。
+                .blockPlayerGestures(),
         ) {
             LazyColumn(modifier = Modifier.fillMaxWidth()) {
                 items(items = menu) { item ->
                     Text(
                         text = subtitleItemLabel(item),
                         style = MaterialTheme.typography.bodyLarge,
-                        color = if (item.active) AppColors.Accent else AppColors.Foreground,
+                        color = when {
+                            !interactive -> DisabledToolColor
+                            item.active -> AppColors.Accent
+                            else -> AppColors.Foreground
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
