@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.geometry.Offset
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -111,6 +112,41 @@ class PlayerBarsVisibilityTest {
                 exitAnimating = false,
             ),
         )
+    }
+
+    @Test
+    fun `开始淡出时指针立即隐藏`() {
+        pointer.onPointerEnter(Offset.Zero)
+        now = 3_999L
+        controls.hideIfExpired()
+        pointerFollowsBars(barsVisible(), pointer)
+        assertTrue(pointer.visible)
+
+        now = 4_000L
+        controls.hideIfExpired()
+        assertFalse(barsVisible())
+        // 淡出还要 1 秒才结束，指针不等淡出，随控制层开始隐藏立即消失。
+        pointerFollowsBars(barsVisible(), pointer)
+        assertFalse(pointer.visible)
+    }
+
+    @Test
+    fun `淡出期间点击控件重新显示并重置计时`() {
+        now = 4_500L
+        controls.hideIfExpired()
+        assertFalse(controls.visible)
+
+        controls.showByUserAction()
+        assertTrue(controls.visible)
+        assertEquals(4_000L, controls.millisUntilAutoHide())
+
+        now = 8_499L
+        controls.hideIfExpired()
+        assertTrue(controls.visible)
+
+        now = 8_500L
+        controls.hideIfExpired()
+        assertFalse(controls.visible)
     }
 
     @Test

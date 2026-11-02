@@ -627,8 +627,8 @@ fun PlayerScreen(
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
             visible = barsVisible,
-            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.TopStart),
         ) {
             val topBarInteractive = playerBarsInteractive(
@@ -673,8 +673,8 @@ fun PlayerScreen(
         }
         AnimatedVisibility(
             visible = barsVisible,
-            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             val bottomBarInteractive = playerBarsInteractive(

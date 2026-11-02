@@ -10,17 +10,24 @@ import androidx.compose.runtime.setValue
 /** 播放页控制层与解锁按钮的无操作自动隐藏时长，毫秒。 */
 const val PLAYER_AUTO_HIDE_MILLIS = 5_000L
 
-/** 控制层无操作自动隐藏的时长，毫秒。 */
+/** 控制层淡出的时长，毫秒；第 4 秒开始淡出、第 5 秒完全消失。 */
+const val CONTROLS_FADE_OUT_MILLIS = 1_000L
+
+/** 控制层无操作后开始淡出的时刻，毫秒。 */
+const val CONTROLS_FADE_START_MILLIS = PLAYER_AUTO_HIDE_MILLIS - CONTROLS_FADE_OUT_MILLIS
+
+/** 控制层无操作到完全消失的总时长，毫秒。 */
 const val CONTROLS_AUTO_HIDE_MILLIS = PLAYER_AUTO_HIDE_MILLIS
 
-/** 控制层显示与隐藏的淡入淡出时长，毫秒。 */
-const val CONTROLS_FADE_MILLIS = 200L
+/** 控制层显示时的淡入时长，毫秒。 */
+const val CONTROLS_FADE_IN_MILLIS = 200L
 
 /**
  * 播放页控制层的显隐与自动隐藏计时。
  *
- * 显示状态下 [CONTROLS_AUTO_HIDE_MILLIS] 内无操作即隐藏；任意操作重新计时；
- * 面板打开或控件按住期间不隐藏，关闭或抬起后重新计时（ADR-0025）。
+ * 显示状态下 [CONTROLS_FADE_START_MILLIS] 内无操作即开始淡出，界面用
+ * [CONTROLS_FADE_OUT_MILLIS] 淡完（无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 完全消失）；
+ * 任意操作重新计时；面板打开或控件按住期间不隐藏，关闭或抬起后重新计时（ADR-0025）。
  *
  * 显示只由用户操作触发：点击画面 [toggle]、点击控件 [showByUserAction]、用户在面板里打开抽屉
  * 或菜单 [updatePanelOpen]；首次加载与切集不显示控制层。
@@ -90,17 +97,17 @@ class PlayerControlsVisibility(
         }
     }
 
-    /** 距自动隐藏的剩余毫秒；不参与计时、[holdVisible] 或按住中时返回 -1。 */
+    /** 距开始淡出的剩余毫秒；不参与计时、[holdVisible] 或按住中时返回 -1。 */
     fun millisUntilAutoHide(holdVisible: Boolean = false): Long {
         if (holdVisible || !visible || panelOpen || pressing) return -1L
         val elapsed = elapsedMillis() - lastInteractionAtMillis
-        return (CONTROLS_AUTO_HIDE_MILLIS - elapsed).coerceAtLeast(0L)
+        return (CONTROLS_FADE_START_MILLIS - elapsed).coerceAtLeast(0L)
     }
 
-    /** 显示状态下无操作满 [CONTROLS_AUTO_HIDE_MILLIS] 后隐藏；面板打开、按住中或 [holdVisible] 时保持。 */
+    /** 显示状态下无操作满 [CONTROLS_FADE_START_MILLIS] 后转为隐藏，界面按 [CONTROLS_FADE_OUT_MILLIS] 淡出；面板打开、按住中或 [holdVisible] 时保持。 */
     fun hideIfExpired(holdVisible: Boolean = false) {
         if (holdVisible || !visible || panelOpen || pressing) return
-        if (elapsedMillis() - lastInteractionAtMillis >= CONTROLS_AUTO_HIDE_MILLIS) {
+        if (elapsedMillis() - lastInteractionAtMillis >= CONTROLS_FADE_START_MILLIS) {
             visible = false
         }
     }
