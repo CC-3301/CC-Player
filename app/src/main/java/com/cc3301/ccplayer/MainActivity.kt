@@ -224,6 +224,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
+
+    /** 屏幕当前的四向方向；只在系统配置真正变化时更新，请求的方向本身不算到位。 */
+    private var screenOrientation by mutableStateOf(ScreenOrientation.Portrait)
     private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
     private var progress by mutableStateOf(PlaybackProgress())
     private var seekPreviewMillis by mutableStateOf<Long?>(null)
@@ -329,7 +332,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        lastScreenOrientation = currentScreenOrientation()
+        screenOrientation = currentScreenOrientation()
+        lastScreenOrientation = screenOrientation
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -470,6 +474,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             decodeMode = decodeMode,
                             loopMode = loopMode,
                             orientationMode = orientationMode,
+                            orientationOverride = sessionOrientation.override,
+                            screenOrientation = screenOrientation,
                             autoPlayNext = autoPlayNext,
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
@@ -976,10 +982,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (target != ScreenOrientation.System) recordScreenOrientation(target)
     }
 
-    /** 每次方向真正切换都写一条日志。 */
+    /**
+     * 每次方向真正切换都写一条日志。
+     *
+     * 部分机型在这个回调里读到的显示方向仍是旧值：播放页的方向等待因此等不到对齐，
+     * 由 2 秒上限兜底，多黑 2 秒后照常出画面。
+     */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        recordScreenOrientation(currentScreenOrientation())
+        screenOrientation = currentScreenOrientation()
+        recordScreenOrientation(screenOrientation)
     }
 
     /** 记录一次屏幕方向切换；同一方向不重复记录。 */

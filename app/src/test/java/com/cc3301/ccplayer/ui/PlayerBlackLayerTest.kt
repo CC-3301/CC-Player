@@ -4,7 +4,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 黑底层只由控制层派生的画面判据决定：没有可显示的画面、或本次播放还没摆过视频比例，就铺黑底。 */
+/**
+ * 黑底层只由控制层派生的画面判据与首次摆位的方向等待决定：
+ * 没有可显示的画面、本次播放还没摆过视频比例、或还在等屏幕方向，就铺黑底。
+ */
 class PlayerBlackLayerTest {
 
     @Test
@@ -14,6 +17,7 @@ class PlayerBlackLayerTest {
                 showsPicture = true,
                 videoAspectRatio = 0.5625,
                 aspectRatioPlaced = true,
+                orientationPending = false,
             ),
         )
     }
@@ -25,6 +29,7 @@ class PlayerBlackLayerTest {
                 showsPicture = false,
                 videoAspectRatio = 16.0 / 9.0,
                 aspectRatioPlaced = true,
+                orientationPending = false,
             ),
         )
     }
@@ -36,6 +41,7 @@ class PlayerBlackLayerTest {
                 showsPicture = true,
                 videoAspectRatio = null,
                 aspectRatioPlaced = false,
+                orientationPending = false,
             ),
         )
     }
@@ -46,11 +52,13 @@ class PlayerBlackLayerTest {
             showsPicture = true,
             videoAspectRatio = null,
             aspectRatioPlaced = false,
+            orientationPending = false,
         )
         val after = showPlayerBlackLayer(
             showsPicture = true,
             videoAspectRatio = 0.5625,
             aspectRatioPlaced = false,
+            orientationPending = false,
         )
 
         assertTrue(before)
@@ -64,6 +72,19 @@ class PlayerBlackLayerTest {
                 showsPicture = true,
                 videoAspectRatio = null,
                 aspectRatioPlaced = true,
+                orientationPending = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `the first placement keeps the cover while the screen is still turning`() {
+        assertTrue(
+            showPlayerBlackLayer(
+                showsPicture = true,
+                videoAspectRatio = 16.0 / 9.0,
+                aspectRatioPlaced = false,
+                orientationPending = true,
             ),
         )
     }

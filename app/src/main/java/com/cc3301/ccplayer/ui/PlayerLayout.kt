@@ -45,17 +45,22 @@ fun videoViewport(
 }
 
 /**
- * 播放页黑底层规则：屏幕上没有可显示的画面，或本次播放还没摆过视频比例，就铺黑底。
+ * 播放页黑底层规则：屏幕上没有可显示的画面、本次播放还没摆过视频比例，或首次摆位还在等屏幕方向，就铺黑底。
  * 比例未知期间视频区先按整屏摆放，黑底挡住这次摆放；比例到达即第一次摆位，并在同一次重绘里撤掉黑底。
  *
- * [aspectRatioPlaced] 表示本次播放已经摆过视频比例：比例到达过一次就一直为真，之后不再按比例盖。
+ * [aspectRatioPlaced] 表示本次播放的首次摆位已有结论：有结论后就一直为真，之后不再按比例盖。
+ * [orientationPending] 表示首次摆位还在等屏幕转向视频方向（见 [PlayerPlacementGate]）：为真时黑底继续
+ * 盖住竖向摆出来的那一帧，方向到位或等待到时限后与摆位一起撤掉。
  * 有没有画面只由控制层派生的 SurfacePresentation 给出，界面不再自行组合加载阶段、黑底与视频轨。
  */
 fun showPlayerBlackLayer(
     showsPicture: Boolean,
     videoAspectRatio: Double?,
     aspectRatioPlaced: Boolean,
-): Boolean = !showsPicture || (!aspectRatioPlaced && !hasKnownVideoAspectRatio(videoAspectRatio))
+    orientationPending: Boolean,
+): Boolean = !showsPicture ||
+    orientationPending ||
+    (!aspectRatioPlaced && !hasKnownVideoAspectRatio(videoAspectRatio))
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
