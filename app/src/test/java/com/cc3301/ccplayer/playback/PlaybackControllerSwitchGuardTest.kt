@@ -2,6 +2,10 @@ package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import java.io.Closeable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -469,6 +473,71 @@ class PlaybackControllerSwitchGuardTest {
         assertEquals(1, failures.size)
     }
 
+    @Test
+    fun `a stuck precheck read does not block the next switch`() = runTest {
+        // 预检接缝用真的模块：第一路的读取卡在 open 里不返回。
+        val probe = PrecheckProbe(backgroundScope, timeoutMillis = STUCK_PRECHECK_BUDGET_MILLIS)
+        val readStarted = CountDownLatch(1)
+        val readGate = CountDownLatch(1)
+        val handle = CloseCountingHandle()
+        val controller = controller(
+            probe = { media ->
+                probe.probe({
+                    // 第二路必须走跳过分支，不应该再打开目标。
+                    if (media.name != "ep2.mkv") error("跳过预检时不应打开目标")
+                    readStarted.countDown()
+                    readGate.await()
+                    handle
+                }) { true }
+            },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportMediaLoaded()
+        val failures = collectFailures(controller)
+
+        // 第一下点下一集：预检卡在读取里。
+        controller.next()
+        runCurrent()
+        assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
+
+        // 第二下：读取线程正忙，跳过预检直接发起切集，不等 4 秒兜底、不报失败。
+        controller.next()
+        runCurrent()
+        assertEquals("root/ep3.mkv", engine.startedUrls.last())
+        assertTrue(controller.switching.value)
+        assertTrue(failures.isEmpty())
+
+        // 上一路最终返回：句柄照样关闭，结果丢弃。
+        readGate.countDown()
+        assertTrue(handle.awaitClosed())
+        assertEquals(1, handle.closeCount)
+    }
+
+    /** 只数关闭次数，并给测试一个等关闭落地的点。 */
+    private class CloseCountingHandle : Closeable {
+        private val closeCalls = AtomicInteger()
+
+        @Volatile
+        var closed = false
+            private set
+
+        val closeCount: Int get() = closeCalls.get()
+
+        override fun close() {
+            closeCalls.incrementAndGet()
+            closed = true
+        }
+
+        fun awaitClosed(): Boolean {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(WATCHDOG_MILLIS)
+            while (!closed) {
+                if (System.nanoTime() >= deadline) return false
+                Thread.sleep(1)
+            }
+            return true
+        }
+    }
+
     private fun TestScope.controller(
         probe: suspend (MediaFile) -> Boolean = alwaysReadableProbe,
         discard: suspend () -> Boolean = { true },
@@ -506,5 +575,13 @@ class PlaybackControllerSwitchGuardTest {
     ) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
         controller.openPlaylist(files, files.first { it.name == current })
+    }
+
+    private companion object {
+        /** 卡住的预检用长预算：到点不参与这条用例。 */
+        const val STUCK_PRECHECK_BUDGET_MILLIS = 10_000L
+
+        /** 等真实线程上的动作落地：超时即用例失败。 */
+        const val WATCHDOG_MILLIS = 5_000L
     }
 }
