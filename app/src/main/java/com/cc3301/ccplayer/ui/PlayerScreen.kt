@@ -352,6 +352,8 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
+    // 控制层在场（可见或淡出中）：指针、退场可点与面板清理都按这个口径，第 5 秒才算隐藏。
+    val controlsPresent = !controls.hidden
     // 本次播放开始过切集之后，加载阶段不再算首次缓冲。
     var switchedThisSession by remember { mutableStateOf(false) }
     LaunchedEffect(switching) {
@@ -363,13 +365,15 @@ fun PlayerScreen(
     LaunchedEffect(surfacePresentation.aspectRatio) {
         if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
     }
-    // 顶/底栏是否可见同时决定指针是否跟随出现。
-    val barsVisible = playerBarsVisible(
+    // 顶/底栏的动画目标与在场：动画目标只看完全可见，在场含淡出中。
+    val bars = playerBarsPresence(
         locked = locked,
-        controlsVisible = controlsVisible,
+        phase = controls.phase,
         panelBarsVisible = panels.controlBarsVisible,
         firstBuffering = firstBuffering,
     )
+    val barsShown = bars.shown
+    val barsPresent = bars.present
     // 面板可见性统一由此判定；不可见的面板不能拦截手势。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -395,36 +399,36 @@ fun PlayerScreen(
     LaunchedEffect(controlsVisible, locked) {
         panels.closeWhenControlsUnavailable(controlsVisible, locked)
     }
-    // 控制层隐藏后涟漪不再渲染：清掉未播完的条目，重新显示时不重播。
-    LaunchedEffect(controlsVisible) {
-        if (!controlsVisible) doubleTapFeedback.clearRipples()
+    // 控制层离开后涟漪不再渲染：清掉未播完的条目，重新显示时不重播。
+    LaunchedEffect(controlsPresent) {
+        doubleTapFeedback.syncRipples(controlsPresent)
     }
     LaunchedEffect(
-        controls.visible,
+        controls.phase,
         controls.panelOpen,
         controls.pressing,
         controls.lastInteractionAtMillis,
+        controls.fadeOutStartedAtMillis,
         switching,
         initialLoading,
     ) {
         // 加载全程不自动隐藏，避免切集期间控制条消失。
-        val holdVisible = switching || initialLoading
-        while (controls.visible && !controls.panelOpen) {
-            val remaining = controls.millisUntilAutoHide(holdVisible)
-            if (remaining < 0L) break
-            if (remaining == 0L) {
-                controls.hideIfExpired(holdVisible)
-                break
-            }
-            delay(remaining)
-        }
+        runControlsAutoHide(
+            controls = controls,
+            holdVisible = { switching || initialLoading },
+            delayMillis = { delay(it) },
+        )
     }
 
-    LaunchedEffect(lock.locked, lock.unlockVisible, lock.unlockShownAtMillis) {
-        if (lock.locked && lock.unlockVisible) {
-            delay(UNLOCK_AUTO_HIDE_MILLIS)
-            lock.hideUnlockIfExpired()
-        }
+    LaunchedEffect(
+        lock.locked,
+        lock.unlockVisible,
+        lock.unlockFading,
+        lock.unlockPressing,
+        lock.unlockShownAtMillis,
+        lock.unlockFadeOutStartedAtMillis,
+    ) {
+        runUnlockAutoHide(lock = lock, delayMillis = { delay(it) })
     }
 
     LaunchedEffect(doubleTapFeedback.left, doubleTapFeedback.right) {
@@ -455,8 +459,8 @@ fun PlayerScreen(
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(barsVisible) {
-        pointerFollowsBars(barsVisible, pointer)
+    LaunchedEffect(barsPresent) {
+        pointerFollowsBars(barsPresent, pointer)
     }
     // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
     LaunchedEffect(pointer) {
@@ -533,7 +537,7 @@ fun PlayerScreen(
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelVisible,
-            controlsVisible = controlsVisible,
+            controlsPresent = controlsPresent,
             switching = switching,
             initialLoading = initialLoading,
             restoring = restoring,
@@ -541,36 +545,37 @@ fun PlayerScreen(
             durationMillis = progress.durationMillis,
             levelControls = levelControls,
             onTogglePlayPause = {
-                controls.resetTimer()
+                controls.onUserGesture()
                 onTogglePlayPause()
             },
             onSeekBy = {
-                controls.resetTimer()
+                controls.onUserGesture()
                 onSeekBy(it)
             },
             onDoubleTapFeedback = { side, deltaMillis, ripple ->
                 doubleTapFeedback.onDoubleTap(side, deltaMillis, ripple)
             },
             onSeekPreview = { position, requestSeek ->
-                controls.resetTimer()
+                controls.onUserGesture()
                 onSeekPreview(position, requestSeek)
             },
             onSeekCommit = {
-                controls.resetTimer()
+                controls.onUserGesture()
                 onSeekCommit()
             },
             onSeekStep = onSeekStep,
             onSeekHeartbeat = onSeekHeartbeat,
-            onToggleControls = { controls.toggle() },
-            onGestureInteraction = { controls.resetTimer() },
+            onToggleControls = { if (toggleControlsAllowed(firstBuffering)) controls.toggle() },
+            onGestureInteraction = { controls.onUserGesture() },
+            onGesturePress = { pressed -> controls.onGesturePress(pressed) },
             onVolumeHint = { volumeHint = it },
             onSeekHint = { seekHint = it },
             modifier = Modifier.fillMaxSize(),
         )
-        // 手势提示元素由控制层可见性与手势类型决定：隐藏时留跳转提示与双击 ±10 秒的该侧箭头与累计秒数。
-        val seekHints = shownGestureHints(controlsVisible, GestureHintSource.Seek)
-        val volumeHints = shownGestureHints(controlsVisible, GestureHintSource.Volume)
-        val doubleTapSeekHints = shownGestureHints(controlsVisible, GestureHintSource.DoubleTapSeek)
+        // 手势提示元素由控制层在场状态与手势类型决定：已隐藏时留跳转提示与双击 ±10 秒的该侧箭头与累计秒数。
+        val seekHints = shownGestureHints(controlsPresent, GestureHintSource.Seek)
+        val volumeHints = shownGestureHints(controlsPresent, GestureHintSource.Volume)
+        val doubleTapSeekHints = shownGestureHints(controlsPresent, GestureHintSource.DoubleTapSeek)
         if (GestureHint.VolumePercent in volumeHints) {
             volumeHint?.let { fraction ->
                 LevelHintLabel(fraction = fraction, modifier = Modifier.align(Alignment.Center))
@@ -626,14 +631,15 @@ fun PlayerScreen(
         val canGoNext = currentIndex in 0 until playlist.lastIndex
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
-            visible = barsVisible,
-            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            visible = barsShown,
+            enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+            exit = fadeOut(tween(if (controls.hiddenImmediately) 0 else CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.TopStart),
         ) {
             val topBarInteractive = playerBarsInteractive(
-                barsVisible = barsVisible,
+                barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
+                locked = locked,
             )
             PlayerTopBar(
                 title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
@@ -672,14 +678,15 @@ fun PlayerScreen(
             )
         }
         AnimatedVisibility(
-            visible = barsVisible,
-            enter = fadeIn(tween(CONTROLS_FADE_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_MILLIS.toInt())),
+            visible = barsShown,
+            enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+            exit = fadeOut(tween(if (controls.hiddenImmediately) 0 else CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             val bottomBarInteractive = playerBarsInteractive(
-                barsVisible = barsVisible,
+                barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
+                locked = locked,
             )
             Controls(
                 state = state,
@@ -716,11 +723,11 @@ fun PlayerScreen(
                     onNext()
                 },
                 onSeekPreview = { position, requestSeek ->
-                    controls.resetTimer()
+                    controls.onUserGesture()
                     onSeekPreview(position, requestSeek)
                 },
                 onSeekCommit = {
-                    controls.resetTimer()
+                    controls.onUserGesture()
                     onSeekCommit()
                 },
                 onSeekHeartbeat = onSeekHeartbeat,
@@ -782,17 +789,27 @@ fun PlayerScreen(
                 )
             }
         }
-        if (lock.unlockVisible) {
-            UnlockButton(
-                onTap = {
-                    lock.tapLockButton()
-                    controls.showByUserAction()
-                },
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .safeDrawingPadding()
-                    .padding(AppSpacing.Lg),
-            )
+        // 解锁按钮随解锁动作立即离开组合；定时隐藏后仍保留组合，重新出现走 200 毫秒淡入。
+        if (!lock.unlockDismissed) {
+            AnimatedVisibility(
+                visible = lock.unlockVisible && !lock.unlockFading,
+                enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+                exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
+                modifier = Modifier.align(Alignment.TopStart),
+            ) {
+                UnlockButton(
+                    onTap = {
+                        lock.tapLockButton()
+                        controls.showByUserAction()
+                    },
+                    modifier = Modifier
+                        .holdControlsVisible { pressed ->
+                            if (pressed) lock.onPressDown() else lock.onPressUp()
+                        }
+                        .safeDrawingPadding()
+                        .padding(AppSpacing.Lg),
+                )
+            }
         }
         // 抽屉之外的那一半是关闭区：横屏点左半屏，竖屏点上半屏。
         if (playlistVisible && panelVisible) {
@@ -865,7 +882,7 @@ private fun PreviewHeartbeat(dragging: Boolean, onHeartbeat: () -> Unit) {
 private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
-    controlsVisible: Boolean,
+    controlsPresent: Boolean,
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
@@ -881,6 +898,7 @@ private fun PlayerGestureLayer(
     onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
     onGestureInteraction: () -> Unit,
+    onGesturePress: (Boolean) -> Unit,
     onVolumeHint: (Float?) -> Unit,
     onSeekHint: (SeekHint?) -> Unit,
     modifier: Modifier = Modifier,
@@ -908,12 +926,13 @@ private fun PlayerGestureLayer(
     val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnGestureInteraction = rememberUpdatedState(onGestureInteraction)
+    val latestOnGesturePress = rememberUpdatedState(onGesturePress)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
     val latestDuration = rememberUpdatedState(durationMillis)
     // 控制层可能在手势层注册之后才隐藏：读状态而不是闭包里的旧值。
-    val latestControlsVisible = rememberUpdatedState(controlsVisible)
+    val latestControlsPresent = rememberUpdatedState(controlsPresent)
     val tapGesture = remember { PlayerTapGesture() }
     val dispatchTap: (TapGestureAction) -> Unit = { action ->
         when (action) {
@@ -925,7 +944,7 @@ private fun PlayerGestureLayer(
                 when (doubleTap) {
                     is DoubleTapAction.Seek -> if (doubleTapFeedbackEnabled) {
                         // 该手势此刻显示哪些提示元素：箭头与累计秒数、涟漪都由此判定。
-                        val hints = shownGestureHints(latestControlsVisible.value, doubleTapHintSource(doubleTap))
+                        val hints = shownGestureHints(latestControlsPresent.value, doubleTapHintSource(doubleTap))
                         // 用夹取后的实际位移累计，时长未知、到边界或片尾不叠加。
                         val actualDelta = latestOnSeekBy.value(doubleTap.deltaMillis)
                         if (actualDelta != 0L && GestureHint.DoubleTapSide in hints) {
@@ -955,6 +974,27 @@ private fun PlayerGestureLayer(
                 tapGesture.cancel()
                 if (!gesturesEnabled) return@pointerInput
                 detectPlayerTaps(tapGesture, dispatchTap)
+            }
+            // 按下即上报一次操作：按住不动同样不隐藏，双指按到最后一指抬起才结束。
+            .pointerInput(gesturesEnabled) {
+                if (!gesturesEnabled) return@pointerInput
+                val tracker = PlayerGesturePressTracker()
+                try {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            for (change in event.changes) {
+                                if (change.pressed) {
+                                    if (tracker.onDown(change.id.value)) latestOnGesturePress.value(true)
+                                } else if (tracker.onUp(change.id.value)) {
+                                    latestOnGesturePress.value(false)
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    if (tracker.pressing) latestOnGesturePress.value(false)
+                }
             }
             .pointerInput(gesturesEnabled, seekAllowed, volumeAllowed) {
                 if (!gesturesEnabled) return@pointerInput

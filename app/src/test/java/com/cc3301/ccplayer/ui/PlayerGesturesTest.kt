@@ -479,8 +479,8 @@ class PlayerGesturesTest {
 
     @Test
     fun `双击暂停与继续不显示任何元素`() {
-        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = true, GestureHintSource.DoubleTapPause))
-        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.DoubleTapPause))
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsPresent = true, GestureHintSource.DoubleTapPause))
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsPresent = false, GestureHintSource.DoubleTapPause))
         assertEquals(GestureHintSource.DoubleTapPause, doubleTapHintSource(DoubleTapAction.TogglePlayPause))
     }
 
@@ -488,12 +488,12 @@ class PlayerGesturesTest {
     fun `双击加减十秒只显示该侧箭头与累计秒数`() {
         assertEquals(
             setOf(GestureHint.DoubleTapSide),
-            shownGestureHints(controlsVisible = false, GestureHintSource.DoubleTapSeek),
+            shownGestureHints(controlsPresent = false, GestureHintSource.DoubleTapSeek),
         )
         // 控制层可见时箭头、秒数与涟漪一起显示。
         assertEquals(
             setOf(GestureHint.DoubleTapSide, GestureHint.DoubleTapRipple),
-            shownGestureHints(controlsVisible = true, GestureHintSource.DoubleTapSeek),
+            shownGestureHints(controlsPresent = true, GestureHintSource.DoubleTapSeek),
         )
         assertEquals(
             GestureHintSource.DoubleTapSeek,
@@ -505,20 +505,20 @@ class PlayerGesturesTest {
     fun `控制层隐藏时拖动与滚轮仍显示目标时间与增减量`() {
         assertEquals(
             setOf(GestureHint.SeekTarget),
-            shownGestureHints(controlsVisible = false, GestureHintSource.Seek),
+            shownGestureHints(controlsPresent = false, GestureHintSource.Seek),
         )
         assertEquals(
             setOf(GestureHint.SeekTarget),
-            shownGestureHints(controlsVisible = true, GestureHintSource.Seek),
+            shownGestureHints(controlsPresent = true, GestureHintSource.Seek),
         )
     }
 
     @Test
     fun `控制层隐藏时音量拖动不显示百分比`() {
-        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsVisible = false, GestureHintSource.Volume))
+        assertEquals(emptySet<GestureHint>(), shownGestureHints(controlsPresent = false, GestureHintSource.Volume))
         assertEquals(
             setOf(GestureHint.VolumePercent),
-            shownGestureHints(controlsVisible = true, GestureHintSource.Volume),
+            shownGestureHints(controlsPresent = true, GestureHintSource.Volume),
         )
     }
 
@@ -526,8 +526,8 @@ class PlayerGesturesTest {
     fun `隐藏态只保留跳转提示与双击加减十秒的该侧箭头`() {
         GestureHintSource.entries.forEach { source ->
             // 显示规则只由可见性收紧：隐藏时是可见时的子集。
-            val shown = shownGestureHints(controlsVisible = true, source)
-            val hidden = shownGestureHints(controlsVisible = false, source)
+            val shown = shownGestureHints(controlsPresent = true, source)
+            val hidden = shownGestureHints(controlsPresent = false, source)
             assertTrue(hidden.all { it in shown })
             assertTrue(
                 hidden.all { it == GestureHint.DoubleTapSide || it == GestureHint.SeekTarget },

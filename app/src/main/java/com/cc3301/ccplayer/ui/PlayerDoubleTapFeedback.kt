@@ -88,6 +88,11 @@ class PlayerDoubleTapFeedback(
     private fun hint(side: DoubleTapSide): DoubleTapHintState? =
         if (side == DoubleTapSide.Left) left else right
 
+    /** 控制层是否在场：在场（含淡出中）时保留涟漪，离开后才清理。 */
+    fun syncRipples(controlsPresent: Boolean) {
+        if (!controlsPresent) clearRipples()
+    }
+
     private fun setHint(side: DoubleTapSide, state: DoubleTapHintState) {
         if (side == DoubleTapSide.Left) left = state else right = state
     }
