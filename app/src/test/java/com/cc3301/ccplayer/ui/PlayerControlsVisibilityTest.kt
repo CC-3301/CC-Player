@@ -1,5 +1,10 @@
 package com.cc3301.ccplayer.ui
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -49,32 +54,6 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
-    fun `退场动画时长取自淡出时长`() {
-        // 界面用同一个值生成退场动画，注入多长就淡多久。
-        assertEquals(1_000, controlsFadeOutSpec(CONTROLS_FADE_OUT_MILLIS).durationMillis)
-        assertEquals(200L, CONTROLS_FADE_IN_MILLIS)
-
-        val injected = PlayerControlsVisibility(elapsedMillis = { now }, fadeOutMillis = 1_234L)
-        assertEquals(1_234, controlsFadeOutSpec(injected.fadeOutMillis).durationMillis)
-    }
-
-    @Test
-    fun `淡出窗口长度随注入的淡出时长变化`() {
-        val injected = PlayerControlsVisibility(elapsedMillis = { now }, fadeOutMillis = 1_234L)
-
-        now = 4_000L
-        injected.beginFadeOutIfExpired()
-
-        now = 5_233L
-        injected.completeFadeOut()
-        assertEquals(true, injected.fading)
-
-        now = 5_234L
-        injected.completeFadeOut()
-        assertEquals(true, injected.hidden)
-    }
-
-    @Test
     fun `点击切换控制层显隐`() {
         controls.toggle()
         assertEquals(false, controls.visible)
@@ -94,6 +73,24 @@ class PlayerControlsVisibilityTest {
 
         assertEquals(true, controls.visible)
         assertEquals(false, controls.fading)
+    }
+
+    @Test
+    fun `按住期间点画面不进入淡出`() {
+        // 一指按住进度条，另一指点画面：任何路径都不得进入淡出。
+        controls.onPressDown()
+
+        controls.toggle()
+
+        assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
+
+        now = 10_000L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.visible)
+
+        controls.onPressUp()
+        assertEquals(4_000L, controls.millisUntilFadeOut())
     }
 
     @Test
@@ -163,8 +160,8 @@ class PlayerControlsVisibilityTest {
         controls.beginFadeOutIfExpired()
         assertEquals(true, controls.fading)
 
-        // 拖动、滚轮与手势都只走 resetTimer。
-        controls.resetTimer()
+        // 拖动进度条、滚轮与整屏手势都走 onUserGesture。
+        controls.onUserGesture()
 
         assertEquals(true, controls.visible)
         assertEquals(false, controls.fading)
@@ -180,7 +177,7 @@ class PlayerControlsVisibilityTest {
         controls.completeFadeOut()
 
         now = 6_000L
-        controls.resetTimer()
+        controls.onUserGesture()
 
         assertEquals(false, controls.visible)
         assertEquals(true, controls.hidden)
@@ -192,7 +189,7 @@ class PlayerControlsVisibilityTest {
         controls.showByUserAction()
 
         now = 4_999L
-        controls.resetTimer()
+        controls.onUserGesture()
 
         assertEquals(true, controls.visible)
 
@@ -359,5 +356,46 @@ class PlayerControlsVisibilityTest {
         now = 8_000L
         controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
+    }
+
+    @Test
+    fun `自动隐藏循环到点淡出并在五秒隐藏`() = runTest {
+        val looped = PlayerControlsVisibility(elapsedMillis = { testScheduler.currentTime })
+        val loop = launch {
+            runControlsAutoHide(looped, holdVisible = { false }, delayMillis = { delay(it) })
+        }
+
+        advanceTimeBy(3_999L)
+        runCurrent()
+        assertEquals(true, looped.visible)
+
+        advanceTimeBy(1L)
+        runCurrent()
+        assertEquals(true, looped.fading)
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(true, looped.hidden)
+
+        loop.cancel()
+    }
+
+    @Test
+    fun `等待提前返回时自动隐藏循环重新评估`() = runTest {
+        val looped = PlayerControlsVisibility(elapsedMillis = { testScheduler.currentTime })
+        val loop = launch {
+            // 每次只等一半左右：模拟提前唤醒，循环必须重新评估并继续等到点。
+            runControlsAutoHide(looped, holdVisible = { false }, delayMillis = { delay(it / 2 + 1) })
+        }
+
+        advanceTimeBy(4_000L)
+        runCurrent()
+        assertEquals(true, looped.fading)
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(true, looped.hidden)
+
+        loop.cancel()
     }
 }

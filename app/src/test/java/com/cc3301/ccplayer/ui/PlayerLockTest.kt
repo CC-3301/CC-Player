@@ -1,6 +1,13 @@
 package com.cc3301.ccplayer.ui
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerLockTest {
@@ -31,6 +38,18 @@ class PlayerLockTest {
 
         assertEquals(false, lock.locked)
         assertEquals(false, lock.unlockVisible)
+    }
+
+    @Test
+    fun `解锁动作立即移除按钮`() {
+        lock.tapLockButton()
+        assertEquals(true, lock.unlockVisible)
+
+        lock.tapLockButton()
+
+        assertEquals(false, lock.locked)
+        assertEquals(false, lock.unlockVisible)
+        assertEquals(false, lock.unlockFading)
     }
 
     @Test
@@ -75,6 +94,38 @@ class PlayerLockTest {
         assertEquals(false, lock.locked)
         assertEquals(false, lock.unlockVisible)
         assertEquals(false, lock.unlockFading)
+    }
+
+    @Test
+    fun `按住解锁按钮期间不进入淡出`() {
+        lock.tapLockButton()
+        lock.onPressDown()
+
+        now = 30_000L
+        lock.beginUnlockFadeOutIfExpired()
+
+        assertEquals(true, lock.unlockVisible)
+        assertEquals(false, lock.unlockFading)
+
+        lock.onPressUp()
+        assertEquals(4_000L, lock.millisUntilUnlockFadeOut())
+    }
+
+    @Test
+    fun `淡出中按下解锁按钮撤销淡出`() {
+        lock.tapLockButton()
+        now = 4_500L
+        lock.beginUnlockFadeOutIfExpired()
+        assertEquals(true, lock.unlockFading)
+
+        lock.onPressDown()
+
+        assertEquals(true, lock.unlockVisible)
+        assertEquals(false, lock.unlockFading)
+        assertEquals(true, lock.unlockPressing)
+
+        lock.onPressUp()
+        assertEquals(false, lock.unlockPressing)
     }
 
     @Test
@@ -167,6 +218,49 @@ class PlayerLockTest {
         now = 7_000L
         lock.completeUnlockFadeOut()
         assertEquals(false, lock.unlockVisible)
+    }
+
+    @Test
+    fun `解锁按钮自动隐藏循环到点淡出并在五秒消失`() = runTest {
+        val looped = PlayerLock(elapsedMillis = { testScheduler.currentTime })
+        looped.tapLockButton()
+        val loop = launch {
+            runUnlockAutoHide(looped, delayMillis = { delay(it) })
+        }
+
+        advanceTimeBy(3_999L)
+        runCurrent()
+        assertEquals(true, looped.unlockVisible)
+        assertEquals(false, looped.unlockFading)
+
+        advanceTimeBy(1L)
+        runCurrent()
+        assertEquals(true, looped.unlockFading)
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(false, looped.unlockVisible)
+
+        loop.cancel()
+    }
+
+    @Test
+    fun `解锁按钮等待提前返回时循环重新评估`() = runTest {
+        val looped = PlayerLock(elapsedMillis = { testScheduler.currentTime })
+        looped.tapLockButton()
+        val loop = launch {
+            runUnlockAutoHide(looped, delayMillis = { delay(it / 2 + 1) })
+        }
+
+        advanceTimeBy(4_000L)
+        runCurrent()
+        assertEquals(true, looped.unlockFading)
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(false, looped.unlockVisible)
+
+        loop.cancel()
     }
 
     @Test

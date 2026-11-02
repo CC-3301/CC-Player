@@ -87,9 +87,16 @@ suspend fun runPointerAutoHide(
 }
 
 /**
- * 指针跟随顶/底栏的实际可见性：栏可见时指针一并出现，栏隐藏时一并隐藏。
+ * 指针是否在场：未锁定时跟随顶/底栏，锁定时跟随解锁按钮。
+ * 上锁后指针与解锁按钮同一时序出现、一起消失。
+ */
+fun playerPointerPresent(locked: Boolean, barsPresent: Boolean, unlockVisible: Boolean): Boolean =
+    if (locked) unlockVisible else barsPresent
+
+/**
+ * 指针跟随控制层的在场状态：在场时指针一并出现，离开时一并隐藏。
  * 只改指针，不碰控制层，控件显隐仍只由用户操作决定。
  */
-fun pointerFollowsBars(barsVisible: Boolean, pointer: PlayerPointerVisibility) {
-    if (barsVisible) pointer.show() else pointer.hide()
+fun pointerFollowsBars(barsPresent: Boolean, pointer: PlayerPointerVisibility) {
+    if (barsPresent) pointer.show() else pointer.hide()
 }

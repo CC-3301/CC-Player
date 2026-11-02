@@ -98,12 +98,12 @@ enum class GestureHintSource {
  * 以及双击 ±10 秒的该侧箭头与累计秒数；音量百分比与涟漪随控制层一起隐藏，
  * 双击暂停/继续不显示任何元素。
  */
-fun shownGestureHints(controlsVisible: Boolean, source: GestureHintSource): Set<GestureHint> = when (source) {
+fun shownGestureHints(controlsPresent: Boolean, source: GestureHintSource): Set<GestureHint> = when (source) {
     GestureHintSource.Seek -> setOf(GestureHint.SeekTarget)
-    GestureHintSource.Volume -> if (controlsVisible) setOf(GestureHint.VolumePercent) else emptySet()
+    GestureHintSource.Volume -> if (controlsPresent) setOf(GestureHint.VolumePercent) else emptySet()
     GestureHintSource.DoubleTapPause -> emptySet()
     GestureHintSource.DoubleTapSeek ->
-        if (controlsVisible) setOf(GestureHint.DoubleTapSide, GestureHint.DoubleTapRipple)
+        if (controlsPresent) setOf(GestureHint.DoubleTapSide, GestureHint.DoubleTapRipple)
         else setOf(GestureHint.DoubleTapSide)
 }
 

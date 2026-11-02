@@ -1,8 +1,6 @@
 package com.cc3301.ccplayer.ui
 
 import android.os.SystemClock
-import androidx.compose.animation.core.TweenSpec
-import androidx.compose.animation.core.tween
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -20,9 +18,6 @@ const val CONTROLS_FADE_START_MILLIS = PLAYER_AUTO_HIDE_MILLIS - CONTROLS_FADE_O
 
 /** 控制层显示时的淡入时长，毫秒。 */
 const val CONTROLS_FADE_IN_MILLIS = 200L
-
-/** 控制层退场动画：时长与淡出窗口同源，界面直接使用这里给出的时长。 */
-fun controlsFadeOutSpec(fadeOutMillis: Long): TweenSpec<Float> = tween(fadeOutMillis.toInt())
 
 /** 控制层的显隐阶段。 */
 enum class ControlsPhase {
@@ -48,7 +43,6 @@ enum class ControlsPhase {
  */
 class PlayerControlsVisibility(
     private val elapsedMillis: () -> Long = { SystemClock.elapsedRealtime() },
-    val fadeOutMillis: Long = CONTROLS_FADE_OUT_MILLIS,
 ) {
     var phase by mutableStateOf(ControlsPhase.Shown)
         private set
@@ -79,7 +73,7 @@ class PlayerControlsVisibility(
     val pressing: Boolean
         get() = pressedCount > 0
 
-    /** 点击画面：显示时开始淡出，淡出或隐藏时显示并重新计时。 */
+    /** 点击画面：显示时开始淡出，淡出或隐藏时显示并重新计时；按住期间不进入淡出。 */
     fun toggle() {
         if (visible) beginFadeOut() else showByUserAction()
     }
@@ -90,8 +84,8 @@ class PlayerControlsVisibility(
         lastInteractionAtMillis = elapsedMillis()
     }
 
-    /** 只重新计时，不改显隐；淡出中操作撤销淡出，已隐藏时手势不唤出控制层。 */
-    fun resetTimer() {
+    /** 拖动进度条、滚轮与整屏手势：算一次操作并重新计时；淡出中撤销淡出，已隐藏时手势不唤出控制层。 */
+    fun onUserGesture() {
         restoreIfFading()
         lastInteractionAtMillis = elapsedMillis()
     }
@@ -114,7 +108,7 @@ class PlayerControlsVisibility(
      * 控制层显隐只由点击决定，加载与切集不主动显示。
      */
     fun onLoadingPhaseChanged() {
-        if (visible) resetTimer()
+        if (visible) lastInteractionAtMillis = elapsedMillis()
     }
 
     /** 面板显隐状态：用户打开面板时控制层一并发显示，打开期间暂停自动隐藏，关闭后重新计时。 */
@@ -136,7 +130,7 @@ class PlayerControlsVisibility(
     /** 距完全隐藏的剩余毫秒；不在淡出态时返回 -1。 */
     fun millisUntilHidden(): Long {
         if (!fading) return -1L
-        return (fadeOutMillis - (elapsedMillis() - fadeOutStartedAtMillis)).coerceAtLeast(0L)
+        return (CONTROLS_FADE_OUT_MILLIS - (elapsedMillis() - fadeOutStartedAtMillis)).coerceAtLeast(0L)
     }
 
     /** 可见态无操作满 [CONTROLS_FADE_START_MILLIS] 后开始淡出；面板打开、按住中或 [holdVisible] 时保持。 */
@@ -145,10 +139,10 @@ class PlayerControlsVisibility(
         if (elapsedMillis() - lastInteractionAtMillis >= CONTROLS_FADE_START_MILLIS) beginFadeOut()
     }
 
-    /** 淡出满 [fadeOutMillis] 后进入已隐藏。 */
+    /** 淡出满 [CONTROLS_FADE_OUT_MILLIS] 后进入已隐藏。 */
     fun completeFadeOut() {
         if (!fading) return
-        if (elapsedMillis() - fadeOutStartedAtMillis >= fadeOutMillis) phase = ControlsPhase.Hidden
+        if (elapsedMillis() - fadeOutStartedAtMillis >= CONTROLS_FADE_OUT_MILLIS) phase = ControlsPhase.Hidden
     }
 
     /** 淡出中的操作撤销淡出并重新计时。 */
@@ -158,9 +152,38 @@ class PlayerControlsVisibility(
         lastInteractionAtMillis = elapsedMillis()
     }
 
+    /** 按住期间任何路径都不进入淡出，避免正在拖动或按压的控件被移除。 */
     private fun beginFadeOut() {
+        if (pressing) return
         phase = ControlsPhase.Fading
         fadeOutStartedAtMillis = elapsedMillis()
         lastInteractionAtMillis = elapsedMillis()
+    }
+}
+
+/**
+ * 控制层自动隐藏循环：按当前阶段等待到点，提前唤醒时重新评估当前阶段并继续等，
+ * 不放弃等待、不重复计时。[holdVisible] 为真（加载中）时暂停计时，等状态变化后由界面重启循环。
+ */
+suspend fun runControlsAutoHide(
+    controls: PlayerControlsVisibility,
+    holdVisible: () -> Boolean,
+    delayMillis: suspend (Long) -> Unit,
+) {
+    while (true) {
+        when (controls.phase) {
+            ControlsPhase.Shown -> {
+                val remaining = controls.millisUntilFadeOut(holdVisible())
+                if (remaining < 0L) return
+                if (remaining > 0L) delayMillis(remaining)
+                controls.beginFadeOutIfExpired(holdVisible())
+            }
+            ControlsPhase.Fading -> {
+                val remaining = controls.millisUntilHidden()
+                if (remaining > 0L) delayMillis(remaining)
+                controls.completeFadeOut()
+            }
+            ControlsPhase.Hidden -> return
+        }
     }
 }

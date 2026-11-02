@@ -104,21 +104,10 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `淡出动画期间控件保持可点击`() {
+        // 生产判据：栏可见，或退场动画未结束（transition 目标为 PostExit）。
         assertTrue(playerBarsInteractive(barsVisible = true, exitAnimating = false))
-        // 栏已不可见但淡出未结束：画面还在，点击照常生效。
         assertTrue(playerBarsInteractive(barsVisible = false, exitAnimating = true))
         assertFalse(playerBarsInteractive(barsVisible = false, exitAnimating = false))
-    }
-
-    @Test
-    fun `淡出窗口内控件保持可点击`() {
-        now = 4_500L
-        controls.beginFadeOutIfExpired()
-
-        assertTrue(controls.fading)
-        assertTrue(barsPresent())
-        assertFalse(barsShown())
-        assertTrue(playerBarsInteractive(barsVisible = barsShown(), exitAnimating = controls.fading))
     }
 
     @Test
@@ -156,12 +145,30 @@ class PlayerBarsVisibilityTest {
         now = 4_500L
         controls.beginFadeOutIfExpired()
 
-        // 拖动、滚轮与手势都只走 resetTimer。
-        controls.resetTimer()
+        // 拖动进度条与滚轮都走 onUserGesture。
+        controls.onUserGesture()
 
         assertTrue(controls.visible)
         assertFalse(controls.fading)
         assertEquals(4_000L, controls.millisUntilFadeOut())
+    }
+
+    @Test
+    fun `淡出中音量与双击涟漪提示仍显示`() {
+        now = 4_500L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.fading)
+        val present = !controls.hidden
+
+        assertTrue(GestureHint.VolumePercent in shownGestureHints(present, GestureHintSource.Volume))
+        assertTrue(GestureHint.DoubleTapRipple in shownGestureHints(present, GestureHintSource.DoubleTapSeek))
+
+        now = 5_000L
+        controls.completeFadeOut()
+        val hidden = !controls.hidden
+
+        assertFalse(GestureHint.VolumePercent in shownGestureHints(hidden, GestureHintSource.Volume))
+        assertFalse(GestureHint.DoubleTapRipple in shownGestureHints(hidden, GestureHintSource.DoubleTapSeek))
     }
 
     @Test
@@ -182,18 +189,54 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `涟漪在第五秒完全隐藏后才清理`() {
+        val feedback = PlayerDoubleTapFeedback(elapsedMillis = { now })
+        feedback.onDoubleTap(DoubleTapSide.Left, 10_000L)
+        assertEquals(1, feedback.ripples.size)
+
         now = 4_000L
         controls.beginFadeOutIfExpired()
-        // 淡出中仍保留子树与涟漪。
-        assertFalse(controls.hidden)
-
-        now = 4_999L
-        controls.completeFadeOut()
-        assertFalse(controls.hidden)
+        feedback.syncRipples(!controls.hidden)
+        assertEquals(1, feedback.ripples.size)
 
         now = 5_000L
         controls.completeFadeOut()
-        assertTrue(controls.hidden)
+        feedback.syncRipples(!controls.hidden)
+        assertEquals(0, feedback.ripples.size)
+    }
+
+    @Test
+    fun `锁定后指针与解锁按钮同一时序`() {
+        val lock = PlayerLock(elapsedMillis = { now })
+        lock.tapLockButton()
+
+        assertTrue(
+            playerPointerPresent(
+                locked = lock.locked,
+                barsPresent = false,
+                unlockVisible = lock.unlockVisible,
+            ),
+        )
+
+        now = 4_000L
+        lock.beginUnlockFadeOutIfExpired()
+        assertTrue(lock.unlockVisible)
+        assertTrue(
+            playerPointerPresent(
+                locked = lock.locked,
+                barsPresent = false,
+                unlockVisible = lock.unlockVisible,
+            ),
+        )
+
+        now = 5_000L
+        lock.completeUnlockFadeOut()
+        assertFalse(
+            playerPointerPresent(
+                locked = lock.locked,
+                barsPresent = false,
+                unlockVisible = lock.unlockVisible,
+            ),
+        )
     }
 
     @Test
@@ -214,7 +257,7 @@ class PlayerBarsVisibilityTest {
     fun `锁定或抽屉打开时指针随栏一起隐藏`() {
         pointer.onPointerEnter(Offset.Zero)
         pointerFollowsBars(
-            barsVisible = playerBarsVisible(
+            barsPresent = playerBarsVisible(
                 locked = true,
                 controlsVisible = !controls.hidden,
                 panelBarsVisible = true,
@@ -226,7 +269,7 @@ class PlayerBarsVisibilityTest {
 
         pointer.onPointerEnter(Offset.Zero)
         pointerFollowsBars(
-            barsVisible = playerBarsVisible(
+            barsPresent = playerBarsVisible(
                 locked = false,
                 controlsVisible = !controls.hidden,
                 panelBarsVisible = false,
