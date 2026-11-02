@@ -4,7 +4,7 @@ import android.view.Surface
 import com.cc3301.ccplayer.library.MediaFile
 
 /** 切集预检的测试替身：默认认为目标可读。 */
-internal val alwaysReadableProbe: suspend (MediaFile) -> Boolean = { true }
+internal val alwaysReadableProbe: suspend (MediaFile) -> PrecheckOutcome = { PrecheckOutcome.Readable }
 
 /**
  * 假播放引擎：记录控制层下发的指令，并让测试自己触发引擎回调。

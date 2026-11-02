@@ -49,8 +49,8 @@ class PlaybackController(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     /** 单调时钟；测试注入虚拟时间，生产用设备开机时间。 */
     private val nowMillis: () -> Long = { SystemClock.elapsedRealtime() },
-    /** 切集预检：试打开目标读取句柄并读 1 个字节后自关，返回是否可读。 */
-    private val probeTarget: suspend (MediaFile) -> Boolean,
+    /** 切集预检：试打开目标读取句柄并读 1 个字节后自关，返回可读、不可读或跳过。 */
+    private val probeTarget: suspend (MediaFile) -> PrecheckOutcome,
     /** 切集重试前丢弃已建立的字节源，返回是否真的丢弃了；字节源由界面侧持有，绑定后注入。 */
     discardByteSources: suspend () -> Boolean = { false },
 ) : PlaybackEngine.Listener {
@@ -403,6 +403,7 @@ class PlaybackController(
      * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]）；
      * 这里只留「预算 + 余量」的兜底，用于结论因实现缺陷产不出时不让调用方无限等待。
      * 不可读时当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
+     * 预检线程正忙时跳过预检、直接发起切集，只写一行跳过日志，不提示。
      */
     private fun startSwitchWhenTargetReadable(
         index: Int,
@@ -417,26 +418,36 @@ class PlaybackController(
         precheckJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
-                val readable = try {
+                val outcome = try {
                     withTimeoutOrNull(
                         SWITCH_PRECHECK_TIMEOUT_MILLIS + SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS,
                     ) {
                         probeTarget(media)
-                    } ?: false
+                    } ?: PrecheckOutcome.Unreadable
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
                     // 读失败与超时按同一条判据：都只记「读取结果为不可读」，靠耗时区分。
-                    false
+                    PrecheckOutcome.Unreadable
                 }
                 if (token != precheckToken || !active) return@launch
-                if (!readable) {
-                    diagnostics.log {
-                        "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | " +
-                            "异常: 读取结果为不可读"
+                when (outcome) {
+                    PrecheckOutcome.Unreadable -> {
+                        diagnostics.log {
+                            "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | " +
+                                "异常: 读取结果为不可读"
+                        }
+                        _playbackFailures.tryEmit(Unit)
+                        return@launch
                     }
-                    _playbackFailures.tryEmit(Unit)
-                    return@launch
+                    // 跳过预检：直接放行切集、不提示，只留一行日志说明这一路没预检。
+                    PrecheckOutcome.SkippedBusy -> diagnostics.log {
+                        "切集预检跳过: ${media.name} | 原因: 上一路未返回"
+                    }
+                    PrecheckOutcome.SkippedClosed -> diagnostics.log {
+                        "切集预检跳过: ${media.name} | 原因: 预检线程已关闭"
+                    }
+                    PrecheckOutcome.Readable -> Unit
                 }
                 startSwitch(index, media, originAtEnd, source)
             } finally {

@@ -4,12 +4,15 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import java.io.Closeable
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -97,7 +100,7 @@ class PlaybackControllerSwitchGuardTest {
 
     @Test
     fun `an unreadable target is not switched`() = runTest {
-        val controller = controller(probe = { false })
+        val controller = controller(probe = { PrecheckOutcome.Unreadable })
         open(controller, "ep1.mkv", "ep2.mkv")
         engine.reportMediaLoaded()
         val failures = collectFailures(controller)
@@ -118,7 +121,7 @@ class PlaybackControllerSwitchGuardTest {
     @Test
     fun `a precheck that never returns is closed by the fallback timeout`() = runTest {
         // 预检桩永不返回：只有外层「预算 + 余量」的兜底能让调用方收尾。
-        val never = CompletableDeferred<Boolean>()
+        val never = CompletableDeferred<PrecheckOutcome>()
         val controller = controller(probe = { never.await() })
         open(controller, "ep1.mkv", "ep2.mkv")
         engine.reportMediaLoaded()
@@ -392,7 +395,7 @@ class PlaybackControllerSwitchGuardTest {
             probe = {
                 probed += it.name
                 gate.await()
-                true
+                PrecheckOutcome.Readable
             },
         )
         open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
@@ -476,41 +479,56 @@ class PlaybackControllerSwitchGuardTest {
     @Test
     fun `a stuck precheck read does not block the next switch`() = runTest {
         // 预检接缝用真的模块：第一路的读取卡在 open 里不返回。
-        val probe = PrecheckProbe(backgroundScope, timeoutMillis = STUCK_PRECHECK_BUDGET_MILLIS)
+        val executor = Executors.newSingleThreadExecutor { Thread(it, "precheck-test").apply { isDaemon = true } }
+        val probe = PrecheckProbe(executor, timeoutMillis = STUCK_PRECHECK_BUDGET_MILLIS)
         val readStarted = CountDownLatch(1)
         val readGate = CountDownLatch(1)
         val handle = CloseCountingHandle()
-        val controller = controller(
-            probe = { media ->
-                probe.probe({
-                    // 第二路必须走跳过分支，不应该再打开目标。
-                    if (media.name != "ep2.mkv") error("跳过预检时不应打开目标")
-                    readStarted.countDown()
-                    readGate.await()
-                    handle
-                }) { true }
-            },
-        )
-        open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
-        engine.reportMediaLoaded()
-        val failures = collectFailures(controller)
+        try {
+            val controller = controller(
+                probe = { media ->
+                    if (media.name == "ep2.mkv") {
+                        // 第一路：预检阻塞等结论，换到 IO 上等，不占控制层线程。
+                        withContext(Dispatchers.IO) {
+                            probe.probe({
+                                readStarted.countDown()
+                                readGate.await()
+                                handle
+                            }) { true }
+                        }
+                    } else {
+                        // 第二路：预检线程正忙，就地跳过并放行，不打开、不读、不等待。
+                        probe.probe({ error("跳过预检时不应打开目标") }) {
+                            error("跳过预检时不应读取目标")
+                        }
+                    }
+                },
+            )
+            open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
+            engine.reportMediaLoaded()
+            val failures = collectFailures(controller)
 
-        // 第一下点下一集：预检卡在读取里。
-        controller.next()
-        runCurrent()
-        assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
+            // 第一下点下一集：预检卡在读取里。
+            controller.next()
+            runCurrent()
+            assertTrue(readStarted.await(WATCHDOG_MILLIS, TimeUnit.MILLISECONDS))
 
-        // 第二下：读取线程正忙，跳过预检直接发起切集，不等 4 秒兜底、不报失败。
-        controller.next()
-        runCurrent()
-        assertEquals("root/ep3.mkv", engine.startedUrls.last())
-        assertTrue(controller.switching.value)
-        assertTrue(failures.isEmpty())
+            // 第二下：读取线程正忙，跳过预检直接发起切集，不等 4 秒兜底、不报失败。
+            // 虚拟时间不推进：判定只靠「上一路没返回」，与预算无关。
+            controller.next()
+            runCurrent()
+            assertEquals("root/ep3.mkv", engine.startedUrls.last())
+            assertTrue(controller.switching.value)
+            assertTrue(failures.isEmpty())
 
-        // 上一路最终返回：句柄照样关闭，结果丢弃。
-        readGate.countDown()
-        assertTrue(handle.awaitClosed())
-        assertEquals(1, handle.closeCount)
+            // 上一路最终返回：句柄照样关闭，结果丢弃。
+            readGate.countDown()
+            assertTrue(handle.awaitClosed())
+            assertEquals(1, handle.closeCount)
+        } finally {
+            readGate.countDown()
+            executor.shutdownNow()
+        }
     }
 
     /** 只数关闭次数，并给测试一个等关闭落地的点。 */
@@ -539,7 +557,7 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     private fun TestScope.controller(
-        probe: suspend (MediaFile) -> Boolean = alwaysReadableProbe,
+        probe: suspend (MediaFile) -> PrecheckOutcome = alwaysReadableProbe,
         discard: suspend () -> Boolean = { true },
     ): PlaybackController = PlaybackController(
         engine,

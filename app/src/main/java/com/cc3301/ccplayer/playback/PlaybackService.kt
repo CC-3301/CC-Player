@@ -28,6 +28,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import java.io.File
+import java.util.concurrent.Executors
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -141,26 +142,34 @@ class PlaybackService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
+    /** 预检读取专用线程：阻塞读只占这一条线程，不占解码许可，也不随点击次数堆积。 */
+    private val precheckExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "switch-precheck").apply { isDaemon = true }
+    }
+
     /** 切集预检的预算器：整条预检只有它一处到点计时。 */
-    private val precheckProbe by lazy { PrecheckProbe(scope) }
+    private val precheckProbe by lazy { PrecheckProbe(precheckExecutor) }
 
     /**
      * 切集预检：打开目标读取句柄读 1 个字节后立即关闭，[PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS] 到点按不可读收尾。
      * 本地走 ContentResolver，网络走与封面相同的随机读接缝；都不占解码许可。
+     * 读取本身在预检线程上跑，这里只是换到 IO 上等结果，不占主线程。
      */
-    private suspend fun probeTargetReadable(media: MediaFile): Boolean {
+    private suspend fun probeTargetReadable(media: MediaFile): PrecheckOutcome = withContext(Dispatchers.IO) {
         if (media.source == MediaSource.Network) {
             val reads = (application as CcPlayerApplication).networkReads
-            return precheckProbe.probe({ reads.openRead(media.location, media.size) }) { source ->
+            precheckProbe.probe({ reads.openRead(media.location, media.size) }) { source ->
                 source.readAt(0, ByteArray(1), 0, 1) > 0
             }
-        }
-        return precheckProbe.probe({ contentResolver.openInputStream(media.location.toUri()) }) { stream ->
-            stream.read(ByteArray(1)) >= 0
+        } else {
+            precheckProbe.probe({ contentResolver.openInputStream(media.location.toUri()) }) { stream ->
+                stream.read(ByteArray(1)) >= 0
+            }
         }
     }
 
     override fun onDestroy() {
+        precheckExecutor.shutdownNow()
         stateScope.cancel()
         scope.cancel()
         audioOutputMonitor.stop()
