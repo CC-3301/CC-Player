@@ -384,7 +384,6 @@ class PlaybackControllerSleepTimerTest {
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 
     private fun TestScope.advance(millis: Long) {

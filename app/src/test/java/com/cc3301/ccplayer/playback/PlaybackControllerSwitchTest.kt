@@ -2193,7 +2193,6 @@ class PlaybackControllerSwitchTest {
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 
     /** 带诊断的控制层：用来断言被拒绝的点击留下了意图记录。 */
@@ -2204,7 +2203,6 @@ class PlaybackControllerSwitchTest {
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 
     private fun TestScope.playingControllerWithDiagnostics(

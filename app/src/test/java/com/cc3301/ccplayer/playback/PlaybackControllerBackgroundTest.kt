@@ -264,7 +264,6 @@ class PlaybackControllerBackgroundTest {
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 
     private fun TestScope.playingController(): PlaybackController {

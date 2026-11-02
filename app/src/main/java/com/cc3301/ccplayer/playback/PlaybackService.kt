@@ -18,19 +18,14 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import androidx.core.graphics.createBitmap
-import androidx.core.net.toUri
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.CcPlayerApplication
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
-import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import java.io.File
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,7 +77,6 @@ class PlaybackService : Service() {
             scope,
             marshalCallbacks = true,
             diagnostics = diagnostics,
-            probeTarget = ::probeTargetReadable,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pauseForBackground,
@@ -144,43 +138,7 @@ class PlaybackService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
-    /**
-     * 预检读取专用线程：阻塞读只占这一条线程，不占解码许可，也不随点击次数堆积。
-     * 预检按这条线程池自身是否空闲判断这一路跳过还是照排。
-     */
-    private val precheckExecutor = ThreadPoolExecutor(
-        1,
-        1,
-        0L,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(),
-    ) { runnable -> Thread(runnable, "switch-precheck").apply { isDaemon = true } }
-
-    /** 切集预检的预算器：整条预检只有它一处到点计时。 */
-    private val precheckProbe by lazy { PrecheckProbe(precheckExecutor) }
-
-    /**
-     * 切集预检：打开目标读取句柄读 1 个字节后立即关闭，[PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS] 到点仍给不出结论就放行。
-     * 本地走 ContentResolver，网络走与封面相同的随机读接缝；都不占解码许可。
-     * 读取本身在预检线程上跑，这里只是换到 IO 上等结果，不占主线程；协程取消打不断这段等待。
-     */
-    private suspend fun probeTargetReadable(media: MediaFile): PrecheckOutcome = withContext(Dispatchers.IO) {
-        if (media.source == MediaSource.Network) {
-            val reads = (application as CcPlayerApplication).networkReads
-            precheckProbe.probe({ reads.openRead(media.location, media.size) }) { source ->
-                source.readAt(0, ByteArray(1), 0, 1) > 0
-            }
-        } else {
-            precheckProbe.probe({ contentResolver.openInputStream(media.location.toUri()) }) { stream ->
-                stream.read(ByteArray(1)) >= 0
-            }
-        }
-    }
-
     override fun onDestroy() {
-        // 预检句柄由预检自己起线程关，不排在这条读取队列上：
-        // 这里丢弃排队中的读取任务，也不会漏关已登记的句柄；关闭卡住也不挡这条线程的关停。
-        precheckExecutor.shutdownNow()
         stateScope.cancel()
         scope.cancel()
         audioOutputMonitor.stop()

@@ -44,7 +44,7 @@ class CcPlayerApplication : Application() {
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(this) }
 
-    /** 网络随机读：封面与切集预检共用一份，避免各自再建一套会话池。 */
+    /** 网络随机读：封面等预览共用一份，避免各自再建一套会话池。 */
     val networkReads: NetworkMediaReads by lazy { createNetworkReads() }
 
     private val previewHolder = MediaPreviewHolder {

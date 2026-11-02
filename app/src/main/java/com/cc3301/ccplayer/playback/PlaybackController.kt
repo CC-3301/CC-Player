@@ -20,7 +20,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlin.coroutines.cancellation.CancellationException
 import kotlin.math.abs
 
 /**
@@ -48,8 +47,6 @@ class PlaybackController(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     /** 单调时钟；测试注入虚拟时间，生产用设备开机时间。 */
     private val nowMillis: () -> Long = { SystemClock.elapsedRealtime() },
-    /** 切集预检：试打开目标读取句柄并读 1 个字节后自关，返回可读、不可读或跳过。 */
-    private val probeTarget: suspend (MediaFile) -> PrecheckOutcome,
     /** 切集重试前丢弃已建立的字节源，返回是否真的丢弃了；字节源由界面侧持有，绑定后注入。 */
     discardByteSources: suspend () -> Boolean = { false },
 ) : PlaybackEngine.Listener {
@@ -316,13 +313,6 @@ class PlaybackController(
     /** 是否在前台；与 Surface 一起决定加载计时是否累积。 */
     private var foreground = true
 
-    /** 切集预检任务；连点上一集/下一集时替换目标，在途预检作废。 */
-    private var precheckJob: Job? = null
-    private var precheckToken = 0
-
-    /** 预检期间已经点到的那一集；连点按它继续前移，不回到当前播放项。 */
-    private var precheckTargetIndex = NO_MEDIA
-
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
     private val resumeActivityGate = ResumeActivityGate()
 
@@ -391,74 +381,9 @@ class PlaybackController(
             return
         }
         if (active) {
-            startSwitchWhenTargetReadable(index, media, originAtEnd, source)
+            startSwitch(index, media, originAtEnd, source)
         } else {
             startSession(index, media)
-        }
-    }
-
-    /**
-     * 切集预检：试打开目标读取句柄读 1 个字节；只有明确读不到才不发起切集。
-     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]），这里不再另加兜底。
-     * 3 秒内给不出结论（到点、读取异常、上一路未返回、预检线程已关闭）一律放行、照常发起切集：
-     * 预检是优化不是门禁，不拿一次失败提示换掉一次可能成功的切集；失败兜底交给 10 秒加载看护。
-     * 明确不可读时当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
-     * 放行只写一行跳过日志，不提示。
-     */
-    private fun startSwitchWhenTargetReadable(
-        index: Int,
-        media: MediaFile,
-        originAtEnd: Boolean,
-        source: LoadTrigger,
-    ) {
-        // 连点上一集/下一集时新的目标接管：在途预检作废，只认最后一次点击。
-        precheckJob?.cancel()
-        precheckTargetIndex = index
-        val token = ++precheckToken
-        precheckJob = scope.launch {
-            try {
-                val startedAtMillis = nowMillis()
-                val outcome = try {
-                    probeTarget(media)
-                } catch (cancellation: CancellationException) {
-                    throw cancellation
-                } catch (failure: Exception) {
-                    // 接缝自己炸了也是判不出来：放行，不判不可读。
-                    PrecheckOutcome.SkippedError
-                }
-                if (token != precheckToken || !active) return@launch
-                when (outcome) {
-                    PrecheckOutcome.Unreadable -> {
-                        diagnostics.log {
-                            "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | " +
-                                "异常: 读取结果为不可读"
-                        }
-                        _playbackFailures.tryEmit(Unit)
-                        return@launch
-                    }
-                    // 放行：直接发起切集、不提示，只留一行日志说明这一路没预检成。
-                    PrecheckOutcome.SkippedTimeout -> diagnostics.log {
-                        "切集预检跳过: ${media.name} | 原因: 到点"
-                    }
-                    PrecheckOutcome.SkippedError -> diagnostics.log {
-                        "切集预检跳过: ${media.name} | 原因: 异常"
-                    }
-                    PrecheckOutcome.SkippedBusy -> diagnostics.log {
-                        "切集预检跳过: ${media.name} | 原因: 上一路未返回"
-                    }
-                    PrecheckOutcome.SkippedClosed -> diagnostics.log {
-                        "切集预检跳过: ${media.name} | 原因: 预检线程已关闭"
-                    }
-                    PrecheckOutcome.Readable -> Unit
-                }
-                startSwitch(index, media, originAtEnd, source)
-            } finally {
-                val runningJob = coroutineContext[Job]
-                if (precheckJob === runningJob) {
-                    precheckJob = null
-                    precheckTargetIndex = NO_MEDIA
-                }
-            }
         }
     }
 
@@ -474,21 +399,13 @@ class PlaybackController(
 
     /** 名称自然排序下的下一集；列表末尾时不动作。切集缓冲期间实时前移目标。 */
     fun next() {
-        playAdjacent(adjacentBaseIndex() + 1)
+        playAdjacent(_currentIndex.value + 1)
     }
 
     /** 名称自然排序下的上一集；列表开头时不动作。切集缓冲期间实时前移目标。 */
     fun previous() {
-        playAdjacent(adjacentBaseIndex() - 1)
+        playAdjacent(_currentIndex.value - 1)
     }
-
-    /** 相邻集的起点：预检期间用已经点到的那一集，连点才不会退回当前播放项。 */
-    private fun adjacentBaseIndex(): Int =
-        if (precheckJob?.isActive == true && precheckTargetIndex != NO_MEDIA) {
-            precheckTargetIndex
-        } else {
-            _currentIndex.value
-        }
 
     private fun playAdjacent(index: Int) {
         when (loadPhase) {
@@ -613,11 +530,6 @@ class PlaybackController(
     private fun startSession(index: Int, media: MediaFile) {
         loadSource = LoadTrigger.Open
         logLoadStart(media, index)
-        // 新会话作废在途预检：旧预检不能再给这个会话发起切集。
-        precheckJob?.cancel()
-        precheckJob = null
-        precheckToken++
-        precheckTargetIndex = NO_MEDIA
         _currentIndex.value = index
         _progress.value = PlaybackProgress()
         endSeekPreview(commit = false)
@@ -2146,10 +2058,6 @@ class PlaybackController(
         switchFramePending = false
         cancelLoadGuard()
         endPendingFrameWatchdog()
-        precheckJob?.cancel()
-        precheckJob = null
-        precheckToken++
-        precheckTargetIndex = NO_MEDIA
         _switching.value = false
         _restoring.value = false
         restartFromStartAfterRestore = false
@@ -2418,9 +2326,6 @@ class PlaybackController(
 
         /** 加载从最近一次目标开始算的判失败时长；重试不顺延，三个阶段共用。 */
         const val LOAD_FAIL_DELAY_MILLIS = 10_000L
-
-        /** 切集预检的等待上限；到点仍给不出结论就放行，照常发起切集。 */
-        const val SWITCH_PRECHECK_TIMEOUT_MILLIS = 3_000L
 
         private const val NO_MEDIA = -1
 

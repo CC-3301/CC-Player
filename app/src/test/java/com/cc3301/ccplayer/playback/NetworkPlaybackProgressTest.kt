@@ -154,7 +154,6 @@ class NetworkPlaybackProgressTest {
             progress,
             scope,
             nowMillis = { 0L },
-            probeTarget = alwaysReadableProbe,
         ).also { controller ->
             controller.openPlaylist(listOf(entry), entry)
             engine.reportMediaLoaded()

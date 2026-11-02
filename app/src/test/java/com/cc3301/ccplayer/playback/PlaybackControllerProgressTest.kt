@@ -258,6 +258,5 @@ class PlaybackControllerProgressTest {
             progress,
             backgroundScope,
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 }

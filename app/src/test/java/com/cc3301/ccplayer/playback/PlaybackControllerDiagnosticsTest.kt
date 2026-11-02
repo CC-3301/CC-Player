@@ -32,7 +32,6 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
-            probeTarget = alwaysReadableProbe,
         )
 
         controller.openPlaylist(listOf(media), media)
@@ -179,7 +178,6 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
-            probeTarget = alwaysReadableProbe,
         )
         open(controller)
 
@@ -374,7 +372,6 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
-            probeTarget = alwaysReadableProbe,
         )
 
     private fun open(controller: PlaybackController) {
