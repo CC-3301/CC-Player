@@ -982,7 +982,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (target != ScreenOrientation.System) recordScreenOrientation(target)
     }
 
-    /** 每次方向真正切换都写一条日志。 */
+    /**
+     * 每次方向真正切换都写一条日志。
+     *
+     * 部分机型在这个回调里读到的显示方向仍是旧值：播放页的方向等待因此等不到对齐，
+     * 由 2 秒上限兜底，多黑 2 秒后照常出画面。
+     */
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         screenOrientation = currentScreenOrientation()

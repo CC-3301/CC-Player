@@ -81,6 +81,7 @@ import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -372,27 +373,37 @@ fun PlayerScreen(
         switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
     }
     val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
-    // 本次播放是否已经摆过视频比例：比例到达过一次就一直为真，之后不再按比例盖黑底。
-    var aspectRatioPlaced by remember { mutableStateOf(false) }
-    LaunchedEffect(surfacePresentation.aspectRatio) {
-        if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
-    }
-    // 首次摆位等屏幕方向：首帧与比例到位后，跟随视频还要等屏幕转到位再撤黑，最多等 2 秒。
-    // 方向到位时这个等待随键变化被取消，不需要额外的完成通知。
-    val awaitsOrientation = awaitsPlayerOrientation(
+    // 首次摆位门：进页先不按比例摆位、盖着黑等屏幕转过来，方向对齐或等满时限后再一起摆位并撤黑。
+    // 比例未知期间一直盖黑由比例判据负责，不进这道门，也不设超时。
+    var placementGate by remember { mutableStateOf(PlayerPlacementGate()) }
+    val ratioKnown = hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)
+    val rotationPending = awaitsVideoRotation(
         mode = orientationMode,
         videoAspectRatio = surfacePresentation.aspectRatio,
-        rotationOverride = orientationOverride,
         screenOrientation = screenOrientation,
-        showsPicture = surfacePresentation.showsPicture,
-        aspectRatioPlaced = aspectRatioPlaced,
+        rotationOverride = orientationOverride,
     )
-    // 到期标记随等待开始重建：新一轮等待从零计时，不会沿用上一轮已经到期的状态。
-    var orientationWaitExpired by remember(awaitsOrientation) { mutableStateOf(false) }
+    val awaitsOrientation = placementGate.awaitsOrientation(
+        ratioKnown = ratioKnown,
+        showsPicture = surfacePresentation.showsPicture,
+        rotationPending = rotationPending,
+    )
+    val placesPicture = placementGate.placesPicture(
+        ratioKnown = ratioKnown,
+        rotationPending = rotationPending,
+    )
+    // 每帧把事实喂给状态机：开始时进入等待，方向对齐即结案；结案后方向回摆不再重开计时、不再重新盖黑。
+    SideEffect {
+        placementGate = placementGate.withFrame(
+            ratioKnown = ratioKnown,
+            showsPicture = surfacePresentation.showsPicture,
+            rotationPending = rotationPending,
+        )
+    }
     LaunchedEffect(awaitsOrientation) {
         if (!awaitsOrientation) return@LaunchedEffect
         runOrientationWait()
-        orientationWaitExpired = true
+        placementGate = placementGate.withWaitLimit()
     }
     // 顶/底栏的动画目标与在场：动画目标只看完全可见，在场含淡出中。
     val bars = playerBarsPresence(
@@ -525,7 +536,8 @@ fun PlayerScreen(
         val viewport = videoViewport(
             containerWidth = with(density) { maxWidth.toPx() },
             containerHeight = with(density) { maxHeight.toPx() },
-            videoAspectRatio = surfacePresentation.aspectRatio,
+            // 还在等方向时先不按比例摆位：视频区留在整屏，等方向到位或到时限再与撤黑一起摆。
+            videoAspectRatio = if (placesPicture) surfacePresentation.aspectRatio else null,
         )
         val morePanelWidth = (maxWidth - 72.dp).coerceIn(1.dp, 320.dp)
         val morePanelMaxHeight = (maxHeight - PlayerTopBarHeight - PlayerControlBarReserve)
@@ -552,8 +564,8 @@ fun PlayerScreen(
             showPlayerBlackLayer(
                 showsPicture = surfacePresentation.showsPicture,
                 videoAspectRatio = surfacePresentation.aspectRatio,
-                aspectRatioPlaced = aspectRatioPlaced,
-                orientationPending = awaitsOrientation && !orientationWaitExpired,
+                aspectRatioPlaced = placementGate.settled,
+                orientationPending = awaitsOrientation,
             )
         ) {
             Box(

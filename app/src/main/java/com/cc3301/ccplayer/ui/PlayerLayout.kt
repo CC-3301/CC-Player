@@ -4,7 +4,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.ui.theme.AppColors
 import kotlin.math.min
 import kotlin.math.roundToLong
@@ -49,9 +48,9 @@ fun videoViewport(
  * 播放页黑底层规则：屏幕上没有可显示的画面、本次播放还没摆过视频比例，或首次摆位还在等屏幕方向，就铺黑底。
  * 比例未知期间视频区先按整屏摆放，黑底挡住这次摆放；比例到达即第一次摆位，并在同一次重绘里撤掉黑底。
  *
- * [aspectRatioPlaced] 表示本次播放已经摆过视频比例：比例到达过一次就一直为真，之后不再按比例盖。
- * [orientationPending] 表示首次摆位还在等屏幕方向（见 [awaitsPlayerOrientation]）：为真时黑底继续盖住
- * 竖向摆出来的那一帧，方向到位或等待到时限后撤掉。
+ * [aspectRatioPlaced] 表示本次播放的首次摆位已有结论：有结论后就一直为真，之后不再按比例盖。
+ * [orientationPending] 表示首次摆位还在等屏幕转向视频方向（见 [PlayerPlacementGate]）：为真时黑底继续
+ * 盖住竖向摆出来的那一帧，方向到位或等待到时限后与摆位一起撤掉。
  * 有没有画面只由控制层派生的 SurfacePresentation 给出，界面不再自行组合加载阶段、黑底与视频轨。
  */
 fun showPlayerBlackLayer(
@@ -62,23 +61,6 @@ fun showPlayerBlackLayer(
 ): Boolean = !showsPicture ||
     orientationPending ||
     (!aspectRatioPlaced && !hasKnownVideoAspectRatio(videoAspectRatio))
-
-/**
- * 首次摆位是否还要等屏幕方向：首帧与比例都已到位、本次播放还没摆过比例，
- * 且屏幕方向还没跟住视频方向（只有“跟随视频”档会不跟，见 [videoOrientationAligned]）。
- * 切集沿用屏上旧画面，不进这条等待。
- */
-fun awaitsPlayerOrientation(
-    mode: OrientationMode,
-    videoAspectRatio: Double?,
-    rotationOverride: ScreenOrientation?,
-    screenOrientation: ScreenOrientation,
-    showsPicture: Boolean,
-    aspectRatioPlaced: Boolean,
-): Boolean = showsPicture &&
-    !aspectRatioPlaced &&
-    hasKnownVideoAspectRatio(videoAspectRatio) &&
-    !videoOrientationAligned(mode, videoAspectRatio, screenOrientation, rotationOverride)
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
