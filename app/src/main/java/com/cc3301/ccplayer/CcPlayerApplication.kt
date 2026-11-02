@@ -44,16 +44,19 @@ class CcPlayerApplication : Application() {
 
     private val settings: SettingsRepository by lazy { SettingsRepository.create(this) }
 
+    /** 网络随机读：封面等预览共用一份，避免各自再建一套会话池。 */
+    val networkReads: NetworkMediaReads by lazy { createNetworkReads() }
+
     private val previewHolder = MediaPreviewHolder {
         // 后台范围用进程级 scope：时长补读等任务跟随应用，不随界面重建。
-        CachedMediaPreviewSource.create(this, previewReads(), diagnostics, backgroundScope = scope)
+        CachedMediaPreviewSource.create(this, networkReads, diagnostics, backgroundScope = scope)
     }
 
     /** 缩略图预览源：整个进程只有一份，转屏与界面重建后复用同一个抽帧许可。 */
     val mediaPreview: MediaPreviewSource get() = previewHolder.instance
 
-    /** 预览读取直接走各协议，不建回环代理，也不参与播放代理的释放。 */
-    private fun previewReads(): NetworkMediaReads {
+    /** 随机读直接走各协议，不建回环代理，也不参与播放代理的释放。 */
+    private fun createNetworkReads(): NetworkMediaReads {
         val sources = NetworkSourceRepository(
             store = DataStoreBookmarkStore.create(this),
             credentials = EncryptedCredentialStore.create(this),

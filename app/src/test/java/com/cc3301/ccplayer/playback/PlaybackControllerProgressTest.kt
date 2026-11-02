@@ -253,5 +253,10 @@ class PlaybackControllerProgressTest {
 
     /** 用 backgroundScope，避免测试推进虚拟时间时把看门狗也推到点。 */
     private fun TestScope.controller(): PlaybackController =
-        PlaybackController(engine, progress, backgroundScope, nowMillis = { testScheduler.currentTime })
+        PlaybackController(
+            engine,
+            progress,
+            backgroundScope,
+            nowMillis = { testScheduler.currentTime },
+        )
 }

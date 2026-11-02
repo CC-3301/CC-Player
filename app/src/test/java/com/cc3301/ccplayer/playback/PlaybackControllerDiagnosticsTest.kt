@@ -45,20 +45,21 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
-    fun `看门狗触发时写日志`() = runTest {
+    fun `首次打开无进展时写失败日志`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
-        assertTrue(sink.lines.any { it.contains("加载看门狗触发: ep1.mkv") })
+        assertTrue(sink.lines.any { it.contains("加载失败: ep1.mkv") })
+        assertTrue(sink.lines.any { it.contains("失败来源: 无进展超时") })
     }
 
     @Test
-    fun `看门狗日志在文件名为空时回退索引`() = runTest {
+    fun `首次打开失败日志在文件名为空时回退索引`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
@@ -67,20 +68,20 @@ class PlaybackControllerDiagnosticsTest {
             MediaFile(name = "", location = "root/ep0.mkv"),
         )
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
-        assertTrue(sink.lines.any { it.contains("加载看门狗触发: 索引 0") })
+        assertTrue(sink.lines.any { it.contains("加载失败: 索引 0") })
     }
 
     @Test
-    fun `关闭时不写看门狗日志`() = runTest {
+    fun `关闭时不写加载失败日志`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = false)
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.isEmpty())
@@ -111,7 +112,7 @@ class PlaybackControllerDiagnosticsTest {
 
         controller.setRenderSurfaceAvailable(false)
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
 
         assertFalse(sink.lines.any { it.contains("Surface 重挂: 等待新帧") })
@@ -160,11 +161,11 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportPlaybackFailed("无法打开文件")
 
         val text = sink.lines.joinToString("\n")
-        assertTrue(text.contains("切集失败: ep2.mkv"))
+        assertTrue(text.contains("加载失败: ep2.mkv"))
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
         assertTrue(text.contains("阶段: 切集"))
-        assertTrue(text.contains("来源: 播放核心报错（无法打开文件）"))
+        assertTrue(text.contains("失败来源: 播放核心报错（无法打开文件）"))
     }
 
     @Test
@@ -189,29 +190,34 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
-    fun `看门狗失败与播放核心报错可区分`() = runTest {
+    fun `无进展超时与播放核心报错可区分`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
-        assertTrue(text.contains("加载看门狗触发: ep1.mkv"))
+        assertTrue(text.contains("加载失败: ep1.mkv"))
         assertTrue(text.contains("目标: root/ep1.mkv"))
         assertTrue(text.contains("阶段: 首次加载"))
-        assertTrue(text.contains("来源: 看门狗超时"))
+        assertTrue(text.contains("失败来源: 无进展超时"))
     }
 
     @Test
-    fun `看门狗与播放核心报错记录可区分的来源与完整定位字段`() = runTest {
+    fun `无进展超时与播放核心报错记录可区分的来源与完整定位字段`() = runTest {
         val watchdogSink = MemoryDiagnosticsSink()
         val watchdogController = controller(diagnostics(watchdogSink, enabled = true))
         open(watchdogController)
+        // 5 秒重试会重发一次加载，失败行记的是重试后的令牌。
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        runCurrent()
         val watchdogToken = engine.currentLoadToken
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(
+            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
+        )
         runCurrent()
 
         val coreSink = MemoryDiagnosticsSink()
@@ -220,16 +226,17 @@ class PlaybackControllerDiagnosticsTest {
         val coreToken = engine.currentLoadToken
         engine.reportPlaybackFailed("无法打开文件")
 
-        val watchdogLine = watchdogSink.lines.single { it.contains("来源:") }
-        val coreLine = coreSink.lines.single { it.contains("来源:") }
+        val watchdogLine = watchdogSink.lines.single { it.contains("失败来源:") }
+        val coreLine = coreSink.lines.single { it.contains("失败来源:") }
         assertTrue(watchdogLine.contains("目标: root/ep1.mkv"))
         assertTrue(watchdogLine.contains("加载令牌: $watchdogToken"))
         assertTrue(watchdogLine.contains("阶段: 首次加载"))
-        assertTrue(watchdogLine.contains("来源: 看门狗超时（60 秒无加载事件）"))
+        assertTrue(watchdogLine.contains("失败来源: 无进展超时（10 秒）"))
+        assertTrue(watchdogLine.contains("计时挂起: 0 次"))
         assertTrue(coreLine.contains("目标: root/ep1.mkv"))
         assertTrue(coreLine.contains("加载令牌: $coreToken"))
         assertTrue(coreLine.contains("阶段: 首次加载"))
-        assertTrue(coreLine.contains("来源: 播放核心报错（无法打开文件）"))
+        assertTrue(coreLine.contains("失败来源: 播放核心报错（无法打开文件）"))
     }
 
     @Test
@@ -326,7 +333,7 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
-    fun `切集无帧超时记录目标、令牌与来源`() = runTest {
+    fun `切集无进展超时记录目标、令牌与来源`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
@@ -336,17 +343,23 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportMediaLoaded()
 
         controller.next()
-        val token = engine.currentLoadToken
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        // 5 秒重试重发过加载：失败行记的是重试后的令牌，回退原片又会再换一次。
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        runCurrent()
+        val token = engine.currentLoadToken
+        advanceTimeBy(
+            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
+        )
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
-        assertTrue(text.contains("切集失败: ep2.mkv"))
+        assertTrue(text.contains("加载失败: ep2.mkv"))
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
         assertTrue(text.contains("阶段: 切集"))
-        assertTrue(text.contains("来源: 无帧超时"))
+        assertTrue(text.contains("失败来源: 无进展超时"))
+        assertTrue(text.contains("重试: 1 次"))
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =

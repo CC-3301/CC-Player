@@ -163,6 +163,8 @@ class PlaybackService : Service() {
 
         /** 界面只上报前后台；暂停与通知动作由服务内的策略统一决定。 */
         fun setAppInForeground(foreground: Boolean) {
+            // 切集计时按真实前后台挂起，与 Surface 是否还在无关。
+            this@PlaybackService.playbackController.setAppInForeground(foreground)
             this@PlaybackService.backgroundPolicy.setAppInForeground(foreground)
         }
     }

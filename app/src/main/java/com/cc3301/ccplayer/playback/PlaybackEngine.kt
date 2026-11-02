@@ -24,7 +24,7 @@ interface PlaybackEngine {
     fun stop()
 
     /**
-     * 丢弃所有在途加载代际。加载看门狗判失败后，在途加载可能永远不会再产生事件，
+     * 丢弃所有在途加载代际。加载看护判超时后，在途加载可能永远不会再产生事件，
      * 恢复原片前必须先丢掉它，否则恢复的 FILE_LOADED 会配到旧代际。
      */
     fun discardInFlightLoads()
@@ -128,9 +128,8 @@ interface PlaybackEngine {
         fun onSeekExecuted(seekId: Long, targetMillis: Long)
 
         /**
-         * 收到任一加载相关事件；用于重置“完全无事件”看门狗。
-         * [activity] 是事件来源，控制层据此区分真实加载活动与自身 resume 的回声；
-         * [loadToken] 是产生它的加载，未知时为 null。
+         * 收到任一加载相关事件。控制层在切集期间用它把等新帧窗口清零，
+         * 并用 [activity] 与 [loadToken] 区分真实加载活动与自身 resume 的回声。
          */
         fun onLoadActivity(activity: LoadActivity, loadToken: Int?)
 
