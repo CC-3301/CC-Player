@@ -56,7 +56,7 @@ class PlaybackController(
 ) : PlaybackEngine.Listener {
 
     /** 字节源丢弃出口：服务先构造控制层，界面绑定后再注入；未注入时按没有源可丢处理。 */
-    private var switchSourceDiscard = discardByteSources
+    private var loadSourceDiscard = discardByteSources
 
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
@@ -278,36 +278,43 @@ class PlaybackController(
     /** 等新帧的计时任务；只在切集结束后排。 */
     private var pendingFrameJob: Job? = null
 
-    /** 本次切集从最近一次目标开始累计的运行时长；后台与 Surface 分离不计入。 */
-    private val switchElapsed = RunningDuration(nowMillis)
+    /**
+     * 首次打开与切集共用的累计运行时长。只在前台且有可渲染 Surface 时累积，
+     * 暂停不挂起；判据与日志耗时都读它，不用墙上时钟重算。
+     */
+    private val guardElapsed = RunningDuration(nowMillis)
 
-    /** 切集看护计时：先到 5 秒重试，重试后再到 10 秒判失败。 */
-    private var switchGuardJob: Job? = null
+    /** 加载看护计时：先到 5 秒重试，重试后再到 10 秒判失败。 */
+    private var guardJob: Job? = null
 
-    /** 本次切集是否已重试；一次切集只重试一次。 */
-    private var switchRetried = false
+    /** 本次加载是否已重试；一次加载只重试一次。 */
+    private var guardRetried = false
 
-    /** 重试发生的时刻；只用于失败日志的事件时间线。 */
-    private var switchRetriedAtMillis: Long? = null
+    /** 重试发生时的累计运行时长；只用于日志的事件时间线。 */
+    private var loadRetriedAtMillis: Long? = null
 
-    /** 本次切集开始的时刻；成功耗时与失败总耗时按它算，只用于日志。 */
-    private var switchStartedAtMillis = 0L
+    /** 本次加载计时被挂起的次数；写进失败行，用来解释耗时与判据的差。 */
+    private var guardSuspensions = 0
 
-    /** 本次切集的目标前移记录；连点只并进事件时间线，不单独写日志。 */
-    private val switchRetargets = mutableListOf<String>()
+    /** 本次加载的目标前移记录；连点只并进事件时间线，不单独写日志。 */
+    private val loadRetargets = mutableListOf<String>()
 
-    /** 本次切集触发过的字节源重建次数。 */
-    private var switchByteSourceRebuilds = 0
+    /** 本次加载触发过的字节源重建次数，以及重试时没能执行的标记。 */
+    private var loadByteSourceRebuilds = 0
+    private var loadDiscardSkipped = false
 
-    /** 本次切集已观察到的进展事件时刻；只在首次出现时记一次。 */
-    private var switchLoadCompletedAtMillis: Long? = null
-    private var switchFirstFrameAtMillis: Long? = null
-    private var switchPositionAdvancedAtMillis: Long? = null
+    /** 已观察到的事件时刻，都按累计运行时长记；只在首次出现时记一次。 */
+    private var loadCompletedAtMillis: Long? = null
+    private var loadFirstFrameAtMillis: Long? = null
+    private var loadPositionAdvancedAtMillis: Long? = null
 
-    /** 本次切集的来源；只用于诊断日志区分手动、列表与片尾。 */
-    private var switchSource = SwitchSource.Manual
+    /** 目标首次接管视频输出的时刻；用来区分「解不出帧」与「帧出了没上屏」。 */
+    private var loadOutputLiveAtMillis: Long? = null
 
-    /** 是否在前台；与 Surface 一起决定切集计时是否累积。 */
+    /** 本次加载的来源；只用于诊断日志区分打开、手动、列表与片尾。 */
+    private var loadSource = LoadTrigger.Open
+
+    /** 是否在前台；与 Surface 一起决定加载计时是否累积。 */
     private var foreground = true
 
     /** 切集预检任务；连点上一集/下一集时替换目标，在途预检作废。 */
@@ -378,10 +385,10 @@ class PlaybackController(
             diagnostics.log { "播放列表选择未执行: ${loadPhaseLabel(loadPhase)}阶段（索引 $index）" }
             return
         }
-        playIndex(index, source = SwitchSource.Playlist)
+        playIndex(index, source = LoadTrigger.Playlist)
     }
 
-    private fun playIndex(index: Int, originAtEnd: Boolean = false, source: SwitchSource = SwitchSource.Manual) {
+    private fun playIndex(index: Int, originAtEnd: Boolean = false, source: LoadTrigger = LoadTrigger.Manual) {
         val media = _playlist.value.getOrNull(index)
         if (media == null) {
             diagnostics.log { "播放目标不存在: 索引 $index" }
@@ -402,7 +409,7 @@ class PlaybackController(
         index: Int,
         media: MediaFile,
         originAtEnd: Boolean,
-        source: SwitchSource,
+        source: LoadTrigger,
     ) {
         // 连点上一集/下一集时新的目标接管：在途预检作废，只认最后一次点击。
         precheckJob?.cancel()
@@ -432,7 +439,7 @@ class PlaybackController(
                             "读取结果为不可读"
                         }
                     diagnostics.log {
-                        "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | 异常: $reason"
+                        "加载预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | 异常: $reason"
                     }
                     _playbackFailures.tryEmit(Unit)
                     return@launch
@@ -502,8 +509,8 @@ class PlaybackController(
      * 绑定界面后注入切集的字节源丢弃出口：字节源由界面侧持有，服务只负责构造控制层。
      * 返回是否真的丢弃了源，只有真丢弃才计入诊断日志的字节源重建次数。
      */
-    fun attachSwitchSources(discardByteSources: suspend () -> Boolean) {
-        switchSourceDiscard = discardByteSources
+    fun attachLoadSources(discardByteSources: suspend () -> Boolean) {
+        loadSourceDiscard = discardByteSources
     }
 
     /**
@@ -513,7 +520,7 @@ class PlaybackController(
     fun setAppInForeground(foreground: Boolean) {
         if (this.foreground == foreground) return
         this.foreground = foreground
-        updateSwitchTimers()
+        updateLoadTimers()
     }
 
     /**
@@ -532,7 +539,7 @@ class PlaybackController(
             settlePresentation()
             cancelSurfaceRestore()
         }
-        updateSwitchTimers()
+        updateLoadTimers()
         finishLoadWithoutSurface()
         evaluateDeferredReady()
     }
@@ -583,6 +590,7 @@ class PlaybackController(
         paused = true
         // 退后台时手势不再有收尾；落定预览并恢复声音，避免静音留到后台。
         endSeekPreview(commit = true)
+        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
@@ -597,7 +605,8 @@ class PlaybackController(
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
     private fun startSession(index: Int, media: MediaFile) {
-        diagnostics.log { "加载开始: ${media.name}" }
+        loadSource = LoadTrigger.Open
+        logLoadStart(media, index)
         // 新会话作废在途预检：旧预检不能再给这个会话发起切集。
         precheckJob?.cancel()
         precheckJob = null
@@ -636,7 +645,8 @@ class PlaybackController(
         restartFromStartAfterRestore = false
         updateState(PlaybackState.Loading)
         beginBufferingIndicator()
-        beginLoadWatchdog()
+        // 首次打开与切集共用同一套看护：5 秒无进展重试，10 秒判失败。
+        beginLoadGuard(newSwitch = true)
         resetSeekForNewLoad()
         expectedLoadToken = engine.start(media.playbackLocation, paused = false)
         engine.fadeInAudio(FADE_IN_MILLIS)
@@ -651,10 +661,10 @@ class PlaybackController(
         index: Int,
         media: MediaFile,
         originAtEnd: Boolean = false,
-        source: SwitchSource = SwitchSource.Manual,
+        source: LoadTrigger = LoadTrigger.Manual,
     ) {
-        switchSource = source
-        logSwitchStart(media, index)
+        loadSource = source
+        logLoadStart(media, index)
         switchOriginIndex = _currentIndex.value
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
@@ -673,7 +683,6 @@ class PlaybackController(
         paused = false
         applySwitchTarget(index, media, newSwitch = true)
         beginBufferingIndicator()
-        // 切集期间不挂 60 秒加载看门狗：等待与失败由切集看护统一裁决。
         // 先停住原视频再替换文件：屏幕上停住的旧帧就是切集期间的等待画面。
         engine.pause()
         startSwitchTarget()
@@ -696,6 +705,8 @@ class PlaybackController(
 
     /** 切集目标切换时共用的状态重置；缓冲计时由调用方决定。 */
     private fun applySwitchTarget(index: Int, media: MediaFile, newSwitch: Boolean) {
+        // 从恢复原片直接起新切集：先撤掉恢复期的加载看门狗，否则它会在到点时把新加载判失败。
+        endLoadWatchdog()
         _currentIndex.value = index
         loadTargetIndex = index
         loadTargetUrl = media.playbackLocation
@@ -720,7 +731,7 @@ class PlaybackController(
         switchPlaybackStarted = false
         updateState(PlaybackState.Loading)
         // 计时以最近一次目标重新起算：目标前移也从头给 5 秒重试与 10 秒判失败。
-        beginSwitchGuard(newSwitch)
+        beginLoadGuard(newSwitch)
     }
 
     /**
@@ -730,7 +741,7 @@ class PlaybackController(
     private fun retargetSwitch(index: Int) {
         val media = _playlist.value.getOrNull(index) ?: return
         // 连点只把目标前移并进事件时间线，不再单独写一行日志。
-        switchRetargets += "目标前移@${nowMillis() - switchStartedAtMillis}ms(${media.name})"
+        loadRetargets += "目标前移@${guardElapsed.elapsedMillis()}ms(${media.name})"
         applySwitchTarget(index, media, newSwitch = false)
         startSwitchTarget()
     }
@@ -792,8 +803,9 @@ class PlaybackController(
     fun pause() {
         if (!active) return
         clearRestoreHoldOnUserAction()
-        // 暂停不挂起切集计时：等待窗口照样按累计运行时长走。
+        // 暂停不挂起加载看护；只挂起等新帧窗口，暂停期间本来就没有新帧可等。
         paused = true
+        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
@@ -812,6 +824,7 @@ class PlaybackController(
         if (!active) return
         clearRestoreHoldOnUserAction()
         paused = false
+        updatePendingFrameTimer()
         // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
         if (loadPhase == LoadPhase.Switching) {
             if (switchPlaybackStarted) resumeEngineForSwitch()
@@ -840,6 +853,7 @@ class PlaybackController(
     fun handleAudioOutputLost() {
         if (!active) return
         paused = true
+        updatePendingFrameTimer()
         engine.pause()
         settleStartedSwitchAsPaused()
         updateState(PlaybackState.Paused)
@@ -1204,7 +1218,7 @@ class PlaybackController(
             }
             LoadPhase.Switching -> {
                 // 加载完成只进事件时间线，不算进展：加载完却不出帧正是要判失败的情形。
-                noteSwitchLoadCompleted()
+                noteLoadCompleted()
                 applyResumePosition()
                 applyStartSubtitles(loadTargetIndex)
                 finishLoadWithoutSurface()
@@ -1245,6 +1259,8 @@ class PlaybackController(
         // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
         // 撤帧只发生在确认接管的 [handleReadySignal] 强信号与 [confirmFrame]。
         switchOutputLive = true
+        // 记下接管时刻：失败行据此区分「解不出帧」与「帧出了没上屏」。
+        if (loadOutputLiveAtMillis == null) loadOutputLiveAtMillis = guardElapsed.elapsedMillis()
         if (!resumeLookupDone) {
             // 期间若已收到无需确认的首帧，它是更强的信号，不能被后续重配覆盖。
             if (deferredReadyNeedsFrame != false) {
@@ -1281,9 +1297,9 @@ class PlaybackController(
             // 首帧已可显示：屏上就是当前加载的画面，切集起点的旧帧到此撤掉、比例同时换新。
             screenFrame = ScreenFrame.Target
             settlePresentation()
-            // 强信号本身就是一条进展：只有弱信号才继续等 10 秒判据。
-            noteSwitchProgress(SwitchProgress.FirstFrame)
-            finishReady(phase)
+            // 强信号本身就是一条进展，也是「帧已上屏」的证据：不再排等新帧窗口。
+            noteLoadProgress(LoadProgress.FirstFrame)
+            finishReady(phase, frameConfirmed = true)
             return
         }
         if (!_renderSurfaceAvailable.value) {
@@ -1339,9 +1355,9 @@ class PlaybackController(
     override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {
         // 控制器自身 resume 产生的 PLAYBACK_RESTART 不是新的加载：不重置看门狗，也不刷新窗口。
         if (resumeActivityGate.shouldIgnore(activity, loadToken)) return
-        // 加载看门狗只管首次打开与恢复原片；切集由切集看护统一裁决。
-        if (loadPhase == LoadPhase.Initial || loadPhase == LoadPhase.Restoring) beginLoadWatchdog()
-        // 切集期间的真实加载事件把等新帧的窗口清零，切集期间不排它的计时。
+        // 60 秒加载看门狗只剩恢复原片在用：首次打开与切集都由加载看护裁决，事件不给看护续期。
+        if (loadPhase == LoadPhase.Restoring) beginLoadWatchdog()
+        // 切集期间的真实加载事件只把等新帧的窗口清零，不排它的计时。
         if (loadPhase == LoadPhase.Switching) restartPendingFrameWindow()
     }
 
@@ -1365,7 +1381,7 @@ class PlaybackController(
             diagnostics.log("Surface 恢复: 新帧已上屏")
         }
         // 首个新帧上屏也是一条进展：切集已经开始出画面，不再重试或判失败。
-        noteSwitchProgress(SwitchProgress.FirstFrame)
+        noteLoadProgress(LoadProgress.FirstFrame)
         confirmTargetFrame()
     }
 
@@ -1394,6 +1410,7 @@ class PlaybackController(
                     return
                 }
                 this.paused = paused
+                updatePendingFrameTimer()
                 updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
             }
         }
@@ -1428,12 +1445,12 @@ class PlaybackController(
         // 自然播完后的下一集与手动切集共用同一条切换路径。
         when {
             _loopMode.value == LoopMode.SingleLoop ->
-                playIndex(_currentIndex.value, originAtEnd = true, source = SwitchSource.EndOfEpisode)
+                playIndex(_currentIndex.value, originAtEnd = true, source = LoadTrigger.EndOfEpisode)
             !_autoPlayNext.value -> endSession()
             _currentIndex.value < _playlist.value.lastIndex ->
-                playIndex(_currentIndex.value + 1, originAtEnd = true, source = SwitchSource.EndOfEpisode)
+                playIndex(_currentIndex.value + 1, originAtEnd = true, source = LoadTrigger.EndOfEpisode)
             _loopMode.value == LoopMode.ListLoop ->
-                playIndex(0, originAtEnd = true, source = SwitchSource.EndOfEpisode)
+                playIndex(0, originAtEnd = true, source = LoadTrigger.EndOfEpisode)
             else -> endSession()
         }
     }
@@ -1464,9 +1481,12 @@ class PlaybackController(
         // 加载中的位置属于新文件，切集时不能覆盖原片保留的进度；时长要留下供就绪初始化。
         if (loadPhase != LoadPhase.None) {
             if (mediaLoaded && durationMillis > 0) loadDurationMillis = durationMillis
-            // 位置真的往前走：这是“目标帧已上屏”的证据，切集到此结束。
-            if (loadPhase == LoadPhase.Switching && mediaLoaded && positionMillis > loadStartPositionMillis) {
-                noteSwitchProgress(SwitchProgress.PositionAdvanced)
+            // 位置真的往前走：这是“目标帧已上屏”的证据，首次打开与切集都到此收尾。
+            // 续播查询与续播 seek 未完成时不算：那时的位置还可能是加载前的旧样本。
+            val positionEvidence = loadGuardPhase() && mediaLoaded && resumeLookupDone &&
+                !seekPendingForReady && positionMillis > loadStartPositionMillis
+            if (positionEvidence) {
+                noteLoadProgress(LoadProgress.PositionAdvanced)
                 confirmTargetFrame()
             }
             return
@@ -1491,6 +1511,7 @@ class PlaybackController(
         _sleepTimerOption.value = null
         if (!active) return
         paused = true
+        updatePendingFrameTimer()
         engine.pause()
         updateState(PlaybackState.Paused)
     }
@@ -1509,11 +1530,11 @@ class PlaybackController(
     /** 首次打开就绪：撤掉缓冲指示，按暂停意图进入播放或暂停。 */
     private fun finishInitialLoad() {
         if (loadPhase != LoadPhase.Initial) return
-        diagnostics.log { "加载成功: ${_playlist.value.getOrNull(loadTargetIndex)?.name ?: ""}" }
+        logLoadSucceeded()
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
-        endLoadWatchdog()
+        cancelLoadGuard()
         // 暂停态续播没有后续位置事件，用加载目标位置与已知时长初始化。
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
@@ -1525,16 +1546,14 @@ class PlaybackController(
     /** 切集就绪：目标画面直接替换屏幕上的旧画面，进度从新文件开始。 */
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
-        diagnostics.log {
-            "切集成功: ${_playlist.value.getOrNull(_currentIndex.value)?.name ?: ""} | " +
-                "耗时: ${nowMillis() - switchStartedAtMillis}ms"
-        }
+        logLoadSucceeded()
         loadPhase = LoadPhase.None
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
-        cancelSwitchGuard()
+        cancelLoadGuard()
         _switching.value = false
-        // 状态就绪但新帧还没上屏时保留原片信息，60 秒仍无帧就回退。
+        // 只有在没拿到「帧已上屏」的证据时才保留原片信息，由等新帧窗口兜底；
+        // 强信号（首帧可显示）与位置前进都算已上屏，不再排那条窗口。
         switchFramePending = targetHasVideo && !frameConfirmed
         if (!switchFramePending) {
             switchOriginIndex = NO_MEDIA
@@ -1556,7 +1575,7 @@ class PlaybackController(
             switchPlaybackStarted = false
             updateState(PlaybackState.Playing)
         }
-        // 状态已就绪但新帧还没上屏：从这里开始算等新帧的窗口，切集期间由切集看护裁决。
+        // 状态已就绪但新帧还没上屏：从这里开始算等新帧的窗口；看护已经收尾，不会两套并行。
         if (switchFramePending) {
             restartPendingFrameWindow()
             armSwitchFrameWatchdog()
@@ -1571,119 +1590,131 @@ class PlaybackController(
         engine.resume()
     }
 
-    /** 计时只在前台且有可渲染 Surface 时累积；两处计时共用这一条判据。 */
-    private fun switchTimingAllowed(): Boolean = foreground && _renderSurfaceAvailable.value
+    /** 计时只在前台且有可渲染 Surface 时累积；看护与等新帧窗口共用这一条判据。 */
+    private fun loadTimingAllowed(): Boolean = foreground && _renderSurfaceAvailable.value
 
-    /** 计时条件变化时的唯一挂起/恢复点：同时管切集看护与等新帧窗口。 */
-    private fun updateSwitchTimers() {
-        if (switchTimingAllowed()) {
-            switchElapsed.start()
-            pendingFrameElapsed.start()
+    /** 当前阶段是否由加载看护裁决：首次打开与切集共用同一套计时。 */
+    private fun loadGuardPhase(): Boolean =
+        loadPhase == LoadPhase.Initial || loadPhase == LoadPhase.Switching
+
+    /** 计时条件变化时的唯一挂起/恢复点：同时管加载看护与等新帧窗口。 */
+    private fun updateLoadTimers() {
+        if (loadTimingAllowed()) {
+            armLoadGuard()
         } else {
-            switchElapsed.suspend()
-            pendingFrameElapsed.suspend()
-            switchGuardJob?.cancel()
-            switchGuardJob = null
-            pendingFrameJob?.cancel()
-            pendingFrameJob = null
+            // 只有真的在跑的表才记一次挂起，重复上报不重复计数。
+            if (guardElapsed.running) {
+                guardElapsed.suspend()
+                if (loadGuardPhase()) guardSuspensions++
+            }
+            guardJob?.cancel()
+            guardJob = null
         }
-        armSwitchGuard()
-        armSwitchFrameWatchdog()
+        updatePendingFrameTimer()
     }
 
     /**
-     * 开始一次切集的计时：累计运行时长从零起算，重试预算恢复。
-     * [newSwitch] 为假表示目标前移：只重置计时与重试预算，事件时间线保留。
+     * 开始一次加载的计时：累计运行时长从零起算。
+     * [newSwitch] 为真表示新的一次加载（首次打开或新切集）：事件时间线与重试预算一起重置；
+     * 为假表示目标前移：只重置计时，重试预算保留——一次加载只重试一次。
      */
-    private fun beginSwitchGuard(newSwitch: Boolean) {
+    private fun beginLoadGuard(newSwitch: Boolean) {
         if (newSwitch) {
-            switchStartedAtMillis = nowMillis()
-            switchRetargets.clear()
-            switchByteSourceRebuilds = 0
-            switchLoadCompletedAtMillis = null
-            switchFirstFrameAtMillis = null
-            switchPositionAdvancedAtMillis = null
+            loadRetargets.clear()
+            loadByteSourceRebuilds = 0
+            loadDiscardSkipped = false
+            loadCompletedAtMillis = null
+            loadFirstFrameAtMillis = null
+            loadPositionAdvancedAtMillis = null
+            loadOutputLiveAtMillis = null
+            guardRetried = false
+            loadRetriedAtMillis = null
+            guardSuspensions = 0
         }
-        switchRetried = false
-        switchRetriedAtMillis = null
-        switchElapsed.reset()
-        if (switchTimingAllowed()) switchElapsed.start()
-        armSwitchGuard()
+        guardElapsed.reset()
+        if (loadTimingAllowed()) guardElapsed.start()
+        armLoadGuard()
     }
 
     /** 下一次看护到点要走的累计运行时长：先 5 秒重试，重试后 10 秒判失败。 */
-    private fun switchGuardThresholdMillis(): Long =
-        if (switchRetried) SWITCH_FAIL_DELAY_MILLIS else SWITCH_RETRY_DELAY_MILLIS
+    private fun guardThresholdMillis(): Long =
+        if (guardRetried) SWITCH_FAIL_DELAY_MILLIS else SWITCH_RETRY_DELAY_MILLIS
 
     /**
      * 按累计运行时长排下一次看护。到点时按同一累计值再判一次：
      * 挂起期间流逝的时间不会进入判据，也不存在用墙上时钟重算剩余。
      */
-    private fun armSwitchGuard() {
-        if (switchGuardJob != null) return
-        if (!active || loadPhase != LoadPhase.Switching) return
-        if (!switchTimingAllowed() || switchHasProgress()) return
-        val waitMillis = switchGuardThresholdMillis() - switchElapsed.elapsedMillis()
+    private fun armLoadGuard() {
+        if (guardJob != null) return
+        if (!active || !loadGuardPhase()) return
+        if (!loadTimingAllowed() || hasLoadProgress()) return
+        guardElapsed.start()
+        val waitMillis = guardThresholdMillis() - guardElapsed.elapsedMillis()
         if (waitMillis <= 0L) {
-            onSwitchGuardTick()
+            onLoadGuardTick()
             return
         }
-        switchGuardJob = scope.launch {
+        guardJob = scope.launch {
             try {
                 delay(waitMillis)
                 val runningJob = coroutineContext[Job]
-                if (switchGuardJob === runningJob) switchGuardJob = null
-                onSwitchGuardTick()
+                if (guardJob === runningJob) guardJob = null
+                onLoadGuardTick()
             } finally {
                 val runningJob = coroutineContext[Job]
-                if (switchGuardJob === runningJob) switchGuardJob = null
+                if (guardJob === runningJob) guardJob = null
             }
         }
     }
 
     /** 看护到点：累计时长没走到阈值就重排，走到了才重试或判失败。 */
-    private fun onSwitchGuardTick() {
-        if (!active || loadPhase != LoadPhase.Switching) return
-        if (!switchTimingAllowed() || switchHasProgress()) return
-        if (switchElapsed.elapsedMillis() < switchGuardThresholdMillis()) {
-            armSwitchGuard()
+    private fun onLoadGuardTick() {
+        if (!active || !loadGuardPhase()) return
+        if (!loadTimingAllowed() || hasLoadProgress()) return
+        if (guardElapsed.elapsedMillis() < guardThresholdMillis()) {
+            armLoadGuard()
             return
         }
-        if (switchRetried) failSwitchWithoutProgress() else retrySwitch()
+        if (guardRetried) failLoadWithoutProgress() else retryLoad()
     }
 
     /**
-     * 5 秒仍无进展：丢弃字节源后以同一目标重发加载，只重试一次。
+     * 5 秒仍无进展：丢弃字节源后以同一目标重发加载，只重试一次；首次打开与切集同一条路径。
      * 暂停意图、目标索引与进度意图都不动；判失败仍从这次目标开始算。
      */
-    private fun retrySwitch() {
+    private fun retryLoad() {
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
-        switchRetried = true
-        switchRetriedAtMillis = nowMillis()
+        val phase = loadPhase
+        guardRetried = true
+        loadRetriedAtMillis = guardElapsed.elapsedMillis()
         diagnostics.log {
-            "切集重试: ${media.name} | 触发时刻: ${nowMillis() - switchStartedAtMillis}ms | " +
-                "已观察到: ${switchEventTimeline()}"
+            "加载重试: ${media.name} | 触发时刻: ${loadRetriedAtMillis}ms | " +
+                "阶段: ${loadPhaseLabel(phase)} | 已观察到: ${loadEventTimeline()}"
         }
         val targetIndex = loadTargetIndex
         scope.launch {
-            // 只有真的丢弃了源才记一次重建；空转不算。
-            if (switchSourceDiscard()) switchByteSourceRebuilds++
-            // 丢弃期间目标被前移、切集被取消或已就绪：这一轮重试作废。
-            if (!active || loadPhase != LoadPhase.Switching || !switchRetried) return@launch
+            // 只有真的丢弃了源才记一次重建；出口不可用或抛异常都按未丢弃处理。
+            if (runCatching { loadSourceDiscard() }.getOrDefault(false)) {
+                loadByteSourceRebuilds++
+            } else {
+                loadDiscardSkipped = true
+            }
+            // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重试作废。
+            if (!active || loadPhase != phase || !guardRetried) return@launch
             if (loadTargetIndex != targetIndex) return@launch
             // 丢弃期间刚到的新帧或位置前进不能被重发冲掉。
-            if (switchHasProgress()) return@launch
-            reloadSwitchTarget(media)
+            if (hasLoadProgress()) return@launch
+            reloadTarget(media, phase)
         }
         // 重试不重启计时：判失败仍是同一条累计时长上的 10 秒。
-        armSwitchGuard()
+        armLoadGuard()
     }
 
     /**
      * 以同一目标重发加载：不换索引、不改暂停意图、不重置进度。
      * 重发前丢弃在途加载代际，否则旧代的加载完成会被配给旧令牌而丢弃，重试等于没做。
      */
-    private fun reloadSwitchTarget(media: MediaFile) {
+    private fun reloadTarget(media: MediaFile, phase: LoadPhase) {
         engine.discardInFlightLoads()
         mediaLoaded = false
         targetHasVideo = true
@@ -1694,19 +1725,21 @@ class PlaybackController(
         deferredReadyNeedsFrame = null
         loadGeneration++
         resetSeekForNewLoad()
-        expectedLoadToken = engine.start(media.playbackLocation, paused = true)
+        if (phase == LoadPhase.Initial) {
+            // 首次打开重发按当前暂停意图起播：用户中途按过暂停就保持暂停。
+            expectedLoadToken = engine.start(media.playbackLocation, paused = paused)
+            engine.fadeInAudio(FADE_IN_MILLIS)
+        } else {
+            // 切集重发仍以暂停开始，就绪后再按暂停意图起播。
+            expectedLoadToken = engine.start(media.playbackLocation, paused = true)
+        }
         lookUpResumePosition(loadTargetIndex, media)
     }
 
-    /** 10 秒仍无进展：按切集失败收尾——回退原片、保持暂停并提示。 */
-    private fun failSwitchWithoutProgress() {
-        if (!active || loadPhase != LoadPhase.Switching) return
-        logSwitchFailure(LoadFailureSource.NoProgress)
-        switchFailureReported = true
-        abandonFrameOnFailure()
-        engine.discardInFlightLoads()
-        restoreOrigin()
-        _playbackFailures.tryEmit(Unit)
+    /** 10 秒仍无进展：首次打开与会话内切集各走原有失败收尾，提示都由 [handleLoadFailure] 统一发。 */
+    private fun failLoadWithoutProgress() {
+        if (!active || !loadGuardPhase()) return
+        handleLoadFailure(LoadFailureSource.NoProgress)
     }
 
     /**
@@ -1720,54 +1753,73 @@ class PlaybackController(
         settlePresentation()
     }
 
-    /** 结束本轮看护计时：成功、失败、取消、目标前移与会话结束时都清掉。 */
-    private fun cancelSwitchGuard() {
-        switchGuardJob?.cancel()
-        switchGuardJob = null
-        switchElapsed.reset()
+    /**
+     * 结束本轮看护计时：成功、失败、取消、目标前移与会话结束时都清掉。
+     * 累计值保留到下一次加载再清零：切集结束后的等新帧失败行还要用它。
+     */
+    private fun cancelLoadGuard() {
+        guardJob?.cancel()
+        guardJob = null
     }
 
-    /** 切集的进展只有两条：目标首帧上屏、播放位置前进。 */
-    private fun switchHasProgress(): Boolean =
-        switchFirstFrameAtMillis != null || switchPositionAdvancedAtMillis != null
+    /** 加载的进展只有两条：目标首帧上屏、播放位置前进。 */
+    private fun hasLoadProgress(): Boolean =
+        loadFirstFrameAtMillis != null || loadPositionAdvancedAtMillis != null
 
     /** 目标文件已打开：只记进事件时间线，本身不算进展。 */
-    private fun noteSwitchLoadCompleted() {
-        if (loadPhase != LoadPhase.Switching) return
-        if (switchLoadCompletedAtMillis == null) switchLoadCompletedAtMillis = nowMillis()
+    private fun noteLoadCompleted() {
+        if (!loadGuardPhase()) return
+        if (loadCompletedAtMillis == null) loadCompletedAtMillis = guardElapsed.elapsedMillis()
     }
 
     /** 记录一条进展：同类事件只记第一次，记到任一条就结束本轮看护。 */
-    private fun noteSwitchProgress(progress: SwitchProgress) {
-        if (loadPhase != LoadPhase.Switching) return
-        val at = nowMillis()
+    private fun noteLoadProgress(progress: LoadProgress) {
+        if (!loadGuardPhase()) return
+        val at = guardElapsed.elapsedMillis()
         when (progress) {
-            SwitchProgress.FirstFrame ->
-                if (switchFirstFrameAtMillis == null) switchFirstFrameAtMillis = at
-            SwitchProgress.PositionAdvanced ->
-                if (switchPositionAdvancedAtMillis == null) switchPositionAdvancedAtMillis = at
+            LoadProgress.FirstFrame ->
+                if (loadFirstFrameAtMillis == null) loadFirstFrameAtMillis = at
+            LoadProgress.PositionAdvanced ->
+                if (loadPositionAdvancedAtMillis == null) loadPositionAdvancedAtMillis = at
         }
-        switchGuardJob?.cancel()
-        switchGuardJob = null
+        guardJob?.cancel()
+        guardJob = null
     }
 
-    /** 切集开始或收到新的加载事件：等新帧的窗口从零起算；切集期间不排它的计时。 */
+    /**
+     * 等新帧窗口的计时条件：前台、有可渲染 Surface，且没暂停。
+     * 暂停期间没有新帧可等，窗口一并挂起，恢复播放后再接着走。
+     */
+    private fun pendingFrameTimingAllowed(): Boolean = loadTimingAllowed() && !paused
+
+    /** 等新帧窗口的唯一挂起/恢复点：暂停、退后台与 Surface 分离都从这里收口。 */
+    private fun updatePendingFrameTimer() {
+        if (pendingFrameTimingAllowed()) {
+            armSwitchFrameWatchdog()
+            return
+        }
+        pendingFrameJob?.cancel()
+        pendingFrameJob = null
+        pendingFrameElapsed.suspend()
+    }
+
+    /** 切集开始或收到新的加载事件：等新帧的窗口清零；切集期间只清零，不排它的计时。 */
     private fun restartPendingFrameWindow() {
         pendingFrameJob?.cancel()
         pendingFrameJob = null
         pendingFrameElapsed.reset()
-        if (switchTimingAllowed()) pendingFrameElapsed.start()
     }
 
     /**
-     * 切集结束但新帧还没上屏时才开始排等新帧窗口。切集期间不排：
-     * 那段时间由切集看护统一裁决，避免两套计时同时生效。
+     * 切集结束但新帧还没上屏时才开始排等新帧窗口。加载看护在跑时不排：
+     * 那段时间由看护统一裁决，避免两套计时同时生效。
      */
     private fun armSwitchFrameWatchdog() {
         if (pendingFrameJob != null) return
         if (!active || !switchFramePending) return
-        if (loadPhase == LoadPhase.Switching) return
-        if (!switchTimingAllowed()) return
+        if (loadGuardPhase()) return
+        if (!pendingFrameTimingAllowed()) return
+        pendingFrameElapsed.start()
         val waitMillis = NO_FRAME_WINDOW_MILLIS - pendingFrameElapsed.elapsedMillis()
         if (waitMillis <= 0L) {
             onSwitchFrameMissing()
@@ -1778,7 +1830,7 @@ class PlaybackController(
                 delay(waitMillis)
                 val runningJob = coroutineContext[Job]
                 if (pendingFrameJob === runningJob) pendingFrameJob = null
-                if (!active || !switchFramePending || !switchTimingAllowed()) return@launch
+                if (!active || !switchFramePending || !loadTimingAllowed()) return@launch
                 if (pendingFrameElapsed.elapsedMillis() < NO_FRAME_WINDOW_MILLIS) {
                     armSwitchFrameWatchdog()
                     return@launch
@@ -1807,7 +1859,7 @@ class PlaybackController(
             switchFramePending = false
             return
         }
-        logSwitchFailure(LoadFailureSource.NoFrame, phase = LoadPhase.Switching)
+        logLoadFailure(LoadFailureSource.NoFrame, phase = LoadPhase.Switching)
         switchFailureReported = true
         switchFramePending = false
         _switching.value = true
@@ -1903,22 +1955,26 @@ class PlaybackController(
 
     /**
      * 加载失败或超时：按阶段收尾，切集中则回退原视频。
-     * [fromWatchdog] 表示没有任何加载事件；[errorText] 是播放核心给出的错误文本。
+     * [source] 是失败来源，[errorText] 是播放核心给出的错误文本。
      */
-    private fun handleLoadFailure(fromWatchdog: Boolean = false, errorText: String? = null) {
+    private fun handleLoadFailure(
+        source: LoadFailureSource = LoadFailureSource.Core,
+        errorText: String? = null,
+    ) {
         if (!active) return
         endLoadWatchdog()
-        val source = if (fromWatchdog) LoadFailureSource.Watchdog else LoadFailureSource.Core
         when (loadPhase) {
             LoadPhase.Switching -> {
-                logSwitchFailure(source, errorText)
+                logLoadFailure(source, errorText)
                 switchFailureReported = true
-                if (fromWatchdog) engine.discardInFlightLoads()
+                // 无进展收尾时目标可能已经接管过视频输出：旧帧不一定还在屏上，按黑底回退。
+                if (source == LoadFailureSource.NoProgress) abandonFrameOnFailure()
+                if (source != LoadFailureSource.Core) engine.discardInFlightLoads()
                 restoreOrigin()
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Initial -> {
-                logLoadFailure("加载失败", source, errorText)
+                logLoadFailure(source, errorText)
                 resetLoadState()
                 active = false
                 paused = true
@@ -1928,7 +1984,7 @@ class PlaybackController(
                 _playbackFailures.tryEmit(Unit)
             }
             LoadPhase.Restoring -> {
-                logLoadFailure("恢复失败", source, errorText)
+                logLoadFailure(source, errorText)
                 val reportFailure = !switchFailureReported
                 resetLoadState()
                 active = false
@@ -1942,7 +1998,7 @@ class PlaybackController(
             LoadPhase.None -> {
                 // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
                 if (switchFailureReported) return
-                logLoadFailure("播放失败", source, errorText)
+                logLoadFailure(source, errorText)
                 clearPendingSwitchFrame()
                 // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音；
                 // 吞掉的暂停回声也在结束时清掉，active 已为假，不再恢复播放。
@@ -1959,18 +2015,35 @@ class PlaybackController(
     /** 失败来源；无帧超时、无进展超时与加载看门狗、播放核心主动报错分开记录。 */
     private enum class LoadFailureSource { Core, Watchdog, NoFrame, NoProgress }
 
-    /** 失败日志包含目标、加载令牌、阶段与来源，便于区分看门狗与播放核心主动报错。 */
+    /**
+     * 加载失败的唯一汇总行：来源、累计运行时长、已观察到的事件与各自时刻、重试与字节源重建次数。
+     * 首次打开、切集、恢复原片与播放中各阶段共用一套字段，按阶段字段区分。
+     * 播放阶段的失败没有在跑的看护计时，省掉这几项，免得把重置后的 0ms 读成真实耗时。
+     */
     private fun logLoadFailure(
-        label: String,
         source: LoadFailureSource,
         errorText: String? = null,
         phase: LoadPhase = loadPhase,
     ) {
+        val title = if (phase == LoadPhase.None) "播放失败" else "加载失败"
+        val guardText = if (phase == LoadPhase.Initial || phase == LoadPhase.Switching) {
+            "累计运行时长: ${guardElapsed.elapsedMillis()}ms | 计时挂起: $guardSuspensions 次 | " +
+                "事件: ${loadEventTimeline()} | 重试: ${if (guardRetried) "1 次" else "0 次"} | " +
+                "字节源重建: ${byteSourceRebuildText()} | "
+        } else {
+            ""
+        }
         diagnostics.log {
-            "$label: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | 加载令牌: $expectedLoadToken | " +
-                "阶段: ${loadPhaseLabel(phase)} | 来源: ${failureSourceText(source, errorText)}"
+            "$title: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | 加载令牌: $expectedLoadToken | " +
+                "阶段: ${loadPhaseLabel(phase)} | 来源: ${loadSource.label} | $guardText" +
+                "Surface: ${surfaceText()} | 后台: ${backgroundText()} | " +
+                "失败来源: ${failureSourceText(source, errorText)}"
         }
     }
+
+    /** 字节源重建次数；重试时没能执行就注明，避免把「没重建」读成「重建了 0 次」。 */
+    private fun byteSourceRebuildText(): String =
+        if (loadDiscardSkipped) "$loadByteSourceRebuilds 次（重建未执行）" else "$loadByteSourceRebuilds 次"
 
     /** 失败来源的日志文案；首次打开、恢复原片与切集共用一套措辞。 */
     private fun failureSourceText(source: LoadFailureSource, errorText: String?): String = when (source) {
@@ -1984,45 +2057,36 @@ class PlaybackController(
             "播放核心报错（${errorText?.takeIf { it.isNotBlank() } ?: "无错误文本"}）"
     }
 
-    /** 一次切集的开始行：目标、目标索引、来源与当前环境，失败时与事件时间线对照。 */
-    private fun logSwitchStart(media: MediaFile, index: Int) {
+    /** 一次加载的开始行：目标、目标索引、来源与当前环境，失败时与事件时间线对照。 */
+    private fun logLoadStart(media: MediaFile, index: Int) {
         diagnostics.log {
-            "切集开始: ${media.name} | 索引: $index | 来源: ${switchSource.label} | " +
+            "加载开始: ${media.name} | 索引: $index | 来源: ${loadSource.label} | " +
                 "播放状态: ${_state.value} | Surface: ${surfaceText()} | 后台: ${backgroundText()}"
         }
     }
 
-    /**
-     * 一次切集失败的唯一汇总行：总耗时、已观察到的事件与各自时刻、重试与字节源重建次数。
-     * [phase] 默认取当前阶段；等新帧窗口的收尾已离开切集阶段，由调用方显式传入。
-     */
-    private fun logSwitchFailure(
-        source: LoadFailureSource,
-        errorText: String? = null,
-        phase: LoadPhase = loadPhase,
-    ) {
+    /** 一次加载成功的唯一汇总行：目标名与从开始到出帧的累计运行时长。 */
+    private fun logLoadSucceeded() {
+        val media = _playlist.value.getOrNull(loadTargetIndex)?.name ?: ""
         diagnostics.log {
-            "切集失败: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | 加载令牌: $expectedLoadToken | " +
-                "阶段: ${loadPhaseLabel(phase)} | 切集来源: ${switchSource.label} | " +
-                "总耗时: ${nowMillis() - switchStartedAtMillis}ms | 事件: ${switchEventTimeline()} | " +
-                "Surface: ${surfaceText()} | 后台: ${backgroundText()} | " +
-                "重试: ${if (switchRetried) "1 次" else "0 次"} | 字节源重建: $switchByteSourceRebuilds 次 | " +
-                "失败来源: ${failureSourceText(source, errorText)}"
+            "加载成功: $media | 阶段: ${loadPhaseLabel(loadPhase)} | " +
+                "耗时: ${guardElapsed.elapsedMillis()}ms | 计时挂起: $guardSuspensions 次"
         }
     }
 
-    /** 已观察到的切集事件与各自时刻（相对本次切集开始）；没有事件时记“无”。 */
-    private fun switchEventTimeline(): String {
-        val events = ArrayList<String>(6)
-        switchRetargets.forEach { events += it }
-        switchLoadCompletedAtMillis?.let { events += "加载完成@${it - switchStartedAtMillis}ms" }
-        switchRetriedAtMillis?.let { events += "重试@${it - switchStartedAtMillis}ms" }
-        switchFirstFrameAtMillis?.let { events += "首帧@${it - switchStartedAtMillis}ms" }
-        switchPositionAdvancedAtMillis?.let { events += "位置前进@${it - switchStartedAtMillis}ms" }
+    /** 已观察到的事件与各自时刻（都按累计运行时长记）；没有事件时记“无”。 */
+    private fun loadEventTimeline(): String {
+        val events = ArrayList<String>(7)
+        loadRetargets.forEach { events += it }
+        loadCompletedAtMillis?.let { events += "加载完成@${it}ms" }
+        loadOutputLiveAtMillis?.let { events += "重配@${it}ms" }
+        loadRetriedAtMillis?.let { events += "重试@${it}ms" }
+        loadFirstFrameAtMillis?.let { events += "首帧@${it}ms" }
+        loadPositionAdvancedAtMillis?.let { events += "位置前进@${it}ms" }
         return if (events.isEmpty()) "无" else events.joinToString("、")
     }
 
-    /** 环境字段：Surface 是否可用与是否在前台各记各的，两者都让切集计时挂起。 */
+    /** 环境字段：Surface 是否可用与是否在前台各记各的，两者都让加载计时挂起。 */
     private fun surfaceText(): String = if (_renderSurfaceAvailable.value) "有" else "无"
 
     private fun backgroundText(): String = if (foreground) "否" else "是"
@@ -2065,7 +2129,7 @@ class PlaybackController(
 
     /**
      * 只兜底“完全无加载事件”的情况；任一 FILE_LOADED/reconfig/restart/end 都会重置。
-     * 只在首次打开与恢复原片时挂；切集由切集看护统一裁决。
+     * 只给恢复原片用：首次打开与切集都由加载看护裁决。
      */
     private fun beginLoadWatchdog() {
         loadWatchdogJob?.cancel()
@@ -2076,7 +2140,7 @@ class PlaybackController(
                     "加载看门狗触发: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | " +
                         "加载令牌: $expectedLoadToken | 阶段: ${loadPhaseLabel(loadPhase)}"
                 }
-                handleLoadFailure(fromWatchdog = true)
+                handleLoadFailure(LoadFailureSource.Watchdog)
             }
         }
     }
@@ -2095,7 +2159,7 @@ class PlaybackController(
         cancelSurfaceRestore()
         switchPlaybackStarted = false
         switchFramePending = false
-        cancelSwitchGuard()
+        cancelLoadGuard()
         endPendingFrameWatchdog()
         precheckJob?.cancel()
         precheckJob = null
@@ -2159,7 +2223,7 @@ class PlaybackController(
         // 上一轮加载自己的画面不再算数；切集起点的原片画面仍然沿用。
         if (screenFrame == ScreenFrame.Target) screenFrame = ScreenFrame.None
         switchFramePending = false
-        cancelSwitchGuard()
+        cancelLoadGuard()
         endPendingFrameWatchdog()
         cancelSurfaceRestore()
         settlePresentation()
@@ -2266,15 +2330,16 @@ class PlaybackController(
     /** 一次加载所处的阶段；切集与首次打开共用缓冲指示，但返回行为不同。 */
     private enum class LoadPhase { None, Initial, Switching, Restoring }
 
-    /** 切集来源；只用于诊断日志区分手动、列表与片尾。 */
-    private enum class SwitchSource(val label: String) {
+    /** 加载来源；只用于诊断日志区分打开、手动、列表与片尾。 */
+    private enum class LoadTrigger(val label: String) {
+        Open("打开"),
         Manual("手动"),
         Playlist("列表"),
         EndOfEpisode("片尾"),
     }
 
-    /** 切集的“进展”证据；任一条在首次出现时结束本轮看护。 */
-    private enum class SwitchProgress { FirstFrame, PositionAdvanced }
+    /** 加载的“进展”证据；任一条在首次出现时结束本轮看护。 */
+    private enum class LoadProgress { FirstFrame, PositionAdvanced }
 
     /** 把 mpv 线程的回调按顺序投递到控制层所在的线程。 */
     private class MarshallingListener(
@@ -2443,6 +2508,9 @@ internal class RunningDuration(private val nowMillis: () -> Long) {
 
     private var accumulatedMillis = 0L
     private var runningSinceMillis: Long? = null
+
+    /** 是否正在累积。 */
+    val running: Boolean get() = runningSinceMillis != null
 
     /** 当前累计的运行时长；挂起期间不再增长。 */
     fun elapsedMillis(): Long {

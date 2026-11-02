@@ -149,7 +149,13 @@ class NetworkPlaybackProgressTest {
 
     /** 起播 [entry] 并等到媒体加载完成。 */
     private fun open(scope: CoroutineScope, entry: MediaFile): PlaybackController =
-        PlaybackController(engine, progress, scope, probeTarget = alwaysReadableProbe).also { controller ->
+        PlaybackController(
+            engine,
+            progress,
+            scope,
+            nowMillis = { 0L },
+            probeTarget = alwaysReadableProbe,
+        ).also { controller ->
             controller.openPlaylist(listOf(entry), entry)
             engine.reportMediaLoaded()
         }

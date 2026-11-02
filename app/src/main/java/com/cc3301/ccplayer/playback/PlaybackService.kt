@@ -30,6 +30,7 @@ import java.io.Closeable
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 前台播放服务：唯一持有 mpv 实例、播放控制层与 MediaSession，界面只绑定取用。
@@ -143,18 +145,38 @@ class PlaybackService : Service() {
 
     /**
      * 切集预检：打开目标读取句柄读 1 个字节后立即关闭。
+     * 预算从预检开始算（含打开）：打开是阻塞 I/O，不响应取消，到点就放弃结果返回不可读，
+     * 让点击立刻有反馈；迟到的句柄由 [probeOnce] 自己的 finally 关掉。
      * 本地走 ContentResolver，网络走与封面相同的随机读接缝；都不占解码许可。
      */
-    private suspend fun probeTargetReadable(media: MediaFile): Boolean = withContext(Dispatchers.IO) {
+    private suspend fun probeTargetReadable(media: MediaFile): Boolean {
+        // 用服务作用域而不是调用方作用域：打开卡住时调用方要能立刻走，不能等它。
+        val probe = scope.async(Dispatchers.IO) { probeOnce(media) }
+        val result = withTimeoutOrNull(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS) { probe.await() }
+        if (result == null) {
+            // 打开还没回来：放弃结果，句柄在它返回后由 probeOnce 关闭。
+            probe.cancel()
+            return false
+        }
+        return result
+    }
+
+    /** 打开句柄读 1 个字节；句柄无论成败、包括被取消后迟到返回，都由这里关闭（关闭幂等）。 */
+    private suspend fun probeOnce(media: MediaFile): Boolean {
         if (media.source == MediaSource.Network) {
             val reads = (application as CcPlayerApplication).networkReads
-            probeFirstByte(reads.openRead(media.location, media.size)) { source ->
-                source.readAt(0, ByteArray(1), 0, 1) > 0
+            val source = reads.openRead(media.location, media.size)
+            try {
+                return probeFirstByte(source) { it.readAt(0, ByteArray(1), 0, 1) > 0 }
+            } finally {
+                runCatching { source.close() }
             }
-        } else {
-            val stream = contentResolver.openInputStream(Uri.parse(media.location))
-                ?: return@withContext false
-            probeFirstByte(stream) { it.read(ByteArray(1)) >= 0 }
+        }
+        val stream = contentResolver.openInputStream(Uri.parse(media.location)) ?: return false
+        try {
+            return probeFirstByte(stream) { it.read(ByteArray(1)) >= 0 }
+        } finally {
+            runCatching { stream.close() }
         }
     }
 

@@ -1063,7 +1063,8 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(showsPicture(controller))
 
-        // 状态已就绪但帧没上屏：由等新帧窗口兜底，窗口走完才回退原片。
+        // 状态已就绪但帧没上屏：暂停期间没有新帧可等，恢复播放后窗口才开始走。
+        controller.resume()
         advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
@@ -1476,16 +1477,18 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `a load that never emits any event is caught by the watchdog`() = runTest {
+    fun `an initial load that never emits any event fails at the ten second guard`() = runTest {
         val controller = controller()
         val failures = collectFailures(controller)
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertEquals(PlaybackState.Ended, controller.state.value)
         assertEquals(1, failures.size)
+        // 首次打开与切集走同一条重试路径：5 秒重发一次，10 秒判失败。
+        assertEquals(2, engine.startedUrls.size)
     }
 
     @Test
@@ -1505,17 +1508,20 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `load activity resets the watchdog`() = runTest {
+    fun `load activity does not extend the initial load guard`() = runTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
         engine.reportLoadActivity()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS - 1)
+        advanceTimeBy(1)
         runCurrent()
+        // 加载事件不是进展：5 秒照样重试，10 秒照样判失败。
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        advanceTimeBy(1)
+        advanceTimeBy(
+            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+        )
         runCurrent()
         assertEquals(PlaybackState.Ended, controller.state.value)
     }

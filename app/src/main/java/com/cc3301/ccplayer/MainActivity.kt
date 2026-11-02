@@ -266,7 +266,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
             // 字节源由界面侧持有：切集重试前的丢弃由这里注入。
-            binder.controller.attachSwitchSources(discardByteSources = ::discardByteSourcesForSwitch)
+            binder.controller.attachLoadSources(discardByteSources = ::discardByteSourcesForSwitch)
             stateCollection = lifecycleScope.launch {
                 launch {
                     binder.controller.state.collect {
@@ -886,7 +886,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
-        playback?.controller?.attachSwitchSources(discardByteSources = { false })
+        playback?.controller?.attachLoadSources(discardByteSources = { false })
         stateCollection?.cancel()
         stateCollection = null
         playback = null

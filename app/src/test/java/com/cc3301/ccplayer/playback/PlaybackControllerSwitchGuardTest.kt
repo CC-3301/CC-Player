@@ -2,8 +2,10 @@ package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -185,19 +187,202 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `an initial load still fails only at sixty seconds`() = runTest {
+    fun `a failed switch restores the original and keeps the session paused`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(90_000, 600_000)
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        runCurrent()
+
+        // 回退原片：重新打开原位置、保持暂停、只提示一次。
+        assertEquals(1, failures.size)
+        assertTrue(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals("root/ep1.mkv", engine.startedUrls.last())
+        assertEquals(90_000L, engine.startedPositions.last())
+
+        engine.reportMediaLoaded()
+        engine.reportFirstFrameReady()
+        assertFalse(controller.restoring.value)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `starting a new switch during a restore cancels the restore watchdog`() = runTest {
+        val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        runCurrent()
+        assertTrue(controller.restoring.value)
+        val reportedByFirstFailure = failures.size
+
+        // 恢复期的 60 秒看门狗到点前 5 秒再切一次：新切集不能被它打成「看门狗超时」。
+        advanceTimeBy(
+            PlaybackController.LOAD_WATCHDOG_MILLIS - PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 5_000,
+        )
+        runCurrent()
+        controller.next()
+        runCurrent()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertTrue(controller.switching.value)
+
+        advanceTimeBy(5_000)
+        runCurrent()
+        // 旧看门狗到点也不会再报一次失败；新切集只走到 5 秒重试。
+        assertEquals(reportedByFirstFailure, failures.size)
+        assertTrue(controller.switching.value)
+        assertEquals(1, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `retargeting after a retry keeps the retry budget`() = runTest {
+        var discards = 0
+        val controller = controller(
+            discard = {
+                discards++
+                true
+            },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportMediaLoaded()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        runCurrent()
+        assertEquals(1, discards)
+
+        // 重试后再前移目标：计时重新起算，但重试预算已经用完。
+        advanceTimeBy(1_000)
+        controller.next()
+        runCurrent()
+        assertEquals(2, controller.currentIndex.value)
+
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        runCurrent()
+        assertEquals(1, discards)
+        assertEquals(1, failures.size)
+    }
+
+    @Test
+    fun `an unreadable precheck times out without switching`() = runTest {
+        val controller = controller(
+            probe = {
+                delay(60_000)
+                true
+            },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv")
+        engine.reportMediaLoaded()
+        val failures = collectFailures(controller)
+        val starts = engine.startedUrls.size
+
+        controller.next()
+        runCurrent()
+        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS - 1)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        // 预算到点按不可读处理：不发起切集，当前播放继续。
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertFalse(controller.switching.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(starts, engine.startedUrls.size)
+    }
+
+    @Test
+    fun `clicking next twice during the precheck only switches to the last target`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val probed = mutableListOf<String>()
+        val controller = controller(
+            probe = {
+                probed += it.name
+                gate.await()
+                true
+            },
+        )
+        open(controller, "ep1.mkv", "ep2.mkv", "ep3.mkv")
+        engine.reportMediaLoaded()
+
+        controller.next()
+        runCurrent()
+        controller.next()
+        runCurrent()
+        // 两次点击都进过预检，第一次在途预检被第二次替换。
+        assertEquals(listOf("ep2.mkv", "ep3.mkv"), probed)
+
+        gate.complete(Unit)
+        runCurrent()
+
+        // 只认最后一次目标：直接从当前集切到第三集，中间集不加载。
+        assertEquals(2, controller.currentIndex.value)
+        assertEquals("root/ep3.mkv", engine.startedUrls.last())
+        assertEquals(2, engine.startedUrls.size)
+    }
+
+    @Test
+    fun `an initial load uses the same guard as a switch`() = runTest {
+        var discards = 0
+        val controller = controller(
+            discard = {
+                discards++
+                true
+            },
+        )
+        val failures = collectFailures(controller)
+        open(controller, "ep1.mkv")
+        assertEquals(1, engine.startedUrls.size)
+
+        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
+        runCurrent()
+        assertEquals(PlaybackState.Loading, controller.state.value)
+        assertEquals(1, engine.startedUrls.size)
+
+        // 5 秒无进展：丢掉字节源后以同一目标重发一次。
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, discards)
+        assertEquals(2, engine.startedUrls.size)
+        assertEquals(PlaybackState.Loading, controller.state.value)
+
+        // 10 秒仍无进展：按首次打开的失败收尾，不在加载中干等。
+        advanceTimeBy(
+            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+        )
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+        assertEquals(2, engine.startedUrls.size)
+    }
+
+    @Test
+    fun `an initial load in the background is not failed on return`() = runTest {
         val controller = controller()
         val failures = collectFailures(controller)
         open(controller, "ep1.mkv")
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 3)
+        advanceTimeBy(1_000)
+        controller.setAppInForeground(false)
+        // 后台待的时间远超 10 秒：这一段不进加载计时。
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 6)
         runCurrent()
+        assertTrue(failures.isEmpty())
         assertEquals(PlaybackState.Loading, controller.state.value)
+
+        controller.setAppInForeground(true)
+        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 1_000 - 1)
+        runCurrent()
         assertTrue(failures.isEmpty())
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(1)
         runCurrent()
-        assertEquals(PlaybackState.Ended, controller.state.value)
         assertEquals(1, failures.size)
     }
 
@@ -214,9 +399,11 @@ class PlaybackControllerSwitchGuardTest {
     )
 
     /** 起播第一集并等首帧就绪，作为切集前的正常播放状态。 */
-    private fun TestScope.playingController(): PlaybackController {
+    private fun TestScope.playingController(
+        vararg names: String = arrayOf("ep1.mkv", "ep2.mkv"),
+    ): PlaybackController {
         val controller = controller()
-        open(controller, "ep1.mkv", "ep2.mkv")
+        open(controller, *names)
         engine.reportMediaLoaded()
         return controller
     }
