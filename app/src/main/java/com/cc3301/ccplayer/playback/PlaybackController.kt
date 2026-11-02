@@ -286,7 +286,7 @@ class PlaybackController(
     /** 加载看护计时：先到 5 秒重试，重试后再到 10 秒判失败。 */
     private var guardJob: Job? = null
 
-    /** 本次加载是否已重试；一次加载只重试一次。 */
+    /** 当前目标是否已重试；每个目标最多重试一次，目标前移后重新起算。 */
     private var guardRetried = false
 
     /** 重试发生时的累计运行时长；只用于日志的事件时间线。 */
@@ -415,21 +415,19 @@ class PlaybackController(
         precheckJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
-                var failure: Throwable? = null
                 val readable = try {
                     probeTarget(media)
                 } catch (cancellation: CancellationException) {
                     throw cancellation
-                } catch (thrown: Throwable) {
-                    failure = thrown
+                } catch (failure: Exception) {
+                    // 读失败与超时按同一条判据：都只记「读取结果为不可读」，靠耗时区分。
                     false
                 }
                 if (token != precheckToken || !active) return@launch
                 if (!readable) {
-                    val reason = failure?.let { "${it.javaClass.name}: ${it.message ?: "无消息"}" }
-                        ?: "读取结果为不可读"
                     diagnostics.log {
-                        "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | 异常: $reason"
+                        "切集预检失败: ${media.name} | 耗时: ${nowMillis() - startedAtMillis}ms | " +
+                            "异常: 读取结果为不可读"
                     }
                     _playbackFailures.tryEmit(Unit)
                     return@launch
@@ -1576,7 +1574,7 @@ class PlaybackController(
     private fun loadGuardPhase(): Boolean =
         loadPhase == LoadPhase.Initial || loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring
 
-    /** 计时条件变化时的唯一挂起/恢复点：同时管加载看护与等新帧窗口。 */
+    /** 前后台与 Surface 上报驱动这里：恢复时重排两只表，挂起时把加载看护的累计值结算掉。 */
     private fun updateLoadTimers() {
         if (loadTimingAllowed()) {
             armLoadGuard()
@@ -1783,8 +1781,8 @@ class PlaybackController(
     }
 
     /**
-     * 等新帧窗口的唯一挂起/恢复点：只有退后台与 Surface 分离会让它挂起，
-     * 与加载看护同一条判据；暂停不挂起，否则暂停态下等不到帧会一直停在旧画面或黑底。
+     * 由 [updateLoadTimers] 调用：按加载看护的同一条判据排或停等新帧窗口。
+     * 暂停不挂起，否则暂停态下等不到帧会一直停在旧画面或黑底。
      */
     private fun updatePendingFrameTimer() {
         if (loadTimingAllowed()) {

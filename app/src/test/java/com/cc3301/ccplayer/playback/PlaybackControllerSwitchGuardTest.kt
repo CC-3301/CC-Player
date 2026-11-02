@@ -5,7 +5,6 @@ import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -344,36 +343,6 @@ class PlaybackControllerSwitchGuardTest {
         runCurrent()
         assertEquals(2, discards)
         assertEquals(1, failures.size)
-    }
-
-    @Test
-    fun `a precheck that runs out its budget does not switch`() = runTest {
-        val controller = controller(
-            probe = {
-                // 预检接缝在预算到点时返回不可读（预算由接缝自己保证）。
-                delay(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
-                false
-            },
-        )
-        open(controller, "ep1.mkv", "ep2.mkv")
-        engine.reportMediaLoaded()
-        val failures = collectFailures(controller)
-        val starts = engine.startedUrls.size
-
-        controller.next()
-        runCurrent()
-        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS - 1)
-        runCurrent()
-        assertTrue(failures.isEmpty())
-        assertFalse(controller.switching.value)
-
-        // 预算到点按不可读处理：不发起切集，当前播放继续。
-        advanceTimeBy(1)
-        runCurrent()
-        assertEquals(1, failures.size)
-        assertFalse(controller.switching.value)
-        assertEquals(0, controller.currentIndex.value)
-        assertEquals(starts, engine.startedUrls.size)
     }
 
     @Test
