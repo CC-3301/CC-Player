@@ -421,7 +421,7 @@ class PlaybackControllerSwitchTest {
         // 真正出帧才算目标画面已上屏，之后不再有无帧失败。
         engine.reportFramePresented()
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
     }
@@ -489,7 +489,7 @@ class PlaybackControllerSwitchTest {
         assertFalse(showsPicture(controller))
         assertEquals(PlaybackState.Paused, controller.state.value)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         assertEquals(1, failures.size)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -743,7 +743,7 @@ class PlaybackControllerSwitchTest {
         engine.reportPlaybackFailed()
         assertEquals(1, failures.size)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertEquals(1, failures.size)
@@ -989,7 +989,7 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
 
         // 加载完成不是进展：没有首帧上屏也没有位置前进时，切集不按时长自行收尾。
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
@@ -1008,7 +1008,7 @@ class PlaybackControllerSwitchTest {
         // 加载完成不是进展：旧画面还留在屏上，不铺黑底。
         assertFalse(blackLayer(controller))
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1)
         runCurrent()
         assertFalse(blackLayer(controller))
         assertTrue(failures.isEmpty())
@@ -1038,7 +1038,7 @@ class PlaybackControllerSwitchTest {
         engine.reportFileLoaded()
         // 视频输出已经重配：屏幕不再是原片画面，只是还没有新帧上屏。
         engine.reportVideoReconfigured()
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         // 10 秒仍无新帧：回退原片，屏上已没有旧画面，按黑底等待它重新出帧。
@@ -1092,7 +1092,7 @@ class PlaybackControllerSwitchTest {
         progress.releaseFinds()
         runCurrent()
         engine.reportLoadActivity()
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 4_000)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 4_000)
         runCurrent()
 
         assertEquals(1, failures.size)
@@ -1112,13 +1112,13 @@ class PlaybackControllerSwitchTest {
 
         // 分离期间不计时：已经跑的 4 秒保留，剩下的等回前台再走。
         controller.setRenderSurfaceAvailable(false)
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 2)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 2)
         runCurrent()
         assertTrue(failures.isEmpty())
         assertTrue(controller.switching.value)
 
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 4_000 - 1)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 4_000 - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
 
@@ -1135,13 +1135,13 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
 
         // 停止：旧的切集计时不能把已结束的会话报成失败。
         controller.stop()
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
         assertEquals(PlaybackState.Idle, controller.state.value)
@@ -1149,7 +1149,7 @@ class PlaybackControllerSwitchTest {
         // 停止后重新打开：上一轮计时同样不能残留。
         controller.playAt(1)
         engine.reportMediaLoaded()
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 2)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 2)
         runCurrent()
         assertTrue(failures.isEmpty())
     }
@@ -1164,7 +1164,7 @@ class PlaybackControllerSwitchTest {
         engine.reportFramePresented()
         assertFalse(controller.switching.value)
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 2)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 2)
         runCurrent()
         assertEquals(1, controller.currentIndex.value)
         assertEquals(PlaybackState.Playing, controller.state.value)
@@ -1177,17 +1177,21 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
         runCurrent()
         controller.cancelSwitch()
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS * 2)
+        // 被取消的切集不再重试或判失败；恢复原片走自己的同一条看护。
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
-
-        // 旧的看护不能结束恢复或重新起播。
         assertTrue(controller.restoring.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
+
+        // 恢复原片的加载一直没回来：它自己的 10 秒到点判失败，落到既有失败收尾。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
+        runCurrent()
+        assertEquals(PlaybackState.Ended, controller.state.value)
     }
 
     @Test
@@ -1284,12 +1288,12 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
         assertTrue(controller.switching.value)
 
-        // 查询一直不完成，看护照样在 10 秒判失败，不再等 60 秒加载看门狗。
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        // 查询一直不完成，看护照样在 10 秒判失败。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
 
         assertTrue(controller.switching.value)
@@ -1308,7 +1312,7 @@ class PlaybackControllerSwitchTest {
         engine.reportVideoReconfigured()
 
         // 没有首帧上屏也没有位置前进：旧画面继续沿用，到 10 秒才收尾。
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertFalse(blackLayer(controller))
@@ -1397,7 +1401,7 @@ class PlaybackControllerSwitchTest {
         assertFalse(controller.switching.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
 
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(failures.isEmpty())
@@ -1482,7 +1486,7 @@ class PlaybackControllerSwitchTest {
         val failures = collectFailures(controller)
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertEquals(PlaybackState.Ended, controller.state.value)
@@ -1497,7 +1501,7 @@ class PlaybackControllerSwitchTest {
         val failures = collectFailures(controller)
 
         controller.next()
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -1512,7 +1516,7 @@ class PlaybackControllerSwitchTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
         engine.reportLoadActivity()
         advanceTimeBy(1)
         runCurrent()
@@ -1520,7 +1524,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
 
         advanceTimeBy(
-            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
         )
         runCurrent()
         assertEquals(PlaybackState.Ended, controller.state.value)
@@ -1644,7 +1648,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Playing, controller.state.value)
 
         engine.reportFramePresented()
-        advanceTimeBy(PlaybackController.LOAD_WATCHDOG_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         assertTrue(failures.isEmpty())
     }

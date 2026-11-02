@@ -52,7 +52,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.any { it.contains("加载失败: ep1.mkv") })
@@ -69,7 +69,7 @@ class PlaybackControllerDiagnosticsTest {
             MediaFile(name = "", location = "root/ep0.mkv"),
         )
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.any { it.contains("加载失败: 索引 0") })
@@ -82,7 +82,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         assertTrue(sink.lines.isEmpty())
@@ -198,7 +198,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         open(controller)
 
-        advanceTimeBy(PlaybackController.SWITCH_FAIL_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
@@ -214,11 +214,11 @@ class PlaybackControllerDiagnosticsTest {
         val watchdogController = controller(diagnostics(watchdogSink, enabled = true))
         open(watchdogController)
         // 5 秒重试会重发一次加载，失败行记的是重试后的令牌。
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
         val watchdogToken = engine.currentLoadToken
         advanceTimeBy(
-            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
         )
         runCurrent()
 
@@ -347,11 +347,11 @@ class PlaybackControllerDiagnosticsTest {
         controller.next()
         engine.reportFileLoaded()
         // 5 秒重试重发过加载：失败行记的是重试后的令牌，回退原片又会再换一次。
-        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
         runCurrent()
         val token = engine.currentLoadToken
         advanceTimeBy(
-            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
         )
         runCurrent()
 

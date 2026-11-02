@@ -30,7 +30,7 @@ internal class MpvFileEvents {
     private var stopping = false
 
     /**
-     * 看门狗丢弃死代际后置位：之后迟到的 END_FILE 不改变状态，
+     * 加载看护丢弃死代际后置位：之后迟到的 END_FILE 不改变状态，
      * 直到下一次 FILE_LOADED 成功，避免死代际的结束把恢复加载判成失败。
      */
     private var discardBarrier = false
@@ -120,7 +120,7 @@ internal class MpvFileEvents {
     }
 
     /**
-     * 看门狗丢弃死代际：结束计数一并归零，不指望死代际补发 END_FILE；
+     * 加载看护丢弃死代际：结束计数一并归零，不指望死代际补发 END_FILE；
      * 之后若真的来了结束事件，用 [discardBarrier] 吞掉。
      */
     @Synchronized
@@ -240,7 +240,7 @@ internal class MpvLoadQueue {
     }
 
     /**
-     * 丢弃不会再产生事件的死代际（看门狗恢复前）。
+     * 丢弃不会再产生事件的死代际（加载看护恢复前）。
      * 保留结束队列为空：迟到的 END_FILE 由旧代际吞掉，不能作用到恢复加载。
      */
     @Synchronized
@@ -366,7 +366,7 @@ internal class MpvLoadCoordinator(
         fileEvents.onStop()
     }
 
-    /** 看门狗恢复前丢弃死代际，并归零结束计数，避免吞掉恢复文件的自然结束。 */
+    /** 加载看护恢复前丢弃死代际，并归零结束计数，避免吞掉恢复文件的自然结束。 */
     @Synchronized
     fun discardInFlight() {
         loads.discardInFlight()

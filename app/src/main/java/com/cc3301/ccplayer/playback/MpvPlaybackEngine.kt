@@ -172,7 +172,7 @@ class MpvPlaybackEngine(
         MPVLib.command(arrayOf("stop"))
     }
 
-    /** 看门狗恢复前丢掉不会再有事件的死代际，避免恢复的 FILE_LOADED 配到旧加载。 */
+    /** 加载看护恢复前丢掉不会再有事件的死代际，避免恢复的 FILE_LOADED 配到旧加载。 */
     override fun discardInFlightLoads() {
         loadCoordinator.discardInFlight()
     }
