@@ -56,7 +56,7 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `音量区比双击区窄，一成名到一成半之间双击仍按快退快进`() {
+    fun `音量区比双击区窄，一成到一成半之间双击仍按快退快进`() {
         assertEquals(GestureZone.Center, gestureZone(100f, width))
         assertEquals(DoubleTapAction.Seek(-10_000L, DoubleTapSide.Left), doubleTapAction(100f, width))
         assertEquals(GestureZone.Center, gestureZone(800f, width))

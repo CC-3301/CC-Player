@@ -259,6 +259,22 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `an extra seek event after a reissue does not move the accepted serial`() {
+        val signals = MpvReadySignals()
+        signals.onStart()
+
+        val replaced = signals.reserve()
+        val reissued = signals.reserve()
+        signals.onSeekIssued(replaced)
+        signals.onSeekReissued(replaced, reissued)
+
+        // 被替换的那条命令也来了一条 SEEK 事件：消费指针停在新序号，不再被推走。
+        signals.onSeekEvent()
+        signals.onSeekEvent()
+        assertEquals(reissued, signals.acceptReady(needsFrameConfirmation = false))
+    }
+
+    @Test
     fun `a repeated ready in the same seek serial is reported once`() {
         val signals = MpvReadySignals()
         signals.onStart()
@@ -412,6 +428,25 @@ class MpvFileEventsTest {
         val ready = coordinator.acceptReady(needsFrameConfirmation = true)
         assertEquals(current, ready?.spec)
         assertEquals(0, ready?.serial)
+    }
+
+    @Test
+    fun `a reissued seek replaces its registration so a single seek event still lands`() {
+        val coordinator = MpvLoadCoordinator()
+        val spec = coordinator.start("root/ep1.mkv")
+        assertEquals(spec, coordinator.onFileLoaded("root/ep1.mkv"))
+
+        val replaced = coordinator.reserveSeekSerial()
+        val reissued = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(replaced)
+        // 改写后的再次下发：被替换的那条命令可能不再产生 SEEK 事件。
+        coordinator.onSeekReissued(replaced, reissued)
+
+        // 只来一条 SEEK 事件：序号推进到新的一跳，落定对得上，不用等超时。
+        coordinator.onSeekEvent()
+        val ready = coordinator.acceptReady(needsFrameConfirmation = false)
+        assertEquals(spec, ready?.spec)
+        assertEquals(reissued, ready?.serial)
     }
 
     @Test

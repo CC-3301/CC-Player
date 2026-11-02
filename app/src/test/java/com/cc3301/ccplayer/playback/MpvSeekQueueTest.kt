@@ -17,6 +17,9 @@ class MpvSeekQueueTest {
     private val issued = mutableListOf<Long>()
     private val issuedSerials = mutableListOf<Int>()
 
+    /** 每次真正下发的 (seekId, 目标毫秒)：断言下发的是哪一个目标，而不只是几条命令。 */
+    private val issuedTargets = mutableListOf<Pair<Long, Long>>()
+
     /** 改写后的再次下发从这里取新序号。 */
     private var serialSource = 100
     private val executed = mutableListOf<Pair<Long, Long>>()
@@ -39,11 +42,12 @@ class MpvSeekQueueTest {
     /** 在命令线程上执行排队中的下发任务：只有仍是当前在途的那一跳才真正下发。 */
     private fun runCommandThread() {
         takeCommands().forEach { seekId ->
-            queue.issueIfCurrent(seekId) { currentSerial, _, firstIssue ->
+            queue.issueIfCurrent(seekId) { currentSerial, targetMillis, firstIssue ->
                 // 首次下发用入队时预留的序号；改写后的再次下发换新序号。
                 val serial = if (firstIssue) currentSerial else ++serialSource
                 issued += seekId
                 issuedSerials += serial
+                issuedTargets += seekId to targetMillis
                 serial
             }
         }
@@ -300,6 +304,7 @@ class MpvSeekQueueTest {
         runCommandThread()
         assertEquals(listOf(1L), issued)
         assertEquals(listOf(1), issuedSerials)
+        assertEquals(listOf(1L to 2_000L), issuedTargets)
     }
 
     @Test

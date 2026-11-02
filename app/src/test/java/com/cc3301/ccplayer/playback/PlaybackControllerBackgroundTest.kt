@@ -22,14 +22,14 @@ class PlaybackControllerBackgroundTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `暂停态回前台不显示缓存帧`() = runTest {
+    fun `暂停态回前台不显示任何画面`() = runTest {
         val controller = pausedController()
         engine.reportPositionChanged(42_000, 600_000)
 
         reattach(controller)
         runCurrent()
 
-        // 退后台不拆画面；Surface 被回收后重建只铺黑底，没有缓存帧可显示，也不 seek。
+        // 退后台不拆画面；Surface 被回收后重建只铺黑底，没有画面可显示，也不 seek。
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertNull(controller.surfacePresentation.value.aspectRatio)
         assertTrue(engine.seekPositions.isEmpty())
@@ -185,7 +185,7 @@ class PlaybackControllerBackgroundTest {
 
         reattach(controller)
         runCurrent()
-        // 片尾黑底没有画面可露：不进入恢复等待，也不铺缓存帧。
+        // 片尾黑底没有画面可露：不进入恢复等待，也不铺任何画面。
         assertFalse(controller.surfacePresentation.value.showsPicture)
 
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)

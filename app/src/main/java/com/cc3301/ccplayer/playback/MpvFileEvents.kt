@@ -309,6 +309,17 @@ internal class MpvReadySignals {
         pendingSeeks.addLast(serial)
     }
 
+    /**
+     * 改写后的再次下发：旧序号换成新序号。
+     * 被替换的那条命令可能不再产生 SEEK 事件，按「一事件一序号」消费会让之后每次落定都错位；
+     * 替换登记后，只来一条事件与两条事件都对齐到新序号。
+     */
+    @Synchronized
+    fun onSeekReissued(previousSerial: Int, serial: Int) {
+        pendingSeeks.remove(previousSerial)
+        pendingSeeks.addLast(serial)
+    }
+
     /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
     @Synchronized
     fun onSeekEvent() {
@@ -408,6 +419,12 @@ internal class MpvLoadCoordinator(
     @Synchronized
     fun onSeekIssued(serial: Int) {
         readySignals.onSeekIssued(serial)
+    }
+
+    /** 改写后的再次下发：旧序号换成新序号，被替换的命令不再单独占一个待认位。 */
+    @Synchronized
+    fun onSeekReissued(previousSerial: Int, serial: Int) {
+        readySignals.onSeekReissued(previousSerial, serial)
     }
 
     /** 一轮跳转开始：离开片尾与序号登记是两件事，每条真正下发的命令都要做一次。 */

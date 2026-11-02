@@ -334,6 +334,25 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `预览改写不吞掉普通跳转的待执行目标`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        // 预览那一跳还在执行时来了普通跳转：目标进待执行槽。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
+        controller.seekTo(200_000)
+        assertEquals(200_000L, engine.pendingSeekMillis)
+
+        // 再拖一次预览：只改写仍在执行的预览那一跳，普通跳转的待执行目标留着。
+        controller.updateSeekPreview(requestSeek = true, positionMillis = 130_000)
+        assertEquals(200_000L, engine.pendingSeekMillis)
+
+        // 预览这一跳执行完后，普通跳转的目标照常补发。
+        engine.reportSeekExecuted()
+        assertEquals(listOf(70_000L, 130_000L, 200_000L), engine.seekPositions)
+    }
+
+    @Test
     fun `首次加载文件还没打开时跳转不下发 seek`() = runTest {
         val controller = controller()
         open(controller)
