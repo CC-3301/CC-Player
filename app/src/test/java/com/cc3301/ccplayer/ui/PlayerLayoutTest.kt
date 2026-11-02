@@ -214,6 +214,7 @@ class PlayerLayoutTest {
                 showsPicture = true,
                 videoAspectRatio = null,
                 aspectRatioPlaced = false,
+                orientationPending = false,
             ),
         )
     }
@@ -232,6 +233,7 @@ class PlayerLayoutTest {
                 showsPicture = true,
                 videoAspectRatio = 0.5625,
                 aspectRatioPlaced = false,
+                orientationPending = false,
             ),
         )
     }

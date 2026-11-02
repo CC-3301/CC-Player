@@ -46,6 +46,25 @@ fun playerOrientation(
 ): ScreenOrientation = rotationOverride ?: resolvedOrientation(mode, videoAspectRatio)
 
 /**
+ * 屏幕方向是否已经跟住视频方向。
+ *
+ * 只有“跟随视频”档要等屏幕转过去；其它档位不依赖视频方向，一律算已对齐，不额外等待。
+ * 跟随视频按本次播放要施加的方向判（转屏按钮的结果优先）；比例未知或方向交回系统时没有可等的
+ * 方向，也算已对齐。
+ */
+fun videoOrientationAligned(
+    mode: OrientationMode,
+    videoAspectRatio: Double?,
+    screenOrientation: ScreenOrientation,
+    rotationOverride: ScreenOrientation?,
+): Boolean {
+    if (mode != OrientationMode.FollowVideo) return true
+    val expected = playerOrientation(mode, videoAspectRatio, rotationOverride)
+    if (expected == ScreenOrientation.System) return true
+    return screenOrientation.isLandscape() == expected.isLandscape()
+}
+
+/**
  * 跟随视频时是否正在等视频方向：设置为跟随视频、比例未知、当前条目是视频，且没有手动转屏。
  *
  * 等待期内不采信传感器角度，屏幕钉在进入播放页时的方向，视频方向一到达就按它施加一次。

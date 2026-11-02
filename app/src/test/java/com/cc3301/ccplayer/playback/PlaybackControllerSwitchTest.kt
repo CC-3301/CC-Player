@@ -2175,6 +2175,7 @@ class PlaybackControllerSwitchTest {
             showsPicture(controller),
             controller.surfacePresentation.value.aspectRatio,
             aspectRatioPlaced = true,
+            orientationPending = false,
         )
 
     private fun dispatch(controller: PlaybackController, action: MediaSessionAction) {

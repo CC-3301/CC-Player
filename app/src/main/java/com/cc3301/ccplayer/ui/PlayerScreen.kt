@@ -308,6 +308,8 @@ fun PlayerScreen(
     decodeMode: DecodeMode,
     loopMode: LoopMode,
     orientationMode: OrientationMode,
+    orientationOverride: ScreenOrientation?,
+    screenOrientation: ScreenOrientation,
     autoPlayNext: Boolean,
     sleepTimerState: SleepTimerState,
     sleepTimerOption: SleepTimerOption?,
@@ -364,6 +366,23 @@ fun PlayerScreen(
     var aspectRatioPlaced by remember { mutableStateOf(false) }
     LaunchedEffect(surfacePresentation.aspectRatio) {
         if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
+    }
+    // 首次摆位等屏幕方向：首帧与比例到位后，跟随视频还要等屏幕转到位再撤黑，最多等 2 秒。
+    // 方向到位时这个等待随键变化被取消，不需要额外的完成通知。
+    val awaitsOrientation = awaitsPlayerOrientation(
+        mode = orientationMode,
+        videoAspectRatio = surfacePresentation.aspectRatio,
+        rotationOverride = orientationOverride,
+        screenOrientation = screenOrientation,
+        showsPicture = surfacePresentation.showsPicture,
+        aspectRatioPlaced = aspectRatioPlaced,
+    )
+    // 到期标记随等待开始重建：新一轮等待从零计时，不会沿用上一轮已经到期的状态。
+    var orientationWaitExpired by remember(awaitsOrientation) { mutableStateOf(false) }
+    LaunchedEffect(awaitsOrientation) {
+        if (!awaitsOrientation) return@LaunchedEffect
+        runOrientationWait()
+        orientationWaitExpired = true
     }
     // 顶/底栏的动画目标与在场：动画目标只看完全可见，在场含淡出中。
     val bars = playerBarsPresence(
@@ -517,12 +536,14 @@ fun PlayerScreen(
                 ),
         )
         // 黑底画在视频视图之后：屏幕上没有可显示的画面时铺黑底（首次打开、片尾恢复、切集无画面、无视频轨）。
-        // 刚进播放页、比例还没到时也盖住，避免视频区先按整屏摆好、比例到达后再缩一次。
+        // 刚进播放页、比例还没到时也盖住，避免视频区先按整屏摆好、比例到达后再缩一次；
+        // 比例到达后还要等屏幕转到位，别让竖向摆出来的首帧先露一下。
         if (
             showPlayerBlackLayer(
                 showsPicture = surfacePresentation.showsPicture,
                 videoAspectRatio = surfacePresentation.aspectRatio,
                 aspectRatioPlaced = aspectRatioPlaced,
+                orientationPending = awaitsOrientation && !orientationWaitExpired,
             )
         ) {
             Box(
