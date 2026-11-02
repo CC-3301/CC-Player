@@ -321,7 +321,7 @@ fun PlayerScreen(
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
-    onTogglePlayPause: () -> Unit,
+    onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeekPreview: (Long, Boolean) -> Unit,
@@ -340,11 +340,9 @@ fun PlayerScreen(
     onToggleRotation: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
-    onButtonClickDebounced: (String) -> Unit = {},
 ) {
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
-    val buttonDebounce = remember { PlayerButtonDebounce() }
     val panels = remember { PlayerPanelState() }
     var volumeHint by remember { mutableStateOf<Float?>(null) }
     var seekHint by remember { mutableStateOf<SeekHint?>(null) }
@@ -374,9 +372,9 @@ fun PlayerScreen(
     )
     val barsShown = bars.shown
     val barsPresent = bars.present
-    // 面板可见性统一由此判定；不可见的面板不能拦截手势。
+    // 面板可见性统一由此判定；切集与首开一开始就不可见，不等清理状态的那一帧。
     val panelVisible = panelVisible(
-        anyOpen = panels.anyOpen,
+        anyOpen = panels.anyOpen && !switching && !initialLoading,
         controlsVisible = controlsVisible,
         locked = locked,
     )
@@ -546,7 +544,7 @@ fun PlayerScreen(
             levelControls = levelControls,
             onTogglePlayPause = {
                 controls.onUserGesture()
-                onTogglePlayPause()
+                onPlayPause()
             },
             onSeekBy = {
                 controls.onUserGesture()
@@ -629,6 +627,50 @@ fun PlayerScreen(
         }
         val canGoPrevious = currentIndex > 0
         val canGoNext = currentIndex in 0 until playlist.lastIndex
+        if (moreVisible && panelVisible) {
+            // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
+            // 先于顶栏/底栏组合：栏区画在上面，面板打开时按钮照常可点。
+            val closeHint = stringResource(R.string.player_more_close)
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .playerPressClickable(PlayerPressTarget.OutsideDismissLayer) {
+                            panels.dismissOutside()
+                        }
+                        .semantics {
+                            contentDescription = closeHint
+                            role = Role.Button
+                        },
+                )
+                MorePanel(
+                    decodeMode = decodeMode,
+                    loopMode = loopMode,
+                    orientationMode = orientationMode,
+                    autoPlayNext = autoPlayNext,
+                    sleepTimerState = sleepTimerState,
+                    selectedSleepTimerOption = sleepTimerOption,
+                    onSelectDecodeMode = onSelectDecodeMode,
+                    onSelectLoopMode = onSelectLoopMode,
+                    onSelectOrientationMode = onSelectOrientationMode,
+                    onToggleAutoPlayNext = onToggleAutoPlayNext,
+                    onSelectSleepTimer = { option ->
+                        onSelectSleepTimer(option)
+                        panels.close()
+                    },
+                    onCancelSleepTimer = {
+                        onCancelSleepTimer()
+                        panels.close()
+                    },
+                    panelWidth = morePanelWidth,
+                    panelMaxHeight = morePanelMaxHeight,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .safeDrawingPadding()
+                        .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
+                )
+            }
+        }
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
             visible = barsShown,
@@ -703,14 +745,9 @@ fun PlayerScreen(
                 initialLoading = initialLoading,
                 restoring = restoring,
                 interactive = bottomBarInteractive,
-                onTogglePlayPause = {
+                onPlayPause = {
                     controls.showByUserAction()
-                    // 播放/暂停是状态开关：距上一击不足 300 毫秒的重复点击只算一次，并把被压掉的一击记下来。
-                    if (buttonDebounce.accept(PlayerPressButton.PlayPause)) {
-                        onTogglePlayPause()
-                    } else {
-                        onButtonClickDebounced("播放键重复点击被忽略: 距上一击不足 ${PLAYER_BUTTON_DEBOUNCE_MILLIS} 毫秒")
-                    }
+                    onPlayPause()
                 },
                 onPrevious = {
                     // 上一集每一击都要把切集目标前移，不去抖。
@@ -745,49 +782,6 @@ fun PlayerScreen(
                     if (pressed) controls.onPressDown() else controls.onPressUp()
                 },
             )
-        }
-        if (moreVisible && panelVisible) {
-            // 更多面板打开时覆盖整屏：点面板外任意区域关闭，面板自身仍可操作。
-            val closeHint = stringResource(R.string.player_more_close)
-            Box(modifier = Modifier.fillMaxSize()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .playerPressClickable(PlayerPressTarget.OutsideDismissLayer) {
-                            panels.dismissOutside()
-                        }
-                        .semantics {
-                            contentDescription = closeHint
-                            role = Role.Button
-                        },
-                )
-                MorePanel(
-                    decodeMode = decodeMode,
-                    loopMode = loopMode,
-                    orientationMode = orientationMode,
-                    autoPlayNext = autoPlayNext,
-                    sleepTimerState = sleepTimerState,
-                    selectedSleepTimerOption = sleepTimerOption,
-                    onSelectDecodeMode = onSelectDecodeMode,
-                    onSelectLoopMode = onSelectLoopMode,
-                    onSelectOrientationMode = onSelectOrientationMode,
-                    onToggleAutoPlayNext = onToggleAutoPlayNext,
-                    onSelectSleepTimer = { option ->
-                        onSelectSleepTimer(option)
-                        panels.close()
-                    },
-                    onCancelSleepTimer = {
-                        onCancelSleepTimer()
-                        panels.close()
-                    },
-                    panelWidth = morePanelWidth,
-                    panelMaxHeight = morePanelMaxHeight,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .safeDrawingPadding()
-                        .padding(top = PlayerTopBarHeight, end = AppSpacing.Sm),
-                )
-            }
         }
         // 解锁按钮随解锁动作立即离开组合；定时隐藏后仍保留组合，重新出现走 200 毫秒淡入。
         if (!lock.unlockDismissed) {
@@ -1371,7 +1365,7 @@ private fun Controls(
     initialLoading: Boolean,
     restoring: Boolean,
     interactive: Boolean,
-    onTogglePlayPause: () -> Unit,
+    onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeekPreview: (Long, Boolean) -> Unit,
@@ -1408,7 +1402,14 @@ private fun Controls(
             previewMillis = seekPreviewMillis,
             seekSettlement = seekSettlement,
             enabled = interactive && actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
-            appearanceEnabled = !initialLoading,
+            appearanceEnabled = actionLooksEnabled(
+                PlayerAction.Seek,
+                canGoPrevious = currentIndex > 0,
+                canGoNext = currentIndex in 0 until playlist.lastIndex,
+                switching = switching,
+                initialLoading = initialLoading,
+                restoring = restoring,
+            ),
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
             onHeartbeat = onSeekHeartbeat,
@@ -1423,7 +1424,7 @@ private fun Controls(
             restoring = restoring,
             interactive = interactive,
             subtitleMenuVisible = subtitleMenuVisible,
-            onTogglePlayPause = onTogglePlayPause,
+            onPlayPause = onPlayPause,
             onPrevious = onPrevious,
             onNext = onNext,
             onToggleSubtitles = onToggleSubtitleMenu,
@@ -1444,7 +1445,7 @@ private fun PlayerIconBar(
     restoring: Boolean,
     interactive: Boolean,
     subtitleMenuVisible: Boolean,
-    onTogglePlayPause: () -> Unit,
+    onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onToggleSubtitles: () -> Unit,
@@ -1507,7 +1508,7 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
-                    onClick = onTogglePlayPause,
+                    onClick = onPlayPause,
                     enabled = interactive &&
                         actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
                     appearanceEnabled = actionLooksEnabled(
