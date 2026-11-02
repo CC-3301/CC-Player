@@ -32,6 +32,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
+            probeTarget = alwaysReadableProbe,
         )
 
         controller.openPlaylist(listOf(media), media)
@@ -111,7 +112,7 @@ class PlaybackControllerDiagnosticsTest {
 
         controller.setRenderSurfaceAvailable(false)
         controller.setRenderSurfaceAvailable(true)
-        advanceTimeBy(PlaybackController.FRAME_FALLBACK_MILLIS)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
 
         assertFalse(sink.lines.any { it.contains("Surface 重挂: 等待新帧") })
@@ -177,6 +178,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
+            probeTarget = alwaysReadableProbe,
         )
         open(controller)
 
@@ -326,7 +328,7 @@ class PlaybackControllerDiagnosticsTest {
     }
 
     @Test
-    fun `切集无帧超时记录目标、令牌与来源`() = runTest {
+    fun `切集无进展超时记录目标、令牌与来源`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
@@ -336,9 +338,14 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportMediaLoaded()
 
         controller.next()
-        val token = engine.currentLoadToken
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS)
+        // 5 秒重试重发过加载：失败行记的是重试后的令牌，回退原片又会再换一次。
+        advanceTimeBy(PlaybackController.SWITCH_RETRY_DELAY_MILLIS)
+        runCurrent()
+        val token = engine.currentLoadToken
+        advanceTimeBy(
+            PlaybackController.SWITCH_FAIL_DELAY_MILLIS - PlaybackController.SWITCH_RETRY_DELAY_MILLIS,
+        )
         runCurrent()
 
         val text = sink.lines.joinToString("\n")
@@ -346,7 +353,8 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("目标: root/ep2.mkv"))
         assertTrue(text.contains("加载令牌: $token"))
         assertTrue(text.contains("阶段: 切集"))
-        assertTrue(text.contains("来源: 无帧超时"))
+        assertTrue(text.contains("来源: 无进展超时"))
+        assertTrue(text.contains("重试: 1 次"))
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =
@@ -359,6 +367,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
+            probeTarget = alwaysReadableProbe,
         )
 
     private fun open(controller: PlaybackController) {

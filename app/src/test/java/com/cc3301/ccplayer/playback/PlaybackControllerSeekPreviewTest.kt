@@ -1167,6 +1167,7 @@ class PlaybackControllerSeekPreviewTest {
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
+        probeTarget = alwaysReadableProbe,
     )
 
     /** 起播第一集并等首帧就绪，作为正常播放状态。 */

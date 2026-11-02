@@ -19,6 +19,7 @@ class PlaybackControllerSubtitleTest {
         FakePlaybackProgressRepository(),
         CoroutineScope(dispatcher),
         nowMillis = { dispatcher.scheduler.currentTime },
+        probeTarget = alwaysReadableProbe,
     )
 
     private val chinese = SubtitleTrack(id = 3, language = "chs", title = null, isDefault = false)

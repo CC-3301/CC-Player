@@ -21,6 +21,7 @@ class PlaybackControllerAudioTest {
         progress,
         CoroutineScope(UnconfinedTestDispatcher()),
         nowMillis = { 0L },
+        probeTarget = alwaysReadableProbe,
     )
 
     @Test

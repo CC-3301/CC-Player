@@ -23,8 +23,10 @@ import com.cc3301.ccplayer.CcPlayerApplication
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
+import java.io.Closeable
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -77,6 +79,7 @@ class PlaybackService : Service() {
             scope,
             marshalCallbacks = true,
             diagnostics = diagnostics,
+            probeTarget = ::probeTargetReadable,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pauseForBackground,
@@ -138,6 +141,42 @@ class PlaybackService : Service() {
         return super.onStartCommand(intent, flags, startId)
     }
 
+    /**
+     * 切集预检：打开目标读取句柄读 1 个字节后立即关闭。
+     * 本地走 ContentResolver，网络走与封面相同的随机读接缝；都不占解码许可。
+     */
+    private suspend fun probeTargetReadable(media: MediaFile): Boolean = withContext(Dispatchers.IO) {
+        if (media.source == MediaSource.Network) {
+            val reads = (application as CcPlayerApplication).networkReads
+            probeFirstByte(reads.openRead(media.location, media.size)) { source ->
+                source.readAt(0, ByteArray(1), 0, 1) > 0
+            }
+        } else {
+            val stream = contentResolver.openInputStream(Uri.parse(media.location))
+                ?: return@withContext false
+            probeFirstByte(stream) { it.read(ByteArray(1)) >= 0 }
+        }
+    }
+
+    /**
+     * 读 1 个字节后关闭。阻塞读不响应协程取消，到 [PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS]
+     * 主动关闭句柄让它退出，预检超时时点击仍有反馈。
+     */
+    private suspend fun <T : Closeable> probeFirstByte(target: T, read: (T) -> Boolean): Boolean =
+        withContext(Dispatchers.IO) {
+            // 阻塞读不响应协程取消：计时器不随预检协程一起被取消，到点主动关闭句柄把读打断。
+            val closeOnTimeout = scope.launch(Dispatchers.IO) {
+                delay(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
+                runCatching { target.close() }
+            }
+            try {
+                read(target)
+            } finally {
+                closeOnTimeout.cancel()
+                runCatching { target.close() }
+            }
+        }
+
     override fun onDestroy() {
         stateScope.cancel()
         scope.cancel()
@@ -163,6 +202,8 @@ class PlaybackService : Service() {
 
         /** 界面只上报前后台；暂停与通知动作由服务内的策略统一决定。 */
         fun setAppInForeground(foreground: Boolean) {
+            // 切集计时按真实前后台挂起，与 Surface 是否还在无关。
+            this@PlaybackService.playbackController.setAppInForeground(foreground)
             this@PlaybackService.backgroundPolicy.setAppInForeground(foreground)
         }
     }

@@ -20,6 +20,7 @@ class PlaybackControllerVideoSizeTest {
         progress,
         CoroutineScope(dispatcher),
         nowMillis = { dispatcher.scheduler.currentTime },
+        probeTarget = alwaysReadableProbe,
     )
 
     @Test
