@@ -44,12 +44,32 @@ class PlayerLockTest {
     fun `解锁动作立即移除按钮`() {
         lock.tapLockButton()
         assertEquals(true, lock.unlockVisible)
+        assertEquals(false, lock.unlockDismissed)
 
         lock.tapLockButton()
 
         assertEquals(false, lock.locked)
         assertEquals(false, lock.unlockVisible)
         assertEquals(false, lock.unlockFading)
+        assertEquals(true, lock.unlockDismissed)
+    }
+
+    @Test
+    fun `定时隐藏后重新出现保留组合走淡入`() {
+        lock.tapLockButton()
+        now = 4_000L
+        lock.beginUnlockFadeOutIfExpired()
+        now = 5_000L
+        lock.completeUnlockFadeOut()
+        assertEquals(false, lock.unlockVisible)
+        // 定时隐藏不置位：重新出现时按钮还在组合里，才能播 200 毫秒淡入。
+        assertEquals(false, lock.unlockDismissed)
+
+        now = 7_000L
+        lock.tapScreen()
+
+        assertEquals(true, lock.unlockVisible)
+        assertEquals(false, lock.unlockDismissed)
     }
 
     @Test
@@ -201,6 +221,7 @@ class PlayerLockTest {
 
         assertEquals(true, lock.locked)
         assertEquals(true, lock.unlockVisible)
+        assertEquals(false, lock.unlockDismissed)
 
         now = 5_999L
         lock.beginUnlockFadeOutIfExpired()

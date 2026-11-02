@@ -54,14 +54,16 @@ class PlayerControlsVisibilityTest {
     }
 
     @Test
-    fun `点击切换控制层显隐`() {
+    fun `点击画面立即隐藏不走淡出`() {
         controls.toggle()
-        assertEquals(false, controls.visible)
-        assertEquals(true, controls.fading)
+
+        assertEquals(true, controls.hidden)
+        assertEquals(false, controls.fading)
+        assertEquals(true, controls.hiddenImmediately)
 
         controls.toggle()
         assertEquals(true, controls.visible)
-        assertEquals(false, controls.fading)
+        assertEquals(false, controls.hiddenImmediately)
     }
 
     @Test
@@ -73,6 +75,7 @@ class PlayerControlsVisibilityTest {
 
         assertEquals(true, controls.visible)
         assertEquals(false, controls.fading)
+        assertEquals(false, controls.hiddenImmediately)
     }
 
     @Test
@@ -83,13 +86,34 @@ class PlayerControlsVisibilityTest {
         controls.toggle()
 
         assertEquals(true, controls.visible)
-        assertEquals(false, controls.fading)
+        assertEquals(false, controls.hidden)
 
         now = 10_000L
         controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         controls.onPressUp()
+        assertEquals(4_000L, controls.millisUntilFadeOut())
+    }
+
+    @Test
+    fun `手势层按下不动不进入淡出`() {
+        now = 4_200L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.fading)
+
+        // 手势层按下即上报按住，手指不动也算操作。
+        controls.onGesturePress(true)
+
+        assertEquals(true, controls.visible)
+        assertEquals(true, controls.pressing)
+
+        now = 9_000L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.visible)
+
+        controls.onGesturePress(false)
+        assertEquals(false, controls.pressing)
         assertEquals(4_000L, controls.millisUntilFadeOut())
     }
 
@@ -397,5 +421,35 @@ class PlayerControlsVisibilityTest {
         assertEquals(true, looped.hidden)
 
         loop.cancel()
+    }
+
+    @Test
+    fun `按住结束按键重启循环后重新计时并隐藏`() = runTest {
+        val looped = PlayerControlsVisibility(elapsedMillis = { testScheduler.currentTime })
+        looped.onGesturePress(true)
+
+        // 按住时循环返回 -1 退出，等界面按 pressing 键重启。
+        val held = launch {
+            runControlsAutoHide(looped, holdVisible = { false }, delayMillis = { delay(it) })
+        }
+        advanceTimeBy(10_000L)
+        runCurrent()
+        assertEquals(true, looped.visible)
+        held.cancel()
+
+        looped.onGesturePress(false)
+        val resumed = launch {
+            runControlsAutoHide(looped, holdVisible = { false }, delayMillis = { delay(it) })
+        }
+
+        advanceTimeBy(4_000L)
+        runCurrent()
+        assertEquals(true, looped.fading)
+
+        advanceTimeBy(1_000L)
+        runCurrent()
+        assertEquals(true, looped.hidden)
+
+        resumed.cancel()
     }
 }

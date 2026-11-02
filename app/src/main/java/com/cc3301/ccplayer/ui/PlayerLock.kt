@@ -34,6 +34,10 @@ class PlayerLock(
     var unlockFading by mutableStateOf(false)
         private set
 
+    /** 解锁动作后按钮立即离开组合；定时隐藏不置位，重新出现才走淡入。 */
+    var unlockDismissed by mutableStateOf(false)
+        private set
+
     /** 解锁按钮本次出现的时刻，用于自动隐藏计时。 */
     var unlockShownAtMillis by mutableLongStateOf(0L)
         private set
@@ -54,6 +58,7 @@ class PlayerLock(
             locked = false
             unlockVisible = false
             unlockFading = false
+            unlockDismissed = true
             return
         }
         locked = true
@@ -119,6 +124,7 @@ class PlayerLock(
         unlockShownAtMillis = elapsedMillis()
         unlockVisible = true
         unlockFading = false
+        unlockDismissed = false
     }
 }
 

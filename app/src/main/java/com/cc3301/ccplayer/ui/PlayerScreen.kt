@@ -365,26 +365,15 @@ fun PlayerScreen(
     LaunchedEffect(surfacePresentation.aspectRatio) {
         if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
     }
-    // 顶/底栏的动画目标：控制层完全可见时才显示，淡出中走退场动画。
-    val barsShown = playerBarsVisible(
+    // 顶/底栏的动画目标与在场：动画目标只看完全可见，在场含淡出中。
+    val bars = playerBarsPresence(
         locked = locked,
-        controlsVisible = controlsVisible,
+        phase = controls.phase,
         panelBarsVisible = panels.controlBarsVisible,
         firstBuffering = firstBuffering,
     )
-    // 顶/底栏是否在场：淡出中仍在，指针跟着留到完全隐藏。
-    val barsPresent = playerBarsVisible(
-        locked = locked,
-        controlsVisible = controlsPresent,
-        panelBarsVisible = panels.controlBarsVisible,
-        firstBuffering = firstBuffering,
-    )
-    // 指针与解锁按钮同一时序：未锁定跟随顶/底栏，锁定跟随解锁按钮。
-    val pointerPresent = playerPointerPresent(
-        locked = locked,
-        barsPresent = barsPresent,
-        unlockVisible = lock.unlockVisible,
-    )
+    val barsShown = bars.shown
+    val barsPresent = bars.present
     // 面板可见性统一由此判定；不可见的面板不能拦截手势。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -470,8 +459,8 @@ fun PlayerScreen(
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(pointerPresent) {
-        pointerFollowsBars(pointerPresent, pointer)
+    LaunchedEffect(barsPresent) {
+        pointerFollowsBars(barsPresent, pointer)
     }
     // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
     LaunchedEffect(pointer) {
@@ -576,8 +565,9 @@ fun PlayerScreen(
             },
             onSeekStep = onSeekStep,
             onSeekHeartbeat = onSeekHeartbeat,
-            onToggleControls = { controls.toggle() },
+            onToggleControls = { if (toggleControlsAllowed(firstBuffering)) controls.toggle() },
             onGestureInteraction = { controls.onUserGesture() },
+            onGesturePress = { pressed -> controls.onGesturePress(pressed) },
             onVolumeHint = { volumeHint = it },
             onSeekHint = { seekHint = it },
             modifier = Modifier.fillMaxSize(),
@@ -643,12 +633,13 @@ fun PlayerScreen(
         AnimatedVisibility(
             visible = barsShown,
             enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
+            exit = fadeOut(tween(if (controls.hiddenImmediately) 0 else CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.TopStart),
         ) {
             val topBarInteractive = playerBarsInteractive(
                 barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
+                locked = locked,
             )
             PlayerTopBar(
                 title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
@@ -689,12 +680,13 @@ fun PlayerScreen(
         AnimatedVisibility(
             visible = barsShown,
             enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
+            exit = fadeOut(tween(if (controls.hiddenImmediately) 0 else CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             val bottomBarInteractive = playerBarsInteractive(
                 barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
+                locked = locked,
             )
             Controls(
                 state = state,
@@ -797,10 +789,10 @@ fun PlayerScreen(
                 )
             }
         }
-        // 解锁按钮随解锁动作立即离开组合，退场期不留下可点子树，避免挡住返回键热区。
-        if (lock.unlockVisible) {
+        // 解锁按钮随解锁动作立即离开组合；定时隐藏后仍保留组合，重新出现走 200 毫秒淡入。
+        if (!lock.unlockDismissed) {
             AnimatedVisibility(
-                visible = !lock.unlockFading,
+                visible = lock.unlockVisible && !lock.unlockFading,
                 enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
                 exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
                 modifier = Modifier.align(Alignment.TopStart),
@@ -906,6 +898,7 @@ private fun PlayerGestureLayer(
     onSeekHeartbeat: () -> Unit,
     onToggleControls: () -> Unit,
     onGestureInteraction: () -> Unit,
+    onGesturePress: (Boolean) -> Unit,
     onVolumeHint: (Float?) -> Unit,
     onSeekHint: (SeekHint?) -> Unit,
     modifier: Modifier = Modifier,
@@ -933,6 +926,7 @@ private fun PlayerGestureLayer(
     val latestOnSeekHeartbeat = rememberUpdatedState(onSeekHeartbeat)
     val latestOnToggleControls = rememberUpdatedState(onToggleControls)
     val latestOnGestureInteraction = rememberUpdatedState(onGestureInteraction)
+    val latestOnGesturePress = rememberUpdatedState(onGesturePress)
     val latestOnVolumeHint = rememberUpdatedState(onVolumeHint)
     val latestOnSeekHint = rememberUpdatedState(onSeekHint)
     val latestPosition = rememberUpdatedState(positionMillis)
@@ -980,6 +974,27 @@ private fun PlayerGestureLayer(
                 tapGesture.cancel()
                 if (!gesturesEnabled) return@pointerInput
                 detectPlayerTaps(tapGesture, dispatchTap)
+            }
+            // 按下即上报一次操作：按住不动同样不隐藏，双指按到最后一指抬起才结束。
+            .pointerInput(gesturesEnabled) {
+                if (!gesturesEnabled) return@pointerInput
+                val tracker = PlayerGesturePressTracker()
+                try {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            for (change in event.changes) {
+                                if (change.pressed) {
+                                    if (tracker.onDown(change.id.value)) latestOnGesturePress.value(true)
+                                } else if (tracker.onUp(change.id.value)) {
+                                    latestOnGesturePress.value(false)
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    if (tracker.pressing) latestOnGesturePress.value(false)
+                }
             }
             .pointerInput(gesturesEnabled, seekAllowed, volumeAllowed) {
                 if (!gesturesEnabled) return@pointerInput

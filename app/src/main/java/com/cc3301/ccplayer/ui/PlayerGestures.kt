@@ -234,12 +234,50 @@ fun playerBarsVisible(
     (controlsVisible || firstBuffering) &&
     panelBarsVisible
 
+/** 顶/底栏的两个判据：动画目标只看完全可见；在场（指针与退场可点）看可见或淡出中。 */
+data class PlayerBarsPresence(val shown: Boolean, val present: Boolean)
+
+fun playerBarsPresence(
+    locked: Boolean,
+    phase: ControlsPhase,
+    panelBarsVisible: Boolean,
+    firstBuffering: Boolean,
+): PlayerBarsPresence = PlayerBarsPresence(
+    shown = playerBarsVisible(locked, phase == ControlsPhase.Shown, panelBarsVisible, firstBuffering),
+    present = playerBarsVisible(locked, phase != ControlsPhase.Hidden, panelBarsVisible, firstBuffering),
+)
+
 /**
- * 顶/底栏控件此刻是否可以点击：栏可见，或正在淡出（画面还在，点击照常生效）。
- * 退场动画期间不移除可点击的子树，避免控件可见却点不到。
+ * 顶/底栏控件此刻是否可以点击：未锁定，且栏可见或正在退场（画面还在，点击照常生效）。
+ * 锁定后立即不可交互，退场动画继续走但不吃点击。
  */
-fun playerBarsInteractive(barsVisible: Boolean, exitAnimating: Boolean): Boolean =
-    barsVisible || exitAnimating
+fun playerBarsInteractive(barsVisible: Boolean, exitAnimating: Boolean, locked: Boolean): Boolean =
+    !locked && (barsVisible || exitAnimating)
+
+/** 首次加载期间顶/底栏固定显示，单击画面不切换控制层，避免画面与状态不一致。 */
+fun toggleControlsAllowed(firstBuffering: Boolean): Boolean = !firstBuffering
+
+/**
+ * 手势层按压计数：任一手指按下即算按住，最后一指抬起才结束。
+ * 按住不动也按一次操作计时，避免按住画面时控制层被移除。
+ */
+class PlayerGesturePressTracker {
+    private val pressedPointers = mutableSetOf<Long>()
+
+    val pressing: Boolean get() = pressedPointers.isNotEmpty()
+
+    /** 手指按下；返回 true 表示由「未按住」变为「按住」。 */
+    fun onDown(pointerId: Long): Boolean {
+        val added = pressedPointers.add(pointerId)
+        return added && pressedPointers.size == 1
+    }
+
+    /** 手指抬起；返回 true 表示最后一指抬起。 */
+    fun onUp(pointerId: Long): Boolean {
+        val removed = pressedPointers.remove(pointerId)
+        return removed && pressedPointers.isEmpty()
+    }
+}
 
 /** 首次缓冲：本次播放还没有开始过切集时的加载阶段。 */
 fun isFirstBuffering(initialLoading: Boolean, switchedSinceOpen: Boolean): Boolean =

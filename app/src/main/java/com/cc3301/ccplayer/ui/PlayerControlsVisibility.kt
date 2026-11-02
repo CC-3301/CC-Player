@@ -67,21 +67,38 @@ class PlayerControlsVisibility(
     var fadeOutStartedAtMillis by mutableLongStateOf(0L)
         private set
 
+    /** 本次隐藏是否由单击画面触发：立即隐藏，界面不退场。 */
+    var hiddenImmediately by mutableStateOf(false)
+        private set
+
     private var pressedCount by mutableIntStateOf(0)
 
     /** 有控件按住中：按下即重新计时，最后一指抬起前不自动隐藏。 */
     val pressing: Boolean
         get() = pressedCount > 0
 
-    /** 点击画面：显示时开始淡出，淡出或隐藏时显示并重新计时；按住期间不进入淡出。 */
+    /** 点击画面：显示时立即隐藏，淡出或隐藏时显示并重新计时；按住期间不隐藏。 */
     fun toggle() {
-        if (visible) beginFadeOut() else showByUserAction()
+        if (visible) hideNow() else showByUserAction()
+    }
+
+    /** 单击画面立即隐藏，不走淡出；按住期间不隐藏。 */
+    fun hideNow() {
+        if (pressing) return
+        phase = ControlsPhase.Hidden
+        hiddenImmediately = true
     }
 
     /** 点击画面或控件时显示控制层并重新计时。 */
     fun showByUserAction() {
         phase = ControlsPhase.Shown
+        hiddenImmediately = false
         lastInteractionAtMillis = elapsedMillis()
+    }
+
+    /** 手势层按压状态：任一手指按下即算按住，最后一指抬起后重新计时。 */
+    fun onGesturePress(pressed: Boolean) {
+        if (pressed) onPressDown() else onPressUp()
     }
 
     /** 拖动进度条、滚轮与整屏手势：算一次操作并重新计时；淡出中撤销淡出，已隐藏时手势不唤出控制层。 */
@@ -156,6 +173,7 @@ class PlayerControlsVisibility(
     private fun beginFadeOut() {
         if (pressing) return
         phase = ControlsPhase.Fading
+        hiddenImmediately = false
         fadeOutStartedAtMillis = elapsedMillis()
         lastInteractionAtMillis = elapsedMillis()
     }
