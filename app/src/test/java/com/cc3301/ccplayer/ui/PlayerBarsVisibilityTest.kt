@@ -12,10 +12,18 @@ class PlayerBarsVisibilityTest {
     private val controls = PlayerControlsVisibility(elapsedMillis = { now })
     private val pointer = PlayerPointerVisibility(elapsedMillis = { now })
 
-    /** 未锁定、抽屉关闭时，按控制层显隐与首次缓冲判定顶/底栏。 */
-    private fun barsVisible(firstBuffering: Boolean = false): Boolean = playerBarsVisible(
+    /** 未锁定、抽屉关闭时，顶/底栏的动画目标：控制层完全可见才显示。 */
+    private fun barsShown(firstBuffering: Boolean = false): Boolean = playerBarsVisible(
         locked = false,
         controlsVisible = controls.visible,
+        panelBarsVisible = true,
+        firstBuffering = firstBuffering,
+    )
+
+    /** 顶/底栏是否在场（可见或淡出中）：指针与退场可点按此判定。 */
+    private fun barsPresent(firstBuffering: Boolean = false): Boolean = playerBarsVisible(
+        locked = false,
+        controlsVisible = !controls.hidden,
         panelBarsVisible = true,
         firstBuffering = firstBuffering,
     )
@@ -24,7 +32,7 @@ class PlayerBarsVisibilityTest {
     fun `控制层隐藏时顶底栏不显示`() {
         controls.toggle()
 
-        assertFalse(barsVisible())
+        assertFalse(barsShown())
     }
 
     @Test
@@ -35,7 +43,7 @@ class PlayerBarsVisibilityTest {
         now = 6_000L
         controls.onLoadingPhaseChanged()
 
-        assertFalse(barsVisible())
+        assertFalse(barsShown())
     }
 
     @Test
@@ -46,7 +54,7 @@ class PlayerBarsVisibilityTest {
             switchedSinceOpen = switchedSinceOpen(switching = false, alreadySwitched = false),
         )
 
-        assertTrue(barsVisible(firstBuffering = firstBuffering))
+        assertTrue(barsShown(firstBuffering = firstBuffering))
     }
 
     @Test
@@ -56,7 +64,7 @@ class PlayerBarsVisibilityTest {
         val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
 
         assertFalse(firstBuffering)
-        assertFalse(barsVisible(firstBuffering = firstBuffering))
+        assertFalse(barsShown(firstBuffering = firstBuffering))
     }
 
     @Test
@@ -67,7 +75,7 @@ class PlayerBarsVisibilityTest {
 
         val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
         assertFalse(firstBuffering)
-        assertFalse(barsVisible(firstBuffering = firstBuffering))
+        assertFalse(barsShown(firstBuffering = firstBuffering))
     }
 
     @Test
@@ -103,61 +111,103 @@ class PlayerBarsVisibilityTest {
     }
 
     @Test
+    fun `淡出窗口内控件保持可点击`() {
+        now = 4_500L
+        controls.beginFadeOutIfExpired()
+
+        assertTrue(controls.fading)
+        assertTrue(barsPresent())
+        assertFalse(barsShown())
+        assertTrue(playerBarsInteractive(barsVisible = barsShown(), exitAnimating = controls.fading))
+    }
+
+    @Test
     fun `控制层隐藏且不在退场时控件不可点击`() {
         controls.toggle()
 
         assertFalse(
             playerBarsInteractive(
-                barsVisible = barsVisible(),
+                barsVisible = barsShown(),
                 exitAnimating = false,
             ),
         )
     }
 
     @Test
-    fun `开始淡出时指针立即隐藏`() {
+    fun `淡出中按下控件撤销淡出并重新计时`() {
+        now = 4_200L
+        controls.beginFadeOutIfExpired()
+        assertTrue(controls.fading)
+
+        // 控件按下走 holdControlsVisible，落到 onPressDown。
+        controls.onPressDown()
+
+        assertTrue(controls.visible)
+        assertFalse(controls.fading)
+        assertEquals(-1L, controls.millisUntilFadeOut())
+
+        controls.onPressUp()
+        assertEquals(4_000L, controls.millisUntilFadeOut())
+        assertTrue(barsShown())
+    }
+
+    @Test
+    fun `淡出中拖动进度条撤销淡出并重新计时`() {
+        now = 4_500L
+        controls.beginFadeOutIfExpired()
+
+        // 拖动、滚轮与手势都只走 resetTimer。
+        controls.resetTimer()
+
+        assertTrue(controls.visible)
+        assertFalse(controls.fading)
+        assertEquals(4_000L, controls.millisUntilFadeOut())
+    }
+
+    @Test
+    fun `淡出中指针保持可见第五秒完全隐藏时才消失`() {
         pointer.onPointerEnter(Offset.Zero)
-        now = 3_999L
-        controls.hideIfExpired()
-        pointerFollowsBars(barsVisible(), pointer)
-        assertTrue(pointer.visible)
 
         now = 4_000L
-        controls.hideIfExpired()
-        assertFalse(barsVisible())
-        // 淡出还要 1 秒才结束，指针不等淡出，随控制层开始隐藏立即消失。
-        pointerFollowsBars(barsVisible(), pointer)
+        controls.beginFadeOutIfExpired()
+        pointerFollowsBars(barsPresent(), pointer)
+        assertTrue(pointer.visible)
+
+        now = 5_000L
+        controls.completeFadeOut()
+        pointerFollowsBars(barsPresent(), pointer)
+
         assertFalse(pointer.visible)
     }
 
     @Test
-    fun `淡出期间点击控件重新显示并重置计时`() {
-        now = 4_500L
-        controls.hideIfExpired()
-        assertFalse(controls.visible)
+    fun `涟漪在第五秒完全隐藏后才清理`() {
+        now = 4_000L
+        controls.beginFadeOutIfExpired()
+        // 淡出中仍保留子树与涟漪。
+        assertFalse(controls.hidden)
 
-        controls.showByUserAction()
-        assertTrue(controls.visible)
-        assertEquals(4_000L, controls.millisUntilAutoHide())
+        now = 4_999L
+        controls.completeFadeOut()
+        assertFalse(controls.hidden)
 
-        now = 8_499L
-        controls.hideIfExpired()
-        assertTrue(controls.visible)
-
-        now = 8_500L
-        controls.hideIfExpired()
-        assertFalse(controls.visible)
+        now = 5_000L
+        controls.completeFadeOut()
+        assertTrue(controls.hidden)
     }
 
     @Test
-    fun `指针跟随栏的可见性`() {
+    fun `指针跟随栏的在场状态`() {
         pointer.onPointerEnter(Offset.Zero)
 
-        pointerFollowsBars(barsVisible = false, pointer = pointer)
-        assertFalse(pointer.visible)
-
-        pointerFollowsBars(barsVisible = true, pointer = pointer)
+        controls.toggle()
+        pointerFollowsBars(barsPresent(), pointer)
         assertTrue(pointer.visible)
+
+        now = 5_000L
+        controls.completeFadeOut()
+        pointerFollowsBars(barsPresent(), pointer)
+        assertFalse(pointer.visible)
     }
 
     @Test
@@ -166,7 +216,7 @@ class PlayerBarsVisibilityTest {
         pointerFollowsBars(
             barsVisible = playerBarsVisible(
                 locked = true,
-                controlsVisible = true,
+                controlsVisible = !controls.hidden,
                 panelBarsVisible = true,
                 firstBuffering = false,
             ),
@@ -178,7 +228,7 @@ class PlayerBarsVisibilityTest {
         pointerFollowsBars(
             barsVisible = playerBarsVisible(
                 locked = false,
-                controlsVisible = true,
+                controlsVisible = !controls.hidden,
                 panelBarsVisible = false,
                 firstBuffering = false,
             ),

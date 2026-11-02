@@ -352,6 +352,8 @@ fun PlayerScreen(
     val doubleTapFeedback = remember(mediaKey) { PlayerDoubleTapFeedback() }
     val locked = lock.locked
     val controlsVisible = controls.visible
+    // 控制层在场（可见或淡出中）：指针、退场可点与面板清理都按这个口径，第 5 秒才算隐藏。
+    val controlsPresent = !controls.hidden
     // 本次播放开始过切集之后，加载阶段不再算首次缓冲。
     var switchedThisSession by remember { mutableStateOf(false) }
     LaunchedEffect(switching) {
@@ -363,10 +365,17 @@ fun PlayerScreen(
     LaunchedEffect(surfacePresentation.aspectRatio) {
         if (hasKnownVideoAspectRatio(surfacePresentation.aspectRatio)) aspectRatioPlaced = true
     }
-    // 顶/底栏是否可见同时决定指针是否跟随出现。
-    val barsVisible = playerBarsVisible(
+    // 顶/底栏的动画目标：控制层完全可见时才显示，淡出中走退场动画。
+    val barsShown = playerBarsVisible(
         locked = locked,
         controlsVisible = controlsVisible,
+        panelBarsVisible = panels.controlBarsVisible,
+        firstBuffering = firstBuffering,
+    )
+    // 顶/底栏是否在场：淡出中仍在，指针跟着留到完全隐藏。
+    val barsPresent = playerBarsVisible(
+        locked = locked,
+        controlsVisible = controlsPresent,
         panelBarsVisible = panels.controlBarsVisible,
         firstBuffering = firstBuffering,
     )
@@ -395,35 +404,55 @@ fun PlayerScreen(
     LaunchedEffect(controlsVisible, locked) {
         panels.closeWhenControlsUnavailable(controlsVisible, locked)
     }
-    // 控制层隐藏后涟漪不再渲染：清掉未播完的条目，重新显示时不重播。
-    LaunchedEffect(controlsVisible) {
-        if (!controlsVisible) doubleTapFeedback.clearRipples()
+    // 控制层完全隐藏后涟漪不再渲染：清掉未播完的条目，重新显示时不重播。
+    LaunchedEffect(controls.hidden) {
+        if (controls.hidden) doubleTapFeedback.clearRipples()
     }
     LaunchedEffect(
-        controls.visible,
+        controls.phase,
         controls.panelOpen,
         controls.pressing,
         controls.lastInteractionAtMillis,
+        controls.fadeOutStartedAtMillis,
         switching,
         initialLoading,
     ) {
         // 加载全程不自动隐藏，避免切集期间控制条消失。
         val holdVisible = switching || initialLoading
-        while (controls.visible && !controls.panelOpen) {
-            val remaining = controls.millisUntilAutoHide(holdVisible)
-            if (remaining < 0L) break
-            if (remaining == 0L) {
-                controls.hideIfExpired(holdVisible)
-                break
+        when (controls.phase) {
+            ControlsPhase.Shown -> {
+                val remaining = controls.millisUntilFadeOut(holdVisible)
+                if (remaining > 0L) delay(remaining)
+                if (remaining >= 0L) controls.beginFadeOutIfExpired(holdVisible)
             }
-            delay(remaining)
+            ControlsPhase.Fading -> {
+                val remaining = controls.millisUntilHidden()
+                if (remaining > 0L) delay(remaining)
+                controls.completeFadeOut()
+            }
+            ControlsPhase.Hidden -> Unit
         }
     }
 
-    LaunchedEffect(lock.locked, lock.unlockVisible, lock.unlockShownAtMillis) {
-        if (lock.locked && lock.unlockVisible) {
-            delay(UNLOCK_AUTO_HIDE_MILLIS)
-            lock.hideUnlockIfExpired()
+    LaunchedEffect(
+        lock.locked,
+        lock.unlockVisible,
+        lock.unlockFading,
+        lock.unlockShownAtMillis,
+        lock.unlockFadeOutStartedAtMillis,
+    ) {
+        when {
+            !lock.locked || !lock.unlockVisible -> Unit
+            lock.unlockFading -> {
+                val remaining = lock.millisUntilUnlockHidden()
+                if (remaining > 0L) delay(remaining)
+                lock.completeUnlockFadeOut()
+            }
+            else -> {
+                val remaining = lock.millisUntilUnlockFadeOut()
+                if (remaining > 0L) delay(remaining)
+                lock.beginUnlockFadeOutIfExpired()
+            }
         }
     }
 
@@ -455,8 +484,8 @@ fun PlayerScreen(
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(barsVisible) {
-        pointerFollowsBars(barsVisible, pointer)
+    LaunchedEffect(barsPresent) {
+        pointerFollowsBars(barsPresent, pointer)
     }
     // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
     LaunchedEffect(pointer) {
@@ -626,13 +655,13 @@ fun PlayerScreen(
         val canGoNext = currentIndex in 0 until playlist.lastIndex
         // 锁定、自动隐藏或抽屉打开时控制层淡出；淡出动画期间控件保持可点击，避免看得见却点不到。
         AnimatedVisibility(
-            visible = barsVisible,
+            visible = barsShown,
             enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
+            exit = fadeOut(controlsFadeOutSpec(controls.fadeOutMillis)),
             modifier = Modifier.align(Alignment.TopStart),
         ) {
             val topBarInteractive = playerBarsInteractive(
-                barsVisible = barsVisible,
+                barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
             )
             PlayerTopBar(
@@ -672,13 +701,13 @@ fun PlayerScreen(
             )
         }
         AnimatedVisibility(
-            visible = barsVisible,
+            visible = barsShown,
             enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
-            exit = fadeOut(tween(CONTROLS_FADE_OUT_MILLIS.toInt())),
+            exit = fadeOut(controlsFadeOutSpec(controls.fadeOutMillis)),
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             val bottomBarInteractive = playerBarsInteractive(
-                barsVisible = barsVisible,
+                barsVisible = barsShown,
                 exitAnimating = transition.targetState == EnterExitState.PostExit,
             )
             Controls(
@@ -782,14 +811,18 @@ fun PlayerScreen(
                 )
             }
         }
-        if (lock.unlockVisible) {
+        AnimatedVisibility(
+            visible = lock.unlockVisible && !lock.unlockFading,
+            enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
+            exit = fadeOut(controlsFadeOutSpec(lock.fadeOutMillis)),
+            modifier = Modifier.align(Alignment.TopStart),
+        ) {
             UnlockButton(
                 onTap = {
                     lock.tapLockButton()
                     controls.showByUserAction()
                 },
                 modifier = Modifier
-                    .align(Alignment.TopStart)
                     .safeDrawingPadding()
                     .padding(AppSpacing.Lg),
             )

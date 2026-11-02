@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlayerControlsVisibilityTest {
@@ -11,39 +13,87 @@ class PlayerControlsVisibilityTest {
     @Test
     fun `默认显示控制层`() {
         assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
+        assertEquals(false, controls.hidden)
     }
 
     @Test
     fun `四秒无操作后开始淡出控制层`() {
         now = 3_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 4_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
 
         assertEquals(false, controls.visible)
+        assertEquals(true, controls.fading)
+        assertEquals(false, controls.hidden)
     }
 
     @Test
-    fun `四秒开始淡出五秒完全消失`() {
-        // 淡出 1 秒：开始淡出时刻加上淡出时长等于完全消失的时刻。
-        assertEquals(1_000L, CONTROLS_FADE_OUT_MILLIS)
-        assertEquals(4_000L, CONTROLS_FADE_START_MILLIS)
-        assertEquals(5_000L, CONTROLS_FADE_START_MILLIS + CONTROLS_FADE_OUT_MILLIS)
-        assertEquals(5_000L, CONTROLS_AUTO_HIDE_MILLIS)
+    fun `五秒后完全隐藏控制层`() {
+        now = 4_000L
+        controls.beginFadeOutIfExpired()
+
+        now = 4_999L
+        controls.completeFadeOut()
+        assertEquals(true, controls.fading)
+        assertEquals(false, controls.hidden)
+
+        now = 5_000L
+        controls.completeFadeOut()
+
+        assertEquals(true, controls.hidden)
+        assertEquals(false, controls.fading)
+    }
+
+    @Test
+    fun `退场动画时长取自淡出时长`() {
+        // 界面用同一个值生成退场动画，注入多长就淡多久。
+        assertEquals(1_000, controlsFadeOutSpec(CONTROLS_FADE_OUT_MILLIS).durationMillis)
+        assertEquals(200L, CONTROLS_FADE_IN_MILLIS)
+
+        val injected = PlayerControlsVisibility(elapsedMillis = { now }, fadeOutMillis = 1_234L)
+        assertEquals(1_234, controlsFadeOutSpec(injected.fadeOutMillis).durationMillis)
+    }
+
+    @Test
+    fun `淡出窗口长度随注入的淡出时长变化`() {
+        val injected = PlayerControlsVisibility(elapsedMillis = { now }, fadeOutMillis = 1_234L)
+
+        now = 4_000L
+        injected.beginFadeOutIfExpired()
+
+        now = 5_233L
+        injected.completeFadeOut()
+        assertEquals(true, injected.fading)
+
+        now = 5_234L
+        injected.completeFadeOut()
+        assertEquals(true, injected.hidden)
     }
 
     @Test
     fun `点击切换控制层显隐`() {
-        // 显示固定 200 毫秒淡入，隐藏先转状态再淡出 1 秒。
-        assertEquals(200L, CONTROLS_FADE_IN_MILLIS)
-
         controls.toggle()
         assertEquals(false, controls.visible)
+        assertEquals(true, controls.fading)
 
         controls.toggle()
         assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
+    }
+
+    @Test
+    fun `淡出中点击画面撤销淡出`() {
+        now = 4_500L
+        controls.beginFadeOutIfExpired()
+
+        controls.toggle()
+
+        assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
     }
 
     @Test
@@ -52,35 +102,88 @@ class PlayerControlsVisibilityTest {
         controls.showByUserAction()
 
         now = 5_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 6_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
     }
 
     @Test
     fun `隐藏后操作重新显示控制层`() {
         now = 4_000L
-        controls.hideIfExpired()
-        assertEquals(false, controls.visible)
+        controls.beginFadeOutIfExpired()
+        now = 5_000L
+        controls.completeFadeOut()
+        assertEquals(true, controls.hidden)
 
         controls.showByUserAction()
 
         assertEquals(true, controls.visible)
+        assertEquals(false, controls.hidden)
     }
 
     @Test
-    fun `隐藏时手势只重置计时不唤出控制层`() {
-        now = 4_000L
-        controls.hideIfExpired()
-        assertEquals(false, controls.visible)
+    fun `淡出中按下控件撤销淡出并重新计时`() {
+        now = 4_200L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.fading)
 
+        // 控件按下走 holdControlsVisible，落到 onPressDown。
+        controls.onPressDown()
+
+        assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
+        assertEquals(true, controls.pressing)
+        assertEquals(-1L, controls.millisUntilFadeOut())
+
+        // 按住期间不进入淡出。
+        now = 9_000L
+        assertEquals(-1L, controls.millisUntilFadeOut())
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.visible)
+
+        // 抬起后从抬起时刻重新计时。
+        controls.onPressUp()
+        assertEquals(4_000L, controls.millisUntilFadeOut())
+
+        now = 12_999L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.visible)
+
+        now = 13_000L
+        controls.beginFadeOutIfExpired()
+        assertEquals(false, controls.visible)
+    }
+
+    @Test
+    fun `淡出中拖动或滚轮撤销淡出并重新计时`() {
+        now = 4_500L
+        controls.beginFadeOutIfExpired()
+        assertEquals(true, controls.fading)
+
+        // 拖动、滚轮与手势都只走 resetTimer。
+        controls.resetTimer()
+
+        assertEquals(true, controls.visible)
+        assertEquals(false, controls.fading)
+        assertEquals(4_500L, controls.lastInteractionAtMillis)
+        assertEquals(4_000L, controls.millisUntilFadeOut())
+    }
+
+    @Test
+    fun `淡出结束后手势只重置计时不唤出控制层`() {
+        now = 4_000L
+        controls.beginFadeOutIfExpired()
         now = 5_000L
+        controls.completeFadeOut()
+
+        now = 6_000L
         controls.resetTimer()
 
         assertEquals(false, controls.visible)
+        assertEquals(true, controls.hidden)
     }
 
     @Test
@@ -94,41 +197,43 @@ class PlayerControlsVisibilityTest {
         assertEquals(true, controls.visible)
 
         now = 8_998L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 8_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
     }
 
     @Test
     fun `剩余时间按最近操作计算`() {
-        assertEquals(4_000L, controls.millisUntilAutoHide())
+        assertEquals(4_000L, controls.millisUntilFadeOut())
 
         now = 1_000L
-        assertEquals(3_000L, controls.millisUntilAutoHide())
+        assertEquals(3_000L, controls.millisUntilFadeOut())
 
         controls.showByUserAction()
-        assertEquals(4_000L, controls.millisUntilAutoHide())
+        assertEquals(4_000L, controls.millisUntilFadeOut())
 
         now = 3_500L
-        assertEquals(1_500L, controls.millisUntilAutoHide())
+        assertEquals(1_500L, controls.millisUntilFadeOut())
     }
 
     @Test
     fun `面板打开时不计算自动隐藏时间`() {
         controls.updatePanelOpen(true)
 
-        assertEquals(-1L, controls.millisUntilAutoHide())
+        assertEquals(-1L, controls.millisUntilFadeOut())
     }
 
     @Test
     fun `隐藏后不再计算自动隐藏时间`() {
         now = 4_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
+        now = 5_000L
+        controls.completeFadeOut()
 
-        assertEquals(-1L, controls.millisUntilAutoHide())
+        assertEquals(-1L, controls.millisUntilFadeOut())
     }
 
     @Test
@@ -136,7 +241,7 @@ class PlayerControlsVisibilityTest {
         controls.updatePanelOpen(true)
 
         now = 10_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
 
         assertEquals(true, controls.visible)
     }
@@ -148,11 +253,11 @@ class PlayerControlsVisibilityTest {
         controls.updatePanelOpen(false)
 
         now = 13_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 14_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
     }
 
@@ -160,8 +265,8 @@ class PlayerControlsVisibilityTest {
     fun `加载期间不自动隐藏`() {
         now = 10_000L
 
-        assertEquals(-1L, controls.millisUntilAutoHide(holdVisible = true))
-        controls.hideIfExpired(holdVisible = true)
+        assertEquals(-1L, controls.millisUntilFadeOut(holdVisible = true))
+        controls.beginFadeOutIfExpired(holdVisible = true)
 
         assertEquals(true, controls.visible)
     }
@@ -174,7 +279,7 @@ class PlayerControlsVisibilityTest {
         assertEquals(3_999L, controls.lastInteractionAtMillis)
 
         now = 4_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
 
         assertEquals(true, controls.visible)
     }
@@ -185,8 +290,8 @@ class PlayerControlsVisibilityTest {
         assertEquals(true, controls.pressing)
 
         now = 30_000L
-        assertEquals(-1L, controls.millisUntilAutoHide())
-        controls.hideIfExpired()
+        assertEquals(-1L, controls.millisUntilFadeOut())
+        controls.beginFadeOutIfExpired()
 
         assertEquals(true, controls.visible)
     }
@@ -199,8 +304,8 @@ class PlayerControlsVisibilityTest {
         controls.onPressUp()
         assertEquals(true, controls.pressing)
         now = 30_000L
-        assertEquals(-1L, controls.millisUntilAutoHide())
-        controls.hideIfExpired()
+        assertEquals(-1L, controls.millisUntilFadeOut())
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         // 最后一指抬起才恢复计时。
@@ -216,27 +321,30 @@ class PlayerControlsVisibilityTest {
         controls.onPressUp()
 
         assertEquals(false, controls.pressing)
-        assertEquals(4_000L, controls.millisUntilAutoHide())
+        assertEquals(4_000L, controls.millisUntilFadeOut())
 
         now = 23_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 24_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
     }
 
     @Test
     fun `隐藏态加载阶段变化不显示控制层`() {
         now = 4_000L
-        controls.hideIfExpired()
-        assertEquals(false, controls.visible)
-
+        controls.beginFadeOutIfExpired()
         now = 5_000L
+        controls.completeFadeOut()
+        assertEquals(true, controls.hidden)
+
+        now = 6_000L
         controls.onLoadingPhaseChanged()
 
         assertEquals(false, controls.visible)
+        assertEquals(true, controls.hidden)
     }
 
     @Test
@@ -245,11 +353,11 @@ class PlayerControlsVisibilityTest {
         controls.onLoadingPhaseChanged()
 
         now = 7_999L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(true, controls.visible)
 
         now = 8_000L
-        controls.hideIfExpired()
+        controls.beginFadeOutIfExpired()
         assertEquals(false, controls.visible)
     }
 }
