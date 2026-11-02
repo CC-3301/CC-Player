@@ -400,8 +400,9 @@ class PlaybackController(
 
     /**
      * 切集预检：试打开目标读取句柄并读 1 个字节，打不开就不发起切集。
-     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]），这里再加「预算 + 余量」的兜底：
-     * 结果一直悬着也按不可读收尾，当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
+     * 3 秒预算由预检接缝自己保证（[SWITCH_PRECHECK_TIMEOUT_MILLIS]）；
+     * 这里只留「预算 + 余量」的兜底，用于结论因实现缺陷产不出时不让调用方无限等待。
+     * 不可读时当前视频继续播放、播放列表位置不变，提示复用既有失败出口。
      */
     private fun startSwitchWhenTargetReadable(
         index: Int,
@@ -2408,7 +2409,7 @@ class PlaybackController(
         /** 切集预检的等待上限；超时按不可读处理，不发起切集。 */
         const val SWITCH_PRECHECK_TIMEOUT_MILLIS = 3_000L
 
-        /** 预检兜底超时的余量：到点后还要关句柄、上报结果，超出「预算 + 余量」按不可读收尾。 */
+        /** 预检兜底超时的余量：只在结论产不出时兜底，正常路径由预检自己的 3 秒到点收尾。 */
         const val SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS = 1_000L
 
         private const val NO_MEDIA = -1

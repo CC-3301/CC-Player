@@ -112,6 +112,41 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
+    fun `a precheck that never returns is closed by the fallback timeout`() = runTest {
+        // 预检桩永不返回：只有外层「预算 + 余量」的兜底能让调用方收尾。
+        val never = CompletableDeferred<Boolean>()
+        val controller = controller(probe = { never.await() })
+        open(controller, "ep1.mkv", "ep2.mkv")
+        engine.reportMediaLoaded()
+        val failures = collectFailures(controller)
+        val starts = engine.startedUrls.size
+
+        controller.next()
+        runCurrent()
+
+        // 3 秒内层预算归预检自己；兜底没到之前不判失败、不发切换。
+        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_TIMEOUT_MILLIS)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+        assertFalse(controller.switching.value)
+
+        // 4 秒兜底按不可读收尾：不发起切换、列表位置不动、只提示一次。
+        advanceTimeBy(PlaybackController.SWITCH_PRECHECK_FALLBACK_MARGIN_MILLIS)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertFalse(controller.switching.value)
+        assertEquals(0, controller.currentIndex.value)
+        assertEquals(starts, engine.startedUrls.size)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+
+        // 再等一轮也不会补发切换或重复提示。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
+        runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(starts, engine.startedUrls.size)
+    }
+
+    @Test
     fun `a switch without progress retries exactly once`() = runTest {
         var discards = 0
         val controller = controller(
