@@ -205,17 +205,22 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `淡出中音量与双击涟漪提示仍显示`() {
-        now = 4_500L
+        // 淡出从第 4 秒起算，满 1 秒才隐藏：4.999 秒仍在场，5.000 秒才离开。
+        now = 4_000L
         controls.beginFadeOutIfExpired()
         assertEquals(true, controls.fading)
-        val present = presence().present
 
+        now = 4_999L
+        controls.completeFadeOut()
+        val present = presence().present
+        assertTrue(present)
         assertTrue(GestureHint.VolumePercent in shownGestureHints(present, GestureHintSource.Volume))
         assertTrue(GestureHint.DoubleTapRipple in shownGestureHints(present, GestureHintSource.DoubleTapSeek))
 
         now = 5_000L
         controls.completeFadeOut()
         val hidden = presence().present
+        assertFalse(hidden)
 
         assertFalse(GestureHint.VolumePercent in shownGestureHints(hidden, GestureHintSource.Volume))
         assertFalse(GestureHint.DoubleTapRipple in shownGestureHints(hidden, GestureHintSource.DoubleTapSeek))
