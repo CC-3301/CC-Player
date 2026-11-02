@@ -37,9 +37,6 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 本代每次真正下发的命令序号，按顺序；预览改写后的再次下发也各占一条。 */
     val issuedSeekSerials = mutableListOf<Int>()
 
-    /** 已按 ready 结算过的命令序号：同一序号再来一条只上报，不重复结算。 */
-    private val settledReadySerials = mutableSetOf<Int>()
-
     /** 最近一次下发的 seek 身份；与真实引擎一致，进程级单调，加载不重置。 */
     var currentSeekId = 0L
         private set
@@ -78,12 +75,13 @@ class FakePlaybackEngine : PlaybackEngine {
         // 与真实引擎一致：加载只作废在途与待发 seek，seek 身份本身不归零；命令序号换代归零。
         seekInFlightId = null
         seekInFlightMillis = null
+        seekInFlightPreview = false
         pendingSeekId = null
         pendingSeekMillis = null
+        pendingSeekPreview = false
         currentSeekSerial = 0
         acceptedSeekSerial = 0
         issuedSeekSerials.clear()
-        settledReadySerials.clear()
         return ++currentLoadToken
     }
 
@@ -109,10 +107,11 @@ class FakePlaybackEngine : PlaybackEngine {
         discardInFlightCalls++
     }
 
-    /** 在途这一跳的身份、序号与目标毫秒；未下发或已执行完时为 null。 */
+    /** 在途这一跳的身份、序号、目标毫秒与是否预览目标；未下发或已执行完时为 null。 */
     private var seekInFlightId: Long? = null
     private var seekInFlightSerial = 0
     private var seekInFlightMillis: Long? = null
+    private var seekInFlightPreview = false
 
     /** 在途期间被覆盖的最新待执行一跳；执行完补发一次。 */
     var pendingSeekId: Long? = null
@@ -120,6 +119,7 @@ class FakePlaybackEngine : PlaybackEngine {
     var pendingSeekMillis: Long? = null
         private set
     private var pendingSeekSerial = 0
+    private var pendingSeekPreview = false
 
     /** 本代加载内的 seek 序号：每下发一跳加一，加载换代归零；ready 带回同一个序号。 */
     private var currentSeekSerial = 0
@@ -127,47 +127,58 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 本代最后一跳已回报执行的序号；本代还没有 seek 执行完时为 0。 */
     private var acceptedSeekSerial = 0
 
-    override fun seekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
+    override fun seekTo(positionMillis: Long): PlaybackEngine.SeekRequest =
+        newSeek(positionMillis, preview = false)
+
+    /** 新的一跳：在途时只覆盖待执行目标，不堆命令；返回的是这一跳自己的凭据。 */
+    private fun newSeek(positionMillis: Long, preview: Boolean): PlaybackEngine.SeekRequest {
         val seekId = ++currentSeekId
         val serial = ++currentSeekSerial
         if (seekInFlightId != null) {
-            // 与真实引擎一致：在途时只覆盖待执行目标，不堆命令；返回的仍是这一跳自己的凭据。
             pendingSeekId = seekId
             pendingSeekSerial = serial
             pendingSeekMillis = positionMillis
+            pendingSeekPreview = preview
             return PlaybackEngine.SeekRequest(seekId, serial)
         }
-        issueSeek(seekId, serial, positionMillis)
+        issueSeek(seekId, serial, positionMillis, preview)
         return PlaybackEngine.SeekRequest(seekId, serial)
     }
 
     /**
-     * 与真实引擎一致：预览目标就地改写仍在执行的那一跳，待执行被丢弃，身份不变、序号换新。
-     * 旧序号的那条 ready 因此对不上这一跳。
+     * 与真实引擎一致：只有预览条目仍在执行时就地改写，待执行的预览一并丢弃，身份不变、序号换新，
+     * 返回改写前的序号；旧序号的那条 ready 因此对不上这一跳。
+     * 在途不是预览条目时按新的一跳入队；普通跳转的待执行目标不随改写丢弃。
      */
     override fun previewSeekTo(positionMillis: Long): PlaybackEngine.SeekRequest {
-        val inFlightId = seekInFlightId ?: return seekTo(positionMillis)
-        pendingSeekId = null
-        pendingSeekMillis = null
-        issueSeek(inFlightId, ++currentSeekSerial, positionMillis)
-        return PlaybackEngine.SeekRequest(inFlightId, seekInFlightSerial)
+        val inFlightId = seekInFlightId
+        if (inFlightId == null || !seekInFlightPreview) return newSeek(positionMillis, preview = true)
+        val previousSerial = seekInFlightSerial
+        if (pendingSeekPreview) {
+            pendingSeekId = null
+            pendingSeekMillis = null
+            pendingSeekPreview = false
+        }
+        issueSeek(inFlightId, ++currentSeekSerial, positionMillis, preview = true)
+        return PlaybackEngine.SeekRequest(inFlightId, previousSerial)
     }
 
     /** 一条 ready（PLAYBACK_RESTART）：[serial] 是它所属的命令序号，与在途那一跳不符时丢弃。 */
     fun reportReadyForSerial(serial: Int, loadToken: Int = currentLoadToken) {
         listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadToken)
+        // 在途为空（已结算）或序号对不上时，这条 ready 不属于这一跳。
         if (seekInFlightId == null || serial != seekInFlightSerial) return
-        if (!settledReadySerials.add(serial)) return
         completeSeek()
     }
 
-    private fun issueSeek(seekId: Long, serial: Int, positionMillis: Long) {
+    private fun issueSeek(seekId: Long, serial: Int, positionMillis: Long, preview: Boolean = false) {
         seekPositions += positionMillis
         seekAudioCalls += "seek($positionMillis)"
         issuedSeekSerials += serial
         seekInFlightId = seekId
         seekInFlightSerial = serial
         seekInFlightMillis = positionMillis
+        seekInFlightPreview = preview
     }
 
     /** 与真实引擎一致：在途这一跳执行完后回报它自己的身份与目标，并补发待执行的一跳。 */
@@ -177,16 +188,18 @@ class FakePlaybackEngine : PlaybackEngine {
         val executedSerial = seekInFlightSerial
         seekInFlightId = null
         seekInFlightMillis = null
+        seekInFlightPreview = false
         acceptedSeekSerial = executedSerial
-        settledReadySerials += executedSerial
         seekExecutions += executedId to executedMillis
         listener?.onSeekExecuted(executedId, executedMillis)
         val pendingId = pendingSeekId ?: return
         val pendingMillis = pendingSeekMillis ?: return
         val pendingSerial = pendingSeekSerial
+        val pendingPreview = pendingSeekPreview
         pendingSeekId = null
         pendingSeekMillis = null
-        issueSeek(pendingId, pendingSerial, pendingMillis)
+        pendingSeekPreview = false
+        issueSeek(pendingId, pendingSerial, pendingMillis, pendingPreview)
     }
 
     /** 模拟播放核心的在途 seek 超时：回报这一跳已执行并补发待执行目标。 */

@@ -188,7 +188,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 退到后台丢弃字节源的判定：加载期间记待丢弃，加载结束或回前台前补做。 */
     private val staleSourceDiscardPolicy = StaleSourceDiscardPolicy()
 
-    /** 屏幕常亮标志：仅前台且在播放时打开，其余时候释放。 */
+    /** 屏幕常亮标志：仅前台且播放或加载时打开，其余时候释放。 */
     private val screenOn = ScreenOnFlag { keepOn ->
         if (keepOn) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -815,11 +815,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
     }
 
-    /** 仅前台且在播放时保持屏幕常亮；暂停、退后台立即释放。 */
+    /** 仅前台且播放或加载时保持屏幕常亮；暂停、片尾、未打开、退后台立即释放。 */
     private fun updateKeepScreenOn() {
         screenOn.update(
             foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
-            playing = playbackState == PlaybackState.Playing,
+            state = playbackState,
         )
     }
 

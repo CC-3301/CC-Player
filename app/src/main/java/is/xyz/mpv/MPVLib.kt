@@ -1,7 +1,6 @@
 package `is`.xyz.mpv
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.view.Surface
 
 // Wrapper for native library
@@ -24,8 +23,6 @@ object MPVLib {
     external fun command(cmd: Array<out String>)
 
     external fun setOptionString(name: String, value: String): Int
-
-    external fun grabThumbnail(dimension: Int): Bitmap?
 
     external fun getPropertyInt(property: String): Int?
     external fun setPropertyInt(property: String, value: Int)
