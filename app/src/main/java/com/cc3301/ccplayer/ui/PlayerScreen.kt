@@ -1278,8 +1278,8 @@ private fun PlayerTopBar(
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
-    onBlankTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onBlankTap: (() -> Unit)? = null,
 ) {
     Box(
         modifier = modifier
@@ -1396,8 +1396,8 @@ private fun Controls(
     onToggleSubtitleMenu: () -> Unit,
     onLock: () -> Unit,
     onSelectSubtitle: (SubtitleMenuItem) -> Unit,
-    onBlankTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    onBlankTap: (() -> Unit)? = null,
 ) {
     // 图标条有意全宽贴边：三键居中与右侧按钮排布需要全部可用宽度；进度条与面板仍保留水平内边距。
     Column(
