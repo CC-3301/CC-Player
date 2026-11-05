@@ -20,6 +20,9 @@ private const val MAX_OPEN_FAILURES = 3
 /** 失败计数的时间窗：距上一次失败超过该时长，计数从头开始。 */
 private const val OPEN_FAILURE_WINDOW_MILLIS = 60 * 1000L
 
+/** 建连期间客户端被作废时，用新客户端重试的次数。 */
+private const val CONNECT_ATTEMPTS = 2
+
 /**
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
@@ -81,20 +84,18 @@ class SmbMediaReads(
      * 作废会话与重建都在锁外收尾：关闭旧客户端可能阻塞在网络操作上。
      */
     private fun recordOpenFailure(key: SessionKey, failure: Throwable) {
-        if (!failure.isConnectionFailure()) return
+        if (!smbConnectionLost(failure)) return
         val now = clock()
         val reached = synchronized(lock) {
-            val previous = openFailures[key]
-            val count = if (previous != null && now - previous.lastAt <= OPEN_FAILURE_WINDOW_MILLIS) {
-                previous.count + 1
-            } else {
-                1
-            }
+            // 清掉过期的计数：偶尔失败一次的键不会长期留在表里。
+            openFailures.entries.removeAll { (_, count) -> now - count.lastAt > OPEN_FAILURE_WINDOW_MILLIS }
+            val count = (openFailures[key]?.count ?: 0) + 1
             if (count < MAX_OPEN_FAILURES) {
                 openFailures[key] = FailureCount(count, now)
                 false
             } else {
-                openFailures.remove(key)
+                // 重建后旧计数一律作废：新客户端不会立刻被旧计数再触发一次重建。
+                openFailures.clear()
                 true
             }
         }
@@ -126,10 +127,6 @@ class SmbMediaReads(
         return closeable
     }
 
-    /** 只有连接不可用的失败才计入：业务类失败不该重建成客户端。 */
-    private fun Throwable.isConnectionFailure(): Boolean =
-        this is MediaSourceException && failure == MediaFailure.Unreachable
-
     /** 取该共享可用的会话并占一个句柄；闲置超时且没有句柄在用、或没有会话时新建。 */
     private suspend fun sessionFor(key: SessionKey, target: SmbTarget): Session {
         val now = clock()
@@ -148,32 +145,45 @@ class SmbMediaReads(
             }
         }
         stale.forEach(::close)
-        val created = connector.connect(
-            host = target.host,
-            port = target.port,
-            share = target.share,
-            username = target.username,
-            password = target.password,
-        )
-        val unused = ArrayList<SmbConnection>()
-        val session = synchronized(lock) {
-            val current = sessions[key]
-            if (current != null) {
-                // 并发建连：留先登记的那条，自己这条没用上。
-                current.lastUsedAt = now
-                current.inUse++
-                unused += created
-                current
-            } else {
-                val fresh = Session(created, now)
-                fresh.inUse = 1
-                sessions[key] = fresh
-                unused += evictBeyondLimitLocked(exclude = key)
-                fresh
+        repeat(CONNECT_ATTEMPTS) {
+            val generation = connector.generation
+            val created = connector.connect(
+                host = target.host,
+                port = target.port,
+                share = target.share,
+                username = target.username,
+                password = target.password,
+            )
+            val unused = ArrayList<SmbConnection>()
+            val session = synchronized(lock) {
+                // 建连期间客户端被作废：这条连接属于旧客户端，不登记，改用新客户端重来。
+                if (connector.generation != generation) {
+                    null
+                } else {
+                    val current = sessions[key]
+                    if (current != null) {
+                        // 并发建连：留先登记的那条，自己这条没用上。
+                        current.lastUsedAt = now
+                        current.inUse++
+                        unused += created
+                        current
+                    } else {
+                        val fresh = Session(created, now)
+                        fresh.inUse = 1
+                        sessions[key] = fresh
+                        unused += evictBeyondLimitLocked(exclude = key)
+                        fresh
+                    }
+                }
             }
+            if (session == null) {
+                close(created)
+                return@repeat
+            }
+            unused.forEach(::close)
+            return session
         }
-        unused.forEach(::close)
-        return session
+        throw MediaSourceException(MediaFailure.Unreachable, "SMB 客户端连续作废，建连未完成")
     }
 
     /** 句柄关闭：计数归零时，已被摘掉的会话才真正关闭连接。 */

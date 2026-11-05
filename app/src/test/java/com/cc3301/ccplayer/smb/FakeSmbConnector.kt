@@ -2,7 +2,11 @@ package com.cc3301.ccplayer.smb
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.SmbConfig
+import com.hierynomus.smbj.connection.Connection
 import java.io.Closeable
+import java.io.IOException
 
 /** 假连接器：用「共享 + 路径 → 子项」的映射代替真 SMB 服务器。 */
 class FakeSmbConnector : SmbConnector {
@@ -24,9 +28,15 @@ class FakeSmbConnector : SmbConnector {
     /** 打开读句柄时抛出的异常；非空时每次打开都失败。随时可改，连接沿用最新的。 */
     var openReadFailure: MediaSourceException? = null
 
-    /** 客户端被作废的次数；作废前建立的连接随之失效。 */
-    var resets: Int = 0
+    /** 客户端代数：每次作废加一；作废前建立的连接随之失效。 */
+    override var generation: Long = 0L
         private set
+
+    /** 作废次数，测试按次数断言。 */
+    val resets: Int get() = generation.toInt()
+
+    /** 建连过程中执行，用来模拟建连期间客户端被作废。 */
+    var duringConnect: (() -> Unit)? = null
 
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
@@ -71,7 +81,8 @@ class FakeSmbConnector : SmbConnector {
         failure?.let { throw it }
         logins += username to password
         shares += share
-        val generation = resets
+        duringConnect?.invoke()
+        val createdGeneration = generation
         return FakeSmbConnection(
             share = share,
             childrenByPath = childrenByPath,
@@ -81,12 +92,12 @@ class FakeSmbConnector : SmbConnector {
             closedShares = closedShares,
             maxReadSize = maxReadSize,
             openReadFailure = { openReadFailure },
-            isStale = { resets != generation },
+            isStale = { generation != createdGeneration },
         )
     }
 
     override fun reset() {
-        resets++
+        generation++
     }
 }
 
@@ -123,6 +134,25 @@ private class FakeSmbConnection(
     /** 旧客户端上的连接在作废后不可再用，与真实现一致。 */
     private fun ensureUsable() {
         if (isStale()) throw MediaSourceException(MediaFailure.Unreachable, "旧客户端的连接已作废")
+    }
+}
+
+/** 记录是否被关闭与建连次数的 SMB 客户端；建连直接失败，不连服务器。 */
+class RecordingSmbClient(config: SmbConfig) : SMBClient(config) {
+
+    var closed = false
+
+    /** 被要求建连的主机名。 */
+    val connects = mutableListOf<String>()
+
+    override fun connect(host: String, port: Int): Connection {
+        connects += host
+        throw IOException("测试用客户端不可用")
+    }
+
+    override fun close() {
+        closed = true
+        super.close()
     }
 }
 

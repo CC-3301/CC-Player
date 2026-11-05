@@ -654,11 +654,11 @@ class CachedMediaPreviewSource(
             is IllegalArgumentException, is SecurityException -> "路径解析"
             else -> "读取"
         }
-        // 原因只记类名：原因消息可能含路径与服务器信息，不进日志。
-        val cause = failure.causeClassNameOrNull()?.let { " | 原因: $it" }.orEmpty()
+        // 只记类名：异常消息可能含路径与服务器信息，不进日志。
+        val cause = failure.causeClassNameOrNull()
         diagnostics.log {
-            "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage | " +
-                "错误: ${failure.message ?: "-"}$cause"
+            "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage" +
+                (cause?.let { " | 原因: $it" } ?: "")
         }
         LoadedPreview(image = null, durationMillis = null, failed = true)
     }

@@ -6,6 +6,9 @@ import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
+import com.hierynomus.mserref.NtStatus
+import com.hierynomus.mssmb2.SMBApiException
+import com.hierynomus.mssmb2.SMB2MessageCommandCode
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -251,5 +254,71 @@ class SmbMediaReadsTest {
 
         assertEquals("重建后 other 重新建连", listOf("other", "media", "media", "media", "other"), connector.shares)
         holding.close()
+    }
+
+    @Test
+    fun `建连期间客户端被作废时用新客户端重连`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        var once = true
+        connector.duringConnect = {
+            if (once) {
+                once = false
+                connector.reset()
+            }
+        }
+
+        reads.openRead(movie, payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("作废一次", 1, connector.resets)
+        assertEquals("旧客户端上的连接不登记，重新建连", 2, connector.shares.size)
+    }
+
+    @Test
+    fun `权限类失败不计入连续失败`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Authentication, "登录失败")
+
+        repeat(3) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        assertEquals("登录失败不重建客户端", 0, connector.resets)
+    }
+
+    @Test
+    fun `会话失效类失败计入连续失败`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        val sessionDeleted = SMBApiException(
+            NtStatus.STATUS_USER_SESSION_DELETED.value,
+            SMB2MessageCommandCode.SMB2_CREATE,
+            null,
+        )
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unknown, "会话失效", sessionDeleted)
+
+        repeat(3) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        assertEquals("服务器删掉会话时重建客户端", 1, connector.resets)
+    }
+
+    @Test
+    fun `重建时清掉其它键的失败计数`() = runTest {
+        addSource(root)
+        val other = "smb://nas/other"
+        addSource(other)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.addFile("other", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+
+        repeat(2) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+        repeat(3) { runCatching { reads.openRead("$other/电影.mkv", payload.size.toLong()) } }
+        assertEquals(1, connector.resets)
+
+        // media 已累计两次失败：重建时不清零的话，再来一次就会立刻再重建。
+        runCatching { reads.openRead(movie, payload.size.toLong()) }
+        assertEquals("重建后旧计数已清零", 1, connector.resets)
+
+        repeat(2) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+        assertEquals("重新计数后到上限", 2, connector.resets)
     }
 }

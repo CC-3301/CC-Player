@@ -43,4 +43,7 @@ interface SmbConnector {
 
     /** 作废当前客户端：之后的建连与打开不再使用它。 */
     fun reset()
+
+    /** 客户端代数：每次作废加一；建连期间代数变化说明这条连接属于已作废的客户端。 */
+    val generation: Long
 }

@@ -1,10 +1,6 @@
 package com.cc3301.ccplayer.smb
 
 import com.hierynomus.mssmb2.SMB2Dialect
-import com.hierynomus.smbj.SMBClient
-import com.hierynomus.smbj.SmbConfig
-import com.hierynomus.smbj.connection.Connection
-import java.io.IOException
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
@@ -95,19 +91,5 @@ class SmbJConnectorTest {
         while (thread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(1)
     }
 
-    /** 记录被关闭与建连次数，不真的建连。 */
-    private class RecordingSmbClient(config: SmbConfig) : SMBClient(config) {
-        var closed = false
-        val connects = CopyOnWriteArrayList<String>()
 
-        override fun connect(host: String, port: Int): Connection {
-            connects += host
-            throw IOException("测试用客户端不可用")
-        }
-
-        override fun close() {
-            closed = true
-            super.close()
-        }
-    }
 }
