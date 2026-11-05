@@ -12,8 +12,8 @@ import androidx.compose.ui.unit.Density
  *
  * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。位移不超过
  * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）的抖动不算移动；越过死区的位移还要
- * 与上一次相隔不超过 [PLAYER_POINTER_CONTINUOUS_MOVE_WINDOW_MILLIS] 才算有效移动，
- * 孤立的单次位移既不显示指针，也不重置隐藏计时。
+ * 距上一次指针移动不超过 [PLAYER_POINTER_CONTINUOUS_MOVE_WINDOW_MILLIS] 才算有效移动，
+ * 孤立的越界既不显示指针，也不重置隐藏计时，也不推进死区锚点。
  * 指针随顶/底栏的实际可见性显隐，见 [pointerFollowsBars]。
  */
 class PlayerPointerVisibility(
@@ -29,35 +29,39 @@ class PlayerPointerVisibility(
     /** 位移死区的锚点：最后一次越过死区的位置。 */
     private var anchor: Offset? = null
 
-    /** 上一次越过死区的时刻；连续位移窗口外的下一次位移重新起算。 */
-    private var lastDeadZoneCrossAtMillis: Long? = null
+    /** 上一次指针移动事件的时刻；每次移动都刷新，未越过死区的也算。 */
+    private var lastMoveEventAtMillis: Long? = null
 
-    /** 指针进入播放页：指针出现，进入位置作为位移死区锚点，连续位移重新起算。 */
-    fun onPointerEnter(position: Offset) {
-        anchor = position
-        lastDeadZoneCrossAtMillis = null
+    /** 指针进入播放页：指针出现，锚点与移动事件清空，进入后的第一次移动只记锚点。 */
+    fun onPointerEnter() {
+        anchor = null
+        lastMoveEventAtMillis = null
         show()
     }
 
     /**
-     * 指针移动：以死区锚点算位移，越过死区才算一次候选移动并重设锚点；
-     * 候选移动与上一次相隔不超过连续位移窗口才算真的在动，此时指针出现并重新计时。
+     * 指针移动：先刷新移动事件时刻，再以死区锚点算位移。
+     * 越过死区且距上一次移动不超过连续位移窗口才算真的在动，此时指针出现并重设锚点；
+     * 孤立的越界不改变锚点，回弹仍落在死区内，不会二次触发。
      */
     fun onPointerMove(position: Offset, density: Density) {
         val deadZonePx = with(density) { PlayerPointerMoveDeadZone.toPx() }
+        val now = elapsedMillis()
+        val previousEventAtMillis = lastMoveEventAtMillis
+        lastMoveEventAtMillis = now
+
         val previous = anchor
         if (previous == null) {
             anchor = position
             return
         }
         if ((position - previous).getDistance() <= deadZonePx) return
-        val now = elapsedMillis()
-        val continuous = lastDeadZoneCrossAtMillis?.let {
+        val continuous = previousEventAtMillis?.let {
             now - it <= PLAYER_POINTER_CONTINUOUS_MOVE_WINDOW_MILLIS
         } ?: false
+        if (!continuous) return
         anchor = position
-        lastDeadZoneCrossAtMillis = now
-        if (continuous) show()
+        show()
     }
 
     /** 显示指针并重新计时。 */

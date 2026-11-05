@@ -228,7 +228,7 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `淡出中指针保持可见第五秒完全隐藏时才消失`() {
-        pointer.onPointerEnter(Offset.Zero)
+        pointer.onPointerEnter()
 
         now = 4_000L
         controls.beginFadeOutIfExpired()
@@ -261,7 +261,7 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `指针跟随栏的在场状态`() {
-        pointer.onPointerEnter(Offset.Zero)
+        pointer.onPointerEnter()
 
         now = 4_000L
         controls.beginFadeOutIfExpired()
@@ -277,7 +277,7 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `锁定或抽屉打开时指针随栏一起隐藏`() {
-        pointer.onPointerEnter(Offset.Zero)
+        pointer.onPointerEnter()
         pointerFollowsBars(
             barsPresent = playerBarsPresence(
                 locked = true,
@@ -289,7 +289,7 @@ class PlayerBarsVisibilityTest {
         )
         assertFalse(pointer.visible)
 
-        pointer.onPointerEnter(Offset.Zero)
+        pointer.onPointerEnter()
         pointerFollowsBars(
             barsPresent = playerBarsPresence(
                 locked = false,
