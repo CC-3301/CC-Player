@@ -30,3 +30,5 @@ backups/
 .kotlin/
 # 工作树
 .worktrees/
+# CodeGraph 索引
+.codegraph/

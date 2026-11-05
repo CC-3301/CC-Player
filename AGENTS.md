@@ -22,19 +22,15 @@
   - 讨论阶段可以提出方案供用户选择，但不得未经确认直接落地。
   - 若实现中发现需求存在歧义或缺口，先反馈用户，不得自行补齐。
 
-## 查官方文档（Context7）
+## MCP 使用指引
 
-调用第三方库 API 前，先用 Context7 拉当前版本文档，不要依赖训练数据。
+### 查官方文档（Context7）
 
-1. `mcp__context7__resolve-library-id`
-   - 参数：`libraryName`（官方拼写，如 Next.js）+ `query`（你要做的事）
-   - 拿到 `/org/project` 或 `/org/project/version` 形式的 ID
+调第三方库 API 前，先用 Context7 查当前版本文档，不靠训练数据。同一问题合计不超过 3 次。
 
-2. `mcp__context7__query-docs`
-   - 参数：`libraryId`（上一步的 ID）+ `query`（单一概念，不要一句话问多个问题）
-   - 可选传 `language` 让对应语言的示例优先返回
+### 查代码结构（CodeGraph）
 
-约束：同一个问题下，这两个工具合计调用 **不超过 3 次**。
+探索代码时优先用 CodeGraph，交给子代理执行；不要用 grep/Read 重验其结果。
 
 ## 协作规范
 
