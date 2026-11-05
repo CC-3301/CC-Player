@@ -81,14 +81,20 @@ internal class PreviewByteWindow(
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         if (length <= 0) return 0
         if (position < 0 || position >= size) return 0
-        val start = chunkStart(position)
-        val bytes = chunkAt(start, position)
-        val from = (position - start).toInt()
-        if (from >= bytes.size) return 0
-        val count = minOf(length, bytes.size - from)
-        System.arraycopy(bytes, from, buffer, offset, count)
-        followReadAhead(start)
-        return count
+        // 从进入读开始计数，包含等待块补齐的时间：取消时据此判断是否打断了在途读。
+        activeReads.incrementAndGet()
+        try {
+            val start = chunkStart(position)
+            val bytes = chunkAt(start, position)
+            val from = (position - start).toInt()
+            if (from >= bytes.size) return 0
+            val count = minOf(length, bytes.size - from)
+            System.arraycopy(bytes, from, buffer, offset, count)
+            followReadAhead(start)
+            return count
+        } finally {
+            activeReads.decrementAndGet()
+        }
     }
 
     /**
@@ -211,7 +217,7 @@ internal class PreviewByteWindow(
         val bytes = ByteArray(limit)
         var read = 0
         while (read < limit) {
-            val count = readSource(origin, start + read, bytes, read, limit - read)
+            val count = origin.readAt(start + read, bytes, read, limit - read)
             if (count <= 0) break
             read += count
         }
@@ -271,15 +277,20 @@ internal class PreviewByteWindow(
             if (chunks[chunk]?.let { it.size >= to - chunk } == true) return
             pending += chunk
         }
-        val result = runCatching {
-            val bytes = ByteArray((to - chunk).toInt())
-            var read = 0
-            while (read < bytes.size) {
-                val count = readSource(aheadSource, chunk + read, bytes, read, bytes.size - read)
-                if (count <= 0) break
-                read += count
+        activeReads.incrementAndGet()
+        val result = try {
+            runCatching {
+                val bytes = ByteArray((to - chunk).toInt())
+                var read = 0
+                while (read < bytes.size) {
+                    val count = aheadSource.readAt(chunk + read, bytes, read, bytes.size - read)
+                    if (count <= 0) break
+                    read += count
+                }
+                if (read == bytes.size) bytes else bytes.copyOf(read)
             }
-            if (read == bytes.size) bytes else bytes.copyOf(read)
+        } finally {
+            activeReads.decrementAndGet()
         }
         synchronized(lock) {
             pending -= chunk
@@ -302,22 +313,6 @@ internal class PreviewByteWindow(
             if (entry.key == start) continue
             iterator.remove()
             residentBytes -= entry.value.size
-        }
-    }
-
-    /** 向底层读一次，并记下读取在途状态；取消时用它判断是否打断传输读。 */
-    private fun readSource(
-        source: ByteSource,
-        position: Long,
-        buffer: ByteArray,
-        offset: Int,
-        length: Int,
-    ): Int {
-        activeReads.incrementAndGet()
-        return try {
-            source.readAt(position, buffer, offset, length)
-        } finally {
-            activeReads.decrementAndGet()
         }
     }
 

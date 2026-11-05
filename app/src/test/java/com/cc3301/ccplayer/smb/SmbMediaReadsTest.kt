@@ -110,6 +110,45 @@ class SmbMediaReadsTest {
         reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
 
         assertEquals("失败会话不得复用，重试新建一条", listOf("media", "media"), connector.shares)
+        assertEquals("失败会话只关一次", 1, connector.closedShares.count { it == "media" })
+    }
+
+    @Test
+    fun `业务类打开失败不丢弃会话`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.NotFound, "文件不存在")
+
+        runCatching { reads.openRead(movie, payload.size.toLong()) }
+        connector.openReadFailure = null
+        reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("业务失败不动会话，重试复用", listOf("media"), connector.shares)
+        assertTrue("业务失败不关连接", connector.closedShares.isEmpty())
+    }
+
+    @Test
+    fun `读取时的业务失败保留会话，会话类失败丢弃`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+
+        val business = reads.openRead(movie, payload.size.toLong())
+        connector.readFailure = MediaSourceException(MediaFailure.NotFound, "读不到")
+        runCatching { business.readAt(0, ByteArray(4), 0, 4) }
+        business.close()
+        connector.readFailure = null
+        reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("业务失败不动会话", listOf("media"), connector.shares)
+
+        val broken = reads.openRead(movie, payload.size.toLong())
+        connector.readFailure = IllegalStateException("传输断开")
+        runCatching { broken.readAt(0, ByteArray(4), 0, 4) }
+        broken.close()
+        connector.readFailure = null
+        reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("会话类失败丢弃后新建", listOf("media", "media"), connector.shares)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -128,6 +167,7 @@ class SmbMediaReadsTest {
         reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
 
         assertEquals("被取消的打开不得把会话留给下一次重试", listOf("media", "media"), connector.shares)
+        assertEquals("取消的会话只关一次", 1, connector.closedShares.count { it == "media" })
     }
 
     @Test

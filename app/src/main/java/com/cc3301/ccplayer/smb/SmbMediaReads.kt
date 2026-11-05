@@ -74,7 +74,8 @@ class SmbMediaReads(
             release(session)
             throw cancellation
         } catch (failure: Exception) {
-            drop(key, session)
+            // 只有会话类失败才丢弃会话；业务失败（不存在、权限不足）不动会话，重试仍可复用。
+            if (smbConnectionLost(failure)) drop(key, session)
             release(session)
             recordOpenFailure(key, failure)
             throw failure
@@ -138,7 +139,7 @@ class SmbMediaReads(
             if (existing != null) {
                 if (now - existing.lastUsedAt > idleMillis && existing.inUse == 0) {
                     sessions.remove(key)
-                    stale += existing.connection
+                    takeConnectionLocked(existing)?.let { stale += it }
                 } else {
                     existing.lastUsedAt = now
                     existing.inUse++
@@ -296,8 +297,9 @@ private class SmbSessionSource(
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = try {
         handle.readAt(position, buffer, offset, length)
-    } catch (failure: IOException) {
-        onFailure()
+    } catch (failure: Throwable) {
+        // 只丢弃连接类失败：业务失败与参数错误不动会话，避免为它们白建一次连。
+        if (smbConnectionLost(failure)) onFailure()
         throw failure
     }
 

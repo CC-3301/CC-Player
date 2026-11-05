@@ -28,6 +28,9 @@ class FakeSmbConnector : SmbConnector {
     /** 打开读句柄时抛出的异常；非空时每次打开都失败。随时可改，连接沿用最新的。 */
     var openReadFailure: MediaSourceException? = null
 
+    /** 读取句柄时抛出的异常；非空时每次读取都失败。随时可改，连接沿用最新的。 */
+    var readFailure: Throwable? = null
+
     /** 客户端代数：每次作废加一；作废前建立的连接随之失效。 */
     override var generation: Long = 0L
         private set
@@ -95,6 +98,7 @@ class FakeSmbConnector : SmbConnector {
             closedShares = closedShares,
             maxReadSize = maxReadSize,
             openReadFailure = { openReadFailure },
+            readFailure = { readFailure },
             isStale = { generation != createdGeneration },
             duringOpenRead = { duringOpenRead?.invoke() },
         )
@@ -114,6 +118,7 @@ private class FakeSmbConnection(
     private val closedShares: MutableList<String>,
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
+    private val readFailure: () -> Throwable?,
     private val isStale: () -> Boolean,
     private val duringOpenRead: suspend () -> Unit,
 ) : SmbConnection {
@@ -128,8 +133,12 @@ private class FakeSmbConnection(
         duringOpenRead()
         openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
-        return RecordingSmbHandle(bytes, maxReadSize = maxReadSize) { closeOrder += "handle" }
-            .also { handles["$share/$path"] = it }
+        return RecordingSmbHandle(
+            bytes,
+            maxReadSize = maxReadSize,
+            onClose = { closeOrder += "handle" },
+            readFailure = readFailure,
+        ).also { handles["$share/$path"] = it }
     }
 
     override fun close() {
@@ -167,6 +176,7 @@ class RecordingSmbHandle(
     private val bytes: ByteArray,
     override val maxReadSize: Int = 0,
     private val onClose: () -> Unit = {},
+    private val readFailure: () -> Throwable? = { null },
 ) : SmbReadHandle, Closeable {
 
     var closed = false
@@ -174,6 +184,7 @@ class RecordingSmbHandle(
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        readFailure()?.let { throw it }
         if (position >= bytes.size) return 0
         val count = minOf(length.toLong(), bytes.size - position).toInt()
         bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
