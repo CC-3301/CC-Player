@@ -27,7 +27,7 @@ private const val CONNECT_ATTEMPTS = 2
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
  * 同一共享的会话复用：抽帧只为条目打开文件句柄，句柄关闭不关会话，下一条目沿用同一会话。
- * 打开或读取失败、取消或超时打断在途传输读时丢弃该会话，连接在最后一个句柄关闭时关闭；
+ * 打开失败一律丢弃该会话；读取遇连接类失败、取消或超时打断在途传输读时丢弃，连接在最后一个句柄关闭时关闭；
  * 闲置超时或超出上限时关闭，且只在没有句柄在用时关闭。
  * 同一会话键连续打开失败到上限时作废全部会话并重建客户端，业务类失败不计入。
  */
@@ -74,8 +74,8 @@ class SmbMediaReads(
             release(session)
             throw cancellation
         } catch (failure: Exception) {
-            // 只有会话类失败才丢弃会话；业务失败（不存在、权限不足）不动会话，重试仍可复用。
-            if (smbConnectionLost(failure)) drop(key, session)
+            // 打开失败一律丢弃会话：重试必须换新会话，不复用刚失败的会话。
+            drop(key, session)
             release(session)
             recordOpenFailure(key, failure)
             throw failure

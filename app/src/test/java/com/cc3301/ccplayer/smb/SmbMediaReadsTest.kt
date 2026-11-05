@@ -114,7 +114,7 @@ class SmbMediaReadsTest {
     }
 
     @Test
-    fun `业务类打开失败不丢弃会话`() = runTest {
+    fun `业务类打开失败也丢弃会话`() = runTest {
         addSource(root)
         connector.addFile("media", "电影.mkv", payload)
         connector.openReadFailure = MediaSourceException(MediaFailure.NotFound, "文件不存在")
@@ -123,8 +123,8 @@ class SmbMediaReadsTest {
         connector.openReadFailure = null
         reads.openRead(movie, payload.size.toLong()).use { source -> source.readAt(0, ByteArray(4), 0, 4) }
 
-        assertEquals("业务失败不动会话，重试复用", listOf("media"), connector.shares)
-        assertTrue("业务失败不关连接", connector.closedShares.isEmpty())
+        assertEquals("打开失败一律丢弃会话，重试新建", listOf("media", "media"), connector.shares)
+        assertEquals("失败会话只关一次", 1, connector.closedShares.count { it == "media" })
     }
 
     @Test
