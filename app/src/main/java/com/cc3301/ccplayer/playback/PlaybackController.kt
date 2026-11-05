@@ -376,7 +376,12 @@ class PlaybackController(
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) return
         // 正在播放时换列表按替换当前播放处理：不把新列表套进旧列表的切集回退。
-        if (active) stop()
+        // 解码模式属于本次会话的临时选择，stop() 会重置成默认值，替换后要写回引擎。
+        if (active) {
+            val decodeMode = _decodeMode.value
+            stop()
+            setDecodeMode(decodeMode)
+        }
         _playlist.value = playlist
         this.directoryEntries = directoryEntries
         playAt(index)

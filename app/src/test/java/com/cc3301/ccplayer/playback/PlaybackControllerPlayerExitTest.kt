@@ -38,6 +38,18 @@ class PlaybackControllerPlayerExitTest {
     }
 
     @Test
+    fun `换片后解码模式保持不变`() {
+        controller.openPlaylist(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
+        engine.reportMediaLoaded()
+        controller.setDecodeMode(DecodeMode.Software)
+
+        controller.openPlaylist(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
+
+        assertEquals(DecodeMode.Software, controller.decodeMode.value)
+        assertEquals(DecodeMode.Software, engine.decodeModes.last())
+    }
+
+    @Test
     fun `离开播放页后自动下一集开启时播完继续`() {
         // 离开播放页等同于 Surface 不可用：音频仍继续，播完按开关决定连播。
         controller.setRenderSurfaceAvailable(false)
