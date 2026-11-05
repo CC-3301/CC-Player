@@ -21,6 +21,13 @@ class FakeSmbConnector : SmbConnector {
     /** 服务器协商的单次读取上限。 */
     var maxReadSize: Int = 0
 
+    /** 打开读句柄时抛出的异常；非空时每次打开都失败。随时可改，连接沿用最新的。 */
+    var openReadFailure: MediaSourceException? = null
+
+    /** 客户端被作废的次数；作废前建立的连接随之失效。 */
+    var resets: Int = 0
+        private set
+
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
 
@@ -64,7 +71,22 @@ class FakeSmbConnector : SmbConnector {
         failure?.let { throw it }
         logins += username to password
         shares += share
-        return FakeSmbConnection(share, childrenByPath, bytesByPath, handles, closeOrder, closedShares, maxReadSize)
+        val generation = resets
+        return FakeSmbConnection(
+            share = share,
+            childrenByPath = childrenByPath,
+            bytesByPath = bytesByPath,
+            handles = handles,
+            closeOrder = closeOrder,
+            closedShares = closedShares,
+            maxReadSize = maxReadSize,
+            openReadFailure = { openReadFailure },
+            isStale = { resets != generation },
+        )
+    }
+
+    override fun reset() {
+        resets++
     }
 }
 
@@ -76,11 +98,18 @@ private class FakeSmbConnection(
     private val closeOrder: MutableList<String>,
     private val closedShares: MutableList<String>,
     private val maxReadSize: Int,
+    private val openReadFailure: () -> MediaSourceException?,
+    private val isStale: () -> Boolean,
 ) : SmbConnection {
 
-    override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
+    override suspend fun list(path: String): List<SmbEntry> {
+        ensureUsable()
+        return childrenByPath["$share/$path"].orEmpty()
+    }
 
     override suspend fun openRead(path: String): SmbReadHandle {
+        ensureUsable()
+        openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
         return RecordingSmbHandle(bytes, maxReadSize = maxReadSize) { closeOrder += "handle" }
             .also { handles["$share/$path"] = it }
@@ -89,6 +118,11 @@ private class FakeSmbConnection(
     override fun close() {
         closeOrder += "connection"
         closedShares += share
+    }
+
+    /** 旧客户端上的连接在作废后不可再用，与真实现一致。 */
+    private fun ensureUsable() {
+        if (isStale()) throw MediaSourceException(MediaFailure.Unreachable, "旧客户端的连接已作废")
     }
 }
 

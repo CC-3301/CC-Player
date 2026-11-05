@@ -149,4 +149,107 @@ class SmbMediaReadsTest {
         assertTrue(connector.closedShares.isEmpty())
         holding.close()
     }
+
+    @Test
+    fun `同一会话连续打开失败到上限时重建一次客户端`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+
+        repeat(2) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+        assertEquals("未到上限不重建", 0, connector.resets)
+
+        runCatching { reads.openRead(movie, payload.size.toLong()) }
+        assertEquals("到上限重建一次", 1, connector.resets)
+    }
+
+    @Test
+    fun `建连失败同样计入连续失败`() = runTest {
+        addSource(root)
+        connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+
+        repeat(3) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        assertEquals("建连失败也累计", 1, connector.resets)
+    }
+
+    @Test
+    fun `打开成功一次后失败计数清零`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        val broken = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+        connector.openReadFailure = broken
+        repeat(2) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        connector.openReadFailure = null
+        reads.openRead(movie, payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+
+        connector.openReadFailure = broken
+        repeat(2) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        assertEquals("中途成功过，失败不累计到上限", 0, connector.resets)
+    }
+
+    @Test
+    fun `重建后下一次打开重新建连`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+        repeat(3) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+
+        connector.openReadFailure = null
+        val head = ByteArray(8)
+        reads.openRead(movie, payload.size.toLong()).use { it.readAt(0, head, 0, head.size) }
+
+        assertEquals(1, connector.resets)
+        assertEquals("每次失败丢掉会话，重建后再建一条", 4, connector.shares.size)
+        assertArrayEquals(payload.copyOfRange(0, 8), head)
+    }
+
+    @Test
+    fun `业务类失败不计入连续失败`() = runTest {
+        addSource(root)
+
+        repeat(3) { runCatching { reads.openRead("$root/不存在.mkv", 1L) } }
+
+        assertEquals("文件不存在不重建客户端", 0, connector.resets)
+    }
+
+    @Test
+    fun `失败间隔超过时间窗后重新计数`() = runTest {
+        var now = 1_000L
+        val timed = SmbMediaReads(connector, SmbLocator(sources), clock = { now })
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+
+        repeat(2) { runCatching { timed.openRead(movie, payload.size.toLong()) } }
+        now += 60_000 + 1
+        runCatching { timed.openRead(movie, payload.size.toLong()) }
+        assertEquals("超出时间窗重新计数", 0, connector.resets)
+
+        repeat(2) { runCatching { timed.openRead(movie, payload.size.toLong()) } }
+        assertEquals("重新计数后仍能到上限", 1, connector.resets)
+    }
+
+    @Test
+    fun `重建作废旧客户端上的会话`() = runTest {
+        addSource(root)
+        val other = "smb://nas/other"
+        addSource(other)
+        connector.addFile("media", "电影.mkv", payload)
+        connector.addFile("other", "电影.mkv", payload)
+        val holding = reads.openRead("$other/电影.mkv", payload.size.toLong())
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "连接已断")
+
+        repeat(3) { runCatching { reads.openRead(movie, payload.size.toLong()) } }
+        assertEquals(1, connector.resets)
+
+        // other 的会话由旧客户端建立：作废后必须重新建连，不能复用死连接再失败一次。
+        connector.openReadFailure = null
+        reads.openRead("$other/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+
+        assertEquals("重建后 other 重新建连", listOf("other", "media", "media", "media", "other"), connector.shares)
+        holding.close()
+    }
 }

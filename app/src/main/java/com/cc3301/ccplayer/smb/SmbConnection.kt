@@ -40,4 +40,7 @@ interface SmbConnector {
 
     /** 列出服务器上的共享名；连不上或没有权限时抛出来源失败异常。 */
     suspend fun shares(host: String, port: Int, username: String, password: String?): List<String>
+
+    /** 作废当前客户端：之后的建连与打开不再使用它。 */
+    fun reset()
 }

@@ -29,12 +29,30 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SmbJConnector(
     private val config: SmbConfig = smb2OnlyConfig(),
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    private val clientFactory: (SmbConfig) -> SMBClient = ::newSmbClient,
 ) : SmbConnector {
 
-    private val client = SMBClient(config)
+    private val clientLock = Any()
+
+    /** 当前客户端；失效后由 [reset] 换成新实例。 */
+    @Volatile
+    private var client = clientFactory(config)
 
     /** 协商结果只记一次：同一条连接的方言与读上限不随重连变化，重复记只是刷日志。 */
     private val negotiateLogged = AtomicBoolean(false)
+
+    override fun reset() {
+        // 先取快照再进锁比对：并发重建时只有真正换掉这条客户端的一次才关闭，不误关别人刚换上的新实例。
+        val observed = client
+        val stale = synchronized(clientLock) {
+            if (client !== observed) return
+            val previous = client
+            client = clientFactory(config)
+            previous
+        }
+        runCatching { stale.close() }
+        diagnostics.log { "SMB 客户端重建: 换成新实例" }
+    }
 
     override suspend fun connect(
         host: String,
@@ -45,7 +63,9 @@ class SmbJConnector(
     ): SmbConnection = withContext(Dispatchers.IO) {
         var connection: Connection? = null
         try {
-            val opened = client.connect(host, port)
+            // 取本地引用：reset 换实例时，已开始的建连仍用完这条客户端。
+            val active = client
+            val opened = active.connect(host, port)
             connection = opened
             logNegotiated(opened)
             val session = opened.authenticate(authenticationOf(username, password))
@@ -86,7 +106,8 @@ class SmbJConnector(
         withContext(Dispatchers.IO) {
             var connection: Connection? = null
             try {
-                connection = client.connect(host, port)
+                val active = client
+                connection = active.connect(host, port)
                 val session = connection.authenticate(authenticationOf(username, password))
                 val ipc = session.connectShare(IPC_SHARE)
                 if (ipc !is PipeShare) {
@@ -200,6 +221,9 @@ private class SmbJReadHandle(
         runCatching { file.close() }
     }
 }
+
+/** 新建客户端：默认工厂，测试可换成记录关闭的实例。 */
+private fun newSmbClient(config: SmbConfig): SMBClient = SMBClient(config)
 
 private fun Throwable.asSourceFailure(message: String): MediaSourceException =
     if (this is MediaSourceException) this else MediaSourceException(smbFailureOf(this), message, this)

@@ -14,11 +14,18 @@ private const val MAX_SESSIONS = 8
 /** 会话闲置上限：超过该时长没有句柄在用时关闭，下次读取重新建连。 */
 private const val SESSION_IDLE_MILLIS = 10 * 60 * 1000L
 
+/** 连续打开失败达到该次数时重建客户端以清掉可能已失效的连接。 */
+private const val MAX_OPEN_FAILURES = 3
+
+/** 失败计数的时间窗：距上一次失败超过该时长，计数从头开始。 */
+private const val OPEN_FAILURE_WINDOW_MILLIS = 60 * 1000L
+
 /**
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
  * 同一共享的会话复用：抽帧只为条目打开文件句柄，句柄关闭不关会话，下一条目沿用同一会话。
  * 打开或读取失败时丢弃该会话；闲置超时或超出上限时才会关闭，且只在没有句柄在用时关闭。
+ * 同一会话键连续打开失败到上限时作废全部会话并重建客户端，业务类失败不计入。
  */
 class SmbMediaReads(
     private val connector: SmbConnector,
@@ -33,14 +40,27 @@ class SmbMediaReads(
     /** 按共享复用的会话，记录最近取用时间与在用句柄数；主机、端口、共享名与凭据相同即同一会话。 */
     private val sessions = HashMap<SessionKey, Session>()
 
+    /** 按会话键记的连续打开失败次数与最近一次失败时刻；成功一次或超出时间窗即清零。 */
+    private val openFailures = HashMap<SessionKey, FailureCount>()
+
     override suspend fun openRead(location: String, size: Long): ByteSource {
         val target = locator.locate(location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
         val key = SessionKey.of(target)
-        val session = sessionFor(key, target)
+        val session = try {
+            sessionFor(key, target)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            recordOpenFailure(key, failure)
+            throw failure
+        }
         return try {
+            val handle = session.connection.openRead(target.path)
+            // 成功一次即清零：计数只看连续失败。
+            forgetOpenFailures(key)
             SmbSessionSource(
-                handle = session.connection.openRead(target.path),
+                handle = handle,
                 onClose = { release(session) },
                 onFailure = { drop(key, session) },
             )
@@ -50,9 +70,65 @@ class SmbMediaReads(
         } catch (failure: Exception) {
             drop(key, session)
             release(session)
+            recordOpenFailure(key, failure)
             throw failure
         }
     }
+
+    /**
+     * 记一次连接类失败；同一会话键连续失败到上限时作废全部会话并重建客户端。
+     * 业务类失败（文件不存在、权限不足等）不计入：否则删几个条目就会重建客户端、连带关掉正常连接。
+     * 作废会话与重建都在锁外收尾：关闭旧客户端可能阻塞在网络操作上。
+     */
+    private fun recordOpenFailure(key: SessionKey, failure: Throwable) {
+        if (!failure.isConnectionFailure()) return
+        val now = clock()
+        val reached = synchronized(lock) {
+            val previous = openFailures[key]
+            val count = if (previous != null && now - previous.lastAt <= OPEN_FAILURE_WINDOW_MILLIS) {
+                previous.count + 1
+            } else {
+                1
+            }
+            if (count < MAX_OPEN_FAILURES) {
+                openFailures[key] = FailureCount(count, now)
+                false
+            } else {
+                openFailures.remove(key)
+                true
+            }
+        }
+        if (!reached) return
+        // 旧客户端上的会话随客户端一起作废：先摘表再重建，下一次打开不会复用已失效的连接。
+        val stale = detachAllSessions()
+        connector.reset()
+        stale.forEach(::close)
+    }
+
+    private fun forgetOpenFailures(key: SessionKey) {
+        synchronized(lock) { openFailures.remove(key) }
+    }
+
+    /** 作废全部会话，交出没有句柄在用的连接；还有句柄在用的留给最后一个句柄关闭时收尾。 */
+    private fun detachAllSessions(): List<SmbConnection> {
+        val closeable = ArrayList<SmbConnection>()
+        synchronized(lock) {
+            sessions.values.forEach { session ->
+                if (session.inUse == 0) {
+                    session.detached = false
+                    closeable += session.connection
+                } else {
+                    session.detached = true
+                }
+            }
+            sessions.clear()
+        }
+        return closeable
+    }
+
+    /** 只有连接不可用的失败才计入：业务类失败不该重建成客户端。 */
+    private fun Throwable.isConnectionFailure(): Boolean =
+        this is MediaSourceException && failure == MediaFailure.Unreachable
 
     /** 取该共享可用的会话并占一个句柄；闲置超时且没有句柄在用、或没有会话时新建。 */
     private suspend fun sessionFor(key: SessionKey, target: SmbTarget): Session {
@@ -149,6 +225,9 @@ class SmbMediaReads(
     private fun close(connection: SmbConnection) {
         runCatching { connection.close() }
     }
+
+    /** 连续失败计数：次数与最近一次失败时刻。 */
+    private data class FailureCount(val count: Int, val lastAt: Long)
 
     /** 会话的登记：连接、最近一次取用的时刻、在用句柄数。 */
     private class Session(val connection: SmbConnection, var lastUsedAt: Long) {
