@@ -907,6 +907,40 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `解码超时作废会话，下一次重试重新打开`() = runTest {
+        val extractor = DiscardRecordingExtractor(decodeDelayMillis = 60_000)
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+
+        val preview = source.preview(network("超时.mkv"))
+
+        assertNull(preview.image)
+        assertEquals("超时后作废会话", 1, extractor.discarded)
+        assertEquals("句柄仍要关闭", 1, extractor.closed)
+    }
+
+    @Test
+    fun `取消在途预览读取后作废会话`() = runTest {
+        val extractor = DiscardRecordingExtractor(decodeGate = CompletableDeferred())
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+
+        val request = async { source.visiblePreview(network("取消.mkv"), 0) }
+        runCurrent()
+        assertEquals(1, extractor.prepares)
+
+        request.cancelAndJoin()
+        runCurrent()
+        assertEquals("取消后作废会话", 1, extractor.discarded)
+    }
+
+    @Test
     fun `慢提取超时后归还许可`() = runTest {
         val tracker = SlowFileExtractor(slowDelayMillis = 60_000)
         val bounded = CachedMediaPreviewSource(
@@ -1872,10 +1906,11 @@ class CachedMediaPreviewSourceTest {
         runCurrent()
         assertTrue(request.await().retryable)
 
-        // 迟到的打开终于返回：没人接手，由打开方关闭，恰好一次。
+        // 迟到的打开终于返回：没人接手，由打开方作废并关闭，恰好一次。
         late.gate.complete(Unit)
         runCurrent()
         assertEquals("迟到的句柄要关一次", 1, late.closed.size)
+        assertEquals("迟到的会话要作废", 1, late.discarded.size)
     }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
@@ -2109,6 +2144,7 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
 
     val started = mutableListOf<String>()
     val closed = mutableListOf<String>()
+    val discarded = mutableListOf<String>()
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
 
@@ -2121,6 +2157,41 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
         return NetworkPreviewPreparation(
             decodeBlock = { byteArrayOf(1) },
             closeBlock = { closed += file.location },
+            discardBlock = {
+                discarded += file.location
+                closed += file.location
+            },
+        )
+    }
+}
+
+/** 记录句柄的关闭与作废：超时、取消必须走作废，不能只关句柄。 */
+private class DiscardRecordingExtractor(
+    private val decodeDelayMillis: Long = 0,
+    private val decodeGate: CompletableDeferred<Unit>? = null,
+) : MediaPreviewExtractor {
+
+    var prepares = 0
+    var closed = 0
+    var discarded = 0
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = null
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+        prepares++
+        return NetworkPreviewPreparation(
+            decodeBlock = {
+                val gate = decodeGate
+                if (gate != null) gate.await() else delay(decodeDelayMillis)
+                byteArrayOf(1)
+            },
+            closeBlock = { closed++ },
+            discardBlock = {
+                discarded++
+                closed++
+            },
         )
     }
 }

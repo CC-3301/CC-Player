@@ -109,4 +109,10 @@ private class PriorityByteSource(
         priority.wakeWaiters()
         runCatching { source.close() }
     }
+
+    override fun discard() {
+        closed.set(true)
+        priority.wakeWaiters()
+        runCatching { source.discard() }
+    }
 }

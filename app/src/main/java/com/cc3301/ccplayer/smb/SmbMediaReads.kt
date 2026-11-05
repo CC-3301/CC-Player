@@ -12,7 +12,7 @@ import kotlinx.coroutines.CancellationException
 private const val MAX_SESSIONS = 8
 
 /** 会话闲置上限：超过该时长没有句柄在用时关闭，下次读取重新建连。 */
-private const val SESSION_IDLE_MILLIS = 10 * 60 * 1000L
+private const val SESSION_IDLE_MILLIS = 2 * 60 * 1000L
 
 /** 连续打开失败达到该次数时重建客户端以清掉可能已失效的连接。 */
 private const val MAX_OPEN_FAILURES = 3
@@ -68,6 +68,8 @@ class SmbMediaReads(
                 onFailure = { drop(key, session) },
             )
         } catch (cancellation: CancellationException) {
+            // 打开被放弃（超时或取消）：会话一并作废，下一次打开必须新建，不能复用。
+            drop(key, session)
             release(session)
             throw cancellation
         } catch (failure: Exception) {
@@ -192,6 +194,7 @@ class SmbMediaReads(
             session.inUse = (session.inUse - 1).coerceAtLeast(0)
             if (session.inUse == 0 && session.detached) {
                 session.detached = false
+                session.dropped = true
                 session.connection
             } else {
                 null
@@ -200,16 +203,21 @@ class SmbMediaReads(
         closeable?.let(::close)
     }
 
-    /** 摘掉会话；还有句柄在用时留给最后一个句柄关闭时收尾，不在这里关。 */
+    /** 摘掉会话；还有句柄在用时留给最后一个句柄关闭时收尾，不在这里关。重复丢弃只关一次连接。 */
     private fun drop(key: SessionKey, session: Session) {
         val closeable = synchronized(lock) {
             if (sessions[key] === session) sessions.remove(key)
-            if (session.inUse == 0) {
-                session.detached = false
-                session.connection
-            } else {
-                session.detached = true
-                null
+            when {
+                session.dropped -> null
+                session.inUse == 0 -> {
+                    session.dropped = true
+                    session.detached = false
+                    session.connection
+                }
+                else -> {
+                    session.detached = true
+                    null
+                }
             }
         }
         closeable?.let(::close)
@@ -247,6 +255,9 @@ class SmbMediaReads(
 
         /** 已从表里摘掉但还有句柄在用，等最后一个句柄关闭时再关连接。 */
         var detached = false
+
+        /** 连接已安排关闭或已关闭；重复丢弃不再关第二次。 */
+        var dropped = false
     }
 
     private data class SessionKey(
@@ -295,5 +306,16 @@ private class SmbSessionSource(
         if (!closed.compareAndSet(false, true)) return
         runCatching { handle.close() }
         onClose()
+    }
+
+    /**
+     * 作废这次读取：先丢弃会话，再关句柄。
+     *
+     * 会话先从表里摘掉，下一次读取不会复用它；句柄还有别的读取在用时，
+     * 由最后一个句柄关闭时收尾连接。
+     */
+    override fun discard() {
+        onFailure()
+        close()
     }
 }

@@ -266,6 +266,26 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `准备失败时作废已打开的句柄，重试不复用`() = runTest {
+        val reads = RecordingReads(ByteArray(1 shl 20))
+        val executor = RejectingExecutor(failAt = 2)
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = executor,
+        )
+
+        try {
+            extractor.prepare(movie)
+            fail("应向上抛出预读提交失败")
+        } catch (expected: RejectedExecutionException) {
+            // 预期路径。
+        }
+
+        assertTrue("准备失败后两条句柄都要作废", reads.sources.all { source -> source.discarded })
+    }
+
+    @Test
     fun `打开句柄失败时向调用方抛出`() = runTest {
         val extractor = NetworkPreviewExtractor(
             { _, _ -> error("打不开") },
@@ -373,6 +393,9 @@ private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
 
     var closed = false
 
+    /** 是否走了作废路径：作废要连会话一起丢弃，不能只关句柄。 */
+    var discarded = false
+
     /** 关闭发生的线程：句柄关闭不得落在调用方线程。 */
     var closedOn: Thread? = null
     val reads = mutableListOf<Long>()
@@ -390,6 +413,11 @@ private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
     override fun close() {
         closed = true
         closedOn = Thread.currentThread()
+    }
+
+    override fun discard() {
+        discarded = true
+        close()
     }
 }
 

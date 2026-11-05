@@ -116,6 +116,16 @@ internal class PreviewByteWindow(
     }
 
     /**
+     * 作废窗口：关闭两条句柄，并让底层丢弃已失效的读取会话。
+     * 超时、取消或打开失败后用它收尾，下一次读取不会复用该会话；可重复调用。
+     */
+    override fun discard() {
+        close()
+        origin.discard()
+        if (aheadSource !== origin) aheadSource.discard()
+    }
+
+    /**
      * 取块内容；缺失时由当前线程补齐，补齐期间其它线程等锁上的通知。
      * 定点读只填了块头一段；解码要块内更后面的字节时整块重读，
      * 256 KiB 的块从块头再读一遍，包含已经读到的前 64 KiB。

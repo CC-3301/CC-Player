@@ -38,6 +38,9 @@ class FakeSmbConnector : SmbConnector {
     /** 建连过程中执行，用来模拟建连期间客户端被作废。 */
     var duringConnect: (() -> Unit)? = null
 
+    /** 打开读句柄过程中挂起，用来模拟打开被超时或取消放弃。 */
+    var duringOpenRead: (suspend () -> Unit)? = null
+
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
 
@@ -93,6 +96,7 @@ class FakeSmbConnector : SmbConnector {
             maxReadSize = maxReadSize,
             openReadFailure = { openReadFailure },
             isStale = { generation != createdGeneration },
+            duringOpenRead = { duringOpenRead?.invoke() },
         )
     }
 
@@ -111,6 +115,7 @@ private class FakeSmbConnection(
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
     private val isStale: () -> Boolean,
+    private val duringOpenRead: suspend () -> Unit,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> {
@@ -120,6 +125,7 @@ private class FakeSmbConnection(
 
     override suspend fun openRead(path: String): SmbReadHandle {
         ensureUsable()
+        duringOpenRead()
         openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
         return RecordingSmbHandle(bytes, maxReadSize = maxReadSize) { closeOrder += "handle" }

@@ -451,6 +451,7 @@ class CachedMediaPreviewSource(
         // 没有可用的读取会话时直接按无图收尾，不再另开一条完整句柄取图。
         val prepared = openOutsideRequest(file, priority)
             ?: return LoadedPreview(image = null, durationMillis = null)
+        var discard = false
         try {
             // 排队时间不计入解码超时；阻塞中的网络读由各自的传输层超时兜底。
             val requestedAt = monotonicClockMillis()
@@ -477,7 +478,11 @@ class CachedMediaPreviewSource(
             // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
             currentCoroutineContext().ensureActive()
             val (completed, bytes) = attempt
-            if (!completed) throw IllegalStateException("网络预览超时")
+            if (!completed) {
+                // 超时后阻塞读取已停止，会话可能已失效：连会话一起作废，下一次重试重新建连。
+                discard = true
+                throw IllegalStateException("网络预览超时")
+            }
             return if (bytes == null) {
                 // 只有可见请求确认的无图才记住；预取结果不记，回到可见时还要再抽一次。
                 // 不写缓存，重启后重新确认。
@@ -488,9 +493,13 @@ class CachedMediaPreviewSource(
                 // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
                 LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
             }
+        } catch (cancellation: CancellationException) {
+            // 取消同样作废会话：阻塞中的传输读被关闭后，该会话不能留给下一次重试复用。
+            discard = true
+            throw cancellation
         } finally {
-            // 句柄无论解码成功、失败还是取消都要关。
-            prepared.close()
+            // 句柄无论解码成功、失败还是取消都要关；超时或取消时连会话一起作废。
+            if (discard) prepared.discard() else prepared.close()
         }
     }
 
@@ -518,8 +527,8 @@ class CachedMediaPreviewSource(
             } catch (failure: Throwable) {
                 Result.failure(failure)
             }
-            // 没人接手（超时或取消）时在这里关闭，句柄不留在无人持有的地方。
-            if (!opened.complete(result)) runCatching { result.getOrNull()?.close() }
+            // 没人接手（超时或取消）时在这里作废，句柄不留在无人持有的地方，会话也不留给下一次重试。
+            if (!opened.complete(result)) runCatching { result.getOrNull()?.discard() }
         }
         val settled = try {
             withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { opened.await() }
@@ -548,7 +557,8 @@ class CachedMediaPreviewSource(
         reason: CancellationException,
     ) {
         if (!opened.completeExceptionally(reason)) {
-            runCatching { opened.getCompleted().getOrNull()?.close() }
+            // 争到的是已经交付的成功打开：作废它，下一次重试换新会话。
+            runCatching { opened.getCompleted().getOrNull()?.discard() }
         }
         opening.cancel()
     }

@@ -35,6 +35,7 @@ fun interface NetworkPreviewDecoder {
 class NetworkPreviewPreparation(
     private val decodeBlock: suspend (Int) -> ByteArray?,
     private val closeBlock: suspend () -> Unit,
+    private val discardBlock: suspend () -> Unit = closeBlock,
 ) {
 
     /** 在解码许可内取图；没有可用图时返回 null。 */
@@ -42,6 +43,14 @@ class NetworkPreviewPreparation(
 
     /** 关闭句柄与预读；可重复调用。取消时也要关，不能随请求一起丢弃。 */
     suspend fun close() = closeBlock()
+
+    /**
+     * 作废句柄与预读，并让读取层丢弃本次读取的会话；可重复调用。
+     *
+     * 预览读取超时、取消或打开失败时用它收尾：只关句柄会把已失效的会话留在表里，
+     * 下一次重试又会复用。缺省等同 [close]。
+     */
+    suspend fun discard() = discardBlock()
 }
 
 /**
@@ -115,6 +124,9 @@ class NetworkPreviewExtractor(
                     closeBlock = {
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
                     },
+                    discardBlock = {
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.discard() } }
+                    },
                 )
             }
         } catch (failure: Throwable) {
@@ -123,11 +135,12 @@ class NetworkPreviewExtractor(
             withContext(NonCancellable + Dispatchers.IO) {
                 val openedWindow = window
                 if (openedWindow != null) {
-                    // 窗口已建、准备还没交出去：关窗口，已提交的预读不再回写，两条句柄一起关。
-                    runCatching { openedWindow.close() }
+                    // 窗口已建、准备还没交出去：作废窗口，已提交的预读不再回写，两条句柄一起关。
+                    // 打开失败后重试必须换新会话，不能复用这次已打开过的连接。
+                    runCatching { openedWindow.discard() }
                 } else {
-                    runCatching { primary?.close() }
-                    runCatching { readAheadHandle?.close() }
+                    runCatching { primary?.discard() }
+                    runCatching { readAheadHandle?.discard() }
                 }
             }
             throw failure
