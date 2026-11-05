@@ -352,15 +352,16 @@ internal class MpvReadySignals {
     }
 
     /**
-     * 下一次预留序号前回收已经到期的坟标：超过等待窗口仍没有迟到事件，就认定它不会再来，
-     * 否则坟标会一直占住队首、吞掉新命令的 SEEK 事件。只回收队首连续的坟标。
+     * 下一次预留序号前回收已经到期的坟标：登记后 3 秒内仍可能被迟到事件消费，
+     * 超过 3 秒仍没有事件才认定它不会再来，否则坟标会一直占住队首、吞掉新命令的 SEEK 事件。
+     * 只回收队首连续的坟标。
      */
     @Synchronized
     fun recycleExpiredTombstones(nowMillis: Long) {
         while (true) {
             val head = pendingSeeks.firstOrNull() ?: return
             val expiresAt = tombstoneExpiries[head] ?: return
-            if (nowMillis < expiresAt) return
+            if (nowMillis <= expiresAt) return
             pendingSeeks.removeFirst()
             tombstones.remove(head)
             tombstoneExpiries.remove(head)
@@ -486,7 +487,7 @@ internal class MpvLoadCoordinator(
         val now = nowMillis()
         readySignals.recycleExpiredTombstones(now)
         val serial = readySignals.reserve()
-        refreshSeek.begin(serial, now)
+        refreshSeek.begin(serial)
         readySignals.onSeekIssued(serial)
         return serial
     }
@@ -497,10 +498,10 @@ internal class MpvLoadCoordinator(
         refreshSeek.discard()?.let { readySignals.discardIssued(it) }
     }
 
-    /** 翻转或分离：刷新不再有效，但命令可能已在路上；序号保留队列位作坟标。 */
+    /** 刷新不再需要（翻转、分离或画面已由播放推进确认）：命令可能已在路上，序号保留队列位作坟标。 */
     @Synchronized
     fun cancelRefreshSeek(): Int? {
-        val tombstone = refreshSeek.cancel() ?: return null
+        val tombstone = refreshSeek.cancel(nowMillis()) ?: return null
         readySignals.tombstone(tombstone.serial, tombstone.expiresAtMillis)
         return tombstone.serial
     }
@@ -508,7 +509,7 @@ internal class MpvLoadCoordinator(
     /** 刷新序号等待窗口到点：登记坟标，迟到的事件只消费它自己。 */
     @Synchronized
     fun onRefreshTimeout(serial: Int): Int? {
-        val tombstone = refreshSeek.onTimeout(serial) ?: return null
+        val tombstone = refreshSeek.onTimeout(serial, nowMillis()) ?: return null
         readySignals.tombstone(tombstone.serial, tombstone.expiresAtMillis)
         return tombstone.serial
     }

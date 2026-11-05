@@ -316,8 +316,10 @@ class MpvFileEventsTest {
 
     @Test
     fun `a timeout tombstone consumes a late seek without moving accepted`() {
-        val coordinator = loadedCoordinator()
+        var now = 0L
+        val coordinator = loadedCoordinator(nowMillis = { now })
         val refresh = coordinator.beginRefreshSeek()
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
         assertEquals(refresh, coordinator.onRefreshTimeout(refresh))
         val real = coordinator.reserveSeekSerial()
         coordinator.onSeekIssued(real)
@@ -333,10 +335,12 @@ class MpvFileEventsTest {
 
     @Test
     fun `cancelling a refresh keeps its serial as a tombstone`() {
-        val coordinator = loadedCoordinator()
+        var now = 0L
+        val coordinator = loadedCoordinator(nowMillis = { now })
         val refresh = coordinator.beginRefreshSeek()
 
         // 翻转/分离：序号不能直接丢，否则迟到的 SEEK 会吃掉下一条真实序号。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
         assertEquals(refresh, coordinator.cancelRefreshSeek())
         val real = coordinator.reserveSeekSerial()
         coordinator.onSeekIssued(real)
@@ -366,10 +370,11 @@ class MpvFileEventsTest {
         var now = 0L
         val coordinator = loadedCoordinator(nowMillis = { now })
         val stale = coordinator.beginRefreshSeek()
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
         assertEquals(stale, coordinator.onRefreshTimeout(stale))
 
-        // 超过等待窗口仍没有迟到事件：下一次预留回收坟标，新刷新才能认回自己的回执。
-        now = REFRESH_SEEK_TIMEOUT_MILLIS
+        // 登记后超过 3 秒仍没有迟到事件：下一次预留回收坟标，新刷新才能认回自己的回执。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS * 2 + 1
         val refresh = coordinator.beginRefreshSeek()
         val event = coordinator.onSeekEvent()
         assertEquals(refresh, event?.serial)
@@ -378,25 +383,44 @@ class MpvFileEventsTest {
     }
 
     @Test
-    fun `a tombstone inside the wait window still absorbs the next seek`() {
+    fun `a tombstone is not recycled within three seconds of registration`() {
         var now = 0L
         val coordinator = loadedCoordinator(nowMillis = { now })
         val stale = coordinator.beginRefreshSeek()
-        coordinator.onRefreshTimeout(stale)
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
+        assertEquals(stale, coordinator.onRefreshTimeout(stale))
 
-        // 还没到回收时间：坟标继续占位，迟到的 SEEK 只消费它自己。
-        now = REFRESH_SEEK_TIMEOUT_MILLIS - 1
-        val refresh = coordinator.beginRefreshSeek()
+        // 登记后 1 秒：迟到事件仍可能来消费坟标，后续真实 seek 的序号不被顶替。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS + 1_000
+        val real = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(real)
+
         val late = coordinator.onSeekEvent()
         assertTrue(late?.tombstone == true)
         assertEquals(0, coordinator.acceptedSeekSerial())
-        assertNull(coordinator.claimRefreshReceipt())
 
-        // 新刷新自己的 SEEK 随后照常认到自己的序号。
-        val refreshEvent = coordinator.onSeekEvent()
-        assertEquals(refresh, refreshEvent?.serial)
-        assertTrue(refreshEvent?.refresh == true)
-        assertEquals(refresh, coordinator.claimRefreshReceipt())
+        val realEvent = coordinator.onSeekEvent()
+        assertEquals(real, realEvent?.serial)
+        assertEquals(real, coordinator.acceptedSeekSerial())
+    }
+
+    @Test
+    fun `a recycled tombstone does not take over the next real seek`() {
+        var now = 0L
+        val coordinator = loadedCoordinator(nowMillis = { now })
+        val stale = coordinator.beginRefreshSeek()
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
+        assertEquals(stale, coordinator.onRefreshTimeout(stale))
+
+        // 登记后超过 3 秒：坟标被回收，后续真实 seek 的 SEEK 不会被它提前吃掉。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS * 2 + 1
+        val real = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(real)
+
+        val event = coordinator.onSeekEvent()
+        assertFalse(event?.tombstone == true)
+        assertEquals(real, event?.serial)
+        assertEquals(real, coordinator.acceptedSeekSerial())
     }
 
     @Test

@@ -3,7 +3,7 @@ package com.cc3301.ccplayer.playback
 /** 刷新序号的等待窗口：超时登记坟标与坟标回收共用同一个 3 秒判据。 */
 internal const val REFRESH_SEEK_TIMEOUT_MILLIS = 3_000L
 
-/** 刷新序号转成的坟标：保留队列位，超过 [expiresAtMillis] 仍没有迟到事件就回收。 */
+/** 刷新序号转成的坟标：保留队列位，[expiresAtMillis] 前仍可能被迟到事件消费，到期后回收。 */
 internal data class RefreshTombstone(val serial: Int, val expiresAtMillis: Long)
 
 /**
@@ -16,21 +16,19 @@ internal data class RefreshTombstone(val serial: Int, val expiresAtMillis: Long)
  * - 迟到：等待窗口内没有 SEEK，转为坟标，保留队列位并仍消费一条迟到事件；
  * - 取消：翻转或分离时命令可能已经下发，同样转为坟标，不直接撤掉队列位；
  * - 作废：命令下发失败、新加载、停止或释放时确定不会再有事件，直接撤掉。
- * 坟标超过等待窗口仍未等到事件时，由下一次预留序号回收，避免永久吞掉后续真实序号。
+ * 坟标登记后 3 秒内仍可能被迟到事件消费；超过 3 秒仍没有事件，由下一次预留序号回收，避免永久吞掉后续真实序号。
  */
 internal class MpvRefreshSeek {
 
     private var serial: Int? = null
-    private var issuedAtMillis = 0L
     private var seen = false
 
     /** 已登记为坟标：队列位仍在，等一条迟到事件把它消费掉。 */
     private var tombstoned = false
 
-    /** 刷新命令已下发：记录它预留的序号与下发时刻。 */
-    fun begin(serial: Int, issuedAtMillis: Long) {
+    /** 刷新命令已下发：记录它预留的序号。 */
+    fun begin(serial: Int) {
         this.serial = serial
-        this.issuedAtMillis = issuedAtMillis
         seen = false
         tombstoned = false
     }
@@ -65,22 +63,22 @@ internal class MpvRefreshSeek {
      * [timeoutSerial] 的计时到点：还没见到 SEEK 时把它登记为坟标并返回；
      * 已经见到就只等它自己的 PLAYBACK_RESTART，不清状态。已经登记过的不重复登记。
      */
-    fun onTimeout(timeoutSerial: Int): RefreshTombstone? {
+    fun onTimeout(timeoutSerial: Int, nowMillis: Long): RefreshTombstone? {
         val current = serial ?: return null
         if (current != timeoutSerial || seen || tombstoned) return null
         tombstoned = true
-        return tombstoneFor(current)
+        return tombstoneFor(current, nowMillis)
     }
 
     /**
      * 翻转或分离：刷新不再有效。
      * 还没见到 SEEK 时命令可能仍在路上，返回要登记的坟标；已经见过或已经登记过则只清归属。
      */
-    fun cancel(): RefreshTombstone? {
+    fun cancel(nowMillis: Long): RefreshTombstone? {
         val current = serial ?: return null
         val pending = !seen && !tombstoned
         clearState()
-        return if (pending) tombstoneFor(current) else null
+        return if (pending) tombstoneFor(current, nowMillis) else null
     }
 
     /**
@@ -93,8 +91,9 @@ internal class MpvRefreshSeek {
         return current
     }
 
-    private fun tombstoneFor(serial: Int): RefreshTombstone =
-        RefreshTombstone(serial, issuedAtMillis + REFRESH_SEEK_TIMEOUT_MILLIS)
+    /** 到期时间从登记时刻起算：此前 3 秒内迟到事件仍可能来消费这个坟标。 */
+    private fun tombstoneFor(serial: Int, nowMillis: Long): RefreshTombstone =
+        RefreshTombstone(serial, nowMillis + REFRESH_SEEK_TIMEOUT_MILLIS)
 
     private fun clearState() {
         serial = null
