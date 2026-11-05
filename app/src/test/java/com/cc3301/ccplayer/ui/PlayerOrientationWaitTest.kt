@@ -9,7 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 首次摆位等方向的时限：到点无条件放行，方向是否对齐都不再等。 */
+/** 首次撤黑等方向的时限：到点无条件放行，方向是否对齐都不再等。 */
 class PlayerOrientationWaitTest {
 
     @Test

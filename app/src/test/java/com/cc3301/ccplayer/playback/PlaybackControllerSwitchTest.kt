@@ -2169,12 +2169,12 @@ class PlaybackControllerSwitchTest {
     private fun showsPicture(controller: PlaybackController): Boolean =
         controller.surfacePresentation.value.showsPicture
 
-    /** 界面按同一判据决定是否铺黑底；切集时屏上旧帧已摆过比例，不按比例盖。 */
+    /** 界面按同一判据决定是否铺黑底；切集时屏上旧帧已有比例，不再盖黑。 */
     private fun blackLayer(controller: PlaybackController): Boolean =
         showPlayerBlackLayer(
             showsPicture(controller),
             controller.surfacePresentation.value.aspectRatio,
-            aspectRatioPlaced = true,
+            orientationSettled = true,
             orientationPending = false,
         )
 

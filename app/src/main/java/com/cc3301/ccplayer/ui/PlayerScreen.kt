@@ -558,7 +558,7 @@ fun PlayerScreen(
             showPlayerBlackLayer(
                 showsPicture = surfacePresentation.showsPicture,
                 videoAspectRatio = surfacePresentation.aspectRatio,
-                aspectRatioPlaced = placementGate.settled,
+                orientationSettled = placementGate.settled,
                 orientationPending = awaitsOrientation,
             )
         ) {

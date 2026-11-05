@@ -6,7 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 首次摆位门：只有横向视频落在竖屏上才等方向，且一轮只结一次案。 */
+/** 首次撤黑门：只有横向视频落在竖屏上才等方向，且一轮只结一次案。 */
 class PlayerPlacementGateTest {
 
     @Test
@@ -26,7 +26,7 @@ class PlayerPlacementGateTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 16.0 / 9.0,
-                aspectRatioPlaced = gate.settled,
+                orientationSettled = gate.settled,
                 orientationPending = gate.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true),
             ),
         )
@@ -39,7 +39,7 @@ class PlayerPlacementGateTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 16.0 / 9.0,
-                aspectRatioPlaced = aligned.settled,
+                orientationSettled = aligned.settled,
                 orientationPending = aligned.awaitsOrientation(
                     ratioKnown = true,
                     showsPicture = true,

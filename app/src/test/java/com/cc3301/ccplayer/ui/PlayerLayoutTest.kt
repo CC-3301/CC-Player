@@ -132,22 +132,6 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `视频区始终按容器尺寸铺满`() {
-        // 尺寸只由容器决定，接口不再接收视频比例；比例与黑边交给 mpv 在 Surface 内处理。
-        val portrait = videoViewport(
-            containerWidth = 1600f,
-            containerHeight = 2560f,
-        )
-        assertViewport(0f, 0f, 1600f, 2560f, portrait)
-
-        val landscape = videoViewport(
-            containerWidth = 2560f,
-            containerHeight = 1600f,
-        )
-        assertViewport(0f, 0f, 2560f, 1600f, landscape)
-    }
-
-    @Test
     fun `容器尺寸非正时给出零尺寸矩形`() {
         val viewport = videoViewport(
             containerWidth = 0f,
@@ -158,40 +142,40 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `进页比例未知时视频区铺满容器并被黑底盖住`() {
-        val viewport = videoViewport(
-            containerWidth = 1600f,
-            containerHeight = 2560f,
-        )
-
-        // 比例未知期间照常铺满容器，黑底盖住首帧。
-        assertViewport(0f, 0f, 1600f, 2560f, viewport)
+    fun `进页比例未知时铺黑底`() {
         assertTrue(
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = null,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = false,
             ),
         )
     }
 
     @Test
-    fun `比例到达后只撤黑，视频区不再改变尺寸`() {
-        val viewport = videoViewport(
-            containerWidth = 1600f,
-            containerHeight = 2560f,
-        )
-
-        assertViewport(0f, 0f, 1600f, 2560f, viewport)
+    fun `比例到达后撤黑`() {
         assertFalse(
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 0.5625,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = false,
             ),
         )
+    }
+
+    @Test
+    fun `比例判据只认有限正数`() {
+        assertFalse(hasKnownVideoAspectRatio(null))
+        assertFalse(hasKnownVideoAspectRatio(0.0))
+        assertFalse(hasKnownVideoAspectRatio(-0.5))
+        assertFalse(hasKnownVideoAspectRatio(Double.NaN))
+        assertFalse(hasKnownVideoAspectRatio(Double.POSITIVE_INFINITY))
+        assertFalse(hasKnownVideoAspectRatio(Double.NEGATIVE_INFINITY))
+
+        assertTrue(hasKnownVideoAspectRatio(0.5625))
+        assertTrue(hasKnownVideoAspectRatio(16.0 / 9.0))
     }
 
     private fun assertViewport(
