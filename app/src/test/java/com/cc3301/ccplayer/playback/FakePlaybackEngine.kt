@@ -263,8 +263,12 @@ class FakePlaybackEngine : PlaybackEngine {
     var refreshFrameCalls = 0
         private set
 
+    /** 刷新是否模拟播放核心重解出帧并补报一次帧上屏；关掉用于覆盖回执没来的兜底。 */
+    var refreshEmitsFrame = true
+
     override fun refreshFrame() {
         refreshFrameCalls++
+        if (refreshEmitsFrame) listener?.onFramePresented(currentLoadToken)
     }
 
     override fun detachSurface() {

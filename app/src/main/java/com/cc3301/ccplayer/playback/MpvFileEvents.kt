@@ -320,6 +320,12 @@ internal class MpvReadySignals {
         pendingSeeks.addLast(serial)
     }
 
+    /** 命令下发失败：撤掉这条不会再有 SEEK 事件的序号，后续事件不会错位。 */
+    @Synchronized
+    fun discardIssued(serial: Int) {
+        pendingSeeks.remove(serial)
+    }
+
     /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
     @Synchronized
     fun onSeekEvent() {
@@ -414,6 +420,12 @@ internal class MpvLoadCoordinator(
     /** 预留本代的一个 seek 序号；ready 带回的序号与它相等才算这一跳之后的信号。 */
     @Synchronized
     fun reserveSeekSerial(): Int = readySignals.reserve()
+
+    /** 刷新的 seek 命令下发失败：撤掉它预留的序号，避免后续 SEEK 事件消费错位。 */
+    @Synchronized
+    fun discardSeekSerial(serial: Int) {
+        readySignals.discardIssued(serial)
+    }
 
     /** 一条 seek 命令已下发：序号进入待认队列，ready 按它认这一跳。 */
     @Synchronized

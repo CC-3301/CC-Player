@@ -486,8 +486,9 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂后只等播放核心的首个新帧：不 seek、不抓帧。
-     * 视频输出重建后由播放核心自行重解码；等待超时只翻转一次视频输出，不 seek、不改播放位置。
+     * Surface 重挂后等播放核心的首个新帧。
+     * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置）；
+     * 播放态等播放核心自行重解码。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
     private fun beginSurfaceRestore() {
         cancelSurfaceRestore()
@@ -502,11 +503,14 @@ class PlaybackController(
                 "阶段: ${loadPhaseLabel(loadPhase)}"
         }
         // 暂停态没有新解码帧：请求播放核心按当前位置重解一帧，不改变播放位置。
-        // 每次重挂只发一次，等待超时仍走视频输出翻转兜底。
-        if (paused && !surfaceRefreshIssued) {
+        // 片尾不刷新，避免 seek 重新触发 eof；切集还在等目标帧时交给原看护，不插刷新；
+        // 每次重挂只发一次。
+        if (paused && !surfaceRefreshIssued && !pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
             surfaceRefreshIssued = true
             engine.refreshFrame()
         }
+        // 刷新回执可能同步到达并已收尾：不再启动超时翻转。
+        if (!awaitingSurfaceFrame) return
         surfaceRestoreJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
@@ -578,6 +582,7 @@ class PlaybackController(
         switchOriginEnded = false
         switchFailureReported = false
         holdBlack = false
+        surfaceRefreshIssued = false
         // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
         screenFrame = ScreenFrame.None
         switchOutputLive = false
@@ -842,6 +847,7 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         directoryEntries = emptyList()
         pausedAtEpisodeEnd = false
+        surfaceRefreshIssued = false
         resetLoadState()
         cancelSleepTimer()
     }
@@ -1198,7 +1204,11 @@ class PlaybackController(
         // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         val phase = loadPhase
-        if (phase == LoadPhase.None) return
+        if (phase == LoadPhase.None) {
+            // Surface 重挂等待期：播放核心回报新帧可显示，按上屏收尾并撤黑。
+            if (awaitingSurfaceFrame) confirmFrame(loadToken)
+            return
+        }
         // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
         // 撤帧只发生在确认接管的 [handleReadySignal] 强信号与 [confirmFrame]。
         switchOutputLive = true
@@ -1416,6 +1426,7 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
+        surfaceRefreshIssued = false
         // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
         endSeekPreview(commit = false)

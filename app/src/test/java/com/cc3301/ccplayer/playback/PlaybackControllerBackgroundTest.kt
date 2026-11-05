@@ -11,7 +11,6 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,32 +21,38 @@ class PlaybackControllerBackgroundTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `暂停态回前台不显示任何画面`() = runTest {
+    fun `暂停态重挂刷新后直接显示暂停帧`() = runTest {
         val controller = pausedController()
         engine.reportPositionChanged(42_000, 600_000)
 
         reattach(controller)
         runCurrent()
 
-        // 退后台不拆画面；Surface 被回收后重建只铺黑底，没有画面可显示；
-        // 暂停态发一次位置中性的精确刷新，不做跳转。
-        assertFalse(controller.surfacePresentation.value.showsPicture)
-        assertNull(controller.surfacePresentation.value.aspectRatio)
+        // 暂停态发一次位置中性刷新，播放核心补报帧上屏后撤黑。
+        assertTrue(controller.surfacePresentation.value.showsPicture)
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(1, engine.refreshFrameCalls)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
+
+        // 回执已到：不再等 3 秒翻转，也不显示缓冲指示。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+        assertFalse(controller.buffering.value)
     }
 
     @Test
-    fun `挂载后 3 秒仍无新帧只翻转一次视频输出`() = runTest {
+    fun `刷新回执没来才在 3 秒后翻转视频输出`() = runTest {
+        engine.refreshEmitsFrame = false
         val controller = pausedController()
 
         reattach(controller)
         runCurrent()
-        // 暂停态先请求播放核心重解当前帧，仍无新帧再走翻转兜底。
+        // 暂停态先请求播放核心重解当前帧，回执没来才走翻转兜底。
         assertEquals(1, engine.refreshFrameCalls)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS - 1)
         runCurrent()
         assertEquals(0, engine.flipVideoOutputCalls)
@@ -76,32 +81,52 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
 
         assertEquals(1, engine.refreshFrameCalls)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue(engine.seekPositions.isEmpty())
 
-        // 刷新不算加载：不显示缓冲指示，也不改变进度。
+        // 刷新不算加载：不显示缓冲指示，也不改变进度；回执到了就不再翻转。
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
         assertFalse(controller.buffering.value)
+        assertEquals(0, engine.flipVideoOutputCalls)
         assertEquals(42_000L, controller.progress.value.positionMillis)
     }
 
     @Test
-    fun `暂停态重挂刷新后仍无新帧走翻转兜底`() = runTest {
+    fun `重挂等待期收到首帧信号也撤黑`() = runTest {
+        engine.refreshEmitsFrame = false
         val controller = pausedController()
         engine.reportPositionChanged(42_000, 600_000)
 
         reattach(controller)
         runCurrent()
-        assertEquals(1, engine.refreshFrameCalls)
-        assertEquals(42_000L, controller.progress.value.positionMillis)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
-        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        engine.reportVideoReconfigured()
         runCurrent()
-        assertEquals(1, engine.flipVideoOutputCalls)
-        assertEquals(1, engine.refreshFrameCalls)
-        assertEquals(42_000L, controller.progress.value.positionMillis)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `片尾暂停重挂不请求精确刷新`() = runTest {
+        val controller = playingController()
+        controller.startSleepTimer(SleepTimerOption.EndOfEpisode)
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+
+        reattach(controller)
+        runCurrent()
+
+        // 片尾不再 seek，避免重新触发 eof 与连播判定。
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertEquals(0, engine.refreshFrameCalls)
+        assertTrue(engine.seekPositions.isEmpty())
     }
 
     @Test
@@ -153,8 +178,9 @@ class PlaybackControllerBackgroundTest {
         assertEquals(startedLoads, engine.startedUrls.size)
         assertFalse(controller.switching.value)
 
-        // 回前台只接着剩下的 30 秒走，不重新给满窗口。
+        // 回前台只接着剩下的 30 秒走，不重新给满窗口；切集等帧期间不插精确刷新。
         controller.setRenderSurfaceAvailable(true)
+        assertEquals(0, engine.refreshFrameCalls)
         advanceTimeBy(PlaybackController.NO_FRAME_WINDOW_MILLIS - 30_000 - 1)
         runCurrent()
         assertEquals(startedLoads, engine.startedUrls.size)
@@ -297,7 +323,8 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         policy.setAppInForeground(true)
 
-        // 暂停态回前台不 seek，也不自动继续。
+        // 暂停态回前台只发一次位置中性刷新，不跳转、不自动继续。
+        assertEquals(1, engine.refreshFrameCalls)
         assertTrue(engine.seekPositions.isEmpty())
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(0, engine.resumeCalls)
