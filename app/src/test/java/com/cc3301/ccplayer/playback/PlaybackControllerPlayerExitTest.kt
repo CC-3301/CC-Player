@@ -42,11 +42,15 @@ class PlaybackControllerPlayerExitTest {
         controller.openPlaylist(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()
         controller.setDecodeMode(DecodeMode.Software)
+        engine.actions.clear()
+        engine.decodeModes.clear()
 
         controller.openPlaylist(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
 
+        // 换片必须先补写解码模式，再开始加载新文件；不能只剩一次 start。
+        assertEquals(listOf("decode:Software", "start"), engine.actions)
+        assertEquals(listOf(DecodeMode.Software), engine.decodeModes)
         assertEquals(DecodeMode.Software, controller.decodeMode.value)
-        assertEquals(DecodeMode.Software, engine.decodeModes.last())
     }
 
     @Test
@@ -104,6 +108,7 @@ class PlaybackControllerPlayerExitTest {
         engine.reportPlaybackFailed("无法打开文件")
         engine.reportPlaybackFailed("无法打开文件")
 
+        assertEquals(2, engine.startedUrls.size)
         assertTrue(controller.playbackFailed.value)
     }
 

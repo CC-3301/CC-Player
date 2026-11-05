@@ -229,6 +229,7 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun setDecodeMode(mode: DecodeMode) {
         decodeModes += mode
+        actions += "decode:${mode.name}"
     }
 
     override fun embeddedSubtitleTracks(): List<SubtitleTrack> = embeddedTracks
