@@ -435,14 +435,13 @@ class MpvPlaybackEngine(
         runCatching { MPVLib.command(arrayOf("seek", "0", "relative+exact")) }
             .onFailure { failure ->
                 cancelRefreshSeek()
-                loadCoordinator.discardSeekSerial(serial)
                 diagnostics.log {
                     "刷新: 下发失败 | ${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
                 }
             }
     }
 
-    /** 刷新序号 3 秒内没有被 SEEK 事件消费就丢弃，避免共享队首永久错位。 */
+    /** 刷新序号 3 秒内没有被 SEEK 事件消费就标记为坟标，迟到的 SEEK 仍消费它自己。 */
     private fun armRefreshTimeout(serial: Int) {
         synchronized(seekTimeoutLock) {
             if (released) return
@@ -464,9 +463,9 @@ class MpvPlaybackEngine(
 
     private fun handleRefreshTimeout(serial: Int) {
         if (released) return
-        val discarded = refreshSeek.onTimeout(serial) ?: return
-        loadCoordinator.discardSeekSerial(discarded)
-        diagnostics.log { "刷新: 3 秒内没有 SEEK 事件，丢弃序号=$discarded" }
+        val tombstoned = refreshSeek.onTimeout(serial) ?: return
+        loadCoordinator.tombstoneSeekSerial(tombstoned)
+        diagnostics.log { "刷新: 3 秒内没有 SEEK 事件，序号标记为坟标=$tombstoned" }
     }
 
     /** 只是撤掉丢弃计时；刷新归属仍留给它自己的 PLAYBACK_RESTART。 */
@@ -477,10 +476,14 @@ class MpvPlaybackEngine(
         }
     }
 
-    /** 新加载、停止、分离或释放：刷新不再有效。 */
+    /**
+     * 新加载、停止、分离或释放：刷新不再有效。
+     * 还没被 SEEK 消费的序号从待认队列撤掉，避免它之后吃掉真实 seek 的事件。
+     */
     private fun cancelRefreshSeek() {
-        refreshSeek.clear()
+        val residual = refreshSeek.clear()
         cancelRefreshTimeout()
+        residual?.let { loadCoordinator.discardSeekSerial(it) }
     }
 
     /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出；刷新无回执时由控制层兜底调用。 */
@@ -595,12 +598,15 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
-                val consumed = loadCoordinator.onSeekEvent()
-                if (refreshSeek.onSeekConsumed(consumed)) {
-                    // 刷新自己的 SEEK 到了：序号不会错位，撤掉丢弃计时，等它自己的 restart。
-                    cancelRefreshTimeout()
-                } else {
-                    seekDiagnostics.onSeekEvent()
+                val event = loadCoordinator.onSeekEvent()
+                when {
+                    // 坟标只消费迟到的 SEEK，不改写 accepted，也不写 seek 诊断。
+                    event?.tombstone == true -> refreshSeek.onSeekConsumed(event.serial)
+                    refreshSeek.onSeekConsumed(event?.serial) -> {
+                        // 刷新自己的 SEEK 到了：序号不会错位，撤掉丢弃计时，等它自己的 restart。
+                        cancelRefreshTimeout()
+                    }
+                    else -> seekDiagnostics.onSeekEvent()
                 }
                 listener?.onLoadActivity(LoadActivity.Seek, loadCoordinator.currentLoadedToken())
             }

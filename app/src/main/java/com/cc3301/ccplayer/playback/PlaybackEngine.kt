@@ -92,7 +92,7 @@ interface PlaybackEngine {
 
     /**
      * 位置中性的精确刷新：让播放核心按当前位置重解一帧，不改变播放位置。
-     * 暂停态 Surface 重挂时，以这次刷新的 seek 完成作为撤黑判据（ADR-0026）。
+     * 暂停态 Surface 重挂时，以刷新自己的 PLAYBACK_RESTART（帧上屏回执）作为撤黑判据，仅暂停态重挂生效（ADR-0026）。
      */
     fun refreshFrame()
 

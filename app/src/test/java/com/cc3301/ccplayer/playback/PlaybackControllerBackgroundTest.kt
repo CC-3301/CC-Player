@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,6 +71,32 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
         assertEquals(1, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `翻转兜底后刷新序号归位`() = runTest {
+        engine.dropRefreshReceipt = true
+        val controller = pausedController()
+
+        reattach(controller)
+        runCurrent()
+        val serial = engine.refreshSeekSerial
+        assertTrue(engine.lastRefreshPaused)
+        assertTrue(serial != null)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+
+        // 回执没来：翻转撤销本次恢复，残留序号一并丢弃；下一次重挂重新分配。
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertEquals(listOf(serial), engine.discardedRefreshSerials)
+        assertNull(engine.refreshSeekSerial)
+
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+        assertTrue(engine.refreshSeekSerial != null && engine.refreshSeekSerial != serial)
     }
 
     @Test

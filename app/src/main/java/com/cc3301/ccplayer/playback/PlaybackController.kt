@@ -488,7 +488,7 @@ class PlaybackController(
     /**
      * Surface 重挂后等播放核心的首个新帧。
      * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
-     * 以这次刷新的 seek 完成为撤黑判据（ADR-0026）；播放态只认播放位置前进。
+     * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态重挂生效（ADR-0026）；播放态只认播放位置前进。
      * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
     private fun beginSurfaceRestore() {

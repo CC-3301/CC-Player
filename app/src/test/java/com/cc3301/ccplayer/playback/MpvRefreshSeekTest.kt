@@ -32,12 +32,32 @@ class MpvRefreshSeekTest {
     }
 
     @Test
-    fun `未等到 SEEK 的刷新序号超时被丢弃`() {
+    fun `未等到 SEEK 的刷新序号超时标记为坟标`() {
         val refresh = MpvRefreshSeek()
         refresh.begin(7)
 
         assertEquals(7, refresh.onTimeout(7))
+        // 迟到的 SEEK 仍由这个坟标消费，不产生回执。
+        assertTrue(refresh.onSeekConsumed(7))
         assertNull(refresh.claimReceipt(7))
+    }
+
+    @Test
+    fun `清掉未消费的序号后不再认领回执`() {
+        val refresh = MpvRefreshSeek()
+        refresh.begin(9)
+
+        assertEquals(9, refresh.clear())
+        assertNull(refresh.claimReceipt(9))
+    }
+
+    @Test
+    fun `已消费的序号被清掉时不返回残留`() {
+        val refresh = MpvRefreshSeek()
+        refresh.begin(9)
+        assertTrue(refresh.onSeekConsumed(9))
+
+        assertNull(refresh.clear())
     }
 
     @Test
