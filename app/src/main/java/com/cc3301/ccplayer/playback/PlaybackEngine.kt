@@ -90,6 +90,12 @@ interface PlaybackEngine {
     /** 视频输出翻转：把 VO 置空后立即恢复，用于挂载后仍等不到新帧。 */
     fun flipVideoOutput()
 
+    /**
+     * 位置中性的精确刷新：让播放核心按当前位置重解一帧，不改变播放位置。
+     * 暂停态 Surface 重挂时，以刷新自己的 PLAYBACK_RESTART（帧上屏回执）作为撤黑判据，仅暂停态重挂生效（ADR-0026）。
+     */
+    fun refreshFrame()
+
     fun detachSurface()
 
     fun setSurfaceSize(width: Int, height: Int)
@@ -134,8 +140,10 @@ interface PlaybackEngine {
         fun onLoadActivity(activity: LoadActivity, loadToken: Int?)
 
         /**
-         * 新画面已真正输出到 Surface：加载已就绪后播放位置实际前进，或重新挂载 Surface 后再次前进。
-         * [loadToken] 标识产生它的加载。暂停态没有位置前进，不能凭视频输出重配冒充这个信号。
+         * 新画面已真正输出到 Surface。
+         * 播放态只认播放位置前进；暂停态 Surface 重挂时认那次位置中性刷新自己的 seek 完成，
+         * 由引擎按 ADR-0026 的撤黑判据上报一次。
+         * [loadToken] 标识产生它的加载。
          */
         fun onFramePresented(loadToken: Int)
 

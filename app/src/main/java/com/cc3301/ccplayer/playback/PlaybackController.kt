@@ -331,6 +331,9 @@ class PlaybackController(
     /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间铺黑底。 */
     private var awaitingSurfaceFrame = false
 
+    /** 本次 Surface 重挂是否已经请求过精确刷新；重挂期间的重复回调不再发。 */
+    private var surfaceRefreshIssued = false
+
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -474,6 +477,8 @@ class PlaybackController(
             screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
+            // 下一次重挂才重新请求精确刷新。
+            surfaceRefreshIssued = false
         }
         updateLoadTimers()
         finishLoadWithoutSurface()
@@ -481,8 +486,10 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂后只等播放核心的首个新帧：不 seek、不抓帧。
-     * 视频输出重建后由播放核心自行重解码；等待超时只翻转一次视频输出，不 seek、不改播放位置。
+     * Surface 重挂后等播放核心的首个新帧。
+     * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
+     * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态重挂生效（ADR-0026）；播放态只认播放位置前进。
+     * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
     private fun beginSurfaceRestore() {
         cancelSurfaceRestore()
@@ -496,6 +503,15 @@ class PlaybackController(
             "Surface 重挂: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
                 "阶段: ${loadPhaseLabel(loadPhase)}"
         }
+        // 暂停态没有新解码帧：请求播放核心按当前位置重解一帧，不改变播放位置。
+        // 片尾不刷新，避免 seek 重新触发 eof；切集还在等目标帧时交给原看护，不插刷新；
+        // 每次重挂只发一次。
+        if (paused && !surfaceRefreshIssued && !pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
+            surfaceRefreshIssued = true
+            engine.refreshFrame()
+        }
+        // 刷新回执可能同步到达并已收尾：不再启动超时翻转。
+        if (!awaitingSurfaceFrame) return
         surfaceRestoreJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
@@ -567,6 +583,7 @@ class PlaybackController(
         switchOriginEnded = false
         switchFailureReported = false
         holdBlack = false
+        surfaceRefreshIssued = false
         // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
         screenFrame = ScreenFrame.None
         switchOutputLive = false
@@ -831,6 +848,7 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         directoryEntries = emptyList()
         pausedAtEpisodeEnd = false
+        surfaceRefreshIssued = false
         resetLoadState()
         cancelSleepTimer()
     }
@@ -1405,6 +1423,7 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
+        surfaceRefreshIssued = false
         // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
         endSeekPreview(commit = false)

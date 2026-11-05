@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import android.view.Surface
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * 假播放引擎：记录控制层下发的指令，并让测试自己触发引擎回调。
@@ -82,17 +84,22 @@ class FakePlaybackEngine : PlaybackEngine {
         currentSeekSerial = 0
         acceptedSeekSerial = 0
         issuedSeekSerials.clear()
+        refreshSeekSerial = null
         return ++currentLoadToken
     }
+
+    private var paused = false
 
     override fun pause() {
         actions += "pause"
         pauseCalls++
+        paused = true
     }
 
     override fun resume() {
         actions += "resume"
         resumeCalls++
+        paused = false
         // 与真实引擎一致：恢复播放会产生一次加载事件；测试可关掉以模拟 0 次事件。
         if (resumeEmitsActivity) {
             listener?.onLoadActivity(LoadActivity.PlaybackRestart, currentLoadToken)
@@ -257,6 +264,52 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun flipVideoOutput() {
         flipVideoOutputCalls++
+        refreshSeekSerial?.let {
+            discardedRefreshSerials += it
+            refreshSeekSerial = null
+        }
+    }
+
+    /** 位置中性精确刷新的次数；刷新不改变播放位置，也不占 seek 序号。 */
+    var refreshFrameCalls = 0
+        private set
+
+    /** 刷新是否模拟播放核心重解出帧并补报一次帧上屏；关掉用于覆盖回执没来的兜底。 */
+    var refreshEmitsFrame = true
+
+    /** 丢掉本次刷新回执，模拟引擎没等到 PLAYBACK_RESTART。 */
+    var dropRefreshReceipt = false
+
+    /** 设置后刷新回执按测试调度器异步投递，覆盖真实引擎的异步回执链。 */
+    var callbackScope: CoroutineScope? = null
+
+    /** 最近一次刷新预留的序号；回执送达或翻转丢弃后清空。 */
+    var refreshSeekSerial: Int? = null
+        private set
+
+    /** 最近一次刷新下发时是否处于暂停态。 */
+    var lastRefreshPaused = false
+        private set
+
+    /** 翻转兜底丢弃掉的刷新序号，用于断言序号归位。 */
+    val discardedRefreshSerials = mutableListOf<Int>()
+
+    private var nextRefreshSerial = 0
+
+    override fun refreshFrame() {
+        refreshFrameCalls++
+        lastRefreshPaused = paused
+        val serial = ++nextRefreshSerial
+        refreshSeekSerial = serial
+        if (!paused || !refreshEmitsFrame || dropRefreshReceipt) return
+        val target = listener ?: return
+        val token = currentLoadToken
+        val scope = callbackScope
+        val deliver = {
+            refreshSeekSerial = null
+            target.onFramePresented(token)
+        }
+        if (scope != null) scope.launch { deliver() } else deliver()
     }
 
     override fun detachSurface() {

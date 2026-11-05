@@ -269,6 +269,9 @@ internal data class ReadySignal(val spec: LoadSpec, val serial: Int)
  */
 internal data class LoadEnd(val end: MpvFileEvents.End, val spec: LoadSpec?)
 
+/** 一条 SEEK 事件消费到的序号；坟标只占位消费，不改写 ready 的 accepted 序号。 */
+internal data class ConsumedSeek(val serial: Int, val tombstone: Boolean)
+
 /**
  * seek 与 ready 的序号：ready 带回的序号不小于该 seek 的序号，才算这一跳之后的信号。
  *
@@ -282,6 +285,8 @@ internal class MpvReadySignals {
 
     private var issued = 0
     private val pendingSeeks = ArrayDeque<Int>()
+    /** 坟标序号：仍占队列位、仍消费一条 SEEK 事件，但不改写 accepted。 */
+    private val tombstones = mutableSetOf<Int>()
     private var accepted = 0
     private var lastReconfigSerial = -1
     private var lastRestartSerial = -1
@@ -291,6 +296,7 @@ internal class MpvReadySignals {
     fun onStart() {
         issued = 0
         pendingSeeks.clear()
+        tombstones.clear()
         accepted = 0
         lastReconfigSerial = -1
         lastRestartSerial = -1
@@ -320,11 +326,31 @@ internal class MpvReadySignals {
         pendingSeeks.addLast(serial)
     }
 
-    /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
+    /** 命令下发失败或恢复结束：撤掉这条不会再等的序号，后续事件不会错位。 */
     @Synchronized
-    fun onSeekEvent() {
-        pendingSeeks.removeFirstOrNull()?.let { accepted = it }
+    fun discardIssued(serial: Int) {
+        pendingSeeks.remove(serial)
+        tombstones.remove(serial)
     }
+
+    /** 超时未等到 SEEK：保留队列位作坟标，迟到的 SEEK 只消费它自己，不吃下一条真实 seek。 */
+    @Synchronized
+    fun tombstone(serial: Int) {
+        if (pendingSeeks.contains(serial)) tombstones.add(serial)
+    }
+
+    /** MPV_EVENT_SEEK 到达：返回本次消费的序号；坟标只消费事件，不改写 accepted。 */
+    @Synchronized
+    fun onSeekEvent(): ConsumedSeek? {
+        val consumed = pendingSeeks.removeFirstOrNull() ?: return null
+        if (tombstones.remove(consumed)) return ConsumedSeek(consumed, tombstone = true)
+        accepted = consumed
+        return ConsumedSeek(consumed, tombstone = false)
+    }
+
+    /** 当前 ready 使用的序号；0 表示本代还没有 SEEK 事件。 */
+    @Synchronized
+    fun acceptedSerial(): Int = accepted
 
     /** 本次 ready 的序号；同一序号内同类信号重复时返回 null。 */
     @Synchronized
@@ -343,6 +369,7 @@ internal class MpvReadySignals {
     fun reset() {
         issued = 0
         pendingSeeks.clear()
+        tombstones.clear()
         accepted = 0
         lastReconfigSerial = -1
         lastRestartSerial = -1
@@ -415,6 +442,18 @@ internal class MpvLoadCoordinator(
     @Synchronized
     fun reserveSeekSerial(): Int = readySignals.reserve()
 
+    /** 撤掉刷新预留的序号：命令失败或恢复结束时不再等它的 SEEK 事件。 */
+    @Synchronized
+    fun discardSeekSerial(serial: Int) {
+        readySignals.discardIssued(serial)
+    }
+
+    /** 刷新序号超时：保留队列位作坟标，迟到的 SEEK 仍消费它自己。 */
+    @Synchronized
+    fun tombstoneSeekSerial(serial: Int) {
+        readySignals.tombstone(serial)
+    }
+
     /** 一条 seek 命令已下发：序号进入待认队列，ready 按它认这一跳。 */
     @Synchronized
     fun onSeekIssued(serial: Int) {
@@ -434,9 +473,11 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onSeekEvent() {
-        readySignals.onSeekEvent()
-    }
+    fun onSeekEvent(): ConsumedSeek? = readySignals.onSeekEvent()
+
+    /** 当前 ready 使用的序号；刷新回执按它认自己那一跳。 */
+    @Synchronized
+    fun acceptedSeekSerial(): Int = readySignals.acceptedSerial()
 
     /** 自然播完时返回产生它的加载令牌；旧代际或重复上报返回 null。 */
     @Synchronized
