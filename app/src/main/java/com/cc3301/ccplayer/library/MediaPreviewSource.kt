@@ -654,9 +654,11 @@ class CachedMediaPreviewSource(
             is IllegalArgumentException, is SecurityException -> "路径解析"
             else -> "读取"
         }
+        // 只记类名：异常消息可能含路径与服务器信息，不进日志。
+        val cause = failure.causeClassNameOrNull()
         diagnostics.log {
-            "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage | " +
-                "错误: ${failure.message ?: "-"}"
+            "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage" +
+                (cause?.let { " | 原因: $it" } ?: "")
         }
         LoadedPreview(image = null, durationMillis = null, failed = true)
     }
@@ -898,4 +900,25 @@ private class PrioritySemaphore(
         val priority: PreviewPriority,
         val granted: CompletableDeferred<Unit>,
     )
+}
+
+/** 追异常原因的最大层数。 */
+private const val MAX_CAUSE_DEPTH = 8
+
+/**
+ * 异常链最内层的原因类型；只取类名，原因消息可能含路径与服务器信息，不进日志。
+ * 没有原因时返回 null；原因成环或超过 [maxDepth] 层时停在上限处，不追下去。
+ */
+internal fun Throwable.causeClassNameOrNull(maxDepth: Int = MAX_CAUSE_DEPTH): String? {
+    var root: Throwable = this
+    val seen = HashSet<Throwable>()
+    seen += root
+    var descended = false
+    repeat(maxDepth) {
+        val next = root.cause ?: return if (descended) root.javaClass.simpleName else null
+        if (!seen.add(next)) return if (descended) root.javaClass.simpleName else null
+        root = next
+        descended = true
+    }
+    return root.javaClass.simpleName
 }
