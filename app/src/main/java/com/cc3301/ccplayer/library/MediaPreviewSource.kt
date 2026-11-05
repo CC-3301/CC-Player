@@ -648,7 +648,16 @@ class CachedMediaPreviewSource(
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (failure: Exception) {
-        diagnostics.log { "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName})" }
+        val stage = when (failure) {
+            is MediaSourceException -> if (failure.failure == MediaFailure.Unreachable) "建连" else "打开句柄"
+            is java.io.FileNotFoundException -> "打开句柄"
+            is IllegalArgumentException, is SecurityException -> "路径解析"
+            else -> "读取"
+        }
+        diagnostics.log {
+            "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage | " +
+                "错误: ${failure.message ?: "-"}"
+        }
         LoadedPreview(image = null, durationMillis = null, failed = true)
     }
 

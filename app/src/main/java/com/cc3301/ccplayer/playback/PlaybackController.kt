@@ -486,16 +486,22 @@ class PlaybackController(
         // 片尾黑底不显示画面，不需要恢复。
         if (holdBlack) return
         awaitingSurfaceFrame = true
-        diagnostics.log("Surface 重挂: 等待新帧")
+        diagnostics.log {
+            "Surface 重挂: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
+                "阶段: ${loadPhaseLabel(loadPhase)}"
+        }
         surfaceRestoreJob = scope.launch {
             try {
+                val startedAtMillis = nowMillis()
                 delay(SURFACE_RESTORE_WAIT_MILLIS)
                 if (!active || !_renderSurfaceAvailable.value) return@launch
                 if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
                 awaitingSurfaceFrame = false
                 engine.flipVideoOutput()
                 diagnostics.log {
-                    "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出"
+                    "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出 | " +
+                        "播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
+                        "阶段: ${loadPhaseLabel(loadPhase)} | 耗时: ${nowMillis() - startedAtMillis}ms"
                 }
             } finally {
                 val runningJob = coroutineContext[Job]
@@ -589,6 +595,8 @@ class PlaybackController(
     ) {
         loadSource = source
         logLoadStart(media, index)
+        val targetAddress = media.playbackLocation.takeIf { it.startsWith("http") }?.substringBeforeLast("/") ?: "本地"
+        diagnostics.log { "切集开始: ${media.name} | 目标地址: $targetAddress" }
         switchOriginIndex = _currentIndex.value
         switchOriginPositionMillis = playedPositionMillis
         switchOriginDurationMillis = playedDurationMillis
