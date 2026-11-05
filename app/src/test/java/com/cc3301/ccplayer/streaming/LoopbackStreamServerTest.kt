@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.streaming
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -14,6 +15,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -38,8 +40,8 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `不带 Range 的 GET 返回 200 与全量字节`() {
-        // 一次拷贝固定一兆字节。
-        assertEquals(1024 * 1024, COPY_BUFFER_BYTES)
+        // 单次读取块固定 64 KiB。
+        assertEquals(64 * 1024, COPY_BUFFER_BYTES)
 
         val response = httpRequest(url)
 
@@ -605,6 +607,207 @@ class LoopbackStreamServerTest {
         }
     }
 
+    @Test(timeout = 15_000L)
+    fun `读到一半停住时按 3 秒判停滞并截断响应体`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        val big = ByteArray(64 * 1024) { (it % 251).toByte() }
+        val gate = CountDownLatch(1)
+        try {
+            val target = logged.serve("smb://nas/media/停滞.mkv") {
+                StallingByteSource(big, firstChunkBytes = 32 * 1024, gate = gate)
+            }
+            val started = System.nanoTime()
+
+            KeepAliveConnection(target, readTimeoutMillis = 10_000).use { client ->
+                val response = client.request()
+
+                // 先写出首块 32 KiB 再卡住：响应体是部分字节，内容与源一致。
+                assertEquals(200, response.statusCode)
+                assertEquals("65536", response.header("Content-Length"))
+                assertTrue("响应体太小：${response.body.size}", response.body.size >= 32 * 1024)
+                assertTrue("响应体不应写满：${response.body.size}", response.body.size < big.size)
+                assertArrayEquals(big.copyOf(response.body.size), response.body)
+            }
+
+            // 判据是读在途超过 3 秒：耗时不能明显短于阈值。
+            val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertTrue("断开耗时 $waitedMillis ms", waitedMillis >= STALL_TIMEOUT_MILLIS)
+            assertTrue("断开耗时 $waitedMillis ms", waitedMillis < 8_000)
+            awaitCondition { diagnostics.messages.any { it.contains("原因: 停滞断开") } }
+        } finally {
+            gate.countDown()
+            logged.close()
+        }
+    }
+
+    @Test(timeout = 25_000L)
+    fun `慢但持续有新字节的大块读取不触发看门狗`() {
+        val big = ByteArray(256 * 1024) { (it % 251).toByte() }
+        val chunked = server.serve("smb://nas/media/慢速.mkv") {
+            SlowChunkByteSource(big, chunkBytes = COPY_BUFFER_BYTES, pauseMillis = 900)
+        }
+
+        val started = System.nanoTime()
+        val response = httpRequest(chunked)
+        val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+        // 每块 64 KiB 都在停滞阈值内返回，整段传输超过 3 秒：慢但持续有数据不触发看门狗。
+        assertArrayEquals(big, response.body)
+        assertTrue("总耗时 $waitedMillis ms", waitedMillis > STALL_TIMEOUT_MILLIS)
+    }
+
+    @Test(timeout = 25_000L)
+    fun `停滞断开后作废字节源，下一次请求重建`() {
+        val big = ByteArray(64 * 1024) { (it % 251).toByte() }
+        val gate = CountDownLatch(1)
+        var opens = 0
+        val target = server.serve("smb://nas/media/停滞重建.mkv") {
+            opens++
+            if (opens == 1) {
+                StallingByteSource(big, firstChunkBytes = 32 * 1024, gate = gate)
+            } else {
+                RecordingByteSource(big)
+            }
+        }
+
+        // 第一次请求卡在后半段：看门狗断开连接并把这条源标记陈旧。
+        KeepAliveConnection(target, readTimeoutMillis = 10_000).use { it.request() }
+        assertEquals(1, opens)
+
+        // 下一次请求重建：建源线程关掉卡死的旧源，新源读到完整字节。
+        val second = httpRequest(target)
+        assertArrayEquals(big, second.body)
+        assertEquals(2, opens)
+        assertEquals(0L, gate.count)
+    }
+
+    @Test
+    fun `单次读取块固定 64 KiB`() {
+        val bytes = ByteArray(256 * 1024) { (it % 251).toByte() }
+        val recording = LimitRecordingByteSource(bytes)
+        val target = server.serve("smb://nas/media/读块.mkv") { recording }
+
+        assertArrayEquals(bytes, httpRequest(target).body)
+
+        // 源不声明单次读上限：每次读取都取固定 64 KiB。
+        assertEquals(listOf(64 * 1024, 64 * 1024, 64 * 1024, 64 * 1024), recording.reads)
+    }
+
+    @Test(timeout = 20_000L)
+    fun `空闲长连接不被看门狗断开`() {
+        KeepAliveConnection(url, readTimeoutMillis = 6_000).use { client ->
+            assertArrayEquals(payload, client.request().body)
+
+            // 没有传输就没有停滞：空闲长连接保持可用，下一请求直接命中已有源。
+            Thread.sleep(STALL_TIMEOUT_MILLIS.toInt() + 500L)
+
+            assertArrayEquals(payload, client.request().body)
+        }
+    }
+
+    @Test
+    fun `连接级打点记录收到请求、建源与连接结束`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        try {
+            val target = logged.serve("smb://nas/media/打点.mkv") { RecordingByteSource(payload) }
+            KeepAliveConnection(target).use { client ->
+                assertArrayEquals(payload, client.request().body)
+                assertArrayEquals(payload, client.request().body)
+            }
+            awaitCondition { diagnostics.messages.any { it.contains("连接结束") } }
+
+            val lines = diagnostics.messages.filter { it.startsWith("回环流") }
+            // 一条连接只写三行：首个请求、建源与连接结束；第二个 Range 不再另起一行。
+            assertEquals(3, lines.size)
+            assertTrue(lines[0].contains("收到请求"))
+            assertTrue(lines[0].contains("Range: -"))
+            assertTrue(lines[0].contains("源: 新建"))
+            assertTrue(lines[1].contains("建源结束"))
+            assertTrue(lines[1].contains("成功"))
+            assertTrue(lines[2].contains("原因: 客户端断开"))
+            assertTrue(lines[2].contains("首字节:"))
+        } finally {
+            logged.close()
+        }
+    }
+
+    @Test(timeout = 15_000L)
+    fun `并发等待同一轮重建时只由发起者写建源结束`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        val release = CountDownLatch(1)
+        val building = CountDownLatch(1)
+        try {
+            val target = logged.serve("smb://nas/media/并发建源.mkv") {
+                building.countDown()
+                release.await()
+                RecordingByteSource(payload)
+            }
+            val first = Thread { runCatching { httpRequest(target) } }.apply {
+                isDaemon = true
+                start()
+            }
+            assertTrue("建源没有开始", building.await(2_000, TimeUnit.MILLISECONDS))
+            val second = Thread { runCatching { httpRequest(target) } }.apply {
+                isDaemon = true
+                start()
+            }
+            // 让第二个请求进入等待同一轮重建。
+            Thread.sleep(200)
+            release.countDown()
+            first.join(5_000)
+            second.join(5_000)
+
+            val buildLines = diagnostics.messages.filter { it.contains("建源结束") }
+            assertEquals(1, buildLines.size)
+            assertTrue(diagnostics.messages.any { it.contains("源: 新建") })
+        } finally {
+            release.countDown()
+            logged.close()
+        }
+    }
+
+    @Test
+    fun `单次读取超过 1 秒记录一条停滞日志`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        try {
+            val target = logged.serve("smb://nas/media/慢读.mkv") {
+                SlowFirstReadByteSource(payload, pauseMillis = SLOW_READ_LOG_MILLIS + 200L)
+            }
+
+            assertArrayEquals(payload, httpRequest(target).body)
+
+            // 每次读取最多一条：不逐读记。
+            val stallLines = diagnostics.messages.filter { it.contains("读取停滞") }
+            assertEquals(1, stallLines.size)
+            assertTrue(stallLines.single().contains("位置 0"))
+        } finally {
+            logged.close()
+        }
+    }
+
+    @Test
+    fun `建源失败记录耗时与异常类名`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        try {
+            val target = logged.serve("smb://nas/media/坏文件.mkv") {
+                throw IllegalStateException("连不上")
+            }
+
+            assertEquals(503, httpRequest(target).statusCode)
+
+            val buildLine = diagnostics.messages.single { it.contains("建源结束") }
+            assertTrue(buildLine.contains("失败: IllegalStateException"))
+            assertTrue(buildLine.contains("耗时:"))
+        } finally {
+            logged.close()
+        }
+    }
+
     private fun awaitCondition(timeoutMillis: Long = 2_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
         while (System.nanoTime() < deadline) {
@@ -727,7 +930,7 @@ class RecordingByteSource(private val bytes: ByteArray) : ByteSource, Closeable 
 }
 
 /** 记录每次请求长度的字节源，并声明单次读上限，用于验证按上限分块。 */
-class LimitRecordingByteSource(val bytes: ByteArray, override val maxReadBytes: Int) : ByteSource {
+class LimitRecordingByteSource(val bytes: ByteArray, override val maxReadBytes: Int = 0) : ByteSource {
 
     /** 每次读取请求的长度，按发生顺序。 */
     val reads = mutableListOf<Int>()
@@ -762,6 +965,86 @@ class ShortByteSource(private val bytes: ByteArray, private val readable: Int = 
 
 /** 测试用 Error 子类：与非异常的断言失败区分开。 */
 class FakeError(message: String) : Error(message)
+
+/** 记录诊断日志的出口：连接级打点按内容断言。 */
+private class RecordingDiagnostics : DiagnosticsLog {
+
+    override val enabled: Boolean = true
+
+    val messages = CopyOnWriteArrayList<String>()
+
+    override fun log(message: String) {
+        messages += message
+    }
+}
+
+/** 每次读取都先停一下再返回一小段：模拟慢但持续有新字节的传输。 */
+private class SlowChunkByteSource(
+    private val bytes: ByteArray,
+    private val chunkBytes: Int,
+    private val pauseMillis: Long,
+) : ByteSource {
+
+    override val size: Long = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        Thread.sleep(pauseMillis)
+        if (position >= bytes.size) return 0
+        val count = minOf(length.toLong(), chunkBytes.toLong(), bytes.size - position).toInt()
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    override fun close() = Unit
+}
+
+/** 先吐出 [firstChunkBytes] 字节，随后卡住直到被关闭：模拟传输中途停滞。 */
+private class StallingByteSource(
+    private val bytes: ByteArray,
+    private val firstChunkBytes: Int,
+    private val gate: CountDownLatch,
+) : ByteSource {
+
+    override val size: Long = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (position == 0L) {
+            val count = minOf(firstChunkBytes.toLong(), length.toLong(), bytes.size.toLong()).toInt()
+            bytes.copyInto(buffer, offset, 0, count)
+            return count
+        }
+        gate.await()
+        return 0
+    }
+
+    override fun close() {
+        gate.countDown()
+    }
+}
+
+/** 首次读取故意超过停滞阈值，之后正常返回。 */
+private class SlowFirstReadByteSource(
+    private val bytes: ByteArray,
+    private val pauseMillis: Long,
+) : ByteSource {
+
+    private var firstRead = true
+
+    override val size: Long = bytes.size.toLong()
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (firstRead) {
+            firstRead = false
+            Thread.sleep(pauseMillis)
+        }
+        if (position >= bytes.size) return 0
+        val count = minOf(length.toLong(), bytes.size - position).toInt()
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    override fun close() = Unit
+}
 
 /** 每次读取都抛出指定异常，模拟网络读超时等失败。 */
 class FailingByteSource(private val failure: Throwable) : ByteSource {

@@ -744,10 +744,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             store = DataStoreBookmarkStore.create(applicationContext),
             credentials = EncryptedCredentialStore.create(applicationContext),
         )
-        val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources))
+        val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources), diagnostics)
         return RoutingNetworkStreams(
             mapOf(
-                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources)),
+                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources), diagnostics),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
             ),

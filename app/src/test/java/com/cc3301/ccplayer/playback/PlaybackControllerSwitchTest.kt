@@ -452,6 +452,9 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(590_000, 600_000)
 
         engine.reportPlaybackEnded()
+        // 第一次读失败先重发一次，重发也失败才回退原片。
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -470,6 +473,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(600_000, 600_000)
 
         engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -513,6 +518,8 @@ class PlaybackControllerSwitchTest {
 
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
 
         assertEquals(500_000L, engine.startedPositions.last())
         assertTrue(controller.switching.value)
@@ -529,6 +536,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(600_000, 600_000)
 
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         // 手动切集的失败回退沿用屏幕上停住的旧帧，不落到片尾黑底那条规则里。
@@ -553,6 +562,8 @@ class PlaybackControllerSwitchTest {
 
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertTrue(controller.restoring.value)
 
         // 自然播完的末次位置可能滞后；播放仍应从头重开而不是续播到片尾。
@@ -568,6 +579,8 @@ class PlaybackControllerSwitchTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
         engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         assertFalse(showsPicture(controller))
@@ -587,6 +600,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(600_000, 600_000)
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         assertFalse(showsPicture(controller))
 
@@ -602,6 +617,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(590_000, 600_000)
         runCurrent()
         engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         assertFalse(showsPicture(controller))
@@ -620,6 +637,8 @@ class PlaybackControllerSwitchTest {
         runCurrent()
 
         engine.reportPlaybackEnded()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         assertTrue(controller.restoring.value)
         progress.records.clear()
@@ -676,6 +695,8 @@ class PlaybackControllerSwitchTest {
 
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertEquals(1, failures.size)
         assertTrue(controller.restoring.value)
 
@@ -722,6 +743,8 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertEquals(1, failures.size)
 
         engine.reportFileLoaded()
@@ -741,6 +764,8 @@ class PlaybackControllerSwitchTest {
 
         engine.reportPlaybackEnded()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertEquals(1, failures.size)
 
         advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
@@ -758,6 +783,8 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(0, controller.currentIndex.value)
@@ -845,6 +872,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(40_000, 600_000)
         controller.next()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertTrue(controller.restoring.value)
         assertTrue(showsPicture(controller))
 
@@ -861,6 +890,8 @@ class PlaybackControllerSwitchTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
         engine.reportPositionChanged(40_000, 600_000)
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         controller.next()
@@ -887,6 +918,8 @@ class PlaybackControllerSwitchTest {
         engine.reportPositionChanged(40_000, 600_000)
 
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -930,6 +963,8 @@ class PlaybackControllerSwitchTest {
         val failures = collectFailures(controller)
 
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(1, failures.size)
@@ -989,7 +1024,7 @@ class PlaybackControllerSwitchTest {
         assertTrue(controller.switching.value)
 
         // 加载完成不是进展：没有首帧上屏也没有位置前进时，切集不按时长自行收尾。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(4_999)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(PlaybackState.Loading, controller.state.value)
@@ -1134,7 +1169,7 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(4_000)
         runCurrent()
         assertTrue(controller.switching.value)
 
@@ -1176,12 +1211,12 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(4_000)
         runCurrent()
         controller.cancelSwitch()
 
-        // 被取消的切集不再重试或判失败；恢复原片走自己的同一条看护。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 被取消的切集不再重发或判失败；恢复原片走自己的同一条看护。
+        advanceTimeBy(5_000)
         runCurrent()
         assertTrue(controller.restoring.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -1202,7 +1237,7 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         controller.next()
 
-        // 新目标重新起算：旧目标剩下的 1 秒不会触发重试。
+        // 新目标重新起算：旧目标剩下的 1 秒不会触发重发。
         advanceTimeBy(1_000)
         runCurrent()
         assertTrue(controller.switching.value)
@@ -1287,12 +1322,12 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportFileLoaded()
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        advanceTimeBy(5_000)
         runCurrent()
         assertTrue(controller.switching.value)
 
         // 查询一直不完成，看护照样在 10 秒判失败。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 5_000)
         runCurrent()
 
         assertTrue(controller.switching.value)
@@ -1490,8 +1525,8 @@ class PlaybackControllerSwitchTest {
 
         assertEquals(PlaybackState.Ended, controller.state.value)
         assertEquals(1, failures.size)
-        // 首次打开与切集走同一条重试路径：5 秒重发一次，10 秒判失败。
-        assertEquals(2, engine.startedUrls.size)
+        // 时间本身不触发重发：首次打开与切集一样只在读到失败时重发。
+        assertEquals(1, engine.startedUrls.size)
     }
 
     @Test
@@ -1506,8 +1541,8 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals("root/ep1.mkv", engine.startedUrls.last())
         assertEquals(1, failures.size)
-        // 5 秒重试丢弃一次在途加载，10 秒判失败回退前再丢一次。
-        assertEquals(2, engine.discardInFlightCalls)
+        // 10 秒判失败回退前丢弃一次在途加载。
+        assertEquals(1, engine.discardInFlightCalls)
     }
 
     @Test
@@ -1515,16 +1550,14 @@ class PlaybackControllerSwitchTest {
         val controller = controller()
 
         open(controller, "ep1.mkv")
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
+        advanceTimeBy(4_999)
         engine.reportLoadActivity()
         advanceTimeBy(1)
         runCurrent()
-        // 加载事件不是进展：5 秒照样重试，10 秒照样判失败。
+        // 加载事件不是进展：不产生重发，10 秒照样判失败。
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        advanceTimeBy(
-            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
-        )
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 5_000)
         runCurrent()
         assertEquals(PlaybackState.Ended, controller.state.value)
     }
@@ -1750,6 +1783,9 @@ class PlaybackControllerSwitchTest {
         val failures = collectFailures(controller)
 
         open(controller, "ep1.mkv")
+        // 第一次读失败先重发一次，重发也失败才按首次打开失败收尾。
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertEquals(PlaybackState.Ended, controller.state.value)
@@ -1760,7 +1796,7 @@ class PlaybackControllerSwitchTest {
         assertEquals(PlaybackState.Loading, controller.state.value)
         engine.reportMediaLoaded()
         assertEquals(PlaybackState.Playing, controller.state.value)
-        assertEquals(2, engine.startedUrls.size)
+        assertEquals(3, engine.startedUrls.size)
     }
 
     @Test
@@ -1803,6 +1839,13 @@ class PlaybackControllerSwitchTest {
 
         controller.next()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
+        assertEquals(1, failures.size)
+
+        // 恢复原片的读失败同样先重发一次，重发也失败才结束会话，且不再重复提示。
+        engine.reportPlaybackFailed()
+        runCurrent()
         assertEquals(1, failures.size)
 
         engine.reportPlaybackFailed()
@@ -1869,8 +1912,14 @@ class PlaybackControllerSwitchTest {
         assertEquals(restoreToken, engine.currentLoadToken)
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv", "root/ep1.mkv"), engine.startedUrls)
 
-        // 当前恢复加载的失败仍然处理。
+        // 当前恢复加载的读失败先重发一次。
         engine.reportPlaybackFailed("恢复失败", loadToken = restoreToken)
+        runCurrent()
+        assertEquals(0, failures.size)
+
+        // 重发也失败：仍然处理，结束时只提示一次。
+        engine.reportPlaybackFailed("恢复失败")
+        runCurrent()
         assertEquals(1, failures.size)
         assertEquals(PlaybackState.Ended, controller.state.value)
     }
@@ -1897,7 +1946,11 @@ class PlaybackControllerSwitchTest {
             engine.startedUrls,
         )
 
+        // 当前目标的读失败先重发一次，重发也失败才回退原片。
         engine.reportPlaybackFailed("目标失败", loadToken = targetToken)
+        runCurrent()
+        engine.reportPlaybackFailed("目标失败")
+        runCurrent()
         assertEquals(1, failures.size)
         assertEquals(0, controller.currentIndex.value)
         assertEquals(PlaybackState.Paused, controller.state.value)
@@ -2065,6 +2118,8 @@ class PlaybackControllerSwitchTest {
         val controller = playingController("ep1.mkv", "ep2.mkv", "ep3.mkv")
         engine.reportPositionChanged(40_000, 600_000)
         controller.next()
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         assertTrue(controller.restoring.value)
         assertTrue(showsPicture(controller))
