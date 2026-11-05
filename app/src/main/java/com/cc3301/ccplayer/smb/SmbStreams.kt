@@ -21,11 +21,7 @@ class SmbStreams(
     private val connector: SmbConnector,
     private val locator: SmbLocator,
     diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    stallDetection: () -> Boolean = { true },
-    private val server: LoopbackStreamServer = LoopbackStreamServer(
-        stallDetection = stallDetection,
-        diagnostics = diagnostics,
-    ),
+    private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
     /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */

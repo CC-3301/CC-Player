@@ -175,7 +175,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             detachEngine = { playback?.engine?.detachSurface() },
             resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
             onAvailabilityChanged = { available ->
-                renderSurfaceAvailable = available
                 playback?.controller?.setRenderSurfaceAvailable(available)
             },
         )
@@ -186,16 +185,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private var stateCollection: Job? = null
     private var streams: NetworkStreams? = null
-
-    /** 最近一次前后台上报与 Surface 可用状态：传输停滞判定与加载看护同一判据。 */
-    @Volatile
-    private var inForeground = false
-
-    @Volatile
-    private var renderSurfaceAvailable = false
-
-    /** 传输停滞只在有加载计时的时候判：退后台或 Surface 分离期间不判。 */
-    private fun stallDetectionAllowed(): Boolean = inForeground && renderSurfaceAvailable
 
     /** 退到后台丢弃字节源的判定：加载期间记待丢弃，加载结束或回前台前补做。 */
     private val staleSourceDiscardPolicy = StaleSourceDiscardPolicy()
@@ -330,7 +319,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             }
             surfaceSession.onEngineAvailable()
             // 新控制器默认认为 Surface 可用；连上后同步一次会话的真实状态。
-            renderSurfaceAvailable = surfaceSession.available
             binder.controller.setRenderSurfaceAvailable(surfaceSession.available)
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             startPendingPlayback()
@@ -756,20 +744,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             store = DataStoreBookmarkStore.create(applicationContext),
             credentials = EncryptedCredentialStore.create(applicationContext),
         )
-        val webDavStreams = WebDavStreams(
-            OkHttpWebDavTransport(),
-            WebDavLocator(sources),
-            diagnostics,
-            ::stallDetectionAllowed,
-        )
+        val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources), diagnostics)
         return RoutingNetworkStreams(
             mapOf(
-                SmbLocation.SCHEME to SmbStreams(
-                    SmbJConnector(),
-                    SmbLocator(sources),
-                    diagnostics,
-                    ::stallDetectionAllowed,
-                ),
+                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources), diagnostics),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
             ),
@@ -804,7 +782,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onStop() {
         super.onStop()
         diagnostics.log("应用退到后台")
-        inForeground = false
         val binder = playback
         binder?.setAppInForeground(false)
         // 退后台立即释放常亮，不等播放状态回调。
@@ -843,7 +820,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     override fun onStart() {
         super.onStart()
         diagnostics.log("应用进入前台")
-        inForeground = true
         playback?.setAppInForeground(true)
         updateKeepScreenOn()
         // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。

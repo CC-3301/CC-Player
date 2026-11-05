@@ -372,7 +372,7 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(text.contains("加载令牌: $token"))
         assertTrue(text.contains("阶段: 切集"))
         assertTrue(text.contains("失败来源: 无进展超时"))
-        assertTrue(text.contains("重试: 1 次"))
+        assertTrue(text.contains("重发: 1 次"))
     }
 
     private fun TestScope.diagnostics(sink: MemoryDiagnosticsSink, enabled: Boolean): Diagnostics =

@@ -41,7 +41,8 @@ private const val STALL_CHECK_INTERVAL_MILLIS = 100L
  *
  * 同一个键恒得同一个地址；字节源在第一个请求到达时才由 opener 建立并缓存。
  * 一条连接按 HTTP 长连接连续处理请求；客户端要求关闭、请求读不出或响应没写完整时结束这条连接。
- * 响应体拷贝期间连续 [STALL_TIMEOUT_MILLIS] 没有读到新字节就主动断开这条连接，
+ * 响应体拷贝期间源侧读在途超过 [STALL_TIMEOUT_MILLIS] 未返回就判停滞：先给这条连接对应的
+ * 字节源打陈旧标记（下一次请求重建时由建源线程关掉旧源、解除阻塞），再断开连接，
  * 让播放核心立刻收到读错误；等建源与空闲长连接都不判停滞。
  * [close] 关闭全部已建立的字节源。
  */
@@ -53,8 +54,6 @@ class LoopbackStreamServer(
     private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "loopback-source-open").apply { isDaemon = true }
     },
-    /** 传输停滞是否计入：与加载看护同一判据（前台且有可渲染 Surface）；为假时暂停停滞计时。 */
-    private val stallDetection: () -> Boolean = { true },
     /** 诊断日志出口：连接级打点跟随设置开关，不逐读、不逐帧。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : AutoCloseable {
@@ -65,6 +64,10 @@ class LoopbackStreamServer(
     /** 已 accept 的连接；[close] 逐个断开，阻塞在读上的处理线程随之退出。 */
     private val connections = ConcurrentHashMap.newKeySet<Connection>()
     private val nextId = AtomicLong(1)
+
+    /** 看门狗异常的限频打点时刻：一分钟最多一条。 */
+    @Volatile
+    private var lastWatchdogFailureAtNanos = 0L
 
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
@@ -166,7 +169,7 @@ class LoopbackStreamServer(
     /**
      * 传输看门狗：只看正在拷贝响应体的连接。
      * 判据是源侧读在途超过 [STALL_TIMEOUT_MILLIS] 仍未返回——这期间没有任何新字节；
-     * 写阻塞（等播放核心取走数据）不算停滞。
+     * 写阻塞（等播放核心取走数据）不算停滞。后台播放同样判：暂停时不读，不会误伤。
      */
     private fun watchTransferStalls() {
         while (!serverSocket.isClosed) {
@@ -175,21 +178,23 @@ class LoopbackStreamServer(
             } catch (interrupted: InterruptedException) {
                 return
             }
-            // 一次异常不能停掉之后所有会话的停滞判定：吞掉后继续下一轮。
-            runCatching { checkTransferStalls() }
+            // 一次异常不能让之后的停滞判定永久失效：限频记一条，再继续下一轮。
+            runCatching { checkTransferStalls() }.onFailure { logWatchdogFailure(it) }
         }
     }
 
+    /** 看门狗自身异常的限频打点：一分钟最多一条，既不刷屏也不至于无声失效。 */
+    private fun logWatchdogFailure(failure: Throwable) {
+        val now = System.nanoTime()
+        if (now - lastWatchdogFailureAtNanos < TimeUnit.MINUTES.toNanos(1)) return
+        lastWatchdogFailureAtNanos = now
+        diagnostics.log { "回环流看门狗异常: ${failure.javaClass.simpleName}" }
+    }
+
     private fun checkTransferStalls() {
-        val allowed = stallDetection()
         val now = System.nanoTime()
         connections.forEach { connection ->
             if (!connection.transferring || connection.stalled.get()) return@forEach
-            if (!allowed) {
-                // 退后台或 Surface 分离：在途读的计时从现在重新起算，后台时间不进判据。
-                connection.restartReadClock(now)
-                return@forEach
-            }
             val readStartedAtNanos = connection.readStartedAtNanos
             if (readStartedAtNanos == 0L) return@forEach
             val waitedNanos = now - readStartedAtNanos
@@ -198,10 +203,12 @@ class LoopbackStreamServer(
             }
             if (waitedNanos < TimeUnit.MILLISECONDS.toNanos(STALL_TIMEOUT_MILLIS)) return@forEach
             if (!connection.stalled.compareAndSet(false, true)) return@forEach
+            // 只断 socket 打断不了卡在源侧的读，也拦不住下一次请求复用这条卡死的源：
+            // 先打陈旧标记，下一次请求重建时由建源线程关掉旧源、解除阻塞。
+            connection.activeEntry?.markStale()
             connection.endReason = EndReason.Stalled
             // 读取还卡着时处理线程不会走到收尾，这一行必须当场写出，否则看不到断开原因。
             logConnectionEnd(connection)
-            // 只断播放核心这一侧：阻塞中的读取由播放核心自己收尾，连接线程随之退出。
             runCatching { connection.socket.close() }
         }
     }
@@ -354,8 +361,8 @@ class LoopbackStreamServer(
         val buffer = ByteArray(readBlockBytes(source))
         var position = start
         var remaining = length
-        // 看门狗只认传输阶段：拷贝开始到结束之间没有新字节才算停滞。
-        connection.beginTransfer()
+        // 看门狗只认传输阶段：源侧读在途超时才算停滞。
+        connection.beginTransfer(entry)
         try {
             while (remaining > 0) {
                 val wanted = minOf(remaining, buffer.size.toLong()).toInt()
@@ -532,12 +539,18 @@ class LoopbackStreamServer(
         @Volatile
         var firstByteMillis: Long? = null
 
-        fun beginTransfer() {
+        /** 正在拷贝的流；判停滞时按它给字节源打陈旧标记。 */
+        @Volatile
+        var activeEntry: Entry? = null
+
+        fun beginTransfer(entry: Entry) {
+            activeEntry = entry
             transferring = true
         }
 
         fun endTransfer() {
             transferring = false
+            activeEntry = null
             readStartedAtNanos = 0L
         }
 
@@ -555,11 +568,6 @@ class LoopbackStreamServer(
             readStartedAtNanos = 0L
         }
 
-        /** 退后台或 Surface 分离期间把在途读的计时从现在重新起算，后台时间不进判据。 */
-        fun restartReadClock(nowNanos: Long) {
-            if (readStartedAtNanos == 0L) return
-            readStartedAtNanos = nowNanos
-        }
 
         fun noteFirstByte(sourceReadyAtNanos: Long) {
             if (firstByteMillis != null) return

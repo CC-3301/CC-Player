@@ -1237,7 +1237,7 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         controller.next()
 
-        // 新目标重新起算：旧目标剩下的 1 秒不会触发重试。
+        // 新目标重新起算：旧目标剩下的 1 秒不会触发重发。
         advanceTimeBy(1_000)
         runCurrent()
         assertTrue(controller.switching.value)

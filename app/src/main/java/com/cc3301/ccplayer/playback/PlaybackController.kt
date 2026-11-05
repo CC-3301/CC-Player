@@ -295,6 +295,9 @@ class PlaybackController(
     /** 重发正在准备（丢弃字节源到真正重发之间）：重复的失败回调一律忽略。 */
     private var retryInFlight = false
 
+    /** 重发准备的代际：旧协程不能清掉新目标刚置的在途标记。 */
+    private var retrySerial = 0
+
     /** 重发发生时的累计运行时长；只用于日志的事件时间线。 */
     private var loadRetriedAtMillis: Long? = null
 
@@ -1351,9 +1354,10 @@ class PlaybackController(
         }
         // 重发准备中的重复回调（同一次失败可能回两条）不再触发第二次重发或提前判失败。
         if (retryInFlight) return
-        // 读到失败前已经出现进展：本轮不能重发，直接按无进展收尾，否则会停在加载且没有提示。
+        // 读到失败前已经出现进展：本轮不能重发，直接按播放核心报错收尾，保留错误文本与失败来源，
+        // 否则会停在加载且没有提示。
         if (hasLoadProgress()) {
-            failLoadWithoutProgress()
+            handleLoadFailure(errorText = errorText)
             return
         }
         if (guardRetried) {
@@ -1362,7 +1366,7 @@ class PlaybackController(
         }
         // 播放核心对打开失败、读失败与解码失败只回同一条失败信号，控制层不按错误文本自造分类：
         // 加载阶段的失败统一先重发一次，第二次再按失败收尾。
-        retryLoad()
+        retryLoad(errorText)
     }
 
     override fun onPlaybackEnded(loadToken: Int) {
@@ -1576,6 +1580,7 @@ class PlaybackController(
         }
         // 目标前移同样重新给一次重发：计时与重发预算都以最近一次目标重新起算。
         guardRetried = false
+        retrySerial++
         retryInFlight = false
         loadRetriedAtMillis = null
         guardElapsed.reset()
@@ -1622,29 +1627,32 @@ class PlaybackController(
     }
 
     /**
-     * 读失败后重发：丢弃字节源，以同一目标、同一位置重发加载，只重发一次；
+     * 失败后重发：丢弃字节源，以同一目标、同一位置重发加载，只重发一次；
      * 首次打开、切集与恢复原片同一条路径。暂停意图、目标索引与进度意图都不动；
      * 判失败仍从这次目标开始算，不因重发顺延。
      * 丢弃期间目标前移、加载结束或已出现进展时这一轮作废：不记重发次数，也不写重发日志。
+     * [errorText] 是触发重发的失败文本，作废时按播放核心报错收尾用。
      */
-    private fun retryLoad() {
+    private fun retryLoad(errorText: String?) {
         if (retryInFlight || guardRetried) return
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
         val phase = loadPhase
         val token = expectedLoadToken
+        retrySerial++
+        val serial = retrySerial
         retryInFlight = true
         scope.launch {
             // 只有真的丢弃了源才记一次重建；出口不可用或抛异常都按未丢弃处理。
             val discarded = runCatching { loadSourceDiscard() }.getOrDefault(false)
             // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重发作废。
             if (!active || loadPhase != phase || expectedLoadToken != token) {
-                retryInFlight = false
+                finishRetry(serial)
                 return@launch
             }
-            // 丢弃期间刚到的新帧或位置前进不能被重发冲掉：改为直接失败收尾，不能停在加载。
+            // 丢弃期间刚到的新帧或位置前进不能被重发冲掉：按播放核心报错收尾，不能停在加载。
             if (hasLoadProgress()) {
-                retryInFlight = false
-                failLoadWithoutProgress()
+                finishRetry(serial)
+                handleLoadFailure(errorText = errorText)
                 return@launch
             }
             // 到这里才真的重发：重发次数、时刻与日志都在这一刻记。
@@ -1656,14 +1664,19 @@ class PlaybackController(
                 loadDiscardSkipped = true
             }
             diagnostics.log {
-                "加载重试: ${media.name} | 触发时刻: ${loadRetriedAtMillis}ms | " +
+                "加载重发: ${media.name} | 触发时刻: ${loadRetriedAtMillis}ms | " +
                     "阶段: ${loadPhaseLabel(phase)} | 已观察到: ${loadEventTimeline()}"
             }
-            retryInFlight = false
+            finishRetry(serial)
             reloadTarget(media, phase)
         }
         // 重发不重启计时：判失败仍是同一条累计时长上的 10 秒。
         armLoadGuard()
+    }
+
+    /** 只有当前代的重发准备才能清在途标记：被替代的旧协程不能抹掉新目标刚置的标记。 */
+    private fun finishRetry(serial: Int) {
+        if (retrySerial == serial) retryInFlight = false
     }
 
     /**
@@ -1982,7 +1995,7 @@ class PlaybackController(
     private enum class LoadFailureSource { Core, NoFrame, NoProgress }
 
     /**
-     * 加载失败的唯一汇总行：来源、累计运行时长、已观察到的事件与各自时刻、重试与字节源重建次数。
+     * 加载失败的唯一汇总行：来源、累计运行时长、已观察到的事件与各自时刻、重发与字节源重建次数。
      * 首次打开、切集、恢复原片与播放中各阶段共用一套字段，按阶段字段区分。
      * 播放阶段的失败没有在跑的看护计时，省掉这几项，免得把重置后的 0ms 读成真实耗时。
      */
@@ -1994,7 +2007,7 @@ class PlaybackController(
         val title = if (phase == LoadPhase.None) "播放失败" else "加载失败"
         val guardText = if (phase != LoadPhase.None) {
             "累计运行时长: ${guardElapsed.elapsedMillis()}ms | 计时挂起: $guardSuspensions 次 | " +
-                "事件: ${loadEventTimeline()} | 重试: ${if (guardRetried) "1 次" else "0 次"} | " +
+                "事件: ${loadEventTimeline()} | 重发: ${if (guardRetried) "1 次" else "0 次"} | " +
                 "字节源重建: ${byteSourceRebuildText()} | "
         } else {
             ""
@@ -2044,7 +2057,7 @@ class PlaybackController(
         loadRetargets.forEach { events += it }
         loadCompletedAtMillis?.let { events += "加载完成@${it}ms" }
         loadOutputLiveAtMillis?.let { events += "重配@${it}ms" }
-        loadRetriedAtMillis?.let { events += "重试@${it}ms" }
+        loadRetriedAtMillis?.let { events += "重发@${it}ms" }
         loadFirstFrameAtMillis?.let { events += "首帧@${it}ms" }
         loadPositionAdvancedAtMillis?.let { events += "位置前进@${it}ms" }
         return if (events.isEmpty()) "无" else events.joinToString("、")
