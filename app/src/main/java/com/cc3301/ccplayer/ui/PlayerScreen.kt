@@ -521,7 +521,7 @@ fun PlayerScreen(
                     val event = awaitPointerEvent()
                     val position = event.mousePosition() ?: continue
                     if (event.type == PointerEventType.Enter) {
-                        pointer.onPointerEnter(position)
+                        pointer.onPointerEnter()
                     } else {
                         pointer.onPointerMove(position, pointerDensity)
                     }
