@@ -11,9 +11,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.Closeable
 import java.io.IOException
+import java.io.InputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -40,8 +42,8 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `不带 Range 的 GET 返回 200 与全量字节`() {
-        // 一次拷贝固定一兆字节。
-        assertEquals(1024 * 1024, COPY_BUFFER_BYTES)
+        // 单次读取块固定 64 KiB。
+        assertEquals(64 * 1024, COPY_BUFFER_BYTES)
 
         val response = httpRequest(url)
 
@@ -608,7 +610,7 @@ class LoopbackStreamServerTest {
     }
 
     @Test(timeout = 15_000L)
-    fun `传输连续 3 秒没有新字节时主动断开连接`() {
+    fun `传输读停滞 3 秒时主动断开连接并截断响应体`() {
         val diagnostics = RecordingDiagnostics()
         val logged = LoopbackStreamServer(diagnostics = diagnostics)
         val release = CountDownLatch(1)
@@ -626,13 +628,17 @@ class LoopbackStreamServerTest {
             val target = logged.serve("smb://nas/media/停滞.mkv") { stalled }
             val started = System.nanoTime()
 
-            KeepAliveConnection(target, readTimeoutMillis = 8_000).use { client ->
-                // 响应头已写出、响应体一个字节都没有：等待看门狗断开。
-                assertEquals(200, client.request().statusCode)
+            KeepAliveConnection(target, readTimeoutMillis = 10_000).use { client ->
+                val response = client.request()
+
+                // 看门狗断开连接：响应头已写出，响应体被截断，客户端立刻读到结束。
+                assertEquals(200, response.statusCode)
+                assertEquals("1000", response.header("Content-Length"))
+                assertTrue("响应体不应写满：${response.body.size}", response.body.size < payload.size)
             }
 
             val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-            assertTrue("断开耗时 $waitedMillis ms", waitedMillis in 2_500..6_000)
+            assertTrue("断开耗时 $waitedMillis ms", waitedMillis < 8_000)
             awaitCondition { diagnostics.messages.any { it.contains("原因: 停滞断开") } }
         } finally {
             release.countDown()
@@ -640,14 +646,76 @@ class LoopbackStreamServerTest {
         }
     }
 
-    @Test(timeout = 20_000L)
-    fun `慢但持续有新字节的读取不触发看门狗`() {
+    @Test(timeout = 25_000L)
+    fun `慢但持续有新字节的大块读取不触发看门狗`() {
+        val big = ByteArray(256 * 1024) { (it % 251).toByte() }
         val chunked = server.serve("smb://nas/media/慢速.mkv") {
-            SlowChunkByteSource(payload, chunkBytes = 200, pauseMillis = 900)
+            SlowChunkByteSource(big, chunkBytes = COPY_BUFFER_BYTES, pauseMillis = 900)
         }
 
-        // 每次读都慢，但每次都有新字节：判据是完全没有新字节，不是吞吐低。
-        assertArrayEquals(payload, httpRequest(chunked).body)
+        val started = System.nanoTime()
+        val response = httpRequest(chunked)
+        val waitedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+        // 每块 64 KiB 都在停滞阈值内返回，整段传输超过 3 秒：慢但持续有数据不触发看门狗。
+        assertArrayEquals(big, response.body)
+        assertTrue("总耗时 $waitedMillis ms", waitedMillis > STALL_TIMEOUT_MILLIS)
+    }
+
+    @Test(timeout = 20_000L)
+    fun `退后台期间不判传输停滞`() {
+        var allowed = false
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(stallDetection = { allowed }, diagnostics = diagnostics)
+        val release = CountDownLatch(1)
+        try {
+            val stalled = object : ByteSource {
+                override val size: Long = payload.size.toLong()
+
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                    release.await()
+                    return 0
+                }
+
+                override fun close() = Unit
+            }
+            val target = logged.serve("smb://nas/media/后台停滞.mkv") { stalled }
+            val uri = URI(target)
+            Socket(InetAddress.getByName(uri.host), uri.port).use { client ->
+                client.soTimeout = 4_000
+                client.getOutputStream().apply {
+                    write("GET ${uri.path} HTTP/1.1\r\nHost: ${uri.host}\r\nConnection: close\r\n\r\n".toByteArray())
+                    flush()
+                }
+                val input = client.getInputStream()
+                readResponseHead(input)
+
+                // 后台待的时间超过停滞阈值：这条连接不能被断开。
+                assertThrows(SocketTimeoutException::class.java) { input.read() }
+                assertFalse(diagnostics.messages.any { it.contains("停滞断开") })
+
+                // 回到前台后重新起算：3 秒没有新字节才断开。
+                allowed = true
+                client.soTimeout = 8_000
+                assertEquals(-1, input.read())
+                awaitCondition { diagnostics.messages.any { it.contains("原因: 停滞断开") } }
+            }
+        } finally {
+            release.countDown()
+            logged.close()
+        }
+    }
+
+    @Test
+    fun `单次读取块不超过 64 KiB`() {
+        val bytes = ByteArray(256 * 1024) { (it % 251).toByte() }
+        val limited = LimitRecordingByteSource(bytes, maxReadBytes = COPY_BUFFER_BYTES)
+        val target = server.serve("smb://nas/media/读块.mkv") { limited }
+
+        assertArrayEquals(bytes, httpRequest(target).body)
+
+        assertTrue(limited.reads.isNotEmpty())
+        assertTrue("单次读取越过 64 KiB：${limited.reads}", limited.reads.all { it <= COPY_BUFFER_BYTES })
     }
 
     @Test(timeout = 20_000L)
@@ -675,16 +743,52 @@ class LoopbackStreamServerTest {
             awaitCondition { diagnostics.messages.any { it.contains("连接结束") } }
 
             val lines = diagnostics.messages.filter { it.startsWith("回环流") }
-            assertEquals(4, lines.size)
+            // 一条连接只写三行：首个请求、建源与连接结束；第二个 Range 不再另起一行。
+            assertEquals(3, lines.size)
             assertTrue(lines[0].contains("收到请求"))
             assertTrue(lines[0].contains("Range: -"))
             assertTrue(lines[0].contains("源: 新建"))
             assertTrue(lines[1].contains("建源结束"))
             assertTrue(lines[1].contains("成功"))
-            assertTrue(lines[2].contains("源: 命中"))
-            assertTrue(lines[3].contains("原因: 客户端断开"))
-            assertTrue(lines[3].contains("首字节:"))
+            assertTrue(lines[2].contains("原因: 客户端断开"))
+            assertTrue(lines[2].contains("首字节:"))
         } finally {
+            logged.close()
+        }
+    }
+
+    @Test(timeout = 15_000L)
+    fun `并发等待同一轮重建时只由发起者写建源结束`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        val release = CountDownLatch(1)
+        val building = CountDownLatch(1)
+        try {
+            val target = logged.serve("smb://nas/media/并发建源.mkv") {
+                building.countDown()
+                release.await()
+                RecordingByteSource(payload)
+            }
+            val first = Thread { runCatching { httpRequest(target) } }.apply {
+                isDaemon = true
+                start()
+            }
+            assertTrue("建源没有开始", building.await(2_000, TimeUnit.MILLISECONDS))
+            val second = Thread { runCatching { httpRequest(target) } }.apply {
+                isDaemon = true
+                start()
+            }
+            // 让第二个请求进入等待同一轮重建。
+            Thread.sleep(200)
+            release.countDown()
+            first.join(5_000)
+            second.join(5_000)
+
+            val buildLines = diagnostics.messages.filter { it.contains("建源结束") }
+            assertEquals(1, buildLines.size)
+            assertTrue(diagnostics.messages.any { it.contains("源: 新建") })
+        } finally {
+            release.countDown()
             logged.close()
         }
     }
@@ -885,6 +989,24 @@ class ShortByteSource(private val bytes: ByteArray, private val readable: Int = 
 
 /** 测试用 Error 子类：与非异常的断言失败区分开。 */
 class FakeError(message: String) : Error(message)
+
+/** 读到响应头空行为止。 */
+private fun readResponseHead(input: InputStream): String {
+    val head = StringBuilder()
+    var matched = 0
+    while (true) {
+        val byte = input.read()
+        if (byte < 0) break
+        head.append(byte.toChar())
+        matched = when {
+            (matched == 0 || matched == 2) && byte == 13 -> matched + 1
+            (matched == 1 || matched == 3) && byte == 10 -> matched + 1
+            else -> 0
+        }
+        if (matched == 4) break
+    }
+    return head.toString()
+}
 
 /** 记录诊断日志的出口：连接级打点按内容断言。 */
 private class RecordingDiagnostics : DiagnosticsLog {

@@ -15,13 +15,14 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** 接受循环连续失败达到该次数后关闭监听，避免忙循环。 */
 internal const val LOOPBACK_ACCEPT_FAILURE_LIMIT = 8
 
-/** 拷贝块的固定大小；回环读写统一按 1 MiB 搬运。 */
-internal const val COPY_BUFFER_BYTES = 1024 * 1024
+/** 单次读取的块上限：压到 64 KiB，慢链路也能在停滞阈值内返回新字节。 */
+internal const val COPY_BUFFER_BYTES = 64 * 1024
 
 /** 重建字节源的等待上限：超时按本次请求失败收尾，不无限等待。 */
 internal const val SOURCE_REBUILD_TIMEOUT_MILLIS = 5_000L
@@ -52,6 +53,8 @@ class LoopbackStreamServer(
     private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "loopback-source-open").apply { isDaemon = true }
     },
+    /** 传输停滞是否计入：与加载看护同一判据（前台且有可渲染 Surface）；为假时暂停停滞计时。 */
+    private val stallDetection: () -> Boolean = { true },
     /** 诊断日志出口：连接级打点跟随设置开关，不逐读、不逐帧。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : AutoCloseable {
@@ -162,7 +165,8 @@ class LoopbackStreamServer(
 
     /**
      * 传输看门狗：只看正在拷贝响应体的连接。
-     * 单次读取超过 [SLOW_READ_LOG_MILLIS] 未返回记一条；连续 [STALL_TIMEOUT_MILLIS] 没有新字节就断开这条连接。
+     * 判据是源侧读在途超过 [STALL_TIMEOUT_MILLIS] 仍未返回——这期间没有任何新字节；
+     * 写阻塞（等播放核心取走数据）不算停滞。
      */
     private fun watchTransferStalls() {
         while (!serverSocket.isClosed) {
@@ -171,32 +175,40 @@ class LoopbackStreamServer(
             } catch (interrupted: InterruptedException) {
                 return
             }
-            val now = System.nanoTime()
-            connections.forEach { connection ->
-                if (!connection.transferring || connection.stalled) return@forEach
-                val readStartedAtNanos = connection.readStartedAtNanos
-                if (readStartedAtNanos != 0L &&
-                    now - readStartedAtNanos >= TimeUnit.MILLISECONDS.toNanos(SLOW_READ_LOG_MILLIS)
-                ) {
-                    logSlowRead(connection, TimeUnit.NANOSECONDS.toMillis(now - readStartedAtNanos))
-                }
-                if (now - connection.lastByteAtNanos < TimeUnit.MILLISECONDS.toNanos(STALL_TIMEOUT_MILLIS)) {
-                    return@forEach
-                }
-                connection.stalled = true
-                connection.endReason = EndReason.Stalled
-                // 读取还卡着时处理线程不会走到收尾，这一行必须当场写出，否则看不到断开原因。
-                logConnectionEnd(connection)
-                // 只断播放核心这一侧：阻塞中的读取由播放核心自己收尾，连接线程随之退出。
-                runCatching { connection.socket.close() }
+            // 一次异常不能停掉之后所有会话的停滞判定：吞掉后继续下一轮。
+            runCatching { checkTransferStalls() }
+        }
+    }
+
+    private fun checkTransferStalls() {
+        val allowed = stallDetection()
+        val now = System.nanoTime()
+        connections.forEach { connection ->
+            if (!connection.transferring || connection.stalled.get()) return@forEach
+            if (!allowed) {
+                // 退后台或 Surface 分离：在途读的计时从现在重新起算，后台时间不进判据。
+                connection.restartReadClock(now)
+                return@forEach
             }
+            val readStartedAtNanos = connection.readStartedAtNanos
+            if (readStartedAtNanos == 0L) return@forEach
+            val waitedNanos = now - readStartedAtNanos
+            if (waitedNanos >= TimeUnit.MILLISECONDS.toNanos(SLOW_READ_LOG_MILLIS)) {
+                logSlowRead(connection, TimeUnit.NANOSECONDS.toMillis(waitedNanos))
+            }
+            if (waitedNanos < TimeUnit.MILLISECONDS.toNanos(STALL_TIMEOUT_MILLIS)) return@forEach
+            if (!connection.stalled.compareAndSet(false, true)) return@forEach
+            connection.endReason = EndReason.Stalled
+            // 读取还卡着时处理线程不会走到收尾，这一行必须当场写出，否则看不到断开原因。
+            logConnectionEnd(connection)
+            // 只断播放核心这一侧：阻塞中的读取由播放核心自己收尾，连接线程随之退出。
+            runCatching { connection.socket.close() }
         }
     }
 
     /** 单次读停滞：同一次读取最多记一条，不逐读记。 */
     private fun logSlowRead(connection: Connection, waitedMillis: Long) {
-        if (connection.slowReadLogged) return
-        connection.slowReadLogged = true
+        if (!connection.slowReadLogged.compareAndSet(false, true)) return
         diagnostics.log {
             "回环流读取停滞: 位置 ${connection.readPosition} | 长度 ${connection.readLength} | " +
                 "已等 ${waitedMillis}ms"
@@ -205,8 +217,7 @@ class LoopbackStreamServer(
 
     /** 连接结束的唯一一行：原因与首字节耗时；同一条连接只写一次，停滞时由看门狗先写。 */
     private fun logConnectionEnd(connection: Connection) {
-        if (connection.endLogged) return
-        connection.endLogged = true
+        if (!connection.endLogged.compareAndSet(false, true)) return
         diagnostics.log {
             "回环流连接结束: 原因: ${connection.endReason.label} | 首字节: ${connection.firstByteText()}"
         }
@@ -259,27 +270,26 @@ class LoopbackStreamServer(
     private fun serve(output: OutputStream, request: Request, connection: Connection): Boolean {
         val id = request.path.trimStart('/').substringBefore('/')
         val entry = entries[id]
-        // 这一行当场写出：命中状态按请求到达时的缓存算，便于区分卡在收请求还是建源。
         val hit = entry?.hasFreshSource() == true
-        diagnostics.log {
-            "回环流收到请求: $id | Range: ${request.rangeHeader ?: "-"} | 源: ${if (hit) "命中" else "新建"}"
+        // 每条连接只在首个请求写这一行：长连接上的多个 Range 不逐请求记。
+        if (connection.firstRequestLogged.compareAndSet(false, true)) {
+            diagnostics.log {
+                "回环流收到请求: $id | Range: ${request.rangeHeader ?: "-"} | 源: ${if (hit) "命中" else "新建"}"
+            }
         }
         if (entry == null) return respondStatus(output, request, STATUS_NOT_FOUND)
         val sourceStartNanos = System.nanoTime()
-        val source = try {
-            entry.source()
-        } catch (failure: Throwable) {
-            diagnostics.log {
-                "回环流建源结束: $id | 耗时: ${elapsedMillis(sourceStartNanos)}ms | " +
-                    "失败: ${failure.javaClass.simpleName}"
-            }
-            return respondStatus(output, request, STATUS_UNAVAILABLE)
-        }
+        val lookup = entry.source()
         // 建源完成时刻：首字节耗时从这里算，不含建源本身。
         val sourceReadyAtNanos = System.nanoTime()
-        if (!hit) {
-            diagnostics.log { "回环流建源结束: $id | 耗时: ${elapsedMillis(sourceStartNanos)}ms | 成功" }
+        // 「建源结束」只由发起这次重建的请求写；并发等待同一轮重建的请求不重复记。
+        if (lookup.startedBuild) {
+            diagnostics.log {
+                "回环流建源结束: $id | 耗时: ${elapsedMillis(sourceStartNanos)}ms | " +
+                    (lookup.failure?.let { "失败: ${it.javaClass.simpleName}" } ?: "成功")
+            }
         }
+        val source = lookup.source ?: return respondStatus(output, request, STATUS_UNAVAILABLE)
         return try {
             respond(output, request, connection, entry, source, sourceReadyAtNanos)
         } catch (disconnected: IOException) {
@@ -372,7 +382,6 @@ class LoopbackStreamServer(
                 }
                 output.write(buffer, 0, read)
                 connection.noteFirstByte(sourceReadyAtNanos)
-                connection.noteByteRead()
                 position += read
                 remaining -= read
             }
@@ -483,18 +492,17 @@ class LoopbackStreamServer(
         ServerClosed("关闭"),
     }
 
-    /** 一条连接的传输状态；看门狗只按这里的时刻判定停滞，连接结束即从监控里摘掉。 */
+    /** 一条连接的传输状态；看门狗只按这里的读取时刻判定停滞，连接结束即从监控里摘掉。 */
     private class Connection(val socket: Socket) {
 
         /** 是否正在拷贝响应体：只有传输阶段判停滞，等建源与空闲长连接都不算。 */
         @Volatile
         var transferring = false
 
-        /** 最近一次读到新字节的时刻；拷贝开始与每次读到字节都刷新。 */
-        @Volatile
-        var lastByteAtNanos = 0L
-
-        /** 当前这次读取的开始时刻；0 表示没有在读。 */
+        /**
+         * 最近一次读到新字节的时刻，也是当前这次读取的开始时刻；0 表示没有读在途。
+         * 读在途超过 [STALL_TIMEOUT_MILLIS] 未返回，就说明这段时间完全没有新字节。
+         */
         @Volatile
         var readStartedAtNanos = 0L
 
@@ -505,27 +513,26 @@ class LoopbackStreamServer(
         var readLength = 0
 
         /** 本次读取的停滞日志是否已经记过：单次读最多一条。 */
-        @Volatile
-        var slowReadLogged = false
+        val slowReadLogged = AtomicBoolean(false)
 
         /** 已被看门狗判定停滞：只断一次、只判一次。 */
-        @Volatile
-        var stalled = false
+        val stalled = AtomicBoolean(false)
+
+        /** 是否已写过「收到请求」：长连接上的多个 Range 只记首条。 */
+        val firstRequestLogged = AtomicBoolean(false)
 
         /** 连接结束原因；看门狗与服务关闭会先写它。 */
         @Volatile
         var endReason = EndReason.ClientClosed
 
         /** 连接结束那一行是否已经写出：停滞时由看门狗写，其余由处理线程收尾时写。 */
-        @Volatile
-        var endLogged = false
+        val endLogged = AtomicBoolean(false)
 
         /** 建源完成到写出首字节的耗时；没有写出响应体时保持 null。 */
         @Volatile
         var firstByteMillis: Long? = null
 
         fun beginTransfer() {
-            lastByteAtNanos = System.nanoTime()
             transferring = true
         }
 
@@ -538,7 +545,7 @@ class LoopbackStreamServer(
         fun beginRead(position: Long, length: Int): Long {
             readPosition = position
             readLength = length
-            slowReadLogged = false
+            slowReadLogged.set(false)
             val startedAtNanos = System.nanoTime()
             readStartedAtNanos = startedAtNanos
             return startedAtNanos
@@ -548,8 +555,10 @@ class LoopbackStreamServer(
             readStartedAtNanos = 0L
         }
 
-        fun noteByteRead() {
-            lastByteAtNanos = System.nanoTime()
+        /** 退后台或 Surface 分离期间把在途读的计时从现在重新起算，后台时间不进判据。 */
+        fun restartReadClock(nowNanos: Long) {
+            if (readStartedAtNanos == 0L) return
+            readStartedAtNanos = nowNanos
         }
 
         fun noteFirstByte(sourceReadyAtNanos: Long) {
@@ -561,6 +570,13 @@ class LoopbackStreamServer(
 
         fun firstByteText(): String = firstByteMillis?.let { "${it}ms" } ?: "未写出"
     }
+
+    /** 一次取源的结果；[startedBuild] 表示这一请求是否发起了本次重建，用于只记一条建源日志。 */
+    private class SourceLookup(
+        val source: ByteSource?,
+        val failure: Throwable?,
+        val startedBuild: Boolean,
+    )
 
     /**
      * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
@@ -593,19 +609,23 @@ class LoopbackStreamServer(
         /** 当前是否已有可直接复用的字节源；只用于请求打点的命中标记。 */
         fun hasFreshSource(): Boolean = source != null && !stale
 
-        /** 取字节源；建立失败或等待超时都抛出，下次请求会重试。关闭后不再建立新源。 */
-        fun source(): ByteSource {
+        /**
+         * 取字节源：命中缓存、等待或发起一次重建。
+         * 重建发起者与并发等待者拿到同一个结果，只有发起者标记 `startedBuild`，用于连接级打点。
+         * 关闭后不再建立新源。
+         */
+        fun source(): SourceLookup {
             val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
             var started = false
-            // 内联块里要么给出本轮轮次，要么已经返回或抛出。
+            // 内联块里要么给出本轮轮次，要么已经返回。
             val pending = synchronized(lock) {
-                check(!closed) { "流已关闭" }
+                if (closed) return SourceLookup(null, IllegalStateException("流已关闭"), false)
                 val inFlight = rebuilding
                 if (inFlight != null) {
                     inFlight
                 } else {
                     val current = source
-                    if (current != null && !stale) return current
+                    if (current != null && !stale) return SourceLookup(current, null, false)
                     // 这次重建消费当前标记：空标记不该让第一次建源白建一次。
                     consumeStale()
                     val created = Rebuild()
@@ -617,10 +637,11 @@ class LoopbackStreamServer(
             if (started) submitRebuild(pending)
             val remaining = deadline - System.nanoTime()
             if (remaining <= 0L || !pending.finished.await(remaining, TimeUnit.NANOSECONDS)) {
-                throw TimeoutException("重建字节源超时")
+                return SourceLookup(null, TimeoutException("重建字节源超时"), started)
             }
-            pending.failure?.let { throw it }
-            return pending.result ?: throw IllegalStateException("流已关闭")
+            pending.failure?.let { return SourceLookup(null, it, started) }
+            val resolved = pending.result ?: return SourceLookup(null, IllegalStateException("流已关闭"), started)
+            return SourceLookup(resolved, null, started)
         }
 
         /** 把这一轮重建交给建源线程；投递被拒时立即结算这一轮，请求按失败收尾。 */

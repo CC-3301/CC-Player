@@ -292,6 +292,9 @@ class PlaybackController(
     /** 本轮是否已重发过；每个目标最多重发一次，目标前移后重新起算。 */
     private var guardRetried = false
 
+    /** 重发正在准备（丢弃字节源到真正重发之间）：重复的失败回调一律忽略。 */
+    private var retryInFlight = false
+
     /** 重发发生时的累计运行时长；只用于日志的事件时间线。 */
     private var loadRetriedAtMillis: Long? = null
 
@@ -1342,12 +1345,24 @@ class PlaybackController(
     override fun onPlaybackFailed(loadToken: Int, errorText: String?) {
         // 取消或重定向后，旧目标迟到的失败不能改变当前阶段，也不提示。
         if (loadToken != expectedLoadToken) return
-        // 加载阶段的读失败先重发一次：以同一目标、同一位置重来，不改暂停意图、目标索引与进度意图。
-        if (active && loadGuardPhase() && !guardRetried) {
-            retryLoad()
+        if (!active || !loadGuardPhase()) {
+            handleLoadFailure(errorText = errorText)
             return
         }
-        handleLoadFailure(errorText = errorText)
+        // 重发准备中的重复回调（同一次失败可能回两条）不再触发第二次重发或提前判失败。
+        if (retryInFlight) return
+        // 读到失败前已经出现进展：本轮不能重发，直接按无进展收尾，否则会停在加载且没有提示。
+        if (hasLoadProgress()) {
+            failLoadWithoutProgress()
+            return
+        }
+        if (guardRetried) {
+            handleLoadFailure(errorText = errorText)
+            return
+        }
+        // 播放核心对打开失败、读失败与解码失败只回同一条失败信号，控制层不按错误文本自造分类：
+        // 加载阶段的失败统一先重发一次，第二次再按失败收尾。
+        retryLoad()
     }
 
     override fun onPlaybackEnded(loadToken: Int) {
@@ -1559,8 +1574,9 @@ class PlaybackController(
             loadOutputLiveAtMillis = null
             guardSuspensions = 0
         }
-        // 目标前移同样重新给一次重试：计时与重试预算都以最近一次目标重新起算。
+        // 目标前移同样重新给一次重发：计时与重发预算都以最近一次目标重新起算。
         guardRetried = false
+        retryInFlight = false
         loadRetriedAtMillis = null
         guardElapsed.reset()
         if (loadTimingAllowed()) guardElapsed.start()
@@ -1609,29 +1625,41 @@ class PlaybackController(
      * 读失败后重发：丢弃字节源，以同一目标、同一位置重发加载，只重发一次；
      * 首次打开、切集与恢复原片同一条路径。暂停意图、目标索引与进度意图都不动；
      * 判失败仍从这次目标开始算，不因重发顺延。
+     * 丢弃期间目标前移、加载结束或已出现进展时这一轮作废：不记重发次数，也不写重发日志。
      */
     private fun retryLoad() {
+        if (retryInFlight || guardRetried) return
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
         val phase = loadPhase
-        guardRetried = true
-        loadRetriedAtMillis = guardElapsed.elapsedMillis()
-        diagnostics.log {
-            "加载重试: ${media.name} | 触发时刻: ${loadRetriedAtMillis}ms | " +
-                "阶段: ${loadPhaseLabel(phase)} | 已观察到: ${loadEventTimeline()}"
-        }
-        val targetIndex = loadTargetIndex
+        val token = expectedLoadToken
+        retryInFlight = true
         scope.launch {
             // 只有真的丢弃了源才记一次重建；出口不可用或抛异常都按未丢弃处理。
-            if (runCatching { loadSourceDiscard() }.getOrDefault(false)) {
+            val discarded = runCatching { loadSourceDiscard() }.getOrDefault(false)
+            // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重发作废。
+            if (!active || loadPhase != phase || expectedLoadToken != token) {
+                retryInFlight = false
+                return@launch
+            }
+            // 丢弃期间刚到的新帧或位置前进不能被重发冲掉：改为直接失败收尾，不能停在加载。
+            if (hasLoadProgress()) {
+                retryInFlight = false
+                failLoadWithoutProgress()
+                return@launch
+            }
+            // 到这里才真的重发：重发次数、时刻与日志都在这一刻记。
+            guardRetried = true
+            loadRetriedAtMillis = guardElapsed.elapsedMillis()
+            if (discarded) {
                 loadByteSourceRebuilds++
             } else {
                 loadDiscardSkipped = true
             }
-            // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重发作废。
-            if (!active || loadPhase != phase || !guardRetried) return@launch
-            if (loadTargetIndex != targetIndex) return@launch
-            // 丢弃期间刚到的新帧或位置前进不能被重发冲掉。
-            if (hasLoadProgress()) return@launch
+            diagnostics.log {
+                "加载重试: ${media.name} | 触发时刻: ${loadRetriedAtMillis}ms | " +
+                    "阶段: ${loadPhaseLabel(phase)} | 已观察到: ${loadEventTimeline()}"
+            }
+            retryInFlight = false
             reloadTarget(media, phase)
         }
         // 重发不重启计时：判失败仍是同一条累计时长上的 10 秒。
