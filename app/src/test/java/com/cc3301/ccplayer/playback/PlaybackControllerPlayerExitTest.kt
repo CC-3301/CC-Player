@@ -97,9 +97,11 @@ class PlaybackControllerPlayerExitTest {
     }
 
     @Test
-    fun `初次加载失败也算错误态`() {
+    fun `首次加载失败重发后仍失败进入错误态`() {
         controller.openPlaylist(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
 
+        // 首次失败先按加载看护重发一次，第二次失败才收尾为错误态。
+        engine.reportPlaybackFailed("无法打开文件")
         engine.reportPlaybackFailed("无法打开文件")
 
         assertTrue(controller.playbackFailed.value)
