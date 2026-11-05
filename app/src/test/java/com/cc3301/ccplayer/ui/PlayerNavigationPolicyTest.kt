@@ -115,34 +115,25 @@ class PlayerNavigationPolicyTest {
     }
 
     @Test
-    fun `通知入口只回到已有播放会话的播放页`() {
-        assertEquals(
-            NotificationOpenAction.ShowPlayerPage,
-            notificationOpenAction(
-                action = OPEN_PLAYER_ACTION,
-                restored = false,
-                playbackState = PlaybackState.Playing,
-                playerVisible = false,
-            ),
-        )
-        assertEquals(
-            NotificationOpenAction.ShowPlayerPage,
-            notificationOpenAction(
-                action = OPEN_PLAYER_ACTION,
-                restored = false,
-                playbackState = PlaybackState.Paused,
-                playerVisible = false,
-            ),
-        )
+    fun `Activity 重建但播放会话仍在时通知入口放行`() {
+        listOf(PlaybackState.Playing, PlaybackState.Paused, PlaybackState.Ended).forEach { state ->
+            assertEquals(
+                NotificationOpenAction.ShowPlayerPage,
+                notificationOpenAction(
+                    action = OPEN_PLAYER_ACTION,
+                    playbackState = state,
+                    playerVisible = false,
+                ),
+            )
+        }
     }
 
     @Test
-    fun `界面重建时的通知入口不处理`() {
+    fun `已消费的通知入口不处理`() {
         assertEquals(
             NotificationOpenAction.Ignore,
             notificationOpenAction(
-                action = OPEN_PLAYER_ACTION,
-                restored = true,
+                action = null,
                 playbackState = PlaybackState.Playing,
                 playerVisible = false,
             ),
@@ -156,7 +147,6 @@ class PlayerNavigationPolicyTest {
                 NotificationOpenAction.Ignore,
                 notificationOpenAction(
                     action = OPEN_PLAYER_ACTION,
-                    restored = false,
                     playbackState = state,
                     playerVisible = false,
                 ),
@@ -166,7 +156,6 @@ class PlayerNavigationPolicyTest {
             NotificationOpenAction.Ignore,
             notificationOpenAction(
                 action = OPEN_PLAYER_ACTION,
-                restored = false,
                 playbackState = PlaybackState.Playing,
                 playerVisible = true,
             ),
@@ -179,20 +168,23 @@ class PlayerNavigationPolicyTest {
             NotificationOpenAction.Ignore,
             notificationOpenAction(
                 action = "android.intent.action.MAIN",
-                restored = false,
                 playbackState = PlaybackState.Playing,
                 playerVisible = false,
             ),
         )
-        assertEquals(
-            NotificationOpenAction.Ignore,
-            notificationOpenAction(
-                action = null,
-                restored = false,
-                playbackState = PlaybackState.Playing,
-                playerVisible = false,
-            ),
-        )
+    }
+
+    @Test
+    fun `入口准备失败时已有播放会话只离开播放页`() {
+        listOf(PlaybackState.Playing, PlaybackState.Paused, PlaybackState.Ended).forEach { state ->
+            assertEquals(FailedEntryExit.LeavePlayerPage, failedEntryExit(state))
+        }
+    }
+
+    @Test
+    fun `入口准备失败且没有播放会话时结束播放`() {
+        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(null))
+        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(PlaybackState.Idle))
     }
 
     @Test

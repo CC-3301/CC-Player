@@ -82,6 +82,7 @@ import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.streaming.StaleSourceDiscardPolicy
 import com.cc3301.ccplayer.ui.AppScreen
+import com.cc3301.ccplayer.ui.FailedEntryExit
 import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
 import com.cc3301.ccplayer.ui.LibraryBackAction
@@ -106,6 +107,7 @@ import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.awaitsVideoOrientation
+import com.cc3301.ccplayer.ui.failedEntryExit
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.notificationOpenAction
@@ -266,7 +268,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             onEnterPlayer = ::enterPlayer,
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
-            onLeavePlayer = ::closePlayer,
+            onLeavePlayer = ::leaveAfterFailedEntry,
             diagnostics = diagnostics,
         )
     }
@@ -664,28 +666,27 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 }
             }
         }
-        // 只在首次创建时处理通知入口：界面重建会重放旧 Intent，不能再次进入播放页。
-        consumeOpenPlayerIntent(intent, restored = savedInstanceState != null)
+        consumeOpenPlayerIntent(intent)
     }
 
     /** 通知栏媒体卡片点击：回到已有播放会话的播放页。 */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // 不把旧 Intent 设为当前 Intent，避免后续重建重放播放页入口。
-        consumeOpenPlayerIntent(intent, restored = false)
+        consumeOpenPlayerIntent(intent)
     }
 
-    /** 消费通知入口：处理过就清掉动作，且只在播放会话非空闲时回到播放页。 */
-    private fun consumeOpenPlayerIntent(intent: Intent?, restored: Boolean) {
+    /** 消费通知入口：清掉动作并回写 Intent，避免界面重建时重放；只在会话非空闲时回到播放页。 */
+    private fun consumeOpenPlayerIntent(intent: Intent?) {
         if (intent == null) return
         val action = intent.action
+        if (action != OPEN_PLAYER_ACTION) return
+        intent.action = null
+        setIntent(intent)
         val open = notificationOpenAction(
             action = action,
-            restored = restored,
             playbackState = playback?.controller?.state?.value,
             playerVisible = playerVisible,
         ) == NotificationOpenAction.ShowPlayerPage
-        if (action == OPEN_PLAYER_ACTION) intent.action = null
         if (open) showPlayerPage()
     }
 
@@ -957,6 +958,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         restoreBrowserSystemUi()
         playerVisible = false
         updateKeepScreenOn()
+    }
+
+    /** 入口准备失败：已有播放会话时只离开播放页，不结束原会话。 */
+    private fun leaveAfterFailedEntry() {
+        when (failedEntryExit(playback?.controller?.state?.value)) {
+            FailedEntryExit.LeavePlayerPage -> leavePlayerPage()
+            FailedEntryExit.StopPlayback -> closePlayer()
+        }
     }
 
     /** 回到播放页：沿用播放服务里的会话，不重建播放，也不重新加载文件。 */

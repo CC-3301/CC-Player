@@ -19,7 +19,7 @@ import kotlinx.coroutines.launch
  * 音频等媒体准备完成后才进入播放页。
  *
  * 网络媒体需要回环地址才能交给播放核心，因此探测完成前不开始播放。
- * 准备失败时先提示原因，再退回列表。
+ * 准备失败时先提示原因，再由界面按现有播放会话收尾。
  */
 class PlaybackEntryOpener(
     private val scope: CoroutineScope,

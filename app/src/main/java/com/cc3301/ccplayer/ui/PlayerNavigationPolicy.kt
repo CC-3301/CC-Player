@@ -3,6 +3,23 @@ package com.cc3301.ccplayer.ui
 import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackState
 
+/** 播放入口准备失败后的收尾结果。 */
+enum class FailedEntryExit {
+    /** 已有播放会话：只离开播放页，保留原会话继续播放。 */
+    LeavePlayerPage,
+
+    /** 没有可用会话：结束播放并离开播放页。 */
+    StopPlayback,
+}
+
+/** 入口准备失败时按现有播放会话决定是否结束播放。 */
+fun failedEntryExit(playbackState: PlaybackState?): FailedEntryExit =
+    if (playbackState != null && playbackState != PlaybackState.Idle) {
+        FailedEntryExit.LeavePlayerPage
+    } else {
+        FailedEntryExit.StopPlayback
+    }
+
 /** 播放页系统返回的处理结果。 */
 enum class PlayerBackAction {
     /** 取消进行中的切集，留在播放页。 */
@@ -60,17 +77,15 @@ enum class NotificationOpenAction {
 }
 
 /**
- * 通知卡片入口判定：只在首次创建且存在非空闲播放会话时回到播放页。
- * 界面重建重放旧 Intent 不得进入空白播放页。
+ * 通知卡片入口判定：只在 Intent 尚未消费且存在非空闲播放会话时回到播放页。
+ * 已消费的 Intent 动作已清空；进程已死亡时 playback 为空，同样不会进入空白播放页。
  */
 fun notificationOpenAction(
     action: String?,
-    restored: Boolean,
     playbackState: PlaybackState?,
     playerVisible: Boolean,
 ): NotificationOpenAction = when {
     action != OPEN_PLAYER_ACTION -> NotificationOpenAction.Ignore
-    restored -> NotificationOpenAction.Ignore
     playbackState == null || playbackState == PlaybackState.Idle -> NotificationOpenAction.Ignore
     playerVisible -> NotificationOpenAction.Ignore
     else -> NotificationOpenAction.ShowPlayerPage
