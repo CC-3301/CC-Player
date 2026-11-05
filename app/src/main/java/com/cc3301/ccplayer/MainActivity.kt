@@ -64,6 +64,7 @@ import com.cc3301.ccplayer.network.RoutingNetworkStreams
 import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
+import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
@@ -81,17 +82,21 @@ import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.streaming.StaleSourceDiscardPolicy
 import com.cc3301.ccplayer.ui.AppScreen
+import com.cc3301.ccplayer.ui.FailedEntryExit
 import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
 import com.cc3301.ccplayer.ui.LibraryBackAction
+import com.cc3301.ccplayer.ui.LibraryEntryAction
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
 import com.cc3301.ccplayer.ui.MpvSurfaceView
 import com.cc3301.ccplayer.ui.NavigationViewModel
+import com.cc3301.ccplayer.ui.NotificationOpenAction
 import com.cc3301.ccplayer.ui.PendingPlayback
 import com.cc3301.ccplayer.ui.PlaybackEntryOpener
 import com.cc3301.ccplayer.ui.PlaybackEntryState
+import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
@@ -102,7 +107,11 @@ import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.awaitsVideoOrientation
+import com.cc3301.ccplayer.ui.failedEntryExit
+import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.mediaFailureText
+import com.cc3301.ccplayer.ui.notificationOpenAction
+import com.cc3301.ccplayer.ui.playerBackAction
 import com.cc3301.ccplayer.ui.onPlayPauseClick
 import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.sensorScreenOrientation
@@ -200,6 +209,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     private var playerVisible by mutableStateOf(false)
 
+    /** 最近一次播放是否以失败收尾；返回时长按错误态处理。 */
+    private var playbackFailed = false
+
+    /** 「APP 内后台播放」当前取值：离开播放页时决定是否停止播放。 */
+    private var inAppBackgroundPlayback = SettingsRepository.DEFAULT_IN_APP_BACKGROUND_PLAYBACK
+
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
@@ -253,7 +268,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             onEnterPlayer = ::enterPlayer,
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
-            onLeavePlayer = ::closePlayer,
+            onLeavePlayer = ::leaveAfterFailedEntry,
             diagnostics = diagnostics,
         )
     }
@@ -296,6 +311,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
                 launch { binder.controller.switching.collect { switching = it } }
                 launch { binder.controller.restoring.collect { restoring = it } }
+                launch { binder.controller.playbackFailed.collect { playbackFailed = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
                 launch { binder.controller.surfacePresentation.collect { surfacePresentation = it } }
                 launch {
@@ -334,6 +350,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onCreate(savedInstanceState)
         screenOrientation = currentScreenOrientation()
         lastScreenOrientation = screenOrientation
+        lifecycleScope.launch {
+            settings.inAppBackgroundPlayback.collect { inAppBackgroundPlayback = it }
+        }
         // 深色界面统一用浅色系统栏图标。
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -531,7 +550,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             onToggleRotation = {
                                 sessionOrientation.toggle(currentScreenOrientation())
                             },
-                            onClose = { handlePlayerBack() },
+                            onClose = { closePlayer() },
                         )
                     }
 
@@ -541,6 +560,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
                             onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
+                            onSetInAppBackgroundPlayback = settingsViewModel::setInAppBackgroundPlayback,
                             onSetResumeMode = settingsViewModel::setResumeMode,
                             onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
                             onSetRestoreLastDirectory = settingsViewModel::setRestoreLastDirectory,
@@ -616,11 +636,21 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                 if (entry.isDirectory) {
                                     library.enter(entry)
                                 } else {
-                                    playbackEntryOpener.open(
-                                        entry = entry,
-                                        entries = libraryState.entries,
-                                        enterBeforePreparing = mediaKindOf(entry.name) == MediaKind.Video,
-                                    )
+                                    val current = playlist.getOrNull(currentIndex)
+                                    val reopen = libraryEntryAction(
+                                        entryLocation = entry.location,
+                                        currentLocation = current?.location,
+                                        playbackActive = playbackState != PlaybackState.Idle,
+                                    ) == LibraryEntryAction.ReopenPlayerPage
+                                    if (reopen) {
+                                        showPlayerPage()
+                                    } else {
+                                        playbackEntryOpener.open(
+                                            entry = entry,
+                                            entries = libraryState.entries,
+                                            enterBeforePreparing = mediaKindOf(entry.name) == MediaKind.Video,
+                                        )
+                                    }
                                 }
                             },
                             onOpenSettings = navigation::openSettings,
@@ -636,6 +666,28 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 }
             }
         }
+        consumeOpenPlayerIntent(intent)
+    }
+
+    /** 通知栏媒体卡片点击：回到已有播放会话的播放页。 */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        consumeOpenPlayerIntent(intent)
+    }
+
+    /** 消费通知入口：清掉动作并回写 Intent，避免界面重建时重放；只在会话非空闲时回到播放页。 */
+    private fun consumeOpenPlayerIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        if (action != OPEN_PLAYER_ACTION) return
+        intent.action = null
+        setIntent(intent)
+        val open = notificationOpenAction(
+            action = action,
+            playbackState = playback?.controller?.state?.value,
+            playerVisible = playerVisible,
+        ) == NotificationOpenAction.ShowPlayerPage
+        if (open) showPlayerPage()
     }
 
     /** 首页返回：第一次提示，2 秒内再按才退出。 */
@@ -721,6 +773,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         appliedScreenOrientation = ScreenOrientation.System
         heldScreenOrientation = null
         playerVisible = true
+        updateKeepScreenOn()
         playbackEntry.enter(preparing)
         requestNotificationPermission()
         if (!bound) {
@@ -826,10 +879,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
     }
 
-    /** 仅前台且播放或加载时保持屏幕常亮；暂停、片尾、未打开、退后台立即释放。 */
+    /** 仅前台且播放页在场、播放或加载时保持屏幕常亮；暂停、片尾、离开播放页与退后台立即释放。 */
     private fun updateKeepScreenOn() {
         screenOn.update(
             foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+            playerVisible = playerVisible,
             state = playbackState,
         )
     }
@@ -843,9 +897,83 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         surfaceSession.onSurfaceChanged(width, height)
     }
 
-    /** 返回先尝试取消切集；没有切集才退出播放页。 */
+    /**
+     * 播放页系统返回：切集只取消这一跳；首次加载、恢复原片与错误态退出播放页；
+     * 其余播放状态按「APP 内后台播放」决定离开后是否继续播放。
+     */
     private fun handlePlayerBack() {
-        if (playback?.controller?.cancelSwitch() != true) closePlayer()
+        when (
+            playerBackAction(
+                state = playbackState,
+                switching = switching,
+                restoring = restoring,
+                initialLoading = playbackEntry.initialLoading(playbackState, switching),
+                failed = playbackFailed,
+                inAppBackgroundPlayback = inAppBackgroundPlayback,
+            )
+        ) {
+            PlayerBackAction.CancelSwitch -> cancelSwitchOrReevaluate()
+            PlayerBackAction.StopAndLeave -> closePlayer()
+            PlayerBackAction.LeaveAndContinue -> leavePlayerPage()
+        }
+    }
+
+    /**
+     * 取消切集；返回前切集已经结束时按控制层最新状态重新判定一次。
+     * 竞态下不因取消失败直接停播；仅当播放会话不存在或最新状态要求退出时才关闭播放页。
+     */
+    private fun cancelSwitchOrReevaluate() {
+        val binder = playback ?: run {
+            closePlayer()
+            return
+        }
+        if (binder.controller.cancelSwitch()) return
+        val state = binder.controller.state.value
+        val switching = binder.controller.switching.value
+        when (
+            playerBackAction(
+                state = state,
+                switching = switching,
+                restoring = binder.controller.restoring.value,
+                initialLoading = playbackEntry.initialLoading(state, switching),
+                failed = binder.controller.playbackFailed.value,
+                inAppBackgroundPlayback = inAppBackgroundPlayback,
+            )
+        ) {
+            PlayerBackAction.CancelSwitch -> Unit
+            PlayerBackAction.StopAndLeave -> closePlayer()
+            PlayerBackAction.LeaveAndContinue -> leavePlayerPage()
+        }
+    }
+
+    /**
+     * 离开播放页但保持播放：播放列表、当前项与进度留在播放服务里，
+     * 返回播放页时直接沿用，不重新解析目录或加载文件。
+     */
+    private fun leavePlayerPage() {
+        playbackEntryOpener.cancel()
+        pendingPlayback.clear()
+        playbackEntry.reset()
+        onSurfaceReleased()
+        restoreBrowserSystemUi()
+        playerVisible = false
+        updateKeepScreenOn()
+    }
+
+    /** 入口准备失败：已有播放会话时只离开播放页，不结束原会话。 */
+    private fun leaveAfterFailedEntry() {
+        when (failedEntryExit(playback?.controller?.state?.value)) {
+            FailedEntryExit.LeavePlayerPage -> leavePlayerPage()
+            FailedEntryExit.StopPlayback -> closePlayer()
+        }
+    }
+
+    /** 回到播放页：沿用播放服务里的会话，不重建播放，也不重新加载文件。 */
+    private fun showPlayerPage() {
+        if (playerVisible) return
+        val binder = playback ?: return
+        if (binder.controller.state.value == PlaybackState.Idle) return
+        enterPlayer(preparing = false)
     }
 
     override fun onSurfaceReleased() {
@@ -864,6 +992,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         restoreBrowserSystemUi()
         playerVisible = false
         playbackState = PlaybackState.Idle
+        playbackFailed = false
         updateKeepScreenOn()
         progress = PlaybackProgress()
         seekPreviewMillis = null

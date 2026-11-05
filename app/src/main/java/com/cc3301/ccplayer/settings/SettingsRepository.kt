@@ -22,7 +22,7 @@ enum class ResumeMode { FromStart, LastPosition }
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 /**
- * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播与后台播放开关、屏幕方向模式、解码模式、
+ * 应用设置的持久化：媒体根目录、列表视图与排序偏好、自动连播与两个后台播放开关、屏幕方向模式、解码模式、
  * 目录位置记忆与启动目录恢复。
  */
 class SettingsRepository(private val dataStore: DataStore<Preferences>) {
@@ -48,9 +48,14 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         preferences[AUTO_PLAY_NEXT] ?: DEFAULT_AUTO_PLAY_NEXT
     }
 
-    /** "后台播放"开关，默认开；关闭时退到后台立即暂停。 */
+    /** "APP 外后台播放"开关，默认开；关闭时退到后台立即暂停。 */
     val backgroundPlayback: Flow<Boolean> = dataStore.data.map { preferences ->
         preferences[BACKGROUND_PLAYBACK] ?: DEFAULT_BACKGROUND_PLAYBACK
+    }
+
+    /** "APP 内后台播放"开关，默认关；开启时离开播放页后音频继续，控制交给通知栏。 */
+    val inAppBackgroundPlayback: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[IN_APP_BACKGROUND_PLAYBACK] ?: DEFAULT_IN_APP_BACKGROUND_PLAYBACK
     }
 
     val orientationMode: Flow<OrientationMode> = dataStore.data.map { preferences ->
@@ -140,6 +145,10 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { preferences -> preferences[BACKGROUND_PLAYBACK] = enabled }
     }
 
+    suspend fun setInAppBackgroundPlayback(enabled: Boolean) {
+        dataStore.edit { preferences -> preferences[IN_APP_BACKGROUND_PLAYBACK] = enabled }
+    }
+
     suspend fun setOrientationMode(mode: OrientationMode) {
         dataStore.edit { preferences -> preferences[ORIENTATION_MODE] = mode.name }
     }
@@ -171,6 +180,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val DEFAULT_SORT_ORDER = SortOrder.NameAscending
         const val DEFAULT_AUTO_PLAY_NEXT = true
         const val DEFAULT_BACKGROUND_PLAYBACK = true
+        const val DEFAULT_IN_APP_BACKGROUND_PLAYBACK = false
         val DEFAULT_ORIENTATION_MODE = OrientationMode.System
         val DEFAULT_RESUME_MODE = ResumeMode.LastPosition
         const val DEFAULT_AUTO_RESTORE_POSITION = true
@@ -188,6 +198,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         private val SORT_ORDER = stringPreferencesKey("sort_order")
         private val AUTO_PLAY_NEXT = booleanPreferencesKey("auto_play_next")
         private val BACKGROUND_PLAYBACK = booleanPreferencesKey("background_playback")
+        private val IN_APP_BACKGROUND_PLAYBACK = booleanPreferencesKey("in_app_background_playback")
         private val ORIENTATION_MODE = stringPreferencesKey("orientation_mode")
         private val RESUME_MODE = stringPreferencesKey("resume_mode")
         private val AUTO_RESTORE_POSITION = booleanPreferencesKey("auto_restore_position")

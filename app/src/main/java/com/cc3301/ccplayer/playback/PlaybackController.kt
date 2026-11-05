@@ -146,6 +146,10 @@ class PlaybackController(
     private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val playbackFailures: SharedFlow<Unit> = _playbackFailures.asSharedFlow()
 
+    /** 播放失败收尾后为真：播放页返回据此退出播放页，而不是按片尾停留处理。 */
+    private val _playbackFailed = MutableStateFlow(false)
+    val playbackFailed: StateFlow<Boolean> = _playbackFailed.asStateFlow()
+
     private val _decodeMode = MutableStateFlow(DecodeMode.Hardware)
     val decodeMode: StateFlow<DecodeMode> = _decodeMode.asStateFlow()
 
@@ -374,6 +378,13 @@ class PlaybackController(
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) return
+        // 正在播放时换列表按替换当前播放处理：不把新列表套进旧列表的切集回退。
+        // 解码模式属于本次会话的临时选择，stop() 会重置成默认值，替换后要写回引擎。
+        if (active) {
+            val decodeMode = _decodeMode.value
+            stop()
+            setDecodeMode(decodeMode)
+        }
         _playlist.value = playlist
         this.directoryEntries = directoryEntries
         playAt(index)
@@ -562,6 +573,7 @@ class PlaybackController(
 
     /** 新起播一个会话：没有旧媒体要保留，画面从黑屏开始。 */
     private fun startSession(index: Int, media: MediaFile) {
+        _playbackFailed.value = false
         loadSource = LoadTrigger.Open
         logLoadStart(media, index)
         _currentIndex.value = index
@@ -616,6 +628,7 @@ class PlaybackController(
         originAtEnd: Boolean = false,
         source: LoadTrigger = LoadTrigger.Manual,
     ) {
+        _playbackFailed.value = false
         loadSource = source
         logLoadStart(media, index)
         val targetAddress = media.playbackLocation.takeIf { it.startsWith("http") }?.substringBeforeLast("/") ?: "本地"
@@ -829,6 +842,7 @@ class PlaybackController(
     }
 
     fun stop() {
+        _playbackFailed.value = false
         val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
         val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
@@ -1973,6 +1987,7 @@ class PlaybackController(
             }
             LoadPhase.Initial -> {
                 logLoadFailure(source, errorText)
+                _playbackFailed.value = true
                 resetLoadState()
                 active = false
                 paused = true
@@ -1983,6 +1998,7 @@ class PlaybackController(
             }
             LoadPhase.Restoring -> {
                 logLoadFailure(source, errorText)
+                _playbackFailed.value = true
                 val reportFailure = !switchFailureReported
                 resetLoadState()
                 active = false
@@ -1997,6 +2013,7 @@ class PlaybackController(
                 // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
                 if (switchFailureReported) return
                 logLoadFailure(source, errorText)
+                _playbackFailed.value = true
                 clearPendingSwitchFrame()
                 // 会话就此结束：预览静音走同一出口恢复，不能把音频留在静音；
                 // 吞掉的暂停回声也在结束时清掉，active 已为假，不再恢复播放。

@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 data class SettingsState(
     val autoPlayNext: Boolean = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
     val backgroundPlayback: Boolean = SettingsRepository.DEFAULT_BACKGROUND_PLAYBACK,
+    val inAppBackgroundPlayback: Boolean = SettingsRepository.DEFAULT_IN_APP_BACKGROUND_PLAYBACK,
     val resumeMode: ResumeMode = SettingsRepository.DEFAULT_RESUME_MODE,
     val autoRestorePosition: Boolean = SettingsRepository.DEFAULT_AUTO_RESTORE_POSITION,
     val restoreLastDirectory: Boolean = SettingsRepository.DEFAULT_RESTORE_LAST_DIRECTORY,
@@ -50,12 +51,14 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
             combine(
                 playback,
                 settings.backgroundPlayback,
+                settings.inAppBackgroundPlayback,
                 settings.restoreLastDirectory,
                 settings.diagnosticsEnabled,
-            ) { playbackSettings, backgroundPlayback, restoreLastDirectory, diagnosticsEnabled ->
+            ) { playbackSettings, backgroundPlayback, inAppBackgroundPlayback, restoreLastDirectory, diagnosticsEnabled ->
                 SettingsState(
                     autoPlayNext = playbackSettings.autoPlayNext,
                     backgroundPlayback = backgroundPlayback,
+                    inAppBackgroundPlayback = inAppBackgroundPlayback,
                     resumeMode = playbackSettings.resumeMode,
                     autoRestorePosition = playbackSettings.autoRestorePosition,
                     restoreLastDirectory = restoreLastDirectory,
@@ -73,6 +76,10 @@ class SettingsViewModel(private val settings: SettingsRepository) : ViewModel() 
 
     fun setBackgroundPlayback(enabled: Boolean) {
         viewModelScope.launch { settings.setBackgroundPlayback(enabled) }
+    }
+
+    fun setInAppBackgroundPlayback(enabled: Boolean) {
+        viewModelScope.launch { settings.setInAppBackgroundPlayback(enabled) }
     }
 
     fun setResumeMode(mode: ResumeMode) {

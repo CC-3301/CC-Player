@@ -105,7 +105,8 @@
     <string name="settings_playback_section">播放</string>
     <string name="settings_list_section">列表</string>
     <string name="settings_auto_play_next">自动播放下一个</string>
-    <string name="settings_background_playback">后台播放</string>
+    <string name="settings_background_playback">APP 外后台播放</string>
+    <string name="settings_in_app_background_playback">APP 内后台播放</string>
     <string name="settings_resume_title">起播位置</string>
     <string name="settings_resume_last_position">播放上次位置</string>
     <string name="settings_resume_from_start">始终从头播放</string>
