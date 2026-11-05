@@ -38,6 +38,38 @@ class PlaybackControllerPlayerExitTest {
     }
 
     @Test
+    fun `离开播放页后自动下一集开启时播完继续`() {
+        // 离开播放页等同于 Surface 不可用：音频仍继续，播完按开关决定连播。
+        controller.setRenderSurfaceAvailable(false)
+        controller.openPlaylist(
+            listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
+            mediaFile("a.mkv"),
+        )
+        engine.reportMediaLoaded()
+
+        engine.reportPlaybackEnded()
+
+        assertEquals(listOf("root/a.mkv", "root/b.mkv"), engine.startedUrls)
+        assertEquals(1, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `离开播放页后自动下一集关闭时播完停止`() {
+        controller.setAutoPlayNext(false)
+        controller.setRenderSurfaceAvailable(false)
+        controller.openPlaylist(
+            listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
+            mediaFile("a.mkv"),
+        )
+        engine.reportMediaLoaded()
+
+        engine.reportPlaybackEnded()
+
+        assertEquals(listOf("root/a.mkv"), engine.startedUrls)
+        assertEquals(PlaybackState.Ended, controller.state.value)
+    }
+
+    @Test
     fun `播放失败进入错误态并可由新的加载清除`() {
         controller.openPlaylist(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()

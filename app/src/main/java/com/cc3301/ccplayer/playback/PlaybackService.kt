@@ -376,7 +376,7 @@ class PlaybackService : Service() {
     /** 通知卡片的点击入口：拉起已存在的界面并落在播放页。 */
     private fun openPlayerIntent(): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
-            action = MainActivity.ACTION_OPEN_PLAYER
+            action = OPEN_PLAYER_ACTION
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         return PendingIntent.getActivity(

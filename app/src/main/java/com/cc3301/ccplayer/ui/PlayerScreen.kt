@@ -421,8 +421,8 @@ fun PlayerScreen(
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
 
-    // 面板或抽屉打开时，系统返回先关闭面板，不离开播放页。
-    BackHandler(enabled = panels.anyOpen) { panels.close() }
+    // 面板或抽屉打开时，系统返回只关闭面板，不离开播放页。
+    BackHandler(enabled = playerBackClosesPanel(panels.anyOpen)) { panels.close() }
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
     // 已打开的面板保持打开，内容按不可用外观处理。

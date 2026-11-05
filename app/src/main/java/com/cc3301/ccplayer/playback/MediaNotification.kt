@@ -8,6 +8,9 @@ import com.cc3301.ccplayer.library.thumbnailCacheKey
 import com.cc3301.ccplayer.library.thumbnailCacheMaxAge
 import java.io.File
 
+/** 点击媒体通知回到播放页的入口动作。 */
+const val OPEN_PLAYER_ACTION = "com.cc3301.ccplayer.action.OPEN_PLAYER"
+
 /** 通知展示内容：标题、时长、封面文件与动作集合。 */
 data class MediaNotificationContent(
     val title: String,
