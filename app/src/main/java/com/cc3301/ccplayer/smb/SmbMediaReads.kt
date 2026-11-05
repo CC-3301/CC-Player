@@ -12,7 +12,7 @@ import kotlinx.coroutines.CancellationException
 private const val MAX_SESSIONS = 8
 
 /** 会话闲置上限：超过该时长没有句柄在用时关闭，下次读取重新建连。 */
-private const val SESSION_IDLE_MILLIS = 10 * 60 * 1000L
+private const val SESSION_IDLE_MILLIS = 2 * 60 * 1000L
 
 /** 连续打开失败达到该次数时重建客户端以清掉可能已失效的连接。 */
 private const val MAX_OPEN_FAILURES = 3
@@ -27,7 +27,8 @@ private const val CONNECT_ATTEMPTS = 2
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
  * 同一共享的会话复用：抽帧只为条目打开文件句柄，句柄关闭不关会话，下一条目沿用同一会话。
- * 打开或读取失败时丢弃该会话；闲置超时或超出上限时才会关闭，且只在没有句柄在用时关闭。
+ * 打开失败一律丢弃该会话；读取遇连接类失败、取消或超时打断在途传输读时丢弃，连接在最后一个句柄关闭时关闭；
+ * 闲置超时或超出上限时关闭，且只在没有句柄在用时关闭。
  * 同一会话键连续打开失败到上限时作废全部会话并重建客户端，业务类失败不计入。
  */
 class SmbMediaReads(
@@ -68,9 +69,12 @@ class SmbMediaReads(
                 onFailure = { drop(key, session) },
             )
         } catch (cancellation: CancellationException) {
+            // 打开被放弃（超时或取消）：会话一并作废，下一次打开必须新建，不能复用。
+            drop(key, session)
             release(session)
             throw cancellation
         } catch (failure: Exception) {
+            // 打开失败一律丢弃会话：重试必须换新会话，不复用刚失败的会话。
             drop(key, session)
             release(session)
             recordOpenFailure(key, failure)
@@ -116,8 +120,7 @@ class SmbMediaReads(
         synchronized(lock) {
             sessions.values.forEach { session ->
                 if (session.inUse == 0) {
-                    session.detached = false
-                    closeable += session.connection
+                    takeConnectionLocked(session)?.let { closeable += it }
                 } else {
                     session.detached = true
                 }
@@ -136,7 +139,7 @@ class SmbMediaReads(
             if (existing != null) {
                 if (now - existing.lastUsedAt > idleMillis && existing.inUse == 0) {
                     sessions.remove(key)
-                    stale += existing.connection
+                    takeConnectionLocked(existing)?.let { stale += it }
                 } else {
                     existing.lastUsedAt = now
                     existing.inUse++
@@ -190,12 +193,7 @@ class SmbMediaReads(
     private fun release(session: Session) {
         val closeable = synchronized(lock) {
             session.inUse = (session.inUse - 1).coerceAtLeast(0)
-            if (session.inUse == 0 && session.detached) {
-                session.detached = false
-                session.connection
-            } else {
-                null
-            }
+            if (session.inUse == 0 && session.detached) takeConnectionLocked(session) else null
         }
         closeable?.let(::close)
     }
@@ -205,14 +203,24 @@ class SmbMediaReads(
         val closeable = synchronized(lock) {
             if (sessions[key] === session) sessions.remove(key)
             if (session.inUse == 0) {
-                session.detached = false
-                session.connection
+                takeConnectionLocked(session)
             } else {
                 session.detached = true
                 null
             }
         }
         closeable?.let(::close)
+    }
+
+    /**
+     * 交出发连接用于关闭；同一条会话只交一次。
+     * 释放、丢弃、淘汰与整体作废都走这里，避免同一条连接被重复关闭。
+     */
+    private fun takeConnectionLocked(session: Session): SmbConnection? {
+        if (session.dropped) return null
+        session.dropped = true
+        session.detached = false
+        return session.connection
     }
 
     /**
@@ -227,7 +235,7 @@ class SmbMediaReads(
                 .minByOrNull { entry -> entry.value.lastUsedAt }
                 ?: return evicted
             sessions.remove(oldest.key)
-            evicted += oldest.value.connection
+            takeConnectionLocked(oldest.value)?.let { evicted += it }
         }
         return evicted
     }
@@ -247,6 +255,9 @@ class SmbMediaReads(
 
         /** 已从表里摘掉但还有句柄在用，等最后一个句柄关闭时再关连接。 */
         var detached = false
+
+        /** 连接已安排关闭或已关闭；重复丢弃不再关第二次。 */
+        var dropped = false
     }
 
     private data class SessionKey(
@@ -286,8 +297,9 @@ private class SmbSessionSource(
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = try {
         handle.readAt(position, buffer, offset, length)
-    } catch (failure: IOException) {
-        onFailure()
+    } catch (failure: Throwable) {
+        // 只丢弃连接类失败：业务失败与参数错误不动会话，避免为它们白建一次连。
+        if (smbConnectionLost(failure)) onFailure()
         throw failure
     }
 
@@ -295,5 +307,16 @@ private class SmbSessionSource(
         if (!closed.compareAndSet(false, true)) return
         runCatching { handle.close() }
         onClose()
+    }
+
+    /**
+     * 作废这次读取：先丢弃会话，再关句柄。
+     *
+     * 会话先从表里摘掉，下一次读取不会复用它；句柄还有别的读取在用时，
+     * 由最后一个句柄关闭时收尾连接。
+     */
+    override fun discard() {
+        onFailure()
+        close()
     }
 }

@@ -12,4 +12,12 @@ interface ByteSource : Closeable {
 
     /** 从 [position] 起读最多 [length] 字节到 [buffer] 的 [offset]；读到末尾返回 0。 */
     fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int
+
+    /**
+     * 作废本次读取：关闭句柄，并让底层丢弃可能已失效的会话。
+     *
+     * 预览读取超时、取消或打开失败时用它代替 [close]；默认只关闭，可重复调用。
+     * 下一次读取必须重新建连，不能复用被作废的会话。
+     */
+    fun discard() = close()
 }

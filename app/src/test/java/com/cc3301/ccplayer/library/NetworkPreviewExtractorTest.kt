@@ -2,17 +2,22 @@ package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
-import kotlinx.coroutines.CancellationException
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -239,30 +244,52 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
-    fun `预读已排队后打开失败时关闭窗口，排队中的预读不再读取`() = runTest {
-        val reads = RecordingReads(ByteArray(1 shl 20))
-        val executor = RejectingExecutor(failAt = 2)
-        val extractor = NetworkPreviewExtractor(
-            reads,
+    fun `准备失败按失败分类收尾：本地失败只关句柄，会话失败作废`() = runTest {
+        // 预读池拒单是本地调度失败，会话没坏：只关句柄。
+        val localReads = RecordingReads(ByteArray(1 shl 20))
+        val localExecutor = RejectingExecutor(failAt = 2)
+        val local = NetworkPreviewExtractor(
+            localReads,
             decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
-            readAhead = executor,
+            readAhead = localExecutor,
         )
 
         try {
-            extractor.prepare(movie)
+            local.prepare(movie)
             fail("应向上抛出预读提交失败")
         } catch (expected: RejectedExecutionException) {
             // 预期路径。
         }
 
-        assertTrue("两条句柄都要关闭", reads.sources.all { source -> source.closed })
-        val readsBefore = reads.sources.sumOf { source -> source.reads.size }
-        executor.runAll()
+        assertTrue("两条句柄都要关闭", localReads.sources.all { source -> source.closed })
+        assertFalse("本地失败不作废会话", localReads.sources.any { source -> source.discarded })
+        val readsBefore = localReads.sources.sumOf { source -> source.reads.size }
+        localExecutor.runAll()
         assertEquals(
             "关闭后已排队的预读不再读取",
             readsBefore,
-            reads.sources.sumOf { source -> source.reads.size },
+            localReads.sources.sumOf { source -> source.reads.size },
         )
+
+        // 会话类失败：作废已打开的句柄，下一次准备换新会话。
+        val lostReads = RecordingReads(ByteArray(1 shl 20))
+        val lost = NetworkPreviewExtractor(
+            lostReads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = RejectingExecutor(
+                failAt = 2,
+                failure = MediaSourceException(MediaFailure.Unreachable, "连接已断"),
+            ),
+        )
+
+        try {
+            lost.prepare(movie)
+            fail("应向上抛出会话失败")
+        } catch (expected: MediaSourceException) {
+            // 预期路径。
+        }
+
+        assertTrue("会话失败要作废已打开的句柄", lostReads.sources.all { source -> source.discarded })
     }
 
     @Test
@@ -309,6 +336,63 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `打开阶段放弃的会话无条件作废，下一次准备新建连`() = runTest {
+        val reads = SessionReads()
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+        )
+        val prepared = extractor.prepare(movie)!!
+        prepared.discard()
+
+        assertEquals("打开阶段放弃要作废会话", 1, reads.discardedSessions)
+        extractor.prepare(movie)!!.close()
+        assertEquals("下一次准备要重新建连", 2, reads.connections)
+    }
+
+    @Test
+    fun `超时取消打断传输读时作废会话，下一次准备新建连`() = runBlocking {
+        val reads = SessionReads(blockFirstRead = true)
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { opened, _, _ ->
+                opened.readAt(0, ByteArray(1), 0, 1)
+                ByteArray(1)
+            },
+            readAhead = StepExecutor(),
+        )
+        val prepared = extractor.prepare(movie)!!
+
+        // 解码阻塞在传输读里，等它真正开始读再按超时取消。
+        val decoding = launch(Dispatchers.Default) { prepared.decode(NETWORK_TARGET_WIDTH) }
+        assertTrue("传输读应当已发起", reads.readStarted.await(5, TimeUnit.SECONDS))
+        decoding.cancelAndJoin()
+        prepared.abandon()
+
+        assertEquals("打断传输读要作废会话", 1, reads.discardedSessions)
+
+        extractor.prepare(movie)!!.close()
+        assertEquals("下一次准备要重新建连", 2, reads.connections)
+    }
+
+    @Test
+    fun `没有在途传输读的放弃不作废会话`() = runTest {
+        val reads = SessionReads()
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+        )
+        val prepared = extractor.prepare(movie)!!
+        prepared.abandon()
+
+        assertEquals("没有在途读不作废会话", 0, reads.discardedSessions)
+        extractor.prepare(movie)!!.close()
+        assertEquals("下一次准备复用会话", 1, reads.connections)
+    }
+
+    @Test
     fun `读取位置越界与末尾返回 -1`() {
         val source = RecordingByteSource(payload)
         val buffer = ByteArray(8)
@@ -351,14 +435,17 @@ private class StepExecutor : PreviewReadAhead {
 }
 
 /** 前 [failAt] - 1 个任务入队，第 [failAt] 个提交时拒绝；用来构造窗口已建、准备未交付。 */
-private class RejectingExecutor(private val failAt: Int) : PreviewReadAhead {
+private class RejectingExecutor(
+    private val failAt: Int,
+    private val failure: Throwable = RejectedExecutionException("预读线程拒绝任务"),
+) : PreviewReadAhead {
 
     private val tasks = ArrayDeque<Runnable>()
     private var submissions = 0
 
     override fun submit(rank: Long, key: Any, task: Runnable) {
         submissions++
-        if (submissions >= failAt) throw RejectedExecutionException("预读线程拒绝任务")
+        if (submissions >= failAt) throw failure
         tasks.addLast(task)
     }
 
@@ -372,6 +459,9 @@ private class RejectingExecutor(private val failAt: Int) : PreviewReadAhead {
 private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
 
     var closed = false
+
+    /** 是否走了作废路径：作废要连会话一起丢弃，不能只关句柄。 */
+    var discarded = false
 
     /** 关闭发生的线程：句柄关闭不得落在调用方线程。 */
     var closedOn: Thread? = null
@@ -390,6 +480,11 @@ private class RecordingByteSource(private val bytes: ByteArray) : ByteSource {
     override fun close() {
         closed = true
         closedOn = Thread.currentThread()
+    }
+
+    override fun discard() {
+        discarded = true
+        close()
     }
 }
 
@@ -417,6 +512,67 @@ private class BlockingByteSource : ByteSource {
         synchronized(lock) {
             isClosed = true
             lock.notifyAll()
+        }
+    }
+}
+
+/** 记录会话建连与作废的假读取；可让第一次读取阻塞到句柄关闭，模拟传输读被打断。 */
+private class SessionReads(private val blockFirstRead: Boolean = false) : NetworkMediaReads {
+
+    private val lock = Object()
+    private var live = false
+    private var firstRead = true
+
+    var connections = 0
+    var discardedSessions = 0
+    val readStarted = CountDownLatch(1)
+
+    override suspend fun openRead(location: String, size: Long): ByteSource {
+        synchronized(lock) {
+            if (!live) {
+                live = true
+                connections++
+            }
+        }
+        return SessionSource()
+    }
+
+    private inner class SessionSource : ByteSource {
+        private val closed = AtomicBoolean(false)
+
+        override val size: Long = 64
+
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+            val blocking = synchronized(lock) {
+                val first = blockFirstRead && firstRead
+                if (first) firstRead = false
+                first
+            }
+            if (blocking) {
+                readStarted.countDown()
+                synchronized(lock) {
+                    while (!closed.get()) lock.wait()
+                }
+                throw IOException("读取已取消")
+            }
+            if (position >= size) return 0
+            buffer[offset] = 7
+            return 1
+        }
+
+        override fun close() {
+            closed.set(true)
+            synchronized(lock) { lock.notifyAll() }
+        }
+
+        override fun discard() {
+            synchronized(lock) {
+                if (live) {
+                    live = false
+                    discardedSessions++
+                }
+            }
+            close()
         }
     }
 }
