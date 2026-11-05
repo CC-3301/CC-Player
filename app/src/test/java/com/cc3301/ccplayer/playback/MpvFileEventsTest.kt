@@ -5,6 +5,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -287,50 +288,43 @@ class MpvFileEventsTest {
 
     @Test
     fun `a refresh serial is consumed by its own seek event`() {
-        val coordinator = MpvLoadCoordinator()
-        coordinator.start("root/ep1.mkv")
-        coordinator.onFileLoaded("root/ep1.mkv")
+        val coordinator = loadedCoordinator()
+        val refresh = coordinator.beginRefreshSeek()
 
-        val refresh = coordinator.reserveSeekSerial()
-        coordinator.onSeekIssued(refresh)
-
-        assertEquals(refresh, coordinator.onSeekEvent()?.serial)
+        val event = coordinator.onSeekEvent()
+        assertEquals(refresh, event?.serial)
+        assertTrue(event?.refresh == true)
         assertEquals(refresh, coordinator.acceptedSeekSerial())
     }
 
     @Test
     fun `refresh and real seek serials are consumed in command order`() {
-        val coordinator = MpvLoadCoordinator()
-        coordinator.start("root/ep1.mkv")
-        coordinator.onFileLoaded("root/ep1.mkv")
-
-        val refresh = coordinator.reserveSeekSerial()
-        coordinator.onSeekIssued(refresh)
+        val coordinator = loadedCoordinator()
+        val refresh = coordinator.beginRefreshSeek()
         val real = coordinator.reserveSeekSerial()
         coordinator.onSeekIssued(real)
 
-        val refreshSeek = MpvRefreshSeek()
-        refreshSeek.begin(refresh)
         // 刷新自己的 SEEK 只归刷新；真实 seek 的 SEEK 照常推进 accepted 序号。
-        assertTrue(refreshSeek.onSeekConsumed(coordinator.onSeekEvent()?.serial))
-        assertFalse(refreshSeek.onSeekConsumed(coordinator.onSeekEvent()?.serial))
+        val refreshEvent = coordinator.onSeekEvent()
+        assertTrue(refreshEvent?.refresh == true)
+        assertEquals(refresh, refreshEvent?.serial)
+        val realEvent = coordinator.onSeekEvent()
+        assertFalse(realEvent?.refresh == true)
+        assertEquals(real, realEvent?.serial)
         assertEquals(real, coordinator.acceptedSeekSerial())
     }
 
     @Test
-    fun `a tombstoned refresh serial consumes a late seek without moving accepted`() {
-        val coordinator = MpvLoadCoordinator()
-        coordinator.start("root/ep1.mkv")
-        coordinator.onFileLoaded("root/ep1.mkv")
-
-        val refresh = coordinator.reserveSeekSerial()
-        coordinator.onSeekIssued(refresh)
-        coordinator.tombstoneSeekSerial(refresh)
+    fun `a timeout tombstone consumes a late seek without moving accepted`() {
+        val coordinator = loadedCoordinator()
+        val refresh = coordinator.beginRefreshSeek()
+        assertEquals(refresh, coordinator.onRefreshTimeout(refresh))
         val real = coordinator.reserveSeekSerial()
         coordinator.onSeekIssued(real)
 
         // 迟到的刷新 SEEK 只消费坟标，不改 ready 的 accepted 序号。
-        assertTrue(coordinator.onSeekEvent()?.tombstone == true)
+        val late = coordinator.onSeekEvent()
+        assertTrue(late?.tombstone == true)
         assertEquals(0, coordinator.acceptedSeekSerial())
 
         assertEquals(real, coordinator.onSeekEvent()?.serial)
@@ -338,21 +332,91 @@ class MpvFileEventsTest {
     }
 
     @Test
-    fun `discarding an unseen refresh serial keeps later seeks aligned`() {
-        val coordinator = MpvLoadCoordinator()
-        coordinator.start("root/ep1.mkv")
-        coordinator.onFileLoaded("root/ep1.mkv")
+    fun `cancelling a refresh keeps its serial as a tombstone`() {
+        val coordinator = loadedCoordinator()
+        val refresh = coordinator.beginRefreshSeek()
 
-        val refresh = coordinator.reserveSeekSerial()
-        coordinator.onSeekIssued(refresh)
-        // 刷新没有等到 SEEK：丢弃它的序号，后面真实 seek 的序号仍按顺序对齐。
-        coordinator.discardSeekSerial(refresh)
+        // 翻转/分离：序号不能直接丢，否则迟到的 SEEK 会吃掉下一条真实序号。
+        assertEquals(refresh, coordinator.cancelRefreshSeek())
+        val real = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(real)
+
+        val late = coordinator.onSeekEvent()
+        assertTrue(late?.tombstone == true)
+        assertEquals(0, coordinator.acceptedSeekSerial())
+
+        val realEvent = coordinator.onSeekEvent()
+        assertEquals(real, realEvent?.serial)
+        assertEquals(real, coordinator.acceptedSeekSerial())
+    }
+
+    @Test
+    fun `a cancelled refresh no longer claims its receipt`() {
+        val coordinator = loadedCoordinator()
+        coordinator.beginRefreshSeek()
+        coordinator.cancelRefreshSeek()
+        coordinator.onSeekEvent()
+
+        assertNull(coordinator.claimRefreshReceipt())
+        assertFalse(coordinator.isRefreshSeekCurrent())
+    }
+
+    @Test
+    fun `an expired tombstone is recycled before the next refresh reservation`() {
+        var now = 0L
+        val coordinator = loadedCoordinator(nowMillis = { now })
+        val stale = coordinator.beginRefreshSeek()
+        assertEquals(stale, coordinator.onRefreshTimeout(stale))
+
+        // 超过等待窗口仍没有迟到事件：下一次预留回收坟标，新刷新才能认回自己的回执。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS
+        val refresh = coordinator.beginRefreshSeek()
+        val event = coordinator.onSeekEvent()
+        assertEquals(refresh, event?.serial)
+        assertTrue(event?.refresh == true)
+        assertEquals(refresh, coordinator.claimRefreshReceipt())
+    }
+
+    @Test
+    fun `a tombstone inside the wait window still absorbs the next seek`() {
+        var now = 0L
+        val coordinator = loadedCoordinator(nowMillis = { now })
+        val stale = coordinator.beginRefreshSeek()
+        coordinator.onRefreshTimeout(stale)
+
+        // 还没到回收时间：坟标继续占位，迟到的 SEEK 只消费它自己。
+        now = REFRESH_SEEK_TIMEOUT_MILLIS - 1
+        val refresh = coordinator.beginRefreshSeek()
+        val late = coordinator.onSeekEvent()
+        assertTrue(late?.tombstone == true)
+        assertEquals(0, coordinator.acceptedSeekSerial())
+        assertNull(coordinator.claimRefreshReceipt())
+
+        // 新刷新自己的 SEEK 随后照常认到自己的序号。
+        val refreshEvent = coordinator.onSeekEvent()
+        assertEquals(refresh, refreshEvent?.serial)
+        assertTrue(refreshEvent?.refresh == true)
+        assertEquals(refresh, coordinator.claimRefreshReceipt())
+    }
+
+    @Test
+    fun `discarding an unseen refresh serial keeps later seeks aligned`() {
+        val coordinator = loadedCoordinator()
+        val refresh = coordinator.beginRefreshSeek()
+        // 命令下发失败或新加载：确定不会再有事件，直接撤掉预留序号。
+        coordinator.discardRefreshSeek()
 
         val real = coordinator.reserveSeekSerial()
         coordinator.onSeekIssued(real)
         assertEquals(real, coordinator.onSeekEvent()?.serial)
         assertEquals(real, coordinator.acceptedSeekSerial())
     }
+
+    private fun loadedCoordinator(nowMillis: () -> Long = { 0L }): MpvLoadCoordinator =
+        MpvLoadCoordinator(nowMillis = nowMillis).apply {
+            start("root/ep1.mkv")
+            onFileLoaded("root/ep1.mkv")
+        }
 
     @Test
     fun `a new load clears pending seeks and the accepted serial`() {

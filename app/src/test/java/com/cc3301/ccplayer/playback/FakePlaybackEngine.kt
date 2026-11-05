@@ -84,7 +84,6 @@ class FakePlaybackEngine : PlaybackEngine {
         currentSeekSerial = 0
         acceptedSeekSerial = 0
         issuedSeekSerials.clear()
-        refreshSeekSerial = null
         return ++currentLoadToken
     }
 
@@ -265,10 +264,6 @@ class FakePlaybackEngine : PlaybackEngine {
 
     override fun flipVideoOutput() {
         flipVideoOutputCalls++
-        refreshSeekSerial?.let {
-            discardedRefreshSerials += it
-            refreshSeekSerial = null
-        }
     }
 
     /** 位置中性精确刷新的次数；刷新不改变播放位置，也不占 seek 序号。 */
@@ -284,32 +279,13 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 设置后刷新回执按测试调度器异步投递，覆盖真实引擎的异步回执链。 */
     var callbackScope: CoroutineScope? = null
 
-    /** 最近一次刷新预留的序号；回执送达或翻转丢弃后清空。 */
-    var refreshSeekSerial: Int? = null
-        private set
-
-    /** 最近一次刷新下发时是否处于暂停态。 */
-    var lastRefreshPaused = false
-        private set
-
-    /** 翻转兜底丢弃掉的刷新序号，用于断言序号归位。 */
-    val discardedRefreshSerials = mutableListOf<Int>()
-
-    private var nextRefreshSerial = 0
-
     override fun refreshFrame() {
         refreshFrameCalls++
-        lastRefreshPaused = paused
-        val serial = ++nextRefreshSerial
-        refreshSeekSerial = serial
         if (!paused || !refreshEmitsFrame || dropRefreshReceipt) return
         val target = listener ?: return
         val token = currentLoadToken
         val scope = callbackScope
-        val deliver = {
-            refreshSeekSerial = null
-            target.onFramePresented(token)
-        }
+        val deliver = { target.onFramePresented(token) }
         if (scope != null) scope.launch { deliver() } else deliver()
     }
 

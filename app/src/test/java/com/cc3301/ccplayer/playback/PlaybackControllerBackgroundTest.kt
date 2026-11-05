@@ -74,29 +74,27 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `翻转兜底后刷新序号归位`() = runTest {
+    fun `翻转兜底后下一次重挂重新请求刷新`() = runTest {
         engine.dropRefreshReceipt = true
         val controller = pausedController()
 
         reattach(controller)
         runCurrent()
-        val serial = engine.refreshSeekSerial
-        assertTrue(engine.lastRefreshPaused)
-        assertTrue(serial != null)
         assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertEquals(1, engine.refreshFrameCalls)
 
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
 
-        // 回执没来：翻转撤销本次恢复，残留序号一并丢弃；下一次重挂重新分配。
+        // 回执没来：只做一次翻转兜底，画面保持黑底。
         assertEquals(1, engine.flipVideoOutputCalls)
-        assertEquals(listOf(serial), engine.discardedRefreshSerials)
-        assertNull(engine.refreshSeekSerial)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
 
+        // 下一次重挂重新请求一次精确刷新；刷新序号归属由引擎单测覆盖。
         controller.setRenderSurfaceAvailable(false)
         controller.setRenderSurfaceAvailable(true)
         runCurrent()
-        assertTrue(engine.refreshSeekSerial != null && engine.refreshSeekSerial != serial)
+        assertEquals(2, engine.refreshFrameCalls)
     }
 
     @Test
