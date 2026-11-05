@@ -331,6 +331,9 @@ class PlaybackController(
     /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间铺黑底。 */
     private var awaitingSurfaceFrame = false
 
+    /** 本次 Surface 重挂是否已经请求过精确刷新；重挂期间的重复回调不再发。 */
+    private var surfaceRefreshIssued = false
+
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -474,6 +477,8 @@ class PlaybackController(
             screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
+            // 下一次重挂才重新请求精确刷新。
+            surfaceRefreshIssued = false
         }
         updateLoadTimers()
         finishLoadWithoutSurface()
@@ -495,6 +500,12 @@ class PlaybackController(
         diagnostics.log {
             "Surface 重挂: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
                 "阶段: ${loadPhaseLabel(loadPhase)}"
+        }
+        // 暂停态没有新解码帧：请求播放核心按当前位置重解一帧，不改变播放位置。
+        // 每次重挂只发一次，等待超时仍走视频输出翻转兜底。
+        if (paused && !surfaceRefreshIssued) {
+            surfaceRefreshIssued = true
+            engine.refreshFrame()
         }
         surfaceRestoreJob = scope.launch {
             try {

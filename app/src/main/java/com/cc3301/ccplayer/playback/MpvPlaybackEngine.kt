@@ -396,6 +396,20 @@ class MpvPlaybackEngine(
         }
     }
 
+    /**
+     * 位置中性的精确刷新：seek 0 relative+exact 让播放核心重解当前帧，不改变播放位置。
+     * 排在同一视频输出队列里，保证新 Surface 挂上、输出重开之后才下发；
+     * 与普通跳转分开执行：不占 seek 序号、不进 seek 队列，也不参与加载看护。
+     */
+    override fun refreshFrame() {
+        if (released || attachedSurface == null) return
+        postVideoOutput {
+            // 投递后已经开始新加载时不再刷新，避免把 seek 打到新文件上。
+            if (released || !loadCoordinator.isFileLoaded) return@postVideoOutput
+            runCatching { MPVLib.command(arrayOf("seek", "0", "relative+exact")) }
+        }
+    }
+
     /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出。 */
     override fun flipVideoOutput() {
         if (attachedSurface == null || videoOutputStopped) return

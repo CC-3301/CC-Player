@@ -524,6 +524,28 @@ class PlaybackControllerSwitchGuardTest {
         assertEquals(1, failures.size)
     }
 
+    @Test
+    fun `切集期间重挂不请求精确刷新且看护照旧`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(1_000)
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+
+        // 切集期间重挂不插精确刷新，也不重置看护计时。
+        assertEquals(0, engine.refreshFrameCalls)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000 - 1)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, failures.size)
+    }
+
     private fun TestScope.controller(
         discard: suspend () -> Boolean = { true },
         diagnostics: DiagnosticsLog = NoDiagnosticsLog,

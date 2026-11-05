@@ -259,6 +259,14 @@ class FakePlaybackEngine : PlaybackEngine {
         flipVideoOutputCalls++
     }
 
+    /** 位置中性精确刷新的次数；刷新不改变播放位置，也不占 seek 序号。 */
+    var refreshFrameCalls = 0
+        private set
+
+    override fun refreshFrame() {
+        refreshFrameCalls++
+    }
+
     override fun detachSurface() {
         attachedSurface = null
     }

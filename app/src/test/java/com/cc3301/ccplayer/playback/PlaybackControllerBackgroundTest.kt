@@ -29,10 +29,12 @@ class PlaybackControllerBackgroundTest {
         reattach(controller)
         runCurrent()
 
-        // 退后台不拆画面；Surface 被回收后重建只铺黑底，没有画面可显示，也不 seek。
+        // 退后台不拆画面；Surface 被回收后重建只铺黑底，没有画面可显示；
+        // 暂停态发一次位置中性的精确刷新，不做跳转。
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertNull(controller.surfacePresentation.value.aspectRatio)
         assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(1, engine.refreshFrameCalls)
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertEquals(42_000L, controller.progress.value.positionMillis)
         assertEquals(listOf("root/ep1.mkv"), engine.startedUrls)
@@ -43,6 +45,9 @@ class PlaybackControllerBackgroundTest {
         val controller = pausedController()
 
         reattach(controller)
+        runCurrent()
+        // 暂停态先请求播放核心重解当前帧，仍无新帧再走翻转兜底。
+        assertEquals(1, engine.refreshFrameCalls)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS - 1)
         runCurrent()
         assertEquals(0, engine.flipVideoOutputCalls)
@@ -58,6 +63,58 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
         assertEquals(1, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `暂停态重挂重复回调只刷新一次`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+
+        assertEquals(1, engine.refreshFrameCalls)
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(engine.seekPositions.isEmpty())
+
+        // 刷新不算加载：不显示缓冲指示，也不改变进度。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+        assertFalse(controller.buffering.value)
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `暂停态重挂刷新后仍无新帧走翻转兜底`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        reattach(controller)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertEquals(1, engine.refreshFrameCalls)
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `播放态重挂不请求精确刷新`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        reattach(controller)
+        runCurrent()
+
+        assertEquals(0, engine.refreshFrameCalls)
+        assertEquals(PlaybackState.Playing, controller.state.value)
+        assertEquals(30_000L, controller.progress.value.positionMillis)
     }
 
     @Test
@@ -130,8 +187,9 @@ class PlaybackControllerBackgroundTest {
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
 
-        // 切集自己等新帧，重挂不叠加恢复等待。
+        // 切集自己等新帧，重挂不叠加恢复等待，也不插精确刷新。
         assertEquals(0, engine.flipVideoOutputCalls)
+        assertEquals(0, engine.refreshFrameCalls)
     }
 
     @Test

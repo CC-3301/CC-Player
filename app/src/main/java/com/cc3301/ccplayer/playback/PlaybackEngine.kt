@@ -90,6 +90,9 @@ interface PlaybackEngine {
     /** 视频输出翻转：把 VO 置空后立即恢复，用于挂载后仍等不到新帧。 */
     fun flipVideoOutput()
 
+    /** 位置中性的精确刷新：让播放核心按当前位置重解一帧，不改变播放位置。 */
+    fun refreshFrame()
+
     fun detachSurface()
 
     fun setSurfaceSize(width: Int, height: Int)
