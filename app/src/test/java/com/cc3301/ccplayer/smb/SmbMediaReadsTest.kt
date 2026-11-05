@@ -131,6 +131,24 @@ class SmbMediaReadsTest {
     }
 
     @Test
+    fun `淘汰后作废不再重复关闭连接`() = runTest {
+        val limited = SmbMediaReads(connector, SmbLocator(sources), maxSessions = 1)
+        addSource("smb://nas/a")
+        addSource("smb://nas/b")
+        connector.addFile("a", "电影.mkv", payload)
+        connector.addFile("b", "电影.mkv", payload)
+
+        val a = limited.openRead("smb://nas/a/电影.mkv", payload.size.toLong())
+        a.close()
+        limited.openRead("smb://nas/b/电影.mkv", payload.size.toLong()).use { it.readAt(0, ByteArray(4), 0, 4) }
+        assertEquals("淘汰关一次 a", listOf("a"), connector.closedShares)
+
+        // 会话已被淘汰关闭：迟到的作废不得再关同一条连接。
+        a.discard()
+        assertEquals("作废不得重复关闭连接", listOf("a"), connector.closedShares)
+    }
+
+    @Test
     fun `会话闲置两分钟后回收`() = runTest {
         var now = 1_000L
         val idle = SmbMediaReads(connector, SmbLocator(sources), clock = { now })

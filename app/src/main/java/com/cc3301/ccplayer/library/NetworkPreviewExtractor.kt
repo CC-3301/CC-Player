@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
 import com.cc3301.ccplayer.streaming.ReadKind
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,7 @@ fun interface NetworkPreviewDecoder {
 class NetworkPreviewPreparation(
     private val decodeBlock: suspend (Int) -> ByteArray?,
     private val closeBlock: suspend () -> Unit,
+    /** 缺省等同 [closeBlock]，仅测试替身可以省略；生产实现必须显式接线。 */
     private val discardBlock: suspend () -> Unit = closeBlock,
 ) {
 
@@ -45,10 +47,10 @@ class NetworkPreviewPreparation(
     suspend fun close() = closeBlock()
 
     /**
-     * 作废句柄与预读，并让读取层丢弃本次读取的会话；可重复调用。
+     * 放弃句柄与预读；取消或超时打断了在途传输读时，让读取层丢弃本次读取的会话；可重复调用。
      *
-     * 预览读取超时、取消或打开失败时用它收尾：只关句柄会把已失效的会话留在表里，
-     * 下一次重试又会复用。缺省等同 [close]。
+     * 只关句柄会把已失效的会话留在表里，下一次重试又会复用；没有在途读的放弃则保留会话，
+     * 下一次读取仍可复用。缺省等同 [close]，仅测试替身可以省略接线。
      */
     suspend fun discard() = discardBlock()
 }
@@ -59,7 +61,8 @@ class NetworkPreviewPreparation(
  * 句柄长度取自目录列表，打开时不发请求取长度；预读用另一条独立句柄，
  * 解码与预读在同一条流上交替位置会重发区间请求。预读按元数据阶段定点读发起，之后跟随解码命中。
  * 打开与预读不占解码许可，解码由 [NetworkPreviewPreparation.decode] 在许可内执行。
- * 打开失败或取消时两条句柄都会关闭；取消或超时时先关闭句柄，让阻塞中的传输读取退出。
+ * 打开失败按失败分类收尾：会话类失败作废本次会话，其它失败只关句柄；取消或超时打断在途传输读时作废会话，
+ * 否则只关句柄。两种收尾都先关闭句柄，让阻塞中的传输读取退出。
  * 读取按 [readPriority] 让出给播放读取，两条句柄的等待合计成一条诊断。打开或解码失败抛出异常，
  * 由上层保持占位图并重试。
  */
@@ -125,7 +128,7 @@ class NetworkPreviewExtractor(
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
                     },
                     discardBlock = {
-                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.discard() } }
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.abandon() } }
                     },
                 )
             }
@@ -134,13 +137,20 @@ class NetworkPreviewExtractor(
             // 关闭句柄可能阻塞在网络上：取消时也要执行，固定在 `Dispatchers.IO` 上收尾。
             withContext(NonCancellable + Dispatchers.IO) {
                 val openedWindow = window
+                val invalidates = failure.invalidatesPreviewSession()
                 if (openedWindow != null) {
-                    // 窗口已建、准备还没交出去：作废窗口，已提交的预读不再回写，两条句柄一起关。
-                    // 打开失败后重试必须换新会话，不能复用这次已打开过的连接。
-                    runCatching { openedWindow.discard() }
-                } else {
+                    // 窗口已建、准备还没交出去：会话类失败作废会话，其它失败（如预读池拒单）只关句柄。
+                    if (invalidates) {
+                        runCatching { openedWindow.discard() }
+                    } else {
+                        runCatching { openedWindow.close() }
+                    }
+                } else if (invalidates) {
                     runCatching { primary?.discard() }
                     runCatching { readAheadHandle?.discard() }
+                } else {
+                    runCatching { primary?.close() }
+                    runCatching { readAheadHandle?.close() }
                 }
             }
             throw failure
@@ -162,7 +172,7 @@ class NetworkPreviewExtractor(
      * 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。
      * 解码侧的异常先收在子协程里：关闭句柄会让阻塞读抛错，取消收尾时按取消上报，不当成抽取失败。
      */
-    private suspend fun decode(window: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? =
+    private suspend fun decode(window: PreviewByteWindow, kind: MediaKind, targetWidth: Int): ByteArray? =
         coroutineScope {
             var image: ByteArray? = null
             var failure: Throwable? = null
@@ -176,6 +186,8 @@ class NetworkPreviewExtractor(
             try {
                 decoding.await()
             } catch (cancellation: CancellationException) {
+                // 先记下取消是否打断了在途传输读，再关句柄：只有这种情况才值得作废会话。
+                window.noteReadInterrupted()
                 runCatching { window.close() }
                 throw cancellation
             }
@@ -187,6 +199,16 @@ class NetworkPreviewExtractor(
             }
             image
         }
+}
+
+/**
+ * 打开阶段该失败是否说明读取会话已失效：传输层失败才算。
+ * 文件不存在、权限不足、预读池拒单这类失败不动会话，重试仍可复用。
+ */
+private fun Throwable.invalidatesPreviewSession(): Boolean = when (this) {
+    is MediaSourceException -> failure == MediaFailure.Unreachable || failure == MediaFailure.Unknown
+    is IOException -> true
+    else -> false
 }
 
 /**

@@ -27,7 +27,8 @@ private const val CONNECT_ATTEMPTS = 2
  * SMB 预览读取：按书签连上共享后打开随机读句柄，不经过回环代理。
  *
  * 同一共享的会话复用：抽帧只为条目打开文件句柄，句柄关闭不关会话，下一条目沿用同一会话。
- * 打开或读取失败时丢弃该会话；闲置超时或超出上限时才会关闭，且只在没有句柄在用时关闭。
+ * 打开或读取失败、取消或超时打断在途传输读时丢弃该会话，连接在最后一个句柄关闭时关闭；
+ * 闲置超时或超出上限时关闭，且只在没有句柄在用时关闭。
  * 同一会话键连续打开失败到上限时作废全部会话并重建客户端，业务类失败不计入。
  */
 class SmbMediaReads(
@@ -118,8 +119,7 @@ class SmbMediaReads(
         synchronized(lock) {
             sessions.values.forEach { session ->
                 if (session.inUse == 0) {
-                    session.detached = false
-                    closeable += session.connection
+                    takeConnectionLocked(session)?.let { closeable += it }
                 } else {
                     session.detached = true
                 }
@@ -192,35 +192,34 @@ class SmbMediaReads(
     private fun release(session: Session) {
         val closeable = synchronized(lock) {
             session.inUse = (session.inUse - 1).coerceAtLeast(0)
-            if (session.inUse == 0 && session.detached) {
-                session.detached = false
-                session.dropped = true
-                session.connection
+            if (session.inUse == 0 && session.detached) takeConnectionLocked(session) else null
+        }
+        closeable?.let(::close)
+    }
+
+    /** 摘掉会话；还有句柄在用时留给最后一个句柄关闭时收尾，不在这里关。 */
+    private fun drop(key: SessionKey, session: Session) {
+        val closeable = synchronized(lock) {
+            if (sessions[key] === session) sessions.remove(key)
+            if (session.inUse == 0) {
+                takeConnectionLocked(session)
             } else {
+                session.detached = true
                 null
             }
         }
         closeable?.let(::close)
     }
 
-    /** 摘掉会话；还有句柄在用时留给最后一个句柄关闭时收尾，不在这里关。重复丢弃只关一次连接。 */
-    private fun drop(key: SessionKey, session: Session) {
-        val closeable = synchronized(lock) {
-            if (sessions[key] === session) sessions.remove(key)
-            when {
-                session.dropped -> null
-                session.inUse == 0 -> {
-                    session.dropped = true
-                    session.detached = false
-                    session.connection
-                }
-                else -> {
-                    session.detached = true
-                    null
-                }
-            }
-        }
-        closeable?.let(::close)
+    /**
+     * 交出发连接用于关闭；同一条会话只交一次。
+     * 释放、丢弃、淘汰与整体作废都走这里，避免同一条连接被重复关闭。
+     */
+    private fun takeConnectionLocked(session: Session): SmbConnection? {
+        if (session.dropped) return null
+        session.dropped = true
+        session.detached = false
+        return session.connection
     }
 
     /**
@@ -235,7 +234,7 @@ class SmbMediaReads(
                 .minByOrNull { entry -> entry.value.lastUsedAt }
                 ?: return evicted
             sessions.remove(oldest.key)
-            evicted += oldest.value.connection
+            takeConnectionLocked(oldest.value)?.let { evicted += it }
         }
         return evicted
     }

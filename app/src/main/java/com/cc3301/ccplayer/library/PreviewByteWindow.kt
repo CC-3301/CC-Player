@@ -2,6 +2,8 @@ package com.cc3301.ccplayer.library
 
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /** 字节预读窗口上限：每条目常驻内存的字节上限。 */
 internal const val PREVIEW_READ_WINDOW_BYTES = 8L * 1024 * 1024
@@ -68,6 +70,12 @@ internal class PreviewByteWindow(
 
     private var closed = false
 
+    /** 正在向底层发起的读取数：取消时据此判断是否打断了传输读。 */
+    private val activeReads = AtomicInteger()
+
+    /** 本次放弃是否打断了在途传输读；只有这种情况才作废会话。 */
+    private val readInterrupted = AtomicBoolean()
+
     override val size: Long get() = origin.size
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
@@ -102,27 +110,54 @@ internal class PreviewByteWindow(
     }
 
     override fun close() {
-        synchronized(lock) {
-            if (closed) return
-            closed = true
-            queued.clear()
-            pending.clear()
-            chunks.clear()
-            residentBytes = 0
-            lock.notifyAll()
-        }
+        if (!markClosed()) return
         runCatching { origin.close() }
         if (aheadSource !== origin) runCatching { aheadSource.close() }
     }
 
     /**
-     * 作废窗口：关闭两条句柄，并让底层丢弃已失效的读取会话。
-     * 超时、取消或打开失败后用它收尾，下一次读取不会复用该会话；可重复调用。
+     * 作废窗口：先切关闭状态，再作废底层会话。
+     *
+     * 不能先 [close]：close 只交还会话占用、不摘会话，两步之间同键打开会拿到即将作废的会话。
+     * 打开阶段已知会话失效时用它收尾；可重复调用。
      */
     override fun discard() {
-        close()
+        markClosed()
         origin.discard()
         if (aheadSource !== origin) aheadSource.discard()
+    }
+
+    /**
+     * 放弃窗口：切关闭状态并关闭句柄；只有取消或超时打断了在途传输读时才作废会话。
+     *
+     * 排队等许可、解码已完成等没有在途读的放弃不动会话，下一次读取仍可复用，不白付一次握手。
+     */
+    fun abandon() {
+        markClosed()
+        if (!readInterrupted.get()) {
+            runCatching { origin.close() }
+            if (aheadSource !== origin) runCatching { aheadSource.close() }
+            return
+        }
+        origin.discard()
+        if (aheadSource !== origin) aheadSource.discard()
+    }
+
+    /** 取消发生时记下是否打断了在途传输读；必须在关闭句柄之前调用。 */
+    fun noteReadInterrupted() {
+        if (activeReads.get() > 0) readInterrupted.set(true)
+    }
+
+    /** 切到关闭状态并清掉窗口内容；已关闭时返回 false。 */
+    private fun markClosed(): Boolean = synchronized(lock) {
+        if (closed) return false
+        closed = true
+        queued.clear()
+        pending.clear()
+        chunks.clear()
+        residentBytes = 0
+        lock.notifyAll()
+        true
     }
 
     /**
@@ -176,7 +211,7 @@ internal class PreviewByteWindow(
         val bytes = ByteArray(limit)
         var read = 0
         while (read < limit) {
-            val count = origin.readAt(start + read, bytes, read, limit - read)
+            val count = readSource(origin, start + read, bytes, read, limit - read)
             if (count <= 0) break
             read += count
         }
@@ -240,7 +275,7 @@ internal class PreviewByteWindow(
             val bytes = ByteArray((to - chunk).toInt())
             var read = 0
             while (read < bytes.size) {
-                val count = aheadSource.readAt(chunk + read, bytes, read, bytes.size - read)
+                val count = readSource(aheadSource, chunk + read, bytes, read, bytes.size - read)
                 if (count <= 0) break
                 read += count
             }
@@ -267,6 +302,22 @@ internal class PreviewByteWindow(
             if (entry.key == start) continue
             iterator.remove()
             residentBytes -= entry.value.size
+        }
+    }
+
+    /** 向底层读一次，并记下读取在途状态；取消时用它判断是否打断传输读。 */
+    private fun readSource(
+        source: ByteSource,
+        position: Long,
+        buffer: ByteArray,
+        offset: Int,
+        length: Int,
+    ): Int {
+        activeReads.incrementAndGet()
+        return try {
+            source.readAt(position, buffer, offset, length)
+        } finally {
+            activeReads.decrementAndGet()
         }
     }
 

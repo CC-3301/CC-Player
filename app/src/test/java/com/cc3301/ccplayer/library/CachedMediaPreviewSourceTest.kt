@@ -907,7 +907,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `解码超时作废会话，下一次重试重新打开`() = runTest {
+    fun `解码超时作废会话，下一次请求重新建连`() = runTest {
         val extractor = DiscardRecordingExtractor(decodeDelayMillis = 60_000)
         val source = CachedMediaPreviewSource(
             extractor = extractor,
@@ -915,15 +915,24 @@ class CachedMediaPreviewSourceTest {
             backgroundScope = unconfinedBackgroundScope,
         )
 
-        val preview = source.preview(network("超时.mkv"))
+        val first = source.visiblePreview(network("超时.mkv"), 0)
 
-        assertNull(preview.image)
-        assertEquals("超时后作废会话", 1, extractor.discarded)
+        assertNull(first.image)
+        assertEquals("超时走作废收尾", 1, extractor.discarded)
         assertEquals("句柄仍要关闭", 1, extractor.closed)
+        assertEquals(1, extractor.connections)
+
+        // 超时放弃的会话已作废：下一次请求重新准备并新建连。
+        extractor.decodeDelayMillis = 0
+        val retry = source.visiblePreview(network("超时.mkv"), 0)
+
+        assertNotNull(retry.image)
+        assertEquals("下一次请求重新准备", 2, extractor.prepares)
+        assertEquals("上一次的会话已作废，下一次新建连", 2, extractor.connections)
     }
 
     @Test
-    fun `取消在途预览读取后作废会话`() = runTest {
+    fun `取消在途预览读取时走放弃收尾`() = runTest {
         val extractor = DiscardRecordingExtractor(decodeGate = CompletableDeferred())
         val source = CachedMediaPreviewSource(
             extractor = extractor,
@@ -937,7 +946,7 @@ class CachedMediaPreviewSourceTest {
 
         request.cancelAndJoin()
         runCurrent()
-        assertEquals("取消后作废会话", 1, extractor.discarded)
+        assertEquals("取消后交给放弃收尾", 1, extractor.discarded)
     }
 
     @Test
@@ -2167,13 +2176,17 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
 
 /** 记录句柄的关闭与作废：超时、取消必须走作废，不能只关句柄。 */
 private class DiscardRecordingExtractor(
-    private val decodeDelayMillis: Long = 0,
+    var decodeDelayMillis: Long = 0,
     private val decodeGate: CompletableDeferred<Unit>? = null,
 ) : MediaPreviewExtractor {
 
     var prepares = 0
+    var connections = 0
     var closed = 0
     var discarded = 0
+
+    /** 假会话是否还活着：作废后下一次准备要重新建连。 */
+    private var live = false
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = null
 
@@ -2181,6 +2194,10 @@ private class DiscardRecordingExtractor(
 
     override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
         prepares++
+        if (!live) {
+            live = true
+            connections++
+        }
         return NetworkPreviewPreparation(
             decodeBlock = {
                 val gate = decodeGate
@@ -2189,7 +2206,10 @@ private class DiscardRecordingExtractor(
             },
             closeBlock = { closed++ },
             discardBlock = {
-                discarded++
+                if (live) {
+                    live = false
+                    discarded++
+                }
                 closed++
             },
         )
