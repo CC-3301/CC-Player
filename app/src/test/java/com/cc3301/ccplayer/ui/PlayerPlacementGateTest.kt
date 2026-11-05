@@ -10,20 +10,18 @@ import org.junit.Test
 class PlayerPlacementGateTest {
 
     @Test
-    fun `比例先到首帧后到时仍等方向，对齐后才摆位并撤黑`() {
-        // 比例先到，首帧还没到：不摆位，也还没开始等（黑底由没画面负责）。
+    fun `比例先到首帧后到时仍等方向，对齐后才撤黑`() {
+        // 比例先到，首帧还没到：还没开始等（黑底由没画面负责）。
         var gate = PlayerPlacementGate().withFrame(
             ratioKnown = true,
             showsPicture = false,
             rotationPending = true,
         )
         assertFalse(gate.awaitsOrientation(ratioKnown = true, showsPicture = false, rotationPending = true))
-        assertFalse(gate.placesPicture(ratioKnown = true, rotationPending = true))
 
-        // 首帧后到：黑底继续盖着，视频区先不按比例摆。
+        // 首帧后到：黑底继续盖着。
         gate = gate.withFrame(ratioKnown = true, showsPicture = true, rotationPending = true)
         assertTrue(gate.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true))
-        assertFalse(gate.placesPicture(ratioKnown = true, rotationPending = true))
         assertTrue(
             showPlayerBlackLayer(
                 showsPicture = true,
@@ -33,11 +31,10 @@ class PlayerPlacementGateTest {
             ),
         )
 
-        // 方向对齐：同一次里摆位并撤黑。
+        // 方向对齐：同一次里撤黑。
         val aligned = gate.withFrame(ratioKnown = true, showsPicture = true, rotationPending = false)
         assertTrue(aligned.settled)
         assertFalse(aligned.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = false))
-        assertTrue(aligned.placesPicture(ratioKnown = true, rotationPending = false))
         assertFalse(
             showPlayerBlackLayer(
                 showsPicture = true,
@@ -59,10 +56,9 @@ class PlayerPlacementGateTest {
             .withFrame(ratioKnown = true, showsPicture = true, rotationPending = false)
 
         assertTrue(settled.settled)
-        // 方向又摆回去：仍然按比例摆位，不再等、不再盖黑。
+        // 方向又摆回去：不再等、不再盖黑。
         val wobbled = settled.withFrame(ratioKnown = true, showsPicture = true, rotationPending = true)
         assertFalse(wobbled.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true))
-        assertTrue(wobbled.placesPicture(ratioKnown = true, rotationPending = true))
     }
 
     @Test
@@ -74,7 +70,6 @@ class PlayerPlacementGateTest {
         assertEquals(PlayerPlacementPhase.Waiting, waiting.phase)
         // 仍按“还在等”处理：计时键不翻，2 秒不会从这一刻重新开始。
         assertTrue(waiting.awaitsOrientation(ratioKnown = true, showsPicture = false, rotationPending = true))
-        assertFalse(waiting.placesPicture(ratioKnown = true, rotationPending = true))
     }
 
     @Test
@@ -95,12 +90,11 @@ class PlayerPlacementGateTest {
         )
 
         assertFalse(portraitOnLandscape.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = false))
-        assertTrue(portraitOnLandscape.placesPicture(ratioKnown = true, rotationPending = false))
         assertTrue(portraitOnLandscape.settled)
     }
 
     @Test
-    fun `比例未知时不摆位也不等方向`() {
+    fun `比例未知时不等方向`() {
         val gate = PlayerPlacementGate().withFrame(
             ratioKnown = false,
             showsPicture = true,
@@ -108,7 +102,6 @@ class PlayerPlacementGateTest {
         )
 
         assertFalse(gate.awaitsOrientation(ratioKnown = false, showsPicture = true, rotationPending = false))
-        assertFalse(gate.placesPicture(ratioKnown = false, rotationPending = false))
         assertFalse(gate.settled)
     }
 
@@ -121,7 +114,6 @@ class PlayerPlacementGateTest {
         )
 
         assertFalse(settled.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true))
-        assertTrue(settled.placesPicture(ratioKnown = true, rotationPending = true))
     }
 
     @Test
