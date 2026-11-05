@@ -47,7 +47,7 @@ class PlaybackController(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     /** 单调时钟；测试注入虚拟时间，生产用设备开机时间。 */
     private val nowMillis: () -> Long = { SystemClock.elapsedRealtime() },
-    /** 切集重试前丢弃已建立的字节源，返回是否真的丢弃了；字节源由界面侧持有，绑定后注入。 */
+    /** 读失败重发前丢弃已建立的字节源，返回是否真的丢弃了；字节源由界面侧持有，绑定后注入。 */
     discardByteSources: suspend () -> Boolean = { false },
 ) : PlaybackEngine.Listener {
 
@@ -286,13 +286,13 @@ class PlaybackController(
      */
     private val guardElapsed = RunningDuration(nowMillis)
 
-    /** 加载看护计时：先到 5 秒重试，重试后再到 10 秒判失败。 */
+    /** 加载看护计时：到 10 秒仍无进展就判失败；重发由读失败驱动，不按时间触发。 */
     private var guardJob: Job? = null
 
-    /** 当前目标是否已重试；每个目标最多重试一次，目标前移后重新起算。 */
+    /** 本轮是否已重发过；每个目标最多重发一次，目标前移后重新起算。 */
     private var guardRetried = false
 
-    /** 重试发生时的累计运行时长；只用于日志的事件时间线。 */
+    /** 重发发生时的累计运行时长；只用于日志的事件时间线。 */
     private var loadRetriedAtMillis: Long? = null
 
     /** 本次加载计时被挂起的次数；写进失败行，用来解释耗时与判据的差。 */
@@ -575,7 +575,7 @@ class PlaybackController(
         restartFromStartAfterRestore = false
         updateState(PlaybackState.Loading)
         beginBufferingIndicator()
-        // 首次打开与切集共用同一套看护：5 秒无进展重试，10 秒判失败。
+        // 首次打开与切集共用同一套看护：读失败重发一次，10 秒无进展判失败。
         beginLoadGuard(newSwitch = true)
         resetSeekForNewLoad()
         expectedLoadToken = engine.start(media.playbackLocation, paused = false)
@@ -660,7 +660,7 @@ class PlaybackController(
         restoreAtEndOfEpisode = false
         switchPlaybackStarted = false
         updateState(PlaybackState.Loading)
-        // 计时以最近一次目标重新起算：目标前移也从头给 5 秒重试与 10 秒判失败。
+        // 计时以最近一次目标重新起算：目标前移也从头给一次读失败重发与 10 秒判失败。
         beginLoadGuard(newSwitch)
     }
 
@@ -1342,6 +1342,11 @@ class PlaybackController(
     override fun onPlaybackFailed(loadToken: Int, errorText: String?) {
         // 取消或重定向后，旧目标迟到的失败不能改变当前阶段，也不提示。
         if (loadToken != expectedLoadToken) return
+        // 加载阶段的读失败先重发一次：以同一目标、同一位置重来，不改暂停意图、目标索引与进度意图。
+        if (active && loadGuardPhase() && !guardRetried) {
+            retryLoad()
+            return
+        }
         handleLoadFailure(errorText = errorText)
     }
 
@@ -1562,10 +1567,6 @@ class PlaybackController(
         armLoadGuard()
     }
 
-    /** 下一次看护到点要走的累计运行时长：先 5 秒重试，重试后 10 秒判失败；三个阶段同一对阈值。 */
-    private fun guardThresholdMillis(): Long =
-        if (guardRetried) LOAD_FAIL_DELAY_MILLIS else LOAD_RETRY_DELAY_MILLIS
-
     /**
      * 按累计运行时长排下一次看护。到点时按同一累计值再判一次：
      * 挂起期间流逝的时间不会进入判据，也不存在用墙上时钟重算剩余。
@@ -1575,7 +1576,7 @@ class PlaybackController(
         if (!active || !loadGuardPhase()) return
         if (!loadTimingAllowed() || hasLoadProgress()) return
         guardElapsed.start()
-        val waitMillis = guardThresholdMillis() - guardElapsed.elapsedMillis()
+        val waitMillis = LOAD_FAIL_DELAY_MILLIS - guardElapsed.elapsedMillis()
         if (waitMillis <= 0L) {
             onLoadGuardTick()
             return
@@ -1593,21 +1594,21 @@ class PlaybackController(
         }
     }
 
-    /** 看护到点：累计时长没走到阈值就重排，走到了才重试或判失败。 */
+    /** 看护到点：累计时长没走到 10 秒就重排，走到了才判失败。 */
     private fun onLoadGuardTick() {
         if (!active || !loadGuardPhase()) return
         if (!loadTimingAllowed() || hasLoadProgress()) return
-        if (guardElapsed.elapsedMillis() < guardThresholdMillis()) {
+        if (guardElapsed.elapsedMillis() < LOAD_FAIL_DELAY_MILLIS) {
             armLoadGuard()
             return
         }
-        if (guardRetried) failLoadWithoutProgress() else retryLoad()
+        failLoadWithoutProgress()
     }
 
     /**
-     * 5 秒仍无进展：丢弃字节源后以同一目标重发加载，只重试一次；
+     * 读失败后重发：丢弃字节源，以同一目标、同一位置重发加载，只重发一次；
      * 首次打开、切集与恢复原片同一条路径。暂停意图、目标索引与进度意图都不动；
-     * 判失败仍从这次目标开始算。
+     * 判失败仍从这次目标开始算，不因重发顺延。
      */
     private fun retryLoad() {
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return
@@ -1626,14 +1627,14 @@ class PlaybackController(
             } else {
                 loadDiscardSkipped = true
             }
-            // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重试作废。
+            // 丢弃期间目标被前移、加载已结束或已被取消：这一轮重发作废。
             if (!active || loadPhase != phase || !guardRetried) return@launch
             if (loadTargetIndex != targetIndex) return@launch
             // 丢弃期间刚到的新帧或位置前进不能被重发冲掉。
             if (hasLoadProgress()) return@launch
             reloadTarget(media, phase)
         }
-        // 重试不重启计时：判失败仍是同一条累计时长上的 10 秒。
+        // 重发不重启计时：判失败仍是同一条累计时长上的 10 秒。
         armLoadGuard()
     }
 
@@ -1837,7 +1838,7 @@ class PlaybackController(
         _restoring.value = true
         // 进入恢复阶段后再派生：恢复期的黑底与沿用旧帧按这一阶段的规则判定。
         settlePresentation()
-        // 恢复原片也走加载看护：5 秒无进展重试一次，10 秒判失败。
+        // 恢复原片也走加载看护：读失败重发一次，10 秒无进展判失败。
         beginLoadGuard(newSwitch = true)
         engine.pause()
         // 从原位置直接打开，恢复后的首帧就是应显示的画面。
@@ -2335,10 +2336,7 @@ class PlaybackController(
         /** 切集结束、状态已就绪却还没上屏时，等新帧的总窗口。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
 
-        /** 加载开始 5 秒仍无进展时重试一次；首次打开、切集与恢复原片共用。 */
-        const val LOAD_RETRY_DELAY_MILLIS = 5_000L
-
-        /** 加载从最近一次目标开始算的判失败时长；重试不顺延，三个阶段共用。 */
+        /** 加载从最近一次目标开始算的判失败时长；重发不顺延，三个阶段共用。 */
         const val LOAD_FAIL_DELAY_MILLIS = 10_000L
 
         private const val NO_MEDIA = -1

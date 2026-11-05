@@ -446,6 +446,8 @@ class PlaybackControllerSeekPreviewTest {
         val controller = playingController()
         controller.next()
         engine.reportPlaybackFailed()
+        runCurrent()
+        engine.reportPlaybackFailed()
         assertTrue(controller.restoring.value)
 
         controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)

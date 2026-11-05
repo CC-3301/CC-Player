@@ -19,7 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 切集看护：5 秒重试、10 秒判失败，以及唯一的累计运行时长计时。
+ * 切集看护：读失败重发一次、10 秒无进展判失败，以及唯一的累计运行时长计时。
  * 切集期间只有这一套计时，后台与 Surface 分离的时间不计入任何判据。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -65,27 +65,23 @@ class PlaybackControllerSwitchGuardTest {
         controller.next()
         engine.reportFileLoaded()
 
-        // 没有就绪兜底：到 4 秒仍在等首帧，也不重试。
-        advanceTimeBy(4_000)
+        // 没有进展也不按时间重发：到 9 秒仍在等首帧，一次都不重发。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1)
         runCurrent()
         assertTrue(controller.switching.value)
         assertEquals(0, engine.discardInFlightCalls)
-
-        // 5 秒重试一次。
-        advanceTimeBy(1_000)
-        runCurrent()
-        assertEquals(1, engine.discardInFlightCalls)
+        assertEquals(1, engine.startedUrls.count { it == "root/ep2.mkv" })
 
         // 10 秒判失败，回退原片一次。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 5_000)
+        advanceTimeBy(1)
         runCurrent()
         assertEquals(1, failures.size)
-        assertEquals(2, engine.startedUrls.count { it == "root/ep2.mkv" })
+        assertEquals(1, engine.startedUrls.count { it == "root/ep2.mkv" })
 
         // 再等 10 秒：切集期间不参与的无帧窗口没有第二次判失败，失败的目标也不再重发。
         advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
-        assertEquals(2, engine.startedUrls.count { it == "root/ep2.mkv" })
+        assertEquals(1, engine.startedUrls.count { it == "root/ep2.mkv" })
 
         // 回退原片自己也是同一条看护：加载没回来就到点判失败，没有第三层可退；
         // 同一次切集只提示一次「播放失败」，恢复再失败不再重复提示。
@@ -94,7 +90,7 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `a switch without progress retries exactly once`() = runTest {
+    fun `a read failure during a switch resends the same target once`() = runTest {
         var discards = 0
         val controller = controller(
             discard = {
@@ -110,23 +106,24 @@ class PlaybackControllerSwitchGuardTest {
         engine.reportFileLoaded()
         assertEquals(1, engine.startedUrls.count { it == "root/ep2.mkv" })
 
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 播放核心因读失败结束本轮：丢弃字节源后以同一目标重发一次，不换目标索引。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
-        // 重试：丢弃字节源后以同一目标重发一次加载，不换目标索引。
         assertEquals(1, discards)
         assertEquals(1, engine.discardInFlightCalls)
         assertEquals(2, engine.startedUrls.count { it == "root/ep2.mkv" })
         assertEquals(1, controller.currentIndex.value)
+        assertTrue(controller.switching.value)
         assertTrue(failures.isEmpty())
 
-        advanceTimeBy(
-            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
-        )
+        // 重发这一轮也读失败：直接按切集失败收尾，不再第三次加载。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
-        // 第二次到点直接判失败，不再重试。
         assertEquals(1, discards)
         assertEquals(2, engine.startedUrls.count { it == "root/ep2.mkv" })
         assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
     }
 
     @Test
@@ -194,7 +191,7 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `a restore without progress retries once and fails at ten seconds`() = runTest {
+    fun `a restore read failure resends once and a second failure ends the session`() = runTest {
         var discards = 0
         val controller = controller(
             discard = {
@@ -216,17 +213,17 @@ class PlaybackControllerSwitchGuardTest {
         val restoreStarts = engine.startedUrls.count { it == "root/ep1.mkv" }
         val discardsBefore = discards
 
-        // 恢复原片的加载一直没回来：5 秒到点重试一次，仍是原位置。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 恢复原片的读失败：以原位置重发一次。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(restoreStarts + 1, engine.startedUrls.count { it == "root/ep1.mkv" })
         assertEquals(discardsBefore + 1, discards)
         assertEquals(40_000L, engine.startedPositions.last())
         assertEquals(reported, failures.size)
 
-        // 10 秒仍无进展：直接落到既有失败收尾，没有第三层可退。
+        // 重发也失败：直接落到既有失败收尾，没有第三层可退。
         // 同一次切集只提示一次「播放失败」，恢复再失败不再重复提示。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(reported, failures.size)
         assertEquals(PlaybackState.Ended, controller.state.value)
@@ -275,8 +272,8 @@ class PlaybackControllerSwitchGuardTest {
         assertTrue(controller.restoring.value)
         val reportedByFirstFailure = failures.size
 
-        // 恢复原片走到 4 秒时再切一次：新加载重新起算 5 秒重试与 10 秒判失败。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1_000)
+        // 恢复原片走到 4 秒时再切一次：新加载重新起算重发预算与 10 秒判失败。
+        advanceTimeBy(4_000)
         runCurrent()
         controller.next()
         runCurrent()
@@ -305,23 +302,23 @@ class PlaybackControllerSwitchGuardTest {
         val failures = collectFailures(controller)
 
         controller.next()
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(1, discards)
 
-        // 重试后再前移目标：计时与重试预算都以新目标重新起算，新目标也获得一次重试。
+        // 重发后再前移目标：计时与重发预算都以新目标重新起算，新目标也获得一次重发。
         advanceTimeBy(1_000)
         controller.next()
         runCurrent()
         assertEquals(2, controller.currentIndex.value)
 
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(2, discards)
         assertTrue(failures.isEmpty())
 
-        // 新目标到 10 秒才判失败，重试上限仍是一次。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 新目标第二次读失败才判失败，重发上限仍是一次。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(2, discards)
         assertEquals(1, failures.size)
@@ -340,22 +337,20 @@ class PlaybackControllerSwitchGuardTest {
         open(controller, "ep1.mkv")
         assertEquals(1, engine.startedUrls.size)
 
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS - 1)
+        // 时间本身不触发重发：到 4 秒仍只有第一次加载。
+        advanceTimeBy(4_000)
         runCurrent()
-        assertEquals(PlaybackState.Loading, controller.state.value)
         assertEquals(1, engine.startedUrls.size)
 
-        // 5 秒无进展：丢掉字节源后以同一目标重发一次。
-        advanceTimeBy(1)
+        // 读到失败：丢掉字节源后以同一目标重发一次。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(1, discards)
         assertEquals(2, engine.startedUrls.size)
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        // 10 秒仍无进展：按首次打开的失败收尾，不在加载中干等。
-        advanceTimeBy(
-            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
-        )
+        // 重发也失败：按首次打开的失败收尾，不在加载中干等。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         assertEquals(1, failures.size)
         assertEquals(PlaybackState.Ended, controller.state.value)

@@ -152,6 +152,9 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
         engine.reportPlaybackEnded()
+        // 第一次读失败先重发一次，重发也失败才回退原片。
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         // 片尾自动恢复：黑底保持到用户操作。
@@ -248,6 +251,9 @@ class PlaybackControllerBackgroundTest {
         val controller = playingController()
         engine.reportPositionChanged(600_000, 600_000)
         engine.reportPlaybackEnded()
+        // 第一次读失败先重发一次，重发也失败才回退原片。
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
         engine.reportFileLoaded()
         // 片尾自动恢复：黑底保持到用户操作。

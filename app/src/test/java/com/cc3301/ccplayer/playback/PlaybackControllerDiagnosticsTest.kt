@@ -157,8 +157,12 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportMediaLoaded()
 
         controller.next()
+        // 第一次读失败先重发一次，失败行记的是重发后的令牌。
+        engine.reportPlaybackFailed("读取超时")
+        runCurrent()
         val token = engine.currentLoadToken
         engine.reportPlaybackFailed("无法打开文件")
+        runCurrent()
 
         val text = sink.lines.joinToString("\n")
         assertTrue(text.contains("加载失败: ep2.mkv"))
@@ -181,6 +185,8 @@ class PlaybackControllerDiagnosticsTest {
         )
         open(controller)
 
+        // 第一次读失败先重发一次，重发也失败才产生失败行。
+        engine.reportPlaybackFailed("读取超时")
         engine.reportPlaybackFailed("解码失败")
 
         val text = sink.lines.joinToString("\n")
@@ -211,20 +217,22 @@ class PlaybackControllerDiagnosticsTest {
         val watchdogSink = MemoryDiagnosticsSink()
         val watchdogController = controller(diagnostics(watchdogSink, enabled = true))
         open(watchdogController)
-        // 5 秒重试会重发一次加载，失败行记的是重试后的令牌。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 读失败会重发一次加载，失败行记的是重发后的令牌。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         val watchdogToken = engine.currentLoadToken
-        advanceTimeBy(
-            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
-        )
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         val coreSink = MemoryDiagnosticsSink()
         val coreController = controller(diagnostics(coreSink, enabled = true))
         open(coreController)
+        // 先读失败重发一次，失败行记的是重发后的令牌。
+        engine.reportPlaybackFailed("读取超时")
+        runCurrent()
         val coreToken = engine.currentLoadToken
         engine.reportPlaybackFailed("无法打开文件")
+        runCurrent()
 
         val watchdogLine = watchdogSink.lines.single { it.contains("失败来源:") }
         val coreLine = coreSink.lines.single { it.contains("失败来源:") }
@@ -250,7 +258,11 @@ class PlaybackControllerDiagnosticsTest {
         engine.reportMediaLoaded()
 
         controller.next()
+        // 第一次读失败先重发一次，重发也失败才产生失败行。
+        engine.reportPlaybackFailed("读取超时")
+        runCurrent()
         engine.reportPlaybackFailed("   ")
+        runCurrent()
 
         assertTrue(sink.lines.any { it.contains("来源: 播放核心报错（无错误文本）") })
     }
@@ -301,6 +313,9 @@ class PlaybackControllerDiagnosticsTest {
         // 切集期间先按暂停、再按继续：失败回退保持暂停时这个「继续」被丢弃。
         controller.togglePlayPause()
         controller.togglePlayPause()
+        // 第一次读失败先重发一次，重发也失败才回退。
+        engine.reportPlaybackFailed()
+        runCurrent()
         engine.reportPlaybackFailed()
 
         assertTrue(sink.lines.any { it.contains("切集回退保持暂停: 丢弃继续播放的意图") })
@@ -344,13 +359,11 @@ class PlaybackControllerDiagnosticsTest {
 
         controller.next()
         engine.reportFileLoaded()
-        // 5 秒重试重发过加载：失败行记的是重试后的令牌，回退原片又会再换一次。
-        advanceTimeBy(PlaybackController.LOAD_RETRY_DELAY_MILLIS)
+        // 读失败重发过加载：失败行记的是重发后的令牌，回退原片又会再换一次。
+        engine.reportPlaybackFailed("读取超时")
         runCurrent()
         val token = engine.currentLoadToken
-        advanceTimeBy(
-            PlaybackController.LOAD_FAIL_DELAY_MILLIS - PlaybackController.LOAD_RETRY_DELAY_MILLIS,
-        )
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
 
         val text = sink.lines.joinToString("\n")

@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.webdav
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
+import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
@@ -18,7 +20,8 @@ import kotlinx.coroutines.runBlocking
 class WebDavStreams(
     private val transport: WebDavTransport,
     private val locator: WebDavLocator,
-    private val server: LoopbackStreamServer = LoopbackStreamServer(),
+    diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
     /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
