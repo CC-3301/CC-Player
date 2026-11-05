@@ -211,6 +211,7 @@ class NetworkPreviewExtractorTest {
     @Test
     fun `预读句柄打开被取消时关闭已经打开的句柄`() = runTest {
         var primaryClosed = false
+        var primaryDiscarded = false
         var opens = 0
         val reads = object : NetworkMediaReads {
             override suspend fun openRead(location: String, size: Long): ByteSource {
@@ -223,6 +224,11 @@ class NetworkPreviewExtractorTest {
 
                         override fun close() {
                             primaryClosed = true
+                        }
+
+                        override fun discard() {
+                            primaryDiscarded = true
+                            close()
                         }
                     }
                 }
@@ -241,6 +247,7 @@ class NetworkPreviewExtractorTest {
             // 预期路径。
         }
         assertTrue("已打开的第一条句柄必须关闭", primaryClosed)
+        assertTrue("打开被取消要作废已打开的会话", primaryDiscarded)
     }
 
     @Test
