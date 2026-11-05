@@ -487,8 +487,9 @@ class PlaybackController(
 
     /**
      * Surface 重挂后等播放核心的首个新帧。
-     * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置）；
-     * 播放态等播放核心自行重解码。等待超时只翻转一次视频输出，不 seek、不改播放位置。
+     * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
+     * 以这次刷新的 seek 完成为撤黑判据（ADR-0026）；播放态只认播放位置前进。
+     * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
     private fun beginSurfaceRestore() {
         cancelSurfaceRestore()
@@ -1204,11 +1205,7 @@ class PlaybackController(
         // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
         if (targetUrl != null && targetUrl != loadTargetUrl) return
         val phase = loadPhase
-        if (phase == LoadPhase.None) {
-            // Surface 重挂等待期：播放核心回报新帧可显示，按上屏收尾并撤黑。
-            if (awaitingSurfaceFrame) confirmFrame(loadToken)
-            return
-        }
+        if (phase == LoadPhase.None) return
         // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
         // 撤帧只发生在确认接管的 [handleReadySignal] 强信号与 [confirmFrame]。
         switchOutputLive = true

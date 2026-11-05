@@ -26,6 +26,8 @@ class PlaybackControllerBackgroundTest {
         engine.reportPositionChanged(42_000, 600_000)
 
         reattach(controller)
+        // 回执按引擎事件链异步到达：刷新刚下发时画面还没撤黑。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
         runCurrent()
 
         // 暂停态发一次位置中性刷新，播放核心补报帧上屏后撤黑。
@@ -92,25 +94,6 @@ class PlaybackControllerBackgroundTest {
         assertFalse(controller.buffering.value)
         assertEquals(0, engine.flipVideoOutputCalls)
         assertEquals(42_000L, controller.progress.value.positionMillis)
-    }
-
-    @Test
-    fun `重挂等待期收到首帧信号也撤黑`() = runTest {
-        engine.refreshEmitsFrame = false
-        val controller = pausedController()
-        engine.reportPositionChanged(42_000, 600_000)
-
-        reattach(controller)
-        runCurrent()
-        assertFalse(controller.surfacePresentation.value.showsPicture)
-
-        engine.reportVideoReconfigured()
-        runCurrent()
-        assertTrue(controller.surfacePresentation.value.showsPicture)
-
-        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
-        runCurrent()
-        assertEquals(0, engine.flipVideoOutputCalls)
     }
 
     @Test
@@ -349,13 +332,15 @@ class PlaybackControllerBackgroundTest {
         assertFalse(controller.surfacePresentation.value.showsPicture)
     }
 
-    private fun TestScope.controller(): PlaybackController =
-        PlaybackController(
+    private fun TestScope.controller(): PlaybackController {
+        engine.callbackScope = this
+        return PlaybackController(
             engine,
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
         )
+    }
 
     private fun TestScope.playingController(): PlaybackController {
         val controller = controller()

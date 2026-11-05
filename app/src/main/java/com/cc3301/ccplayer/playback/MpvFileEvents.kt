@@ -326,11 +326,17 @@ internal class MpvReadySignals {
         pendingSeeks.remove(serial)
     }
 
-    /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号。 */
+    /** MPV_EVENT_SEEK 到达：后续 ready 改用这个 seek 的序号；返回本次消费的序号。 */
     @Synchronized
-    fun onSeekEvent() {
-        pendingSeeks.removeFirstOrNull()?.let { accepted = it }
+    fun onSeekEvent(): Int? {
+        val consumed = pendingSeeks.removeFirstOrNull()
+        if (consumed != null) accepted = consumed
+        return consumed
     }
+
+    /** 当前 ready 使用的序号；0 表示本代还没有 SEEK 事件。 */
+    @Synchronized
+    fun acceptedSerial(): Int = accepted
 
     /** 本次 ready 的序号；同一序号内同类信号重复时返回 null。 */
     @Synchronized
@@ -446,9 +452,11 @@ internal class MpvLoadCoordinator(
     }
 
     @Synchronized
-    fun onSeekEvent() {
-        readySignals.onSeekEvent()
-    }
+    fun onSeekEvent(): Int? = readySignals.onSeekEvent()
+
+    /** 当前 ready 使用的序号；刷新回执按它认自己那一跳。 */
+    @Synchronized
+    fun acceptedSeekSerial(): Int = readySignals.acceptedSerial()
 
     /** 自然播完时返回产生它的加载令牌；旧代际或重复上报返回 null。 */
     @Synchronized

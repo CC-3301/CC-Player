@@ -286,6 +286,55 @@ class MpvFileEventsTest {
     }
 
     @Test
+    fun `a refresh serial is consumed by its own seek event`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.onFileLoaded("root/ep1.mkv")
+
+        val refresh = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(refresh)
+
+        assertEquals(refresh, coordinator.onSeekEvent())
+        assertEquals(refresh, coordinator.acceptedSeekSerial())
+    }
+
+    @Test
+    fun `refresh and real seek serials are consumed in command order`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.onFileLoaded("root/ep1.mkv")
+
+        val refresh = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(refresh)
+        val real = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(real)
+
+        val refreshSeek = MpvRefreshSeek()
+        refreshSeek.begin(refresh)
+        // 刷新自己的 SEEK 只归刷新；真实 seek 的 SEEK 照常推进 accepted 序号。
+        assertTrue(refreshSeek.onSeekConsumed(coordinator.onSeekEvent()))
+        assertFalse(refreshSeek.onSeekConsumed(coordinator.onSeekEvent()))
+        assertEquals(real, coordinator.acceptedSeekSerial())
+    }
+
+    @Test
+    fun `discarding an unseen refresh serial keeps later seeks aligned`() {
+        val coordinator = MpvLoadCoordinator()
+        coordinator.start("root/ep1.mkv")
+        coordinator.onFileLoaded("root/ep1.mkv")
+
+        val refresh = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(refresh)
+        // 刷新没有等到 SEEK：丢弃它的序号，后面真实 seek 的序号仍按顺序对齐。
+        coordinator.discardSeekSerial(refresh)
+
+        val real = coordinator.reserveSeekSerial()
+        coordinator.onSeekIssued(real)
+        assertEquals(real, coordinator.onSeekEvent())
+        assertEquals(real, coordinator.acceptedSeekSerial())
+    }
+
+    @Test
     fun `a new load clears pending seeks and the accepted serial`() {
         val signals = MpvReadySignals()
         signals.onStart()

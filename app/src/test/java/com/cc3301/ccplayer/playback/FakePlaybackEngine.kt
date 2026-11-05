@@ -1,6 +1,8 @@
 package com.cc3301.ccplayer.playback
 
 import android.view.Surface
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /**
  * 假播放引擎：记录控制层下发的指令，并让测试自己触发引擎回调。
@@ -266,9 +268,16 @@ class FakePlaybackEngine : PlaybackEngine {
     /** 刷新是否模拟播放核心重解出帧并补报一次帧上屏；关掉用于覆盖回执没来的兜底。 */
     var refreshEmitsFrame = true
 
+    /** 设置后刷新回执按测试调度器异步投递，覆盖真实引擎的异步回执链。 */
+    var callbackScope: CoroutineScope? = null
+
     override fun refreshFrame() {
         refreshFrameCalls++
-        if (refreshEmitsFrame) listener?.onFramePresented(currentLoadToken)
+        if (!refreshEmitsFrame) return
+        val target = listener ?: return
+        val token = currentLoadToken
+        val scope = callbackScope
+        if (scope != null) scope.launch { target.onFramePresented(token) } else target.onFramePresented(token)
     }
 
     override fun detachSurface() {

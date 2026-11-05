@@ -43,9 +43,11 @@ class MpvPlaybackEngine(
     @Volatile
     private var awaitingSurfaceFrame = false
 
-    /** 位置中性刷新已下发、还在等它自己的 PLAYBACK_RESTART；一次性，只补报一次帧上屏。 */
-    @Volatile
-    private var refreshSeekInFlight = false
+    /** 本次位置中性刷新的 seek 归属；只有它预留的序号能触发帧上屏回执。 */
+    private val refreshSeek = MpvRefreshSeek()
+
+    /** 刷新序号 3 秒内没有等到 SEEK 事件时的丢弃计时。 */
+    private var refreshTimeoutFuture: ScheduledFuture<*>? = null
 
     /** 新加载的文件尚未看到播放位置前进。 */
     @Volatile
@@ -138,6 +140,7 @@ class MpvPlaybackEngine(
     }
 
     override fun start(url: String, paused: Boolean, startPositionMillis: Long): Int {
+        cancelRefreshSeek()
         val spec = loadCoordinator.start(url)
         // 成功打开前的日志也要归到本次加载；START_FILE 会清掉这之前混入的上一轮排队日志。
         errorLog.onStartLoad(spec.token)
@@ -145,7 +148,6 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         awaitingLoadFrame = true
-        refreshSeekInFlight = false
         seekDiagnostics.reset()
         seekQueue.reset()
         positionGate.onStart(startPositionMillis)
@@ -169,10 +171,10 @@ class MpvPlaybackEngine(
 
     override fun stop() {
         // 停止产生的 END_FILE 由待吞状态消化，不能当成播放结束或失败。
+        cancelRefreshSeek()
         loadCoordinator.stop()
         hasVideoTrack = false
         awaitingLoadFrame = false
-        refreshSeekInFlight = false
         seekDiagnostics.reset()
         seekQueue.reset()
         MPVLib.command(arrayOf("stop"))
@@ -180,6 +182,7 @@ class MpvPlaybackEngine(
 
     /** 加载看护恢复前丢掉不会再有事件的死代际，避免恢复的 FILE_LOADED 配到旧加载。 */
     override fun discardInFlightLoads() {
+        cancelRefreshSeek()
         loadCoordinator.discardInFlight()
     }
 
@@ -404,34 +407,86 @@ class MpvPlaybackEngine(
 
     /**
      * 位置中性的精确刷新：seek 0 relative+exact 让播放核心重解当前帧，不改变播放位置。
-     * 排在同一视频输出队列里，保证新 Surface 挂上、输出重开之后才下发。
-     * 刷新登记自己的 seek 序号，SEEK 事件只消费它，不占真实跳转的序号；
-     * 它的重配不参与 ready 去重，PLAYBACK_RESTART 到达时一次性补报帧上屏。
+     * 先等视频输出重开完成，再把命令投到与真实 seek 同一条命令线程，按同一顺序预留并下发。
+     * 只有这次刷新自己的序号能触发帧上屏回执；别的序号照常走普通 seek 路径。
      */
     override fun refreshFrame() {
         if (released || attachedSurface == null) return
         postVideoOutput {
-            // 投递后已经开始新加载、没有视频轨或已到片尾时都不刷新，也不补报。
-            if (released || !loadCoordinator.isFileLoaded || !hasVideoTrack) return@postVideoOutput
-            if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return@postVideoOutput
-            val serial = loadCoordinator.reserveSeekSerial()
-            loadCoordinator.onSeekIssued(serial)
-            refreshSeekInFlight = true
-            runCatching { MPVLib.command(arrayOf("seek", "0", "relative+exact")) }
-                .onFailure { failure ->
-                    refreshSeekInFlight = false
-                    loadCoordinator.discardSeekSerial(serial)
-                    diagnostics.log {
-                        "刷新: 下发失败 | ${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
-                    }
+            if (released || attachedSurface == null || videoOutputStopped) return@postVideoOutput
+            val queued = runCatching { seekCommandExecutor.execute { issueRefreshSeek() } }
+            if (queued.isFailure) {
+                diagnostics.log {
+                    "刷新: 命令线程不可用 | ${queued.exceptionOrNull()?.javaClass?.simpleName ?: "-"}"
                 }
+            }
         }
+    }
+
+    /** 命令线程上预留并下发刷新：与真实 seek 共用同一顺序，序号不会互换。 */
+    private fun issueRefreshSeek() {
+        if (released || attachedSurface == null || videoOutputStopped) return
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+        if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return
+        val serial = loadCoordinator.reserveSeekSerial()
+        loadCoordinator.onSeekIssued(serial)
+        refreshSeek.begin(serial)
+        armRefreshTimeout(serial)
+        runCatching { MPVLib.command(arrayOf("seek", "0", "relative+exact")) }
+            .onFailure { failure ->
+                cancelRefreshSeek()
+                loadCoordinator.discardSeekSerial(serial)
+                diagnostics.log {
+                    "刷新: 下发失败 | ${failure.javaClass.simpleName}: ${failure.message ?: "-"}"
+                }
+            }
+    }
+
+    /** 刷新序号 3 秒内没有被 SEEK 事件消费就丢弃，避免共享队首永久错位。 */
+    private fun armRefreshTimeout(serial: Int) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            refreshTimeoutFuture?.cancel(false)
+            refreshTimeoutFuture = seekTimeoutExecutor.schedule(
+                { postRefreshTimeout(serial) },
+                REFRESH_SEEK_TIMEOUT_MILLIS,
+                TimeUnit.MILLISECONDS,
+            )
+        }
+    }
+
+    private fun postRefreshTimeout(serial: Int) {
+        synchronized(seekTimeoutLock) {
+            if (released) return
+            runCatching { seekCommandExecutor.execute { handleRefreshTimeout(serial) } }
+        }
+    }
+
+    private fun handleRefreshTimeout(serial: Int) {
+        if (released) return
+        val discarded = refreshSeek.onTimeout(serial) ?: return
+        loadCoordinator.discardSeekSerial(discarded)
+        diagnostics.log { "刷新: 3 秒内没有 SEEK 事件，丢弃序号=$discarded" }
+    }
+
+    /** 只是撤掉丢弃计时；刷新归属仍留给它自己的 PLAYBACK_RESTART。 */
+    private fun cancelRefreshTimeout() {
+        synchronized(seekTimeoutLock) {
+            refreshTimeoutFuture?.cancel(false)
+            refreshTimeoutFuture = null
+        }
+    }
+
+    /** 新加载、停止、分离或释放：刷新不再有效。 */
+    private fun cancelRefreshSeek() {
+        refreshSeek.clear()
+        cancelRefreshTimeout()
     }
 
     /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出；刷新无回执时由控制层兜底调用。 */
     override fun flipVideoOutput() {
         if (attachedSurface == null || videoOutputStopped) return
-        refreshSeekInFlight = false
+        cancelRefreshSeek()
         awaitingSurfaceFrame = true
         postVideoOutput {
             MPVLib.setPropertyString("vo", "null")
@@ -447,7 +502,7 @@ class MpvPlaybackEngine(
     override fun detachSurface() {
         if (released || attachedSurface == null) return
         awaitingSurfaceFrame = false
-        refreshSeekInFlight = false
+        cancelRefreshSeek()
         videoOutputQueue.invalidate()
         postDetach()
         attachedSurface = null
@@ -494,7 +549,9 @@ class MpvPlaybackEngine(
             seekTimeoutFuture = null
         }
         seekQueue.reset()
-        refreshSeekInFlight = false
+        refreshSeek.clear()
+        refreshTimeoutFuture?.cancel(false)
+        refreshTimeoutFuture = null
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
         // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
@@ -538,17 +595,26 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
-                // 刷新没有登记 seek 诊断，不为它写“无对应目标”的行；它登记的序号仍按事件消费。
-                if (!refreshSeekInFlight) seekDiagnostics.onSeekEvent()
+                val consumed = loadCoordinator.onSeekEvent()
+                if (refreshSeek.onSeekConsumed(consumed)) {
+                    // 刷新自己的 SEEK 到了：序号不会错位，撤掉丢弃计时，等它自己的 restart。
+                    cancelRefreshTimeout()
+                } else {
+                    seekDiagnostics.onSeekEvent()
+                }
                 listener?.onLoadActivity(LoadActivity.Seek, loadCoordinator.currentLoadedToken())
-                loadCoordinator.onSeekEvent()
             }
             // 播放中优先等 PLAYBACK_RESTART；暂停中只有 VIDEO_RECONFIG，
             // 它可能早于首帧上屏，控制层要等位置真正前进后才算就绪。
             MPVLib.MpvEvent.MPV_EVENT_VIDEO_RECONFIG -> {
                 listener?.onLoadActivity(LoadActivity.VideoReconfig, loadCoordinator.currentLoadedToken())
                 // 刷新的重配不是新的就绪信号：不占 ready 去重序号，等它的 PLAYBACK_RESTART 补报帧。
-                if (!refreshSeekInFlight && loadCoordinator.isFileLoaded && hasVideoTrack && isPaused()) {
+                if (
+                    !refreshSeek.isCurrent(loadCoordinator.acceptedSeekSerial()) &&
+                    loadCoordinator.isFileLoaded &&
+                    hasVideoTrack &&
+                    isPaused()
+                ) {
                     reportReady(needsFrameConfirmation = true)
                 }
             }
@@ -558,8 +624,11 @@ class MpvPlaybackEngine(
             }
             // 暂停态的重播同样不能证明画面可显示；纯音频没有帧可等。
             MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART -> {
-                // 刷新的重播是它唯一的上屏回执：补报后不再走普通 ready 路径。
-                if (finishRefreshFrame()) return
+                // 只有刷新自己的序号、且仍在暂停态时才补报回执；其它序号与 resume 照常走普通 ready 与诊断。
+                if (isPaused() && refreshSeek.claimReceipt(loadCoordinator.acceptedSeekSerial()) != null) {
+                    reportRefreshFrame()
+                    return
+                }
                 // 音频链在重播后才完成重建，这里补记 seek 后的第二个快照。
                 seekDiagnostics.onPlaybackRestart()
                 listener?.onLoadActivity(LoadActivity.PlaybackRestart, loadCoordinator.currentLoadedToken())
@@ -572,19 +641,15 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * 位置中性刷新的 PLAYBACK_RESTART：补报一次帧上屏，越过暂停态不出帧的拦截。
-     * 只认 Surface 仍挂着、没有开始新加载、有视频轨且没有播到片尾的那一次；
-     * 其余情况只收掉等待标记，不补报。返回 true 表示这条事件属于刷新。
+     * 位置中性刷新的 PLAYBACK_RESTART：按 ADR-0026 的撤黑判据补报一次帧上屏。
+     * 只认 Surface 仍挂着、没有开始新加载、有视频轨且没有播到片尾的那一次。
      */
-    private fun finishRefreshFrame(): Boolean {
-        if (!refreshSeekInFlight) return false
-        refreshSeekInFlight = false
-        if (released || attachedSurface == null || videoOutputStopped) return true
-        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return true
-        if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return true
-        val token = loadCoordinator.currentLoadedToken() ?: return true
+    private fun reportRefreshFrame() {
+        if (released || attachedSurface == null || videoOutputStopped) return
+        if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
+        if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return
+        val token = loadCoordinator.currentLoadedToken() ?: return
         listener?.onFramePresented(token)
-        return true
     }
 
     private fun onFileLoaded() {
@@ -602,7 +667,7 @@ class MpvPlaybackEngine(
 
     /** 替换与失败由 [MpvFileEvents] 判定；自然播完只由 eof-reached 上报。 */
     private fun onEndFile() {
-        refreshSeekInFlight = false
+        cancelRefreshSeek()
         val end = loadCoordinator.onEndFile()
         listener?.onLoadActivity(LoadActivity.EndFile, end.spec?.token)
         errorLog.onEndFile(end)
@@ -622,7 +687,7 @@ class MpvPlaybackEngine(
         awaitingLoadFrame = false
         awaitingSurfaceFrame = false
         // 画面已经由播放推进确认，刷新的回执不再需要。
-        refreshSeekInFlight = false
+        cancelRefreshSeek()
         listener?.onFramePresented(token)
     }
 
@@ -1160,3 +1225,6 @@ private fun textOrDash(value: String?): String = value?.takeIf { it.isNotBlank()
 private fun Double.finiteOrNull(): Double? = takeIf { it.isFinite() }
 
 private const val SEEK_NEAR_END_MILLIS = 5_000L
+
+/** 刷新序号等 SEEK 事件的上限；超过就丢弃，避免共享队首永久错位。 */
+private const val REFRESH_SEEK_TIMEOUT_MILLIS = 3_000L
