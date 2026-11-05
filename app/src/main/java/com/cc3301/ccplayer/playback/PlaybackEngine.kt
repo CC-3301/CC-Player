@@ -114,6 +114,7 @@ interface PlaybackEngine {
         /**
          * 首帧已可显示。[needsFrameConfirmation] 为真表示信号本身不能证明画面已上屏
          * （视频链重配，或暂停态下的 PLAYBACK_RESTART），控制层要等到真正出帧后再算就绪。
+         * 暂停态 Surface 重挂的刷新回执不走这条：它由 [onFramePresented] 上报。
          * [targetUrl] 是本次加载的目标，控制层据此丢弃取消/恢复之后迟到的 ready。
          * [seekSerial] 是这条信号所在的加载内的 seek 序号，本代还没有 seek 时为 0；
          * 加载就绪按它判断续播 seek 是否已经过去，落定认的是 [onSeekExecuted] 带回来的身份。
@@ -141,8 +142,8 @@ interface PlaybackEngine {
 
         /**
          * 新画面已真正输出到 Surface。
-         * 播放态只认播放位置前进；暂停态 Surface 重挂时认那次位置中性刷新自己的 seek 完成，
-         * 由引擎按 ADR-0026 的撤黑判据上报一次。
+         * 播放态只认播放位置前进；暂停态 Surface 重挂时认那次位置中性刷新自己的
+         * PLAYBACK_RESTART（seek 后重播回执）作为撤黑判据，由引擎上报一次；该回执是代理信号，真机待验。
          * [loadToken] 标识产生它的加载。
          */
         fun onFramePresented(loadToken: Int)
