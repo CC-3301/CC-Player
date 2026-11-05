@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterExitState
@@ -419,6 +420,9 @@ fun PlayerScreen(
     val playlistVisible = panels.playlistOpen
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
+
+    // 面板或抽屉打开时，系统返回先关闭面板，不离开播放页。
+    BackHandler(enabled = panels.anyOpen) { panels.close() }
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
     // 已打开的面板保持打开，内容按不可用外观处理。

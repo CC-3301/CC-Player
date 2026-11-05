@@ -20,6 +20,7 @@ import androidx.core.content.FileProvider
 import androidx.core.graphics.createBitmap
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.cc3301.ccplayer.CcPlayerApplication
+import com.cc3301.ccplayer.MainActivity
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
@@ -186,6 +187,9 @@ class PlaybackService : Service() {
                 },
             )
             isActive = true
+            // 点通知卡片或系统媒体控制回到已有播放会话的播放页。
+            val openPlayer = openPlayerIntent()
+            setSessionActivity(openPlayer)
             setPlaybackState(
                 playbackState(
                     playbackController.state.value,
@@ -360,12 +364,27 @@ class PlaybackService : Service() {
             builder.addAction(actionIcon(action), actionLabel(action), actionIntent(action))
         }
         return builder
+            .setContentIntent(openPlayerIntent())
             .setStyle(
                 MediaStyle()
                     .setMediaSession(mediaSession.sessionToken)
                     .setShowActionsInCompactView(*content.actions.indices.toList().toIntArray()),
             )
             .build()
+    }
+
+    /** 通知卡片的点击入口：拉起已存在的界面并落在播放页。 */
+    private fun openPlayerIntent(): PendingIntent {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_OPEN_PLAYER
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        return PendingIntent.getActivity(
+            this,
+            OPEN_PLAYER_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 
     private fun actionIcon(action: MediaSessionAction): Int = when (action) {
@@ -423,6 +442,7 @@ class PlaybackService : Service() {
         const val NOTIFICATION_ID = 1
         const val MEDIA_SESSION_TAG = "ccplayer-playback"
         const val SYSTEM_UI_PACKAGE = "com.android.systemui"
+        const val OPEN_PLAYER_REQUEST_CODE = 100
         const val MAX_COVER_SIZE = 256
         const val APP_ICON_SIZE = 192
     }

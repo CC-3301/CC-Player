@@ -43,6 +43,18 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `默认关闭 APP 内后台播放`() = runTest {
+        assertFalse(settings.inAppBackgroundPlayback.first())
+    }
+
+    @Test
+    fun `APP 内后台播放开关写入后读回`() = runTest {
+        settings.setInAppBackgroundPlayback(true)
+
+        assertTrue(settings.inAppBackgroundPlayback.first())
+    }
+
+    @Test
     fun `默认关闭诊断日志`() = runTest {
         assertFalse(settings.diagnosticsEnabled.first())
     }
