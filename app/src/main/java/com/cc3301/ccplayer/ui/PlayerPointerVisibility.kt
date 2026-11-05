@@ -10,8 +10,10 @@ import androidx.compose.ui.unit.Density
 /**
  * 播放页鼠标指针的显隐与自动隐藏计时。
  *
- * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏；位移不超过
- * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）的抖动不算移动。
+ * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。位移不超过
+ * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）的抖动不算移动；越过死区的位移还要
+ * 与上一次相隔不超过 [PLAYER_POINTER_CONTINUOUS_MOVE_WINDOW_MILLIS] 才算有效移动，
+ * 孤立的单次位移既不显示指针，也不重置隐藏计时。
  * 指针随顶/底栏的实际可见性显隐，见 [pointerFollowsBars]。
  */
 class PlayerPointerVisibility(
@@ -24,23 +26,38 @@ class PlayerPointerVisibility(
     var lastActivityAtMillis: Long = elapsedMillis()
         private set
 
-    /** 位移死区的锚点：最后一次有效移动的位置。 */
+    /** 位移死区的锚点：最后一次越过死区的位置。 */
     private var anchor: Offset? = null
 
-    /** 指针进入播放页：指针出现，进入位置作为位移死区锚点。 */
+    /** 上一次越过死区的时刻；连续位移窗口外的下一次位移重新起算。 */
+    private var lastDeadZoneCrossAtMillis: Long? = null
+
+    /** 指针进入播放页：指针出现，进入位置作为位移死区锚点，连续位移重新起算。 */
     fun onPointerEnter(position: Offset) {
         anchor = position
+        lastDeadZoneCrossAtMillis = null
         show()
     }
 
-    /** 指针移动：以死区锚点算位移，越过死区才算移动并重设锚点；抖动不改变任何状态。 */
+    /**
+     * 指针移动：以死区锚点算位移，越过死区才算一次候选移动并重设锚点；
+     * 候选移动与上一次相隔不超过连续位移窗口才算真的在动，此时指针出现并重新计时。
+     */
     fun onPointerMove(position: Offset, density: Density) {
         val deadZonePx = with(density) { PlayerPointerMoveDeadZone.toPx() }
         val previous = anchor
-        if (previous == null || (position - previous).getDistance() > deadZonePx) {
+        if (previous == null) {
             anchor = position
-            show()
+            return
         }
+        if ((position - previous).getDistance() <= deadZonePx) return
+        val now = elapsedMillis()
+        val continuous = lastDeadZoneCrossAtMillis?.let {
+            now - it <= PLAYER_POINTER_CONTINUOUS_MOVE_WINDOW_MILLIS
+        } ?: false
+        anchor = position
+        lastDeadZoneCrossAtMillis = now
+        if (continuous) show()
     }
 
     /** 显示指针并重新计时。 */

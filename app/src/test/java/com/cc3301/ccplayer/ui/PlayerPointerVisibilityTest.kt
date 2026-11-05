@@ -22,8 +22,8 @@ class PlayerPointerVisibilityTest {
     private val threeX = Density(3f)
 
     @Test
-    fun `指针位移死区为 5dp`() {
-        assertEquals(5.dp, PlayerPointerMoveDeadZone)
+    fun `指针位移死区为 10dp`() {
+        assertEquals(10.dp, PlayerPointerMoveDeadZone)
     }
 
     @Test
@@ -65,31 +65,90 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `三倍屏下 5dp 死区等于 15 像素`() {
+    fun `三倍屏下 10dp 死区等于 30 像素`() {
         pointer.onPointerEnter(Offset.Zero)
         pointer.hide()
 
-        pointer.onPointerMove(Offset(14f, 0f), threeX)
-        assertFalse(pointer.visible)
-
         // 位移正好等于死区不算移动，判据是严格大于。
-        pointer.onPointerMove(Offset(15f, 0f), threeX)
-        assertFalse(pointer.visible)
+        now = 100L
+        pointer.onPointerMove(Offset(29f, 0f), threeX)
+        now = 110L
+        pointer.onPointerMove(Offset(30f, 0f), threeX)
 
-        pointer.onPointerMove(Offset(16f, 0f), threeX)
-        assertTrue(pointer.visible)
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
     }
 
     @Test
-    fun `位移越过死区显示指针并重新计时`() {
+    fun `连续位移唤出指针并重新计时`() {
         pointer.onPointerEnter(Offset.Zero)
         pointer.hide()
 
+        now = 400L
+        pointer.onPointerMove(Offset(0f, 20f), oneX)
         now = 500L
-        pointer.onPointerMove(Offset(0f, 6f), oneX)
+        pointer.onPointerMove(Offset(0f, 40f), oneX)
 
         assertTrue(pointer.visible)
         assertEquals(500L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `单次越过死区的位移不唤出指针`() {
+        pointer.onPointerEnter(Offset.Zero)
+        pointer.hide()
+
+        now = 400L
+        pointer.onPointerMove(Offset(0f, 20f), oneX)
+
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `连续位移窗口内的两次位移才唤出指针`() {
+        pointer.onPointerEnter(Offset.Zero)
+        pointer.hide()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 20f), oneX)
+        now = 350L
+        pointer.onPointerMove(Offset(0f, 40f), oneX)
+
+        assertTrue(pointer.visible)
+        assertEquals(350L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `间隔超过连续位移窗口的位移不唤出指针`() {
+        pointer.onPointerEnter(Offset.Zero)
+        pointer.hide()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 20f), oneX)
+        now = 351L
+        pointer.onPointerMove(Offset(0f, 40f), oneX)
+
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `连续位移唤出指针时控制层保持隐藏`() {
+        val controls = PlayerControlsVisibility(elapsedMillis = { now })
+        controls.toggle()
+        assertTrue(controls.hidden)
+
+        pointer.onPointerEnter(Offset.Zero)
+        pointer.hide()
+
+        now = 400L
+        pointer.onPointerMove(Offset(0f, 20f), oneX)
+        now = 500L
+        pointer.onPointerMove(Offset(0f, 40f), oneX)
+
+        assertTrue(pointer.visible)
+        assertTrue(controls.hidden)
     }
 
     @Test
@@ -102,14 +161,16 @@ class PlayerPointerVisibilityTest {
 
         now = 3_016L
         pointer.onPointerMove(Offset(40f, 0f), oneX)
+        now = 3_100L
+        pointer.onPointerMove(Offset(60f, 0f), oneX)
         assertTrue(pointer.visible)
-        assertEquals(3_016L, pointer.lastActivityAtMillis)
+        assertEquals(3_100L, pointer.lastActivityAtMillis)
 
-        now = 6_015L
+        now = 6_099L
         pointer.hideIfExpired()
         assertTrue(pointer.visible)
 
-        now = 6_016L
+        now = 6_100L
         pointer.hideIfExpired()
         assertFalse(pointer.visible)
     }
