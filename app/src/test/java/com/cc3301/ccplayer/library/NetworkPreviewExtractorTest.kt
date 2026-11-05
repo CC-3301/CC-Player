@@ -336,6 +336,22 @@ class NetworkPreviewExtractorTest {
     }
 
     @Test
+    fun `打开阶段放弃的会话无条件作废，下一次准备新建连`() = runTest {
+        val reads = SessionReads()
+        val extractor = NetworkPreviewExtractor(
+            reads,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+        )
+        val prepared = extractor.prepare(movie)!!
+        prepared.discard()
+
+        assertEquals("打开阶段放弃要作废会话", 1, reads.discardedSessions)
+        extractor.prepare(movie)!!.close()
+        assertEquals("下一次准备要重新建连", 2, reads.connections)
+    }
+
+    @Test
     fun `超时取消打断传输读时作废会话，下一次准备新建连`() = runBlocking {
         val reads = SessionReads(blockFirstRead = true)
         val extractor = NetworkPreviewExtractor(
@@ -352,7 +368,7 @@ class NetworkPreviewExtractorTest {
         val decoding = launch(Dispatchers.Default) { prepared.decode(NETWORK_TARGET_WIDTH) }
         assertTrue("传输读应当已发起", reads.readStarted.await(5, TimeUnit.SECONDS))
         decoding.cancelAndJoin()
-        prepared.discard()
+        prepared.abandon()
 
         assertEquals("打断传输读要作废会话", 1, reads.discardedSessions)
 
@@ -369,7 +385,7 @@ class NetworkPreviewExtractorTest {
             readAhead = StepExecutor(),
         )
         val prepared = extractor.prepare(movie)!!
-        prepared.discard()
+        prepared.abandon()
 
         assertEquals("没有在途读不作废会话", 0, reads.discardedSessions)
         extractor.prepare(movie)!!.close()

@@ -36,8 +36,10 @@ fun interface NetworkPreviewDecoder {
 class NetworkPreviewPreparation(
     private val decodeBlock: suspend (Int) -> ByteArray?,
     private val closeBlock: suspend () -> Unit,
-    /** 缺省等同 [closeBlock]，仅测试替身可以省略；生产实现必须显式接线。 */
+    /** 无条件作废句柄与预读，并丢弃本次会话；打开阶段被放弃时用。缺省等同 [closeBlock]，仅测试替身可省略接线。 */
     private val discardBlock: suspend () -> Unit = closeBlock,
+    /** 放弃解码中的读取：打断在途传输读时丢弃会话，否则只关句柄。缺省等同 [closeBlock]，仅测试替身可省略接线。 */
+    private val abandonBlock: suspend () -> Unit = closeBlock,
 ) {
 
     /** 在解码许可内取图；没有可用图时返回 null。 */
@@ -47,12 +49,19 @@ class NetworkPreviewPreparation(
     suspend fun close() = closeBlock()
 
     /**
-     * 放弃句柄与预读；取消或超时打断了在途传输读时，让读取层丢弃本次读取的会话；可重复调用。
+     * 无条件作废句柄与预读，并丢弃本次读取的会话；可重复调用。
      *
-     * 只关句柄会把已失效的会话留在表里，下一次重试又会复用；没有在途读的放弃则保留会话，
-     * 下一次读取仍可复用。缺省等同 [close]，仅测试替身可以省略接线。
+     * 用于打开超时或打开被取消：打开阶段还没有解码读，不能按「是否打断传输读」判断，
+     * 被放弃的打开一律换新会话。
      */
     suspend fun discard() = discardBlock()
+
+    /**
+     * 放弃解码中的读取：只有取消或超时打断了在途传输读时才让读取层丢弃会话；可重复调用。
+     *
+     * 排队等许可、解码已完成等没有在途读的放弃保留会话，下一次读取仍可复用。
+     */
+    suspend fun abandon() = abandonBlock()
 }
 
 /**
@@ -128,6 +137,9 @@ class NetworkPreviewExtractor(
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
                     },
                     discardBlock = {
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.discard() } }
+                    },
+                    abandonBlock = {
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.abandon() } }
                     },
                 )

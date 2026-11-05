@@ -5,7 +5,6 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -499,8 +498,8 @@ class CachedMediaPreviewSource(
             abandoned = true
             throw cancellation
         } finally {
-            // 句柄无论解码成功、失败还是取消都要关；超时或取消交给作废收尾决定是否丢弃会话。
-            if (abandoned) prepared.discard() else prepared.close()
+            // 句柄无论解码成功、失败还是取消都要关；解码超时或取消按是否打断传输读决定是否丢弃会话。
+            if (abandoned) prepared.abandon() else prepared.close()
         }
     }
 
@@ -516,8 +515,6 @@ class CachedMediaPreviewSource(
         priority: PreviewPriority,
     ): NetworkPreviewPreparation? {
         val opened = CompletableDeferred<Result<NetworkPreviewPreparation?>>()
-        // 打开超时放弃时，迟到的句柄要作废会话；请求取消放弃的只关句柄，不白丢好会话。
-        val discardLate = AtomicBoolean(false)
         // 父 Job 跟随进程级范围，调度器沿用调用方的：请求取消不会连带取消这次打开。
         val opening = CoroutineScope(
             currentCoroutineContext() + Job(backgroundScope.coroutineContext[Job]),
@@ -530,21 +527,17 @@ class CachedMediaPreviewSource(
             } catch (failure: Throwable) {
                 Result.failure(failure)
             }
-            // 没人接手（超时或取消）时在这里收尾，句柄不留在无人持有的地方。
-            if (!opened.complete(result)) {
-                val late = result.getOrNull()
-                if (discardLate.get()) runCatching { late?.discard() } else runCatching { late?.close() }
-            }
+            // 没人接手（超时或取消）时在这里作废，句柄不留在无人持有的地方，会话也不留给下一次重试。
+            if (!opened.complete(result)) runCatching { result.getOrNull()?.discard() }
         }
         val settled = try {
             withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { opened.await() }
         } catch (failure: Throwable) {
-            abandonOpen(opened, opening, CancellationException("网络预览打开已放弃"), discardLate = false)
+            abandonOpen(opened, opening, CancellationException("网络预览打开已放弃"))
             throw failure
         }
         if (settled == null) {
-            discardLate.set(true)
-            abandonOpen(opened, opening, CancellationException("网络预览打开超时"), discardLate = true)
+            abandonOpen(opened, opening, CancellationException("网络预览打开超时"))
             throw IllegalStateException("网络预览打开超时")
         }
         return settled.getOrThrow()
@@ -562,12 +555,10 @@ class CachedMediaPreviewSource(
         opened: CompletableDeferred<Result<NetworkPreviewPreparation?>>,
         opening: Job,
         reason: CancellationException,
-        discardLate: Boolean,
     ) {
         if (!opened.completeExceptionally(reason)) {
-            // 争到的是已经交付的成功打开：打开超时作废会话，请求取消只关句柄。
-            val late = opened.getCompleted().getOrNull()
-            if (discardLate) runCatching { late?.discard() } else runCatching { late?.close() }
+            // 争到的是已经交付的成功打开：打开已被放弃，会话一并作废，下一次重试换新会话。
+            runCatching { opened.getCompleted().getOrNull()?.discard() }
         }
         opening.cancel()
     }

@@ -1920,6 +1920,13 @@ class CachedMediaPreviewSourceTest {
         runCurrent()
         assertEquals("迟到的句柄要关一次", 1, late.closed.size)
         assertEquals("迟到的会话要作废", 1, late.discarded.size)
+        assertEquals(1, late.connections)
+
+        // 打开超时作废了会话：下一次准备必须新建会话。
+        val retry = async { bounded.visiblePreview(network("迟到.mkv"), 0) }
+        runCurrent()
+        assertNotNull(retry.await().image)
+        assertEquals("打开超时后下一次准备新建连", 2, late.connections)
     }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
@@ -2155,6 +2162,10 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
     val closed = mutableListOf<String>()
     val discarded = mutableListOf<String>()
 
+    /** 假会话的建连次数：作废后下一次准备要重新建连。 */
+    var connections = 0
+    private var live = false
+
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
 
     override suspend fun durationMillis(file: MediaFile): Long? = null
@@ -2163,11 +2174,16 @@ private class UninterruptibleOpenExtractor : MediaPreviewExtractor {
         started += file.location
         // 等待放在 NonCancellable 里：等价于取消打不断的阻塞打开。
         withContext(NonCancellable) { gate.await() }
+        if (!live) {
+            live = true
+            connections++
+        }
         return NetworkPreviewPreparation(
             decodeBlock = { byteArrayOf(1) },
             closeBlock = { closed += file.location },
             discardBlock = {
                 discarded += file.location
+                live = false
                 closed += file.location
             },
         )
@@ -2206,6 +2222,13 @@ private class DiscardRecordingExtractor(
             },
             closeBlock = { closed++ },
             discardBlock = {
+                if (live) {
+                    live = false
+                    discarded++
+                }
+                closed++
+            },
+            abandonBlock = {
                 if (live) {
                     live = false
                     discarded++
