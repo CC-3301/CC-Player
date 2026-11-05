@@ -132,110 +132,50 @@ class PlayerLayoutTest {
     }
 
     @Test
-    fun `比例未知时铺满容器`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 1000f,
-            videoAspectRatio = null,
-        )
-
-        assertViewport(0f, 0f, 1000f, 1000f, viewport)
-    }
-
-    @Test
-    fun `横视频按宽度贴合并在垂直方向居中`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 1000f,
-            videoAspectRatio = 2.0,
-        )
-
-        assertViewport(0f, 250f, 1000f, 500f, viewport)
-    }
-
-    @Test
-    fun `竖视频按高度贴合并在水平方向居中`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 1000f,
-            videoAspectRatio = 0.5,
-        )
-
-        assertViewport(250f, 0f, 500f, 1000f, viewport)
-    }
-
-    @Test
-    fun `正方形视频取较短边`() {
-        val viewport = videoViewport(
-            containerWidth = 1000f,
-            containerHeight = 400f,
-            videoAspectRatio = 1.0,
-        )
-
-        assertViewport(300f, 0f, 400f, 400f, viewport)
-    }
-
-    @Test
-    fun `比例非正或非有限时铺满容器`() {
-        listOf(0.0, -2.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { aspect ->
-            val viewport = videoViewport(
-                containerWidth = 1000f,
-                containerHeight = 500f,
-                videoAspectRatio = aspect,
-            )
-
-            assertViewport(0f, 0f, 1000f, 500f, viewport)
-        }
-    }
-
-    @Test
     fun `容器尺寸非正时给出零尺寸矩形`() {
         val viewport = videoViewport(
             containerWidth = 0f,
             containerHeight = -100f,
-            videoAspectRatio = 1.0,
         )
 
         assertViewport(0f, 0f, 0f, 0f, viewport)
     }
 
     @Test
-    fun `进页比例未知时视频区整屏摆放并被黑底盖住`() {
-        val viewport = videoViewport(
-            containerWidth = 1600f,
-            containerHeight = 2560f,
-            videoAspectRatio = null,
-        )
-
-        // 比例未知期间视频区仍按整屏摆放，这次摆放由黑底挡住。
-        assertViewport(0f, 0f, 1600f, 2560f, viewport)
+    fun `进页比例未知时铺黑底`() {
         assertTrue(
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = null,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = false,
             ),
         )
     }
 
     @Test
-    fun `比例到达后视频区落位并且黑底撤掉`() {
-        val viewport = videoViewport(
-            containerWidth = 1600f,
-            containerHeight = 2560f,
-            videoAspectRatio = 0.5625,
-        )
-
-        assertViewport(80f, 0f, 1440f, 2560f, viewport)
+    fun `比例到达后撤黑`() {
         assertFalse(
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 0.5625,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = false,
             ),
         )
+    }
+
+    @Test
+    fun `比例判据只认有限正数`() {
+        assertFalse(hasKnownVideoAspectRatio(null))
+        assertFalse(hasKnownVideoAspectRatio(0.0))
+        assertFalse(hasKnownVideoAspectRatio(-0.5))
+        assertFalse(hasKnownVideoAspectRatio(Double.NaN))
+        assertFalse(hasKnownVideoAspectRatio(Double.POSITIVE_INFINITY))
+        assertFalse(hasKnownVideoAspectRatio(Double.NEGATIVE_INFINITY))
+
+        assertTrue(hasKnownVideoAspectRatio(0.5625))
+        assertTrue(hasKnownVideoAspectRatio(16.0 / 9.0))
     }
 
     private fun assertViewport(

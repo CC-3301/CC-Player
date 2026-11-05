@@ -5,8 +5,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 黑底层只由控制层派生的画面判据与首次摆位的方向等待决定：
- * 没有可显示的画面、本次播放还没摆过视频比例、或还在等屏幕方向，就铺黑底。
+ * 黑底层只由控制层派生的画面判据与首次撤黑的方向等待决定：
+ * 没有可显示的画面、本次播放还没拿到过视频比例、或还在等屏幕方向，就铺黑底。
  */
 class PlayerBlackLayerTest {
 
@@ -16,7 +16,7 @@ class PlayerBlackLayerTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 0.5625,
-                aspectRatioPlaced = true,
+                orientationSettled = true,
                 orientationPending = false,
             ),
         )
@@ -28,7 +28,7 @@ class PlayerBlackLayerTest {
             showPlayerBlackLayer(
                 showsPicture = false,
                 videoAspectRatio = 16.0 / 9.0,
-                aspectRatioPlaced = true,
+                orientationSettled = true,
                 orientationPending = false,
             ),
         )
@@ -40,7 +40,7 @@ class PlayerBlackLayerTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = null,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = false,
             ),
         )
@@ -51,13 +51,13 @@ class PlayerBlackLayerTest {
         val before = showPlayerBlackLayer(
             showsPicture = true,
             videoAspectRatio = null,
-            aspectRatioPlaced = false,
+            orientationSettled = false,
             orientationPending = false,
         )
         val after = showPlayerBlackLayer(
             showsPicture = true,
             videoAspectRatio = 0.5625,
-            aspectRatioPlaced = false,
+            orientationSettled = false,
             orientationPending = false,
         )
 
@@ -71,7 +71,7 @@ class PlayerBlackLayerTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = null,
-                aspectRatioPlaced = true,
+                orientationSettled = true,
                 orientationPending = false,
             ),
         )
@@ -83,7 +83,7 @@ class PlayerBlackLayerTest {
             showPlayerBlackLayer(
                 showsPicture = true,
                 videoAspectRatio = 16.0 / 9.0,
-                aspectRatioPlaced = false,
+                orientationSettled = false,
                 orientationPending = true,
             ),
         )

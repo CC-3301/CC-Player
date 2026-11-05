@@ -2,7 +2,7 @@ package com.cc3301.ccplayer.ui
 
 import kotlinx.coroutines.delay
 
-/** 首次摆位等屏幕转向视频方向的上限：到点无论方向是否到位都撤黑，不允许一直黑着。 */
+/** 首次撤黑等屏幕转向视频方向的上限：到点无论方向是否到位都撤黑，不允许一直黑着。 */
 const val PLAYER_ORIENTATION_WAIT_LIMIT_MILLIS = 2_000L
 
 /**

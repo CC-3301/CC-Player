@@ -5,62 +5,51 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.cc3301.ccplayer.ui.theme.AppColors
-import kotlin.math.min
 import kotlin.math.roundToLong
 
 /** 视频区矩形：坐标与尺寸相对容器左上角，单位像素。 */
 data class VideoViewport(val left: Float, val top: Float, val width: Float, val height: Float)
 
 /**
- * 比例是否能用来摆放视频区：非空、有限且大于 0。
- * 视频区摆放与「比例未知期间铺黑」共用这一判据，两处不会各判一套。
+ * 比例是否能用于方向判断与「比例未知期间铺黑」：非空、有限且大于 0。
  */
 fun hasKnownVideoAspectRatio(videoAspectRatio: Double?): Boolean =
     videoAspectRatio != null && videoAspectRatio.isFinite() && videoAspectRatio > 0.0
 
 /**
- * 视频区矩形：按 [videoAspectRatio]（宽/高）等比缩放后居中，不拉伸不裁剪。
- * 比例未知、非正或非有限时铺满容器；容器尺寸非正时给出零尺寸矩形。
+ * 视频区矩形：始终铺满容器，视频比例与黑边由 mpv 在 Surface 内处理。
+ * 容器尺寸非正时给出零尺寸矩形。
  */
 fun videoViewport(
     containerWidth: Float,
     containerHeight: Float,
-    videoAspectRatio: Double?,
 ): VideoViewport {
     val width = containerWidth.coerceAtLeast(0f)
     val height = containerHeight.coerceAtLeast(0f)
-    val ratio = videoAspectRatio.takeIf { hasKnownVideoAspectRatio(it) }
-    if (width <= 0f || height <= 0f || ratio == null) {
-        return if (width <= 0f || height <= 0f) VideoViewport(0f, 0f, 0f, 0f)
-        else VideoViewport(0f, 0f, width, height)
+    return if (width <= 0f || height <= 0f) {
+        VideoViewport(0f, 0f, 0f, 0f)
+    } else {
+        VideoViewport(0f, 0f, width, height)
     }
-    val fittedWidth = min(width, (height * ratio).toFloat())
-    val fittedHeight = (fittedWidth / ratio).toFloat()
-    return VideoViewport(
-        left = (width - fittedWidth) / 2f,
-        top = (height - fittedHeight) / 2f,
-        width = fittedWidth,
-        height = fittedHeight,
-    )
 }
 
 /**
- * 播放页黑底层规则：屏幕上没有可显示的画面、本次播放还没摆过视频比例，或首次摆位还在等屏幕方向，就铺黑底。
- * 比例未知期间视频区先按整屏摆放，黑底挡住这次摆放；比例到达即第一次摆位，并在同一次重绘里撤掉黑底。
+ * 播放页黑底层规则：屏幕上没有可显示的画面、本次播放还没拿到过视频比例，或首次撤黑还在等屏幕方向，就铺黑底。
+ * 视频区始终铺满容器；比例未知期间黑底盖住首帧，比例到达即撤掉黑底（横向视频还要等方向到位）。
  *
- * [aspectRatioPlaced] 表示本次播放的首次摆位已有结论：有结论后就一直为真，之后不再按比例盖。
- * [orientationPending] 表示首次摆位还在等屏幕转向视频方向（见 [PlayerPlacementGate]）：为真时黑底继续
- * 盖住竖向摆出来的那一帧，方向到位或等待到时限后与摆位一起撤掉。
+ * [orientationSettled] 表示本次播放的方向等待已有结论：有结论后就一直为真，之后不再按比例盖。
+ * [orientationPending] 表示首次撤黑还在等屏幕转向视频方向（见 [PlayerPlacementGate]）：为真时黑底继续
+ * 盖住竖向摆出来的那一帧，方向到位或等待到时限后撤掉。
  * 有没有画面只由控制层派生的 SurfacePresentation 给出，界面不再自行组合加载阶段、黑底与视频轨。
  */
 fun showPlayerBlackLayer(
     showsPicture: Boolean,
     videoAspectRatio: Double?,
-    aspectRatioPlaced: Boolean,
+    orientationSettled: Boolean,
     orientationPending: Boolean,
 ): Boolean = !showsPicture ||
     orientationPending ||
-    (!aspectRatioPlaced && !hasKnownVideoAspectRatio(videoAspectRatio))
+    (!orientationSettled && !hasKnownVideoAspectRatio(videoAspectRatio))
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp

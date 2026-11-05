@@ -9,7 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 首次摆位等方向的时限：到点无条件放行，方向是否对齐都不再等。 */
+/** 首次撤黑等方向的时限：到点无条件放行，方向是否对齐都不再等。 */
 class PlayerOrientationWaitTest {
 
     @Test
@@ -35,7 +35,7 @@ class PlayerOrientationWaitTest {
     }
 
     @Test
-    fun `一直不对齐时等满时限摆位并撤黑`() = runTest {
+    fun `一直不对齐时等满时限撤黑`() = runTest {
         var gate = PlayerPlacementGate().withFrame(
             ratioKnown = true,
             showsPicture = true,
@@ -51,11 +51,9 @@ class PlayerOrientationWaitTest {
         advanceTimeBy(PLAYER_ORIENTATION_WAIT_LIMIT_MILLIS - 1)
         runCurrent()
         assertTrue(gate.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true))
-        assertFalse(gate.placesPicture(ratioKnown = true, rotationPending = true))
 
         advanceTimeBy(1)
         runCurrent()
         assertFalse(gate.awaitsOrientation(ratioKnown = true, showsPicture = true, rotationPending = true))
-        assertTrue(gate.placesPicture(ratioKnown = true, rotationPending = true))
     }
 }
