@@ -12,8 +12,9 @@ import androidx.compose.ui.unit.Density
  *
  * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。有效移动要求同向净位移达到
  * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）且这段累计持续
- * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：沿当前累计方向记带符号的净位移，同向推进
- * 累加、反向位移扣减，扣到 0 及以下才以新方向重新起算，来回抵消的抖动凑不满净位移。
+ * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：位移按向量累加成净位移，反向的位移自然
+ * 抵消、换向（含垂直）的位移继续累加；净位移被抵消到不再推进、或相邻两次移动相隔超过窗口时，
+ * 累计清零重开。
  * 指针随顶/底栏的实际可见性显隐，见 [pointerFollowsBars]；栏在场时指针直接跟随鼠标，不做判定。
  */
 class PlayerPointerVisibility(
@@ -32,53 +33,64 @@ class PlayerPointerVisibility(
     /** 上一次移动事件的位置；进入播放页后清空，下一次移动只记位置。 */
     private var lastPosition: Offset? = null
 
-    /** 当前累计方向；为 null 表示没有正在累计的位移。 */
-    private var moveDirection: Offset? = null
-
-    /** 沿 [moveDirection] 的带符号净位移，反向的位移会把它扣减。 */
-    private var moveDistance: Float = 0f
+    /** 当前这段累计的净位移向量；为零表示没有正在累计的位移。 */
+    private var netMove: Offset = Offset.Zero
 
     /** 当前这段净位移的起始时刻。 */
     private var moveStartedAtMillis: Long = 0L
 
+    /** 上一次移动事件的时刻；为 null 表示这段累计已中断。 */
+    private var lastEventAtMillis: Long? = null
+
     /** 指针进入播放页：指针出现，位移状态清空，进入后的第一次移动只记位置。 */
     fun onPointerEnter() {
         lastPosition = null
-        resetMove()
+        netMove = Offset.Zero
+        lastEventAtMillis = null
         show()
     }
 
     /**
-     * 指针移动：同向净位移越过死区并持续满窗口才算真的在动，此时指针出现并重新起算。
+     * 指针移动：净位移越过死区并持续满窗口才算真的在动，此时指针出现并重新起算。
      * 栏在场时不做判定，直接显示并重新计时。
      */
     fun onPointerMove(position: Offset, density: Density) {
         val now = elapsedMillis()
         val previous = lastPosition
         lastPosition = position
+
         if (followsPointerDirectly) {
-            resetMove()
+            clearMove(now)
             show()
             return
         }
-        if (previous == null) return
+        if (previous == null) {
+            lastEventAtMillis = now
+            clearMove(now)
+            return
+        }
 
         val delta = position - previous
-        val length = delta.getDistance()
-        if (length <= 0f) return
+        if (delta.getDistance() <= 0f) return
 
-        val direction = moveDirection
-        if (direction == null) {
-            startMove(delta, length, now)
+        // 相邻移动相隔超过窗口：这段位移已经中断，累计清零、从这次事件重新起算。
+        val gap = lastEventAtMillis?.let { now - it }
+        lastEventAtMillis = now
+        if (gap == null || gap > PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS) clearMove(now)
+
+        val summed = netMove + delta
+        if (netMove.x * summed.x + netMove.y * summed.y <= 0f) {
+            // 净位移被抵消到不再推进：以这次位移重新起算。
+            netMove = delta
+            moveStartedAtMillis = now
         } else {
-            val net = moveDistance + direction.x * delta.x + direction.y * delta.y
-            if (net <= 0f) startMove(delta, length, now) else moveDistance = net
+            netMove = summed
         }
 
         val deadZonePx = with(density) { PlayerPointerMoveDeadZone.toPx() }
-        if (moveDistance < deadZonePx) return
+        if (netMove.getDistance() < deadZonePx) return
         if (now - moveStartedAtMillis < PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS) return
-        resetMove()
+        clearMove(now)
         show()
     }
 
@@ -91,7 +103,8 @@ class PlayerPointerVisibility(
     /** 隐藏指针；隐藏后重新按位移判据判定。 */
     fun hide() {
         visible = false
-        resetMove()
+        netMove = Offset.Zero
+        lastEventAtMillis = null
     }
 
     /** 距自动隐藏的剩余毫秒；指针已隐藏时返回 -1。 */
@@ -114,18 +127,10 @@ class PlayerPointerVisibility(
         if (present) show() else hide()
     }
 
-    /** 以这次位移起算一段新的同向净位移。 */
-    private fun startMove(delta: Offset, length: Float, now: Long) {
-        moveDirection = delta / length
-        moveDistance = length
+    /** 清空这段净位移，起点改为 [now]。 */
+    private fun clearMove(now: Long) {
+        netMove = Offset.Zero
         moveStartedAtMillis = now
-    }
-
-    /** 清空同向净位移的累计。 */
-    private fun resetMove() {
-        moveDirection = null
-        moveDistance = 0f
-        moveStartedAtMillis = 0L
     }
 }
 

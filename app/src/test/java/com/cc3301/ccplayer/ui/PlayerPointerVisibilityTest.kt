@@ -168,7 +168,7 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `反向位移扣减累计值，不清空已攒的同向净位移`() {
+    fun `反向位移从净位移里扣减，不清空已攒的位移`() {
         hidePointer()
 
         now = 100L
@@ -189,7 +189,7 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `净位移扣到 0 及以下后以新方向重新起算`() {
+    fun `净位移被抵消到不再推进时以新方向重新起算`() {
         hidePointer()
 
         now = 100L
@@ -209,6 +209,50 @@ class PlayerPointerVisibilityTest {
 
         assertTrue(pointer.visible)
         assertEquals(280L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `换向后的位移继续累加，垂直移动不会卡住净位移`() {
+        hidePointer()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 0f), oneX)
+        now = 110L
+        pointer.onPointerMove(Offset(8f, 0f), oneX)
+        // 净位移只有 8dp，先不唤出。
+        now = 130L
+        pointer.onPointerMove(Offset(8f, 5f), oneX)
+        assertFalse(pointer.visible)
+
+        now = 150L
+        pointer.onPointerMove(Offset(8f, 8f), oneX)
+        assertFalse(pointer.visible)
+
+        now = 270L
+        pointer.onPointerMove(Offset(8f, 10f), oneX)
+
+        assertTrue(pointer.visible)
+        assertEquals(270L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `停手超过窗口后小幅移动不唤出指针`() {
+        hidePointer()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 0f), oneX)
+        now = 110L
+        pointer.onPointerMove(Offset(5f, 0f), oneX)
+        now = 130L
+        pointer.onPointerMove(Offset(9.5f, 0f), oneX)
+        assertFalse(pointer.visible)
+
+        // 停 10 秒再补 0.5dp：这段累计已经中断，不能靠补差额凑满死区。
+        now = 10_130L
+        pointer.onPointerMove(Offset(10f, 0f), oneX)
+
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
     }
 
     @Test
@@ -313,16 +357,16 @@ class PlayerPointerVisibilityTest {
         pointer.onPointerMove(Offset(0f, 2f), oneX)
         now = 3_040L
         pointer.onPointerMove(Offset(0f, 4f), oneX)
-        now = 3_200L
+        now = 3_190L
         pointer.onPointerMove(Offset(0f, 14f), oneX)
         assertTrue(pointer.visible)
-        assertEquals(3_200L, pointer.lastActivityAtMillis)
+        assertEquals(3_190L, pointer.lastActivityAtMillis)
 
-        now = 6_199L
+        now = 6_189L
         pointer.hideIfExpired()
         assertTrue(pointer.visible)
 
-        now = 6_200L
+        now = 6_190L
         pointer.hideIfExpired()
         assertFalse(pointer.visible)
     }
