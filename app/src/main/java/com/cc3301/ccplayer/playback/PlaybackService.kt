@@ -96,7 +96,9 @@ class PlaybackService : Service() {
             },
             isPaused = {
                 val state = playbackController.state.value
-                state == PlaybackState.Paused || state == PlaybackState.Ended
+                // 加载/切集阶段也可能已经被用户按了暂停：按播放意图判断，不只看状态。
+                state == PlaybackState.Paused || state == PlaybackState.Ended ||
+                    playbackController.playPauseIntentPaused
             },
         )
         audioFocus = AudioFocusRequester(this) { change ->

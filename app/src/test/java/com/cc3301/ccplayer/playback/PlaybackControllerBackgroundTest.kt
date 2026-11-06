@@ -437,11 +437,18 @@ class PlaybackControllerBackgroundTest {
         controller.setRenderSurfaceAvailable(true)
         runCurrent()
         assertEquals(1, engine.refreshFrameCalls)
+
+        // 同一次恢复里回前台入口不重复刷新。
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
         assertEquals(1, engine.flipVideoOutputCalls)
 
-        // 第二次恢复：回前台暂停态且屏上仍无帧，仍要允许一次刷新。
+        // 下一次恢复仍允许一次刷新。
         controller.setAppInForeground(false)
         controller.setAppInForeground(true)
         runCurrent()
@@ -450,6 +457,18 @@ class PlaybackControllerBackgroundTest {
         // 让本次恢复的兜底计时走完，不把未完成的等待留到测试结束。
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
         runCurrent()
+    }
+
+    @Test
+    fun `首次加载中回前台不留下黑屏无提示标记`() = runTest {
+        val controller = controller()
+        val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
+        controller.openPlaylist(files, files.first())
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertFalse(controller.surfacePresentation.value.quietBlack)
     }
 
     @Test

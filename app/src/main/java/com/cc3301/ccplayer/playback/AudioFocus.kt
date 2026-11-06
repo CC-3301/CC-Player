@@ -40,7 +40,8 @@ class AudioFocusRequester(
      * 调用方在拿到之前不能出声。
      */
     fun request(): Boolean {
-        val manager = audioManager ?: return false
+        // 没有音频服务（极少数设备/测试环境）：按已获得处理，不阻断播放。
+        val manager = audioManager ?: return true
         if (granted) return true
         if (!registered) {
             val result = manager.requestAudioFocus(request)
@@ -69,7 +70,11 @@ class AudioFocusRequester(
                 granted = false
                 onFocusChange(AudioFocusChange.Loss)
             }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> onFocusChange(AudioFocusChange.TransientLoss)
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                // 短暂丢失期间没有焦点：再次要出声必须等 GAIN 回调，不能凭旧状态放行。
+                granted = false
+                onFocusChange(AudioFocusChange.TransientLoss)
+            }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> onFocusChange(AudioFocusChange.TransientDuck)
         }
     }
@@ -101,9 +106,11 @@ class AudioFocusPolicy(
             }
             AudioFocusChange.TransientLoss -> {
                 duck(false)
-                // 暂停中的短暂丢失也记下恢复意图：GAIN 到了照常继续。
+                // 只有「正在出声、因这次丢失才暂停」才记恢复意图；
+                // 用户本来暂停的保持暂停，GAIN 回来不替用户继续。
+                if (isPaused()) return
                 resumeAfterGain = true
-                pauseIfAudible()
+                pausePlayback()
             }
             AudioFocusChange.Loss -> {
                 duck(false)

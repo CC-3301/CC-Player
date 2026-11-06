@@ -338,9 +338,6 @@ class PlaybackController(
     /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间铺黑底。 */
     private var awaitingSurfaceFrame = false
 
-    /** 本次 Surface 重挂是否已经请求过精确刷新；重挂期间的重复回调不再发。 */
-    private var surfaceRefreshIssued = false
-
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -490,14 +487,19 @@ class PlaybackController(
      */
     private fun dropFrameOnForegroundReturn() {
         if (!active || paused || holdBlack) return
-        quietBlack = true
         if (screenFrame != ScreenFrame.None) {
             screenFrame = ScreenFrame.None
             originAspectRatio = null
             settlePresentation()
         }
         // 与 Surface 重挂同一条等新帧路径：3 秒无新帧翻转一次视频输出，等待有上限。
-        beginSurfaceRestore(reason = "回前台播放态")
+        val waiting = beginSurfaceRestore(reason = "回前台播放态")
+        // 只有真正进入恢复等待且仍无画面才算「黑屏无提示」；
+        // 加载/切集阶段不改变提示规则（首次缓冲照常显示）。
+        if (waiting && !_surfacePresentation.value.showsPicture) {
+            quietBlack = true
+            settlePresentation()
+        }
     }
 
     /**
@@ -526,8 +528,6 @@ class PlaybackController(
             screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
-            // 下一次重挂才重新请求精确刷新。
-            surfaceRefreshIssued = false
         }
         updateLoadTimers()
         finishLoadWithoutSurface()
@@ -541,15 +541,16 @@ class PlaybackController(
      * 播放态不 seek，只等播放位置前进。每次进入恢复都重新允许一次刷新。
      * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
-    private fun beginSurfaceRestore(reason: String = "Surface 重挂") {
+    private fun beginSurfaceRestore(reason: String = "Surface 重挂"): Boolean {
+        // 同一次恢复里重挂与回前台可能各调一次：已有等待在跑时不重复刷新、也不重开计时。
+        // 等待还在但计时已收（比如当时没有 Surface）：允许重新进入，重挂后仍有 3 秒兜底。
+        if (awaitingSurfaceFrame && surfaceRestoreJob != null) return false
         cancelSurfaceRestore()
-        if (!active) return
+        if (!active) return false
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
-        if (loadPhase != LoadPhase.None) return
+        if (loadPhase != LoadPhase.None) return false
         // 片尾黑底不显示画面，不需要恢复。
-        if (holdBlack) return
-        // 每次进入恢复都算一次：上一次恢复用掉的刷新标志不能挡住这一次。
-        surfaceRefreshIssued = false
+        if (holdBlack) return false
         awaitingSurfaceFrame = true
         diagnostics.log {
             "$reason: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
@@ -560,7 +561,6 @@ class PlaybackController(
         // 本次恢复只发一次。
         if (paused) {
             if (!pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
-                surfaceRefreshIssued = true
                 engine.refreshFrame()
             }
         } else {
@@ -568,7 +568,7 @@ class PlaybackController(
             engine.awaitFramePresentation()
         }
         // 刷新回执可能同步到达并已收尾：不再启动超时翻转。
-        if (!awaitingSurfaceFrame) return
+        if (!awaitingSurfaceFrame) return true
         surfaceRestoreJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
@@ -587,6 +587,7 @@ class PlaybackController(
                 if (surfaceRestoreJob === runningJob) surfaceRestoreJob = null
             }
         }
+        return true
     }
 
     /** 结束本次恢复等待：迟到的翻转不再下发，旧画面留到真正出帧。 */
@@ -641,7 +642,6 @@ class PlaybackController(
         switchOriginEnded = false
         switchFailureReported = false
         holdBlack = false
-        surfaceRefreshIssued = false
         // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
         screenFrame = ScreenFrame.None
         quietBlack = false
@@ -923,7 +923,6 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         directoryEntries = emptyList()
         pausedAtEpisodeEnd = false
-        surfaceRefreshIssued = false
         resetLoadState()
         cancelSleepTimer()
     }
@@ -1500,7 +1499,6 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
-        surfaceRefreshIssued = false
         quietBlack = false
         // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false

@@ -51,14 +51,14 @@ class AudioFocusPolicyTest {
     }
 
     @Test
-    fun `暂停中短暂丢失也记恢复意图，拿到焦点后继续`() {
+    fun `用户暂停中短暂丢失保持暂停，拿到焦点也不续播`() {
         paused = true
 
         policy.onFocusChange(AudioFocusChange.TransientLoss)
         assertTrue(events.isEmpty())
 
         policy.onFocusChange(AudioFocusChange.Gain)
-        assertEquals(listOf("resume"), events)
+        assertTrue(events.isEmpty())
     }
 
     @Test
@@ -105,16 +105,24 @@ class AudioFocusPolicyTest {
     }
 
     @Test
-    fun `结束或放弃焦点时把音量与意图重置`() {
+    fun `放弃焦点时把暂降音量恢复到基准`() {
         policy.onFocusChange(AudioFocusChange.TransientDuck)
-        policy.onFocusChange(AudioFocusChange.TransientLoss)
         assertEquals(true, ducked)
 
         policy.reset()
 
         assertEquals(false, ducked)
-        // 重置后不会因为旧恢复意图自动补播。
+        assertEquals(2, duckChanges)
+    }
+
+    @Test
+    fun `结束会话清掉短暂丢失的恢复意图`() {
+        policy.onFocusChange(AudioFocusChange.TransientLoss)
+        assertEquals(listOf("pause"), events)
+
+        policy.reset()
         policy.onFocusChange(AudioFocusChange.Gain)
+
         assertFalse(events.contains("resume"))
     }
 }
