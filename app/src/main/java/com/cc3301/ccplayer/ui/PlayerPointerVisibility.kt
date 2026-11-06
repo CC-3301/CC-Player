@@ -11,9 +11,9 @@ import androidx.compose.ui.unit.Density
  * 播放页鼠标指针的显隐与自动隐藏计时。
  *
  * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。有效移动要求同向净位移达到
- * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）且这段位移持续
- * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：反向的位移把累计值减回去，来回抵消的
- * 抖动不计数；改换方向的位移从新方向重新起算。
+ * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）且这段累计持续
+ * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：沿当前累计方向记带符号的净位移，同向推进
+ * 累加、反向位移扣减，扣到 0 及以下才以新方向重新起算，来回抵消的抖动凑不满净位移。
  * 指针随顶/底栏的实际可见性显隐，见 [pointerFollowsBars]；栏在场时指针直接跟随鼠标，不做判定。
  */
 class PlayerPointerVisibility(
@@ -22,9 +22,8 @@ class PlayerPointerVisibility(
     var visible by mutableStateOf(true)
         private set
 
-    /** 顶/底栏在场：指针直接跟随鼠标，不做位移判定。由 [pointerFollowsBars] 维护。 */
-    var followsPointerDirectly: Boolean = false
-        internal set
+    /** 顶/底栏在场：指针直接跟随鼠标，不做位移判定。 */
+    private var followsPointerDirectly = false
 
     /** 最近一次显示指针或径直跟随的时刻；只被计时协程读取，不参与重组。 */
     var lastActivityAtMillis: Long = elapsedMillis()
@@ -33,13 +32,13 @@ class PlayerPointerVisibility(
     /** 上一次移动事件的位置；进入播放页后清空，下一次移动只记位置。 */
     private var lastPosition: Offset? = null
 
-    /** 当前同向净位移的方向；为 null 表示没有正在累计的位移。 */
+    /** 当前累计方向；为 null 表示没有正在累计的位移。 */
     private var moveDirection: Offset? = null
 
-    /** 沿 [moveDirection] 的净位移，反向的位移会把它减小。 */
+    /** 沿 [moveDirection] 的带符号净位移，反向的位移会把它扣减。 */
     private var moveDistance: Float = 0f
 
-    /** 当前同向净位移的起始时刻。 */
+    /** 当前这段净位移的起始时刻。 */
     private var moveStartedAtMillis: Long = 0L
 
     /** 指针进入播放页：指针出现，位移状态清空，进入后的第一次移动只记位置。 */
@@ -69,14 +68,11 @@ class PlayerPointerVisibility(
         if (length <= 0f) return
 
         val direction = moveDirection
-        val advance = direction?.let { delta.dot(it) } ?: 0f
-        if (direction == null || advance <= 0f) {
-            // 没有正在累计的位移，或这次位移没有沿当前方向推进：从这次位移重新起算。
-            moveDirection = delta / length
-            moveDistance = length
-            moveStartedAtMillis = now
+        if (direction == null) {
+            startMove(delta, length, now)
         } else {
-            moveDistance += advance
+            val net = moveDistance + direction.x * delta.x + direction.y * delta.y
+            if (net <= 0f) startMove(delta, length, now) else moveDistance = net
         }
 
         val deadZonePx = with(density) { PlayerPointerMoveDeadZone.toPx() }
@@ -112,6 +108,19 @@ class PlayerPointerVisibility(
         }
     }
 
+    /** 控制层在场状态变化：在场时指针一并出现并直接跟随鼠标，离场时一并隐藏、回到位移判据。 */
+    fun onControlLayerPresenceChanged(present: Boolean) {
+        followsPointerDirectly = present
+        if (present) show() else hide()
+    }
+
+    /** 以这次位移起算一段新的同向净位移。 */
+    private fun startMove(delta: Offset, length: Float, now: Long) {
+        moveDirection = delta / length
+        moveDistance = length
+        moveStartedAtMillis = now
+    }
+
     /** 清空同向净位移的累计。 */
     private fun resetMove() {
         moveDirection = null
@@ -142,6 +151,5 @@ suspend fun runPointerAutoHide(
  * 只改指针，不碰控制层，控件显隐仍只由用户操作决定。
  */
 fun pointerFollowsBars(barsPresent: Boolean, pointer: PlayerPointerVisibility) {
-    pointer.followsPointerDirectly = barsPresent
-    if (barsPresent) pointer.show() else pointer.hide()
+    pointer.onControlLayerPresenceChanged(barsPresent)
 }

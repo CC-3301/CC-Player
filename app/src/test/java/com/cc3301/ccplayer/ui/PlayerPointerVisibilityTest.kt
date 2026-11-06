@@ -168,26 +168,76 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `改换方向的位移从新方向重新起算`() {
+    fun `反向位移扣减累计值，不清空已攒的同向净位移`() {
         hidePointer()
 
         now = 100L
         pointer.onPointerMove(Offset(0f, 0f), oneX)
         now = 110L
-        pointer.onPointerMove(Offset(0f, 8f), oneX)
+        pointer.onPointerMove(Offset(0f, 10f), oneX)
 
-        // 先向上 8dp，再向下 8dp：向下不从向上的累计里扣，而是从新方向重新起算。
-        now = 260L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
+        // 向下 6dp 从向上的净位移里扣减，剩 4dp，方向与起点都不变。
+        now = 130L
+        pointer.onPointerMove(Offset(0f, 4f), oneX)
         assertFalse(pointer.visible)
 
-        now = 270L
-        pointer.onPointerMove(Offset(0f, -1f), oneX)
-        now = 420L
-        pointer.onPointerMove(Offset(0f, -10f), oneX)
+        now = 280L
+        pointer.onPointerMove(Offset(0f, 14f), oneX)
 
         assertTrue(pointer.visible)
-        assertEquals(420L, pointer.lastActivityAtMillis)
+        assertEquals(280L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `净位移扣到 0 及以下后以新方向重新起算`() {
+        hidePointer()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 0f), oneX)
+        now = 110L
+        pointer.onPointerMove(Offset(0f, 6f), oneX)
+
+        // 向下 6dp 把向上的 6dp 扣到 0，改为向下起算，起点是此刻。
+        now = 130L
+        pointer.onPointerMove(Offset(0f, 0f), oneX)
+        now = 270L
+        pointer.onPointerMove(Offset(0f, -12f), oneX)
+        assertFalse(pointer.visible)
+
+        now = 280L
+        pointer.onPointerMove(Offset(0f, -13f), oneX)
+
+        assertTrue(pointer.visible)
+        assertEquals(280L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `慢速斜向拖动满窗口后唤出指针`() {
+        hidePointer()
+
+        // 阶梯状斜拖：横向、纵向 2dp 交替前进，同向净位移累计到 10dp 用满 150ms。
+        val path = listOf(
+            100L to Offset(0f, 0f),
+            110L to Offset(2f, 0f),
+            130L to Offset(2f, 2f),
+            150L to Offset(4f, 2f),
+            170L to Offset(4f, 4f),
+            190L to Offset(6f, 4f),
+            210L to Offset(6f, 6f),
+            230L to Offset(8f, 6f),
+            250L to Offset(8f, 8f),
+        )
+        for ((at, position) in path) {
+            now = at
+            pointer.onPointerMove(position, oneX)
+        }
+        assertFalse(pointer.visible)
+
+        now = 260L
+        pointer.onPointerMove(Offset(10f, 8f), oneX)
+
+        assertTrue(pointer.visible)
+        assertEquals(260L, pointer.lastActivityAtMillis)
     }
 
     @Test
