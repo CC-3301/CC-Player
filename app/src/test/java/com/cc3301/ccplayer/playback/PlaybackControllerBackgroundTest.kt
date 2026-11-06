@@ -460,6 +460,23 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `前台切集进行中回前台撤帧后黑屏不显示缓冲提示`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.next()
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
+        runCurrent()
+
+        // 切集缓冲灯照常亮起，但屏上旧画面已撤：黑屏期间不显示提示。
+        assertTrue(controller.buffering.value)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertTrue(controller.surfacePresentation.value.quietBlack)
+    }
+
+    @Test
     fun `首次加载中回前台不留下黑屏无提示标记`() = runTest {
         val controller = controller()
         val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))

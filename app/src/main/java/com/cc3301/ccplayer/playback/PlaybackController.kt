@@ -490,12 +490,13 @@ class PlaybackController(
         if (screenFrame != ScreenFrame.None) {
             screenFrame = ScreenFrame.None
             originAspectRatio = null
+            // 撤帧已经发生：即使处于加载/切集阶段、本次不进入等新帧等待，黑屏期间也不显示提示。
+            quietBlack = true
             settlePresentation()
         }
         // 与 Surface 重挂同一条等新帧路径：3 秒无新帧翻转一次视频输出，等待有上限。
         val waiting = beginSurfaceRestore(reason = "回前台播放态")
-        // 只有真正进入恢复等待且仍无画面才算「黑屏无提示」；
-        // 加载/切集阶段不改变提示规则（首次缓冲照常显示）。
+        // 本来就没有画面但确实进入等待：同样按黑屏无提示处理；加载/切集阶段不改变提示规则。
         if (waiting && !_surfacePresentation.value.showsPicture) {
             quietBlack = true
             settlePresentation()
