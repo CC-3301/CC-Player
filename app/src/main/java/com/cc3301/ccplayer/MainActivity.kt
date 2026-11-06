@@ -7,14 +7,12 @@ import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
-import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.view.Display
-import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.WindowManager
 import android.widget.Toast
@@ -30,7 +28,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -101,12 +98,10 @@ import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
-import com.cc3301.ccplayer.ui.SensorOrientationGate
 import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
-import com.cc3301.ccplayer.ui.awaitsVideoOrientation
 import com.cc3301.ccplayer.ui.failedEntryExit
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.mediaFailureText
@@ -114,7 +109,7 @@ import com.cc3301.ccplayer.ui.notificationOpenAction
 import com.cc3301.ccplayer.ui.playerBackAction
 import com.cc3301.ccplayer.ui.onPlayPauseClick
 import com.cc3301.ccplayer.ui.relativeSeekTarget
-import com.cc3301.ccplayer.ui.sensorScreenOrientation
+import com.cc3301.ccplayer.ui.screenOrientationMode
 import com.cc3301.ccplayer.ui.theme.CcPlayerTheme
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
@@ -218,24 +213,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
-    /** 最近的设置方向档位；传感器回调在组合之外判定，需要即时读到。 */
+    /** 最近的设置方向档位。 */
     private var playerOrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE
-
-    /** 最近一次传感器角度；为空表示角度未知（设备接近水平、架在支架上或传感器不可用）。 */
-    private var sensorAngle: Int? = null
-
-    /** 传感器换向的去抖闸门；用户操作与设置变化不走它。 */
-    private val sensorOrientationGate = SensorOrientationGate()
-
-    /** 本次播放是否已记录过传感器首个回调与首个有效角度。 */
-    private var orientationSensorCallbackLogged = false
-    private var orientationSensorAngleLogged = false
-
-    /** 已施加的播放页方向，用于方向迟滞；[ScreenOrientation.System] 表示本次播放还没施加过。 */
-    private var appliedScreenOrientation = ScreenOrientation.System
-
-    /** 等待视频方向期间钉住的方向：进入播放页时记一次，视频方向到达或离开播放页即清除。 */
-    private var heldScreenOrientation: ScreenOrientation? = null
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
@@ -389,77 +368,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 LaunchedEffect(playbackState, buffering, switching) {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
-                // 播放页按方向设置与角度施加朝向；离开播放页把方向交回系统。
+                // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
                 // 比例只读屏上那一帧的比例：切集期间跟随旧画面，不会因新文件先上报尺寸就转屏。
                 LaunchedEffect(
                     playerVisible,
                     orientationMode,
                     surfacePresentation.aspectRatio,
                     sessionOrientation.override,
-                    // 进页时列表还没落地；媒介身份变化后要重算等待。
+                    // 进页时播放列表还没落地；媒介身份变化后要重算一次纯音频判定。
                     playlist,
                     currentIndex,
                 ) {
                     playerOrientationMode = orientationMode
-                    when {
-                        // 跟随视频但视频方向未知：钉住进入播放页时的方向，传感器不参与。
-                        playerVisible && awaitingVideoOrientation() -> holdOrientationUntilVideoKnown()
-                        playerVisible -> {
-                            heldScreenOrientation = null
-                            applyPlayerOrientationFromUser()
-                        }
-                        else -> {
-                            heldScreenOrientation = null
-                            applyOrientation(ScreenOrientation.System)
-                        }
-                    }
-                }
-                // 传感器只在播放页注册，离开播放页注销；没有可用传感器时按档位施加族正向。
-                DisposableEffect(playerVisible) {
-                    if (!playerVisible) return@DisposableEffect onDispose { }
-                    val listener = object : OrientationEventListener(this@MainActivity, SensorManager.SENSOR_DELAY_UI) {
-                        override fun onOrientationChanged(orientation: Int) {
-                            if (!playerVisible) return
-                            val angle = orientation.takeIf { it != OrientationEventListener.ORIENTATION_UNKNOWN }
-                            if (!orientationSensorCallbackLogged) {
-                                orientationSensorCallbackLogged = true
-                                diagnostics.log {
-                                    if (angle == null) {
-                                        "方向传感器: 首个回调未知（设备接近水平或传感器不可用）"
-                                    } else {
-                                        "方向传感器: 首个回调 $angle"
-                                    }
-                                }
-                            }
-                            if (angle != null && !orientationSensorAngleLogged) {
-                                orientationSensorAngleLogged = true
-                                diagnostics.log { "方向传感器: 首个有效角度 $angle" }
-                            }
-                            if (angle == null) {
-                                // 角度再次未知：保留已施加方向，不回退到族正向重算。
-                                sensorAngle = null
-                                sensorOrientationGate.onAngleUnknown()
-                                return
-                            }
-                            sensorAngle = angle
-                            // 视频方向未知时先不动：这一步施加的方向会先于视频方向生效。
-                            if (awaitingVideoOrientation()) return
-                            applyPlayerOrientationFromSensor()
-                        }
-                    }
-                    if (listener.canDetectOrientation()) {
-                        listener.enable()
-                        diagnostics.log { "方向传感器: 已启用" }
-                    } else {
-                        diagnostics.log { "方向传感器: 不可用，方向按档位施加" }
-                    }
-                    onDispose {
-                        listener.disable()
-                        sensorAngle = null
-                        sensorOrientationGate.onAngleUnknown()
-                        orientationSensorCallbackLogged = false
-                        orientationSensorAngleLogged = false
-                    }
+                    dispatchPlayerOrientation()
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
@@ -770,8 +691,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。 */
     private fun enterPlayer(preparing: Boolean) {
         sessionOrientation.beginPlayback()
-        appliedScreenOrientation = ScreenOrientation.System
-        heldScreenOrientation = null
         playerVisible = true
         updateKeepScreenOn()
         playbackEntry.enter(preparing)
@@ -1039,7 +958,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
         sessionOrientation.endPlayback()
-        applyOrientation(ScreenOrientation.System)
+        // 离开播放页把方向交回系统；状态变化后 [LaunchedEffect] 会再比对一次，相同时不写。
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
     /** 当前屏幕的四向方向，供转屏按钮从现状切换与方向日志判定。 */
@@ -1056,60 +976,30 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation
             ?: Surface.ROTATION_0
 
-    /** 用户操作（进播放页、改设置、点转屏按钮、视频比例变化）立即施加，不经过传感器去抖。 */
-    private fun applyPlayerOrientationFromUser() {
-        sensorOrientationGate.onUserApplied()
-        applyPlayerOrientation()
-    }
-
-    /** 跟随视频且视频方向未知：等待期内不采信传感器角度，屏幕钉在进入播放页时的方向。 */
-    private fun awaitingVideoOrientation(): Boolean = awaitsVideoOrientation(
-        mode = playerOrientationMode,
-        videoAspectRatio = surfacePresentation.aspectRatio,
-        audioOnly = currentMediaIsAudio(),
-        rotationOverride = sessionOrientation.override,
-    )
-
-    /** 钉住进入播放页时的方向；只在首次钉住时确定。 */
-    private fun holdOrientationUntilVideoKnown() {
-        val held = heldScreenOrientation ?: currentScreenOrientation().also {
-            heldScreenOrientation = it
+    /**
+     * 下发播放页方向；不在播放页时交回系统。
+     *
+     * 跟随视频比例未知时映射函数返回空，保持当前 requestedOrientation 等比例到达。
+     * 与当前请求相同时不写，避免多余的方向变化。
+     */
+    private fun dispatchPlayerOrientation() {
+        val target = if (playerVisible) {
+            screenOrientationMode(
+                mode = playerOrientationMode,
+                videoAspectRatio = surfacePresentation.aspectRatio,
+                rotationOverride = sessionOrientation.override,
+                audioOnly = currentMediaIsAudio(),
+            )
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
-        appliedScreenOrientation = held
-        applyOrientation(held)
+        if (target == null || target == requestedOrientation) return
+        requestedOrientation = target
     }
 
-    /** 当前条目是不是纯音频；纯音频没有视频方向，不进入等待。列表未就绪时按视频算。 */
+    /** 当前条目是不是纯音频；纯音频没有视频方向，不进入方向等待。列表未就绪时按视频算。 */
     private fun currentMediaIsAudio(): Boolean =
         playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Audio } ?: false
-
-    /** 传感器帧：目标方向连续稳定达到阈值后才施加。 */
-    private fun applyPlayerOrientationFromSensor() {
-        if (!sensorOrientationGate.shouldApplyFromSensor(playerOrientationTarget())) return
-        applyPlayerOrientation()
-    }
-
-    /** 当前方向设置与传感器角度下要施加的朝向。 */
-    private fun playerOrientationTarget(): ScreenOrientation =
-        sensorScreenOrientation(
-            sessionOrientation.resolve(playerOrientationMode, surfacePresentation.aspectRatio),
-            sensorAngle,
-            appliedScreenOrientation,
-        )
-
-    /**
-     * 施加当前目标朝向；方向真正变化时才写一条诊断日志。
-     *
-     * 角度未知时按档位施加族正向（已施加过族内方向则保留），「屏幕方向」档交回系统。
-     */
-    private fun applyPlayerOrientation() {
-        val target = playerOrientationTarget()
-        if (target == appliedScreenOrientation) return
-        appliedScreenOrientation = target
-        applyOrientation(target)
-        // 交回系统时没有具体方向，系统切换完成后由配置变化记录。
-        if (target != ScreenOrientation.System) recordScreenOrientation(target)
-    }
 
     /**
      * 每次方向真正切换都写一条日志。
@@ -1155,17 +1045,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             controller.hide(WindowInsetsCompat.Type.systemBars())
         } else {
             controller.show(WindowInsetsCompat.Type.systemBars())
-        }
-    }
-
-    /** 设置窗口方向；[ScreenOrientation.System] 交回系统自动旋转设置，离开播放页时也走这条。 */
-    private fun applyOrientation(orientation: ScreenOrientation) {
-        requestedOrientation = when (orientation) {
-            ScreenOrientation.System -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            ScreenOrientation.Portrait -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            ScreenOrientation.ReversePortrait -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-            ScreenOrientation.Landscape -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            ScreenOrientation.ReverseLandscape -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
         }
     }
 
