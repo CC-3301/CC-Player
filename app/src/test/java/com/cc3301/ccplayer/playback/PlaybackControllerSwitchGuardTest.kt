@@ -21,7 +21,8 @@ import org.junit.Test
 
 /**
  * 切集看护：读失败重发一次、10 秒无进展判失败，以及唯一的累计运行时长计时。
- * 切集期间只有这一套计时，后台与 Surface 分离的时间不计入任何判据。
+ * 切集期间只有这一套计时，退后台与 Surface 分离都不挂起它：
+ * 后台正常播放靠「播放位置前进」算进展，没有进展一样到 10 秒判失败。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerSwitchGuardTest {
@@ -30,7 +31,7 @@ class PlaybackControllerSwitchGuardTest {
     private val progress = FakePlaybackProgressRepository()
 
     @Test
-    fun `a switch that loads in the background is not failed on return`() = runTest {
+    fun `a switch without progress in the background fails at ten seconds`() = runTest {
         val controller = playingController()
         val failures = collectFailures(controller)
 
@@ -38,23 +39,49 @@ class PlaybackControllerSwitchGuardTest {
         advanceTimeBy(1_000)
         controller.setAppInForeground(false)
         engine.reportFileLoaded()
-        // 后台待的时间远超 10 秒：这一段不进切集计时。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 6)
-        runCurrent()
-        assertTrue(failures.isEmpty())
-
-        controller.setAppInForeground(true)
-        runCurrent()
-        // 回前台不立刻判失败：只接着剩下的 9 秒走。
-        assertTrue(controller.switching.value)
-        assertTrue(failures.isEmpty())
-
+        // 后台不挂起计时：加载完成不算进展，到 10 秒照样判失败并回退原片。
         advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000 - 1)
         runCurrent()
+        assertTrue(controller.switching.value)
         assertTrue(failures.isEmpty())
 
         advanceTimeBy(1)
         runCurrent()
+        assertEquals(1, failures.size)
+        assertEquals(0, controller.currentIndex.value)
+        assertTrue(controller.restoring.value)
+    }
+
+    @Test
+    fun `a switch that advances position in the background is not failed`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        controller.setAppInForeground(false)
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        engine.reportPositionChanged(1_000, 600_000)
+
+        // 后台位置在前进就是进展：退后台 30 秒不按后台时间判失败。
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertTrue(failures.isEmpty())
+        assertFalse(controller.switching.value)
+    }
+
+    @Test
+    fun `a switch without progress keeps the guard running while the surface is detached`() = runTest {
+        val controller = playingController()
+        val failures = collectFailures(controller)
+
+        controller.next()
+        advanceTimeBy(1_000)
+        controller.setRenderSurfaceAvailable(false)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000)
+        runCurrent()
+
+        // Surface 分离同样不挂起计时：无进展到 10 秒照样判失败。
         assertEquals(1, failures.size)
     }
 
@@ -373,7 +400,7 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `a restore in the background is not failed on return`() = runTest {
+    fun `a restore without progress in the background fails at ten seconds`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(40_000, 600_000)
         val failures = collectFailures(controller)
@@ -384,20 +411,9 @@ class PlaybackControllerSwitchGuardTest {
         assertTrue(controller.restoring.value)
         val reported = failures.size
 
-        // 恢复原片走到 1 秒时退后台：后台时间不进恢复的 10 秒判据。
-        advanceTimeBy(1_000)
+        // 恢复原片同样不因后台挂起：无进展到 10 秒直接结束会话。
         controller.setAppInForeground(false)
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 6)
-        runCurrent()
-        assertEquals(reported, failures.size)
-        assertTrue(controller.restoring.value)
-
-        controller.setAppInForeground(true)
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000 - 1)
-        runCurrent()
-        assertEquals(reported, failures.size)
-
-        advanceTimeBy(1)
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS)
         runCurrent()
         // 恢复失败不重复提示，直接结束会话。
         assertEquals(reported, failures.size)
@@ -501,27 +517,23 @@ class PlaybackControllerSwitchGuardTest {
     }
 
     @Test
-    fun `an initial load in the background is not failed on return`() = runTest {
+    fun `an initial load in the background fails at ten seconds without progress`() = runTest {
         val controller = controller()
         val failures = collectFailures(controller)
         open(controller, "ep1.mkv")
 
         advanceTimeBy(1_000)
         controller.setAppInForeground(false)
-        // 后台待的时间远超 10 秒：这一段不进加载计时。
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 6)
+        // 后台不挂起计时：无进展到 10 秒判失败，不再无限转圈。
+        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000 - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
         assertEquals(PlaybackState.Loading, controller.state.value)
 
-        controller.setAppInForeground(true)
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 1_000 - 1)
-        runCurrent()
-        assertTrue(failures.isEmpty())
-
         advanceTimeBy(1)
         runCurrent()
         assertEquals(1, failures.size)
+        assertEquals(PlaybackState.Ended, controller.state.value)
     }
 
     @Test

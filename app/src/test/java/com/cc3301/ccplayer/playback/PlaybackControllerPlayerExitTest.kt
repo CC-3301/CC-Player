@@ -25,14 +25,15 @@ class PlaybackControllerPlayerExitTest {
     )
 
     @Test
-    fun `正在播放时点开另一条视频以新列表替换当前播放`() {
+    fun `正在播放时点开另一条视频只发 loadfile 替换，不先停`() {
         controller.openPlaylist(listOf(mediaFile("a.mkv"), mediaFile("b.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()
 
         controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
 
+        // 旧片在播时直接以 loadfile replace 替换：先发 stop 会把新加载一并终止。
         assertEquals(listOf("root/a.mkv", "root/c.mkv"), engine.startedUrls)
-        assertEquals(1, engine.stopCalls)
+        assertEquals(0, engine.stopCalls)
         assertEquals(listOf("c.mkv"), controller.playlist.value.map { it.name })
         assertEquals(PlaybackState.Loading, controller.state.value)
     }

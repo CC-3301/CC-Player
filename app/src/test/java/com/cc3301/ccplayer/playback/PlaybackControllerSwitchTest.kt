@@ -1135,7 +1135,7 @@ class PlaybackControllerSwitchTest {
     }
 
     @Test
-    fun `surface detach pauses the switch guard and reattach continues it`() = runTest {
+    fun `surface detach keeps the switch guard running`() = runTest {
         val controller = playingController()
         val failures = collectFailures(controller)
 
@@ -1144,17 +1144,12 @@ class PlaybackControllerSwitchTest {
         runCurrent()
         assertTrue(controller.switching.value)
 
-        // 分离期间不计时：已经跑的 4 秒保留，剩下的等回前台再走。
+        // 分离不挂起计时：已经跑的 4 秒照样保留，剩下的照旧走完，回前台不顺延。
         controller.setRenderSurfaceAvailable(false)
-        advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS * 2)
-        runCurrent()
-        assertTrue(failures.isEmpty())
-        assertTrue(controller.switching.value)
-
-        controller.setRenderSurfaceAvailable(true)
         advanceTimeBy(PlaybackController.LOAD_FAIL_DELAY_MILLIS - 4_000 - 1)
         runCurrent()
         assertTrue(failures.isEmpty())
+        assertTrue(controller.switching.value)
 
         advanceTimeBy(1)
         runCurrent()
