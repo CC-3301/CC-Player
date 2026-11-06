@@ -61,4 +61,34 @@ class PlayerSessionOrientationTest {
 
         assertNull(session.override)
     }
+
+    @Test
+    fun `新会话不沿用上一次的比例`() {
+        session.onVideoAspectRatio(1.78)
+
+        session.beginPlayback()
+
+        assertNull(session.videoAspectRatio)
+    }
+
+    @Test
+    fun `离开播放页保留比例回到同一会话沿用`() {
+        session.onVideoAspectRatio(0.5625)
+
+        session.endPlayback()
+        assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
+
+        session.resumePlayback()
+        assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
+    }
+
+    @Test
+    fun `无效比例不覆盖已记录的比例`() {
+        session.onVideoAspectRatio(1.78)
+
+        listOf(null, 0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { ratio ->
+            session.onVideoAspectRatio(ratio)
+            assertEquals("比例 $ratio", 1.78, session.videoAspectRatio!!, 0.0)
+        }
+    }
 }

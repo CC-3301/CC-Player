@@ -15,15 +15,14 @@ enum class ScreenOrientation { System, Portrait, ReversePortrait, Landscape, Rev
 fun ScreenOrientation.isLandscape(): Boolean =
     this == ScreenOrientation.Landscape || this == ScreenOrientation.ReverseLandscape
 
-/** 视频比例是否可用：空、非有限或非正都算未知。 */
-fun videoAspectRatioKnown(videoAspectRatio: Double?): Boolean =
-    videoAspectRatio != null && videoAspectRatio.isFinite() && videoAspectRatio > 0.0
-
 /**
  * 按方向设置与视频宽高比判定期望的族（ADR-0013）。
  *
- * 跟随视频：宽高比 ≥1 取横屏族，<1 取竖屏族；比例未知、非正或非有限时按屏幕方向处理
- * （四向全跟），避免在拿到比例之前把画面锁死。
+ * 跟随视频：宽高比 ≥1 取横屏族，<1 取竖屏族。
+ *
+ * 比例未知、非正或非有限时返回 [ScreenOrientation.System]，只给「首次撤黑等方向」
+ * （[awaitsVideoRotation]）这类调用方兜底：播放页下发不走这个分支，同样条件下
+ * [screenOrientationMode] 判成锁住当前方向。
  */
 fun resolvedOrientation(mode: OrientationMode, videoAspectRatio: Double?): ScreenOrientation =
     when (mode) {
@@ -31,7 +30,7 @@ fun resolvedOrientation(mode: OrientationMode, videoAspectRatio: Double?): Scree
         OrientationMode.Landscape -> ScreenOrientation.Landscape
         OrientationMode.Portrait -> ScreenOrientation.Portrait
         OrientationMode.FollowVideo -> when {
-            !videoAspectRatioKnown(videoAspectRatio) -> ScreenOrientation.System
+            !hasKnownVideoAspectRatio(videoAspectRatio) -> ScreenOrientation.System
             videoAspectRatio != null && videoAspectRatio >= 1.0 -> ScreenOrientation.Landscape
             else -> ScreenOrientation.Portrait
         }
@@ -64,9 +63,9 @@ fun awaitsVideoRotation(
 }
 
 /**
- * 跟随视频时是否正在等视频方向：设置为跟随视频、比例未知、当前条目是视频，且没有手动转屏。
+ * 跟随视频时是否正在等视频方向：设置为跟随视频、比例未知、当前条目有视频方向，且没有手动转屏。
  *
- * 等待期内不下发方向，屏幕停在进入播放页时的方向，视频方向一到达就按它下发一次。
+ * 等待期内锁住当前方向（`SCREEN_ORIENTATION_LOCKED`），视频方向一到达就按它下发一次。
  * 比例为 NaN、非正等无效值时同样算未知。
  */
 fun awaitsVideoOrientation(
@@ -79,7 +78,7 @@ fun awaitsVideoOrientation(
     if (rotationOverride != null) return false
     // 纯音频没有视频方向，等下去会永久占住方向。
     if (audioOnly) return false
-    return !videoAspectRatioKnown(videoAspectRatio)
+    return !hasKnownVideoAspectRatio(videoAspectRatio)
 }
 
 /** 转屏按钮：按当前是否为横屏给出另一个方向。 */

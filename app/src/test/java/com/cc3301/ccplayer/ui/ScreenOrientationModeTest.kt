@@ -6,7 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * 方向档位 + 视频宽高比 + 转屏覆盖 + 是否在播放页 → 下发的系统方向模式，接缝 12。
+ * 方向档位 + 视频宽高比 + 转屏覆盖 + 有无视频方向 → 下发的系统方向模式，接缝 12。
  *
  * 方向交给系统的传感器旋转模式，App 不再自己判角度；180° 反向由系统的 `allowAllRotations`
  * 决定，这里不断言反向。
@@ -14,12 +14,11 @@ import org.junit.Test
 class ScreenOrientationModeTest {
 
     private fun mode(
-        mode: OrientationMode,
+        mode: OrientationMode?,
         ratio: Double? = null,
         override: ScreenOrientation? = null,
         audioOnly: Boolean = false,
-        playerVisible: Boolean = true,
-    ): Int = screenOrientationMode(mode, ratio, override, audioOnly, playerVisible)
+    ): Int = screenOrientationMode(mode, ratio, override, audioOnly)
 
     @Test
     fun `四个档位各取对应的系统传感器模式`() {
@@ -97,7 +96,8 @@ class ScreenOrientationModeTest {
     }
 
     @Test
-    fun `纯音频按屏幕方向档处理`() {
+    fun `没有视频方向的条目按屏幕方向档处理`() {
+        // 扩展名是音频，或容器里没有视频轨：都不进入方向等待。
         assertEquals(
             ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR,
             mode(OrientationMode.FollowVideo, null, audioOnly = true),
@@ -127,18 +127,17 @@ class ScreenOrientationModeTest {
 
     @Test
     fun `离开播放页交回系统`() {
-        listOf(OrientationMode.System, OrientationMode.Landscape, OrientationMode.Portrait, OrientationMode.FollowVideo)
-            .forEach { tier ->
-                assertEquals(
-                    "档位 $tier",
-                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
-                    mode(tier, 1.78, ScreenOrientation.Landscape, playerVisible = false),
-                )
-            }
-        // 比例未知也交回系统，不锁在当前方向。
+        listOf(null, 2.39, 0.5625).forEach { ratio ->
+            assertEquals(
+                "比例 $ratio",
+                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
+                mode(null, ratio),
+            )
+        }
+        // 有转屏覆盖也照旧交回系统。
         assertEquals(
             ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
-            mode(OrientationMode.FollowVideo, null, playerVisible = false),
+            mode(null, 1.78, ScreenOrientation.Landscape),
         )
     }
 }

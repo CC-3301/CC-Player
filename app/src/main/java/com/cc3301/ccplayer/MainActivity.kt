@@ -214,9 +214,6 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
-    /** 本次播放会话的视频比例；离开播放页后为空，直到本次会话首个 presentation 到达。 */
-    private var sessionAspectRatio by mutableStateOf<Double?>(null)
-
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
 
@@ -245,7 +242,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             scope = lifecycleScope,
             directoryEntries = { library.directoryEntries() },
             networkStreams = { networkStreams() },
-            onEnterPlayer = ::enterPlayer,
+            onEnterPlayer = { preparing -> enterPlayer(preparing, newSession = true) },
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
             onLeavePlayer = ::leaveAfterFailedEntry,
@@ -296,8 +293,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch {
                     binder.controller.surfacePresentation.collect {
                         surfacePresentation = it
-                        // 本次会话首个 presentation 定下方向要用的比例；离开播放页即清空。
-                        if (playerVisible && it.aspectRatio != null) sessionAspectRatio = it.aspectRatio
+                        // 屏上那一帧的比例；有效就更新，离页或新会话时由会话对象作废。
+                        sessionOrientation.onVideoAspectRatio(it.aspectRatio)
                     }
                 }
                 launch {
@@ -376,17 +373,19 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
-                // 比例只认本次会话首个 presentation 上报的那一帧：切集期间跟随旧画面，不因新文件先报尺寸就转屏。
+                // 比例跟着会话走：新会话作废，回到同一会话沿用，切集期间用屏上旧画面的比例。
                 LaunchedEffect(
                     playerVisible,
                     orientationMode,
-                    sessionAspectRatio,
+                    sessionOrientation.videoAspectRatio,
                     sessionOrientation.override,
-                    // 进页时播放列表还没落地；媒介身份变化后要重算一次纯音频判定。
+                    // 进页时播放列表还没落地；媒介身份与视频轨变化后要重算一次「有无视频方向」。
                     playlist,
                     currentIndex,
+                    surfacePresentation.targetHasVideo,
                 ) {
-                    dispatchPlayerOrientation(orientationMode)
+                    // 不在播放页时传空：方向交回系统。
+                    dispatchPlayerOrientation(if (playerVisible) orientationMode else null)
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
@@ -694,9 +693,14 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         library.addLocalRoot(uri.toString())
     }
 
-    /** 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。 */
-    private fun enterPlayer(preparing: Boolean) {
-        sessionOrientation.beginPlayback()
+    /**
+     * 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。
+     *
+     * [newSession] 为真表示开始新的播放会话（从浏览页点进来），比例与转屏结果作废；
+     * 为假表示回到同一会话（通知栏入口等），沿用已记录的比例。
+     */
+    private fun enterPlayer(preparing: Boolean, newSession: Boolean) {
+        if (newSession) sessionOrientation.beginPlayback() else sessionOrientation.resumePlayback()
         playerVisible = true
         updateKeepScreenOn()
         playbackEntry.enter(preparing)
@@ -898,7 +902,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         if (playerVisible) return
         val binder = playback ?: return
         if (binder.controller.state.value == PlaybackState.Idle) return
-        enterPlayer(preparing = false)
+        enterPlayer(preparing = false, newSession = false)
     }
 
     override fun onSurfaceReleased() {
@@ -960,14 +964,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /**
      * 退出播放页：恢复系统栏与方向，保证它们在页面切换前到位；调用前 [playerVisible] 必须已为 false。
      *
-     * 比例作废、覆盖清零，方向由 [dispatchPlayerOrientation] 按非播放状态下发，重复调用无副作用。
+     * 覆盖清零、比例保留到下一次回到同一会话，方向由 [dispatchPlayerOrientation] 按非播放状态下发，重复调用无副作用。
      */
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
         sessionOrientation.endPlayback()
-        sessionAspectRatio = null
-        // 不在播放页时档位不参与判定，这里传哪个档位都只交回系统。
-        dispatchPlayerOrientation(OrientationMode.System)
+        // 不在播放页：模式传空，方向交回系统；比例留到下一次回到同一会话。
+        dispatchPlayerOrientation()
     }
 
     /** 当前屏幕的四向方向，供转屏按钮从现状切换与方向日志判定。 */
@@ -987,24 +990,28 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /**
      * 下发方向；这是 `requestedOrientation` 唯一的写入点。
      *
-     * 不在播放页时交回系统；跟随视频比例未知时锁住当前方向。
+     * [mode] 为空表示不在播放页，方向交回系统；跟随视频比例未知时锁住当前方向。
      * 与当前请求相同时不写，避免多余的方向变化。
      */
-    private fun dispatchPlayerOrientation(mode: OrientationMode) {
+    private fun dispatchPlayerOrientation(mode: OrientationMode? = null) {
         val target = screenOrientationMode(
             mode = mode,
-            videoAspectRatio = sessionAspectRatio,
+            videoAspectRatio = sessionOrientation.videoAspectRatio,
             rotationOverride = sessionOrientation.override,
-            audioOnly = currentMediaIsAudio(),
-            playerVisible = playerVisible,
+            audioOnly = currentTargetHasNoVideo(),
         )
         if (target == requestedOrientation) return
         requestedOrientation = target
     }
 
-    /** 当前条目是不是纯音频；纯音频没有视频方向，不进入方向等待。列表未就绪时按视频算。 */
-    private fun currentMediaIsAudio(): Boolean =
-        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Audio } ?: false
+    /**
+     * 当前集有没有视频方向：扩展名是音频，或容器里没有视频轨。
+     *
+     * 没有视频方向的条目按屏幕方向档处理，不进入方向等待。列表未就绪时按有视频算。
+     */
+    private fun currentTargetHasNoVideo(): Boolean =
+        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Audio } == true ||
+            !surfacePresentation.targetHasVideo
 
     /**
      * 每次方向真正切换都写一条日志。

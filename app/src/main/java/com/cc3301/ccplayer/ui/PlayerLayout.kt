@@ -11,7 +11,9 @@ import kotlin.math.roundToLong
 data class VideoViewport(val left: Float, val top: Float, val width: Float, val height: Float)
 
 /**
- * 比例是否能用于方向判断与「比例未知期间铺黑」：非空、有限且大于 0。
+ * 视频比例是否可用：非空、有限且大于 0。
+ *
+ * 这是唯一判据，方向与「比例未知期间铺黑」都引用它。
  */
 fun hasKnownVideoAspectRatio(videoAspectRatio: Double?): Boolean =
     videoAspectRatio != null && videoAspectRatio.isFinite() && videoAspectRatio > 0.0
