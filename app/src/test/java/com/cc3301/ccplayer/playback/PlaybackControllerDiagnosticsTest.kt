@@ -240,7 +240,6 @@ class PlaybackControllerDiagnosticsTest {
         assertTrue(watchdogLine.contains("加载令牌: $watchdogToken"))
         assertTrue(watchdogLine.contains("阶段: 首次加载"))
         assertTrue(watchdogLine.contains("失败来源: 无进展超时（10 秒）"))
-        assertTrue(watchdogLine.contains("计时挂起: 0 次"))
         assertTrue(coreLine.contains("目标: root/ep1.mkv"))
         assertTrue(coreLine.contains("加载令牌: $coreToken"))
         assertTrue(coreLine.contains("阶段: 首次加载"))

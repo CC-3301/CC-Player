@@ -285,8 +285,8 @@ class PlaybackController(
     private var pendingFrameJob: Job? = null
 
     /**
-     * 首次打开与切集共用的累计运行时长。只在前台且有可渲染 Surface 时累积，
-     * 暂停不挂起；判据与日志耗时都读它，不用墙上时钟重算。
+     * 首次打开、切集与恢复原片共用的累计运行时长：退后台与 Surface 分离都不挂起，
+     * 暂停也不挂起；判据与日志耗时都读它，不用墙上时钟重算。
      */
     private val guardElapsed = RunningDuration(nowMillis)
 
@@ -304,9 +304,6 @@ class PlaybackController(
 
     /** 重发发生时的累计运行时长；只用于日志的事件时间线。 */
     private var loadRetriedAtMillis: Long? = null
-
-    /** 本次加载计时被挂起的次数；写进失败行，用来解释耗时与判据的差。 */
-    private var guardSuspensions = 0
 
     /** 本次加载的目标前移记录；连点只并进事件时间线，不单独写日志。 */
     private val loadRetargets = mutableListOf<String>()
@@ -326,7 +323,7 @@ class PlaybackController(
     /** 本次加载的来源；只用于诊断日志区分打开、手动、列表与片尾。 */
     private var loadSource = LoadTrigger.Open
 
-    /** 是否在前台；与 Surface 一起决定加载计时是否累积。 */
+    /** 是否在前台；与 Surface 一起决定等新帧窗口是否挂起。 */
     private var foreground = true
 
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
@@ -379,10 +376,12 @@ class PlaybackController(
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) return
         // 正在播放时换列表按替换当前播放处理：不把新列表套进旧列表的切集回退。
-        // 解码模式属于本次会话的临时选择，stop() 会重置成默认值，替换后要写回引擎。
+        // 解码模式属于本次会话的临时选择，结束会话会重置成默认值，替换后要写回引擎。
+        // 换片不向播放核心发停止：mpv 的 stop 紧跟 loadfile 会把新加载一并终止，
+        // 旧片直接由新加载的 loadfile replace 替换。
         if (active) {
             val decodeMode = _decodeMode.value
-            stop()
+            discardSession()
             setDecodeMode(decodeMode)
         }
         _playlist.value = playlist
@@ -464,7 +463,7 @@ class PlaybackController(
     }
 
     /**
-     * 界面前后台上报：切集计时只在前台且 Surface 可用时累积。
+     * 界面前后台上报：加载看护不因前后台变化挂起，切集计时照常累计。
      * 后台播放开着时 Surface 可能还在，前后台与 Surface 分开记、同一处结算。
      */
     fun setAppInForeground(foreground: Boolean) {
@@ -842,6 +841,16 @@ class PlaybackController(
     }
 
     fun stop() {
+        discardSession()
+        engine.stop()
+    }
+
+    /**
+     * 丢弃当前会话并回到空闲：保存进度、清状态。
+     * 是否向播放核心发停止由调用方决定：换列表替换当前播放时不发 stop，
+     * 旧片由新加载的 loadfile replace 直接替换。
+     */
+    private fun discardSession() {
         _playbackFailed.value = false
         val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
@@ -852,7 +861,6 @@ class PlaybackController(
         active = false
         paused = false
         endSeekPreview(commit = false)
-        engine.stop()
         updateState(PlaybackState.Idle)
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
@@ -1569,26 +1577,20 @@ class PlaybackController(
         engine.resume()
     }
 
-    /** 计时只在前台且有可渲染 Surface 时累积；看护与等新帧窗口共用这一条判据。 */
+    /** 等新帧窗口的计时条件：只在前台且有可渲染 Surface 时累积。 */
     private fun loadTimingAllowed(): Boolean = foreground && _renderSurfaceAvailable.value
 
     /** 当前阶段是否由加载看护裁决：首次打开、切集与恢复原片共用同一套计时。 */
     private fun loadGuardPhase(): Boolean =
         loadPhase == LoadPhase.Initial || loadPhase == LoadPhase.Switching || loadPhase == LoadPhase.Restoring
 
-    /** 前后台与 Surface 上报驱动这里：恢复时重排两只表，挂起时把加载看护的累计值结算掉。 */
+    /**
+     * 前后台与 Surface 上报驱动这里：加载看护照常累计，只重排等新帧窗口。
+     * 退后台不是挂起的理由——后台没有进展就由看护照常判失败，
+     * 后台正常播放时靠「播放位置前进」算进展。
+     */
     private fun updateLoadTimers() {
-        if (loadTimingAllowed()) {
-            armLoadGuard()
-        } else {
-            // 只有真的在跑的表才记一次挂起，重复上报不重复计数。
-            if (guardElapsed.running) {
-                guardElapsed.suspend()
-                if (loadGuardPhase()) guardSuspensions++
-            }
-            guardJob?.cancel()
-            guardJob = null
-        }
+        armLoadGuard()
         updatePendingFrameTimer()
     }
 
@@ -1609,7 +1611,6 @@ class PlaybackController(
             loadFirstFrameAtMillis = null
             loadPositionAdvancedAtMillis = null
             loadOutputLiveAtMillis = null
-            guardSuspensions = 0
         }
         // 目标前移同样重新给一次重发：计时与重发预算都以最近一次目标重新起算。
         guardRetried = false
@@ -1617,18 +1618,18 @@ class PlaybackController(
         retryInFlight = false
         loadRetriedAtMillis = null
         guardElapsed.reset()
-        if (loadTimingAllowed()) guardElapsed.start()
+        guardElapsed.start()
         armLoadGuard()
     }
 
     /**
-     * 按累计运行时长排下一次看护。到点时按同一累计值再判一次：
-     * 挂起期间流逝的时间不会进入判据，也不存在用墙上时钟重算剩余。
+     * 按累计运行时长排下一次看护。到点时按同一累计值再判一次，
+     * 不存在用墙上时钟重算剩余。
      */
     private fun armLoadGuard() {
         if (guardJob != null) return
         if (!active || !loadGuardPhase()) return
-        if (!loadTimingAllowed() || hasLoadProgress()) return
+        if (hasLoadProgress()) return
         guardElapsed.start()
         val waitMillis = LOAD_FAIL_DELAY_MILLIS - guardElapsed.elapsedMillis()
         if (waitMillis <= 0L) {
@@ -1651,7 +1652,7 @@ class PlaybackController(
     /** 看护到点：累计时长没走到 10 秒就重排，走到了才判失败。 */
     private fun onLoadGuardTick() {
         if (!active || !loadGuardPhase()) return
-        if (!loadTimingAllowed() || hasLoadProgress()) return
+        if (hasLoadProgress()) return
         if (guardElapsed.elapsedMillis() < LOAD_FAIL_DELAY_MILLIS) {
             armLoadGuard()
             return
@@ -1801,7 +1802,7 @@ class PlaybackController(
     }
 
     /**
-     * 由 [updateLoadTimers] 调用：按加载看护的同一条判据排或停等新帧窗口。
+     * 由 [updateLoadTimers] 调用：前台且有可渲染 Surface 时排等新帧窗口，否则停表。
      * 暂停不挂起，否则暂停态下等不到帧会一直停在旧画面或黑底。
      */
     private fun updatePendingFrameTimer() {
@@ -2042,7 +2043,7 @@ class PlaybackController(
     ) {
         val title = if (phase == LoadPhase.None) "播放失败" else "加载失败"
         val guardText = if (phase != LoadPhase.None) {
-            "累计运行时长: ${guardElapsed.elapsedMillis()}ms | 计时挂起: $guardSuspensions 次 | " +
+            "累计运行时长: ${guardElapsed.elapsedMillis()}ms | " +
                 "事件: ${loadEventTimeline()} | 重发: ${if (guardRetried) "1 次" else "0 次"} | " +
                 "字节源重建: ${byteSourceRebuildText()} | "
         } else {
@@ -2083,7 +2084,7 @@ class PlaybackController(
         val media = _playlist.value.getOrNull(loadTargetIndex)?.name ?: ""
         diagnostics.log {
             "加载成功: $media | 阶段: ${loadPhaseLabel(loadPhase)} | " +
-                "耗时: ${guardElapsed.elapsedMillis()}ms | 计时挂起: $guardSuspensions 次"
+                "耗时: ${guardElapsed.elapsedMillis()}ms"
         }
     }
 
@@ -2099,7 +2100,7 @@ class PlaybackController(
         return if (events.isEmpty()) "无" else events.joinToString("、")
     }
 
-    /** 环境字段：Surface 是否可用与是否在前台各记各的，两者都让加载计时挂起。 */
+    /** 环境字段：Surface 是否可用与是否在前台各记各的。 */
     private fun surfaceText(): String = if (_renderSurfaceAvailable.value) "有" else "无"
 
     private fun backgroundText(): String = if (foreground) "否" else "是"
@@ -2484,9 +2485,6 @@ internal class RunningDuration(private val nowMillis: () -> Long) {
 
     private var accumulatedMillis = 0L
     private var runningSinceMillis: Long? = null
-
-    /** 是否正在累积。 */
-    val running: Boolean get() = runningSinceMillis != null
 
     /** 当前累计的运行时长；挂起期间不再增长。 */
     fun elapsedMillis(): Long {
