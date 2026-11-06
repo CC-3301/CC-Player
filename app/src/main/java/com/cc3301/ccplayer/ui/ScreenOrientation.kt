@@ -20,9 +20,8 @@ fun ScreenOrientation.isLandscape(): Boolean =
  *
  * 跟随视频：宽高比 ≥1 取横屏族，<1 取竖屏族。
  *
- * 比例未知、非正或非有限时返回 [ScreenOrientation.System]，只给「首次撤黑等方向」
- * （[awaitsVideoRotation]）这类调用方兜底：播放页下发不走这个分支，同样条件下
- * [screenOrientationMode] 判成锁住当前方向。
+ * 比例未知、非正或非有限时返回 [ScreenOrientation.System]。下发路径走不到这个分支：
+ * [screenOrientationMode] 在同样条件下判成锁住当前方向，比例已知时才调到这里。
  */
 fun resolvedOrientation(mode: OrientationMode, videoAspectRatio: Double?): ScreenOrientation =
     when (mode) {

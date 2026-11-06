@@ -36,12 +36,12 @@ class ScreenOrientationTest {
     }
 
     @Test
-    fun `跟随视频比例未知时期望族按屏幕方向兜底`() {
+    fun `跟随视频比例未知时期望族返回系统`() {
         assertEquals(ScreenOrientation.System, resolvedOrientation(OrientationMode.FollowVideo, null))
     }
 
     @Test
-    fun `跟随视频比例非正或非有限时期望族按屏幕方向兜底`() {
+    fun `跟随视频比例非正或非有限时期望族返回系统`() {
         listOf(0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { aspect ->
             assertEquals(ScreenOrientation.System, resolvedOrientation(OrientationMode.FollowVideo, aspect))
         }

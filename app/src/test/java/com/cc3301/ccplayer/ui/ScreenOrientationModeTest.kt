@@ -102,6 +102,11 @@ class ScreenOrientationModeTest {
             ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR,
             mode(OrientationMode.FollowVideo, null, audioOnly = true),
         )
+        // 比例已知也不按比例分族，照样按屏幕方向档。
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR,
+            mode(OrientationMode.FollowVideo, 1.78, audioOnly = true),
+        )
     }
 
     @Test

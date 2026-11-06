@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
@@ -211,8 +210,11 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 「APP 内后台播放」当前取值：离开播放页时决定是否停止播放。 */
     private var inAppBackgroundPlayback = SettingsRepository.DEFAULT_IN_APP_BACKGROUND_PLAYBACK
 
-    /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
+    /** 本次播放的转屏结果与会话比例；为空时按设置判定，退出播放页即清除转屏结果。 */
     private val sessionOrientation = PlayerSessionOrientation()
+
+    /** 点开的条目是否没有视频方向；加载开始前方向判定用它，加载开始后以视频轨结果为准。 */
+    private var entryHasNoVideo = false
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
@@ -571,10 +573,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                                     if (reopen) {
                                         showPlayerPage()
                                     } else {
+                                        val entryIsVideo = mediaKindOf(entry.name) == MediaKind.Video
+                                        // 加载开始前列表与视频轨还是上一段会话的结论：首帧方向按点开的条目算。
+                                        entryHasNoVideo = !entryIsVideo
                                         playbackEntryOpener.open(
                                             entry = entry,
                                             entries = libraryState.entries,
-                                            enterBeforePreparing = mediaKindOf(entry.name) == MediaKind.Video,
+                                            enterBeforePreparing = entryIsVideo,
                                         )
                                     }
                                 }
@@ -700,7 +705,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
      * 为假表示回到同一会话（通知栏入口等），沿用已记录的比例。
      */
     private fun enterPlayer(preparing: Boolean, newSession: Boolean) {
-        if (newSession) sessionOrientation.beginPlayback() else sessionOrientation.resumePlayback()
+        if (newSession) sessionOrientation.beginPlayback() else sessionOrientation.clearOverride()
         playerVisible = true
         updateKeepScreenOn()
         playbackEntry.enter(preparing)
@@ -738,6 +743,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
 
     /** 后台准备完成：把播放列表与字幕目录交给播放控制层。 */
     private fun openMedia(current: MediaFile, files: List<MediaFile>, directoryEntries: List<MediaFile>) {
+        // 加载开始：目标的视频轨以加载结果为准，不再用点开时的扩展名事实。
+        entryHasNoVideo = false
         pendingPlayback.set(current, files, directoryEntries)
         startPendingPlayback()
     }
@@ -962,15 +969,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /**
-     * 退出播放页：恢复系统栏与方向，保证它们在页面切换前到位；调用前 [playerVisible] 必须已为 false。
+     * 退出播放页：恢复系统栏与方向，保证它们在页面切换前到位。
      *
-     * 覆盖清零、比例保留到下一次回到同一会话，方向由 [dispatchPlayerOrientation] 按非播放状态下发，重复调用无副作用。
+     * 覆盖清零、比例保留到下一次回到同一会话；上一段会话的视频轨结论作废，避免新会话首帧被它带偏。
+     * 方向由 [dispatchPlayerOrientation] 按非播放状态下发，重复调用无副作用。
      */
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
-        sessionOrientation.endPlayback()
+        sessionOrientation.clearOverride()
+        surfacePresentation = surfacePresentation.copy(targetHasVideo = true)
         // 不在播放页：模式传空，方向交回系统；比例留到下一次回到同一会话。
-        dispatchPlayerOrientation()
+        dispatchPlayerOrientation(null)
     }
 
     /** 当前屏幕的四向方向，供转屏按钮从现状切换与方向日志判定。 */
@@ -993,12 +1002,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
      * [mode] 为空表示不在播放页，方向交回系统；跟随视频比例未知时锁住当前方向。
      * 与当前请求相同时不写，避免多余的方向变化。
      */
-    private fun dispatchPlayerOrientation(mode: OrientationMode? = null) {
+    private fun dispatchPlayerOrientation(mode: OrientationMode?) {
         val target = screenOrientationMode(
             mode = mode,
             videoAspectRatio = sessionOrientation.videoAspectRatio,
             rotationOverride = sessionOrientation.override,
-            audioOnly = currentTargetHasNoVideo(),
+            audioOnly = entryHasNoVideo || currentTargetHasNoVideo(),
         )
         if (target == requestedOrientation) return
         requestedOrientation = target

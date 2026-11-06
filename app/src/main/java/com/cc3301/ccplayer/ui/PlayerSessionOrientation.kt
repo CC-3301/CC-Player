@@ -22,21 +22,15 @@ class PlayerSessionOrientation {
 
     /** 开始新的播放会话：转屏结果与比例都作废。 */
     fun beginPlayback() {
-        override = null
+        clearOverride()
         videoAspectRatio = null
     }
 
-    /** 回到同一播放会话：沿用已记录的比例，转屏结果清零。 */
-    fun resumePlayback() {
-        override = null
-    }
-
-    /** 离开播放页：转屏结果作废；比例保留到下一次回到同一会话。 */
-    fun endPlayback() {
-        override = null
-    }
-
-    /** 用户重新选择方向设置时，让设置立即生效。 */
+    /**
+     * 清掉本次播放的转屏结果，比例不受影响。
+     *
+     * 回到同一会话、离开播放页与重选方向设置都只做这件事。
+     */
     fun clearOverride() {
         override = null
     }

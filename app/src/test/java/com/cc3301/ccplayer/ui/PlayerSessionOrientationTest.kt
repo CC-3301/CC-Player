@@ -45,10 +45,10 @@ class PlayerSessionOrientationTest {
     }
 
     @Test
-    fun `退出播放页清零转屏覆盖`() {
+    fun `离开播放页只清转屏结果`() {
         session.toggle(ScreenOrientation.Landscape)
 
-        session.endPlayback()
+        session.clearOverride()
 
         assertNull(session.override)
     }
@@ -75,10 +75,12 @@ class PlayerSessionOrientationTest {
     fun `离开播放页保留比例回到同一会话沿用`() {
         session.onVideoAspectRatio(0.5625)
 
-        session.endPlayback()
+        // 离开页面与回到同一会话都只清转屏结果。
+        session.clearOverride()
         assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
 
-        session.resumePlayback()
+        session.toggle(ScreenOrientation.Portrait)
+        session.clearOverride()
         assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
     }
 
