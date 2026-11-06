@@ -10,7 +10,7 @@ import androidx.compose.ui.unit.Density
 /**
  * 播放页鼠标指针的显隐与自动隐藏计时。
  *
- * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。有效移动要求持续的同向净位移达到
+ * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。有效移动要求净位移达到
  * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）且这段累计持续
  * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：位移按向量累加成净位移，反向的位移自然
  * 抵消、换向（含垂直）的位移继续累加；净位移反向越过起点、或相邻两次移动相隔超过窗口时，
