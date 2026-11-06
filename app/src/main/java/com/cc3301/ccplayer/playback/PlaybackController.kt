@@ -496,7 +496,7 @@ class PlaybackController(
         }
         // 与 Surface 重挂同一条等新帧路径：3 秒无新帧翻转一次视频输出，等待有上限。
         val waiting = beginSurfaceRestore(reason = "回前台播放态")
-        // 本来就没有画面但确实进入等待：同样按黑屏无提示处理；加载/切集阶段不改变提示规则。
+        // 本来就没有画面但确实进入等待：同样按黑屏无提示处理。
         if (waiting && !_surfacePresentation.value.showsPicture) {
             quietBlack = true
             settlePresentation()

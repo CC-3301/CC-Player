@@ -5,7 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 
-/** 音频焦点变化：短暂丢失在会出声时记住回来后继续，永久丢失要记下不应出声，暂降只压低音量。 */
+/** 音频焦点变化：短暂丢失在未暂停且未结束时记下恢复后继续（加载与切集按即将出声处理），永久丢失要记下不应出声，暂降只压低音量。 */
 enum class AudioFocusChange { Gain, Loss, TransientLoss, TransientDuck }
 
 /**
@@ -101,11 +101,12 @@ internal class AudioFocusRegistration {
         isGranted = isRegistered
     }
 
-    /** 永久丢失与短暂丢失都意味着当前没有焦点，但短暂丢失仍等 GAIN。 */
+    /** 永久丢失：当前没有焦点，重新播放前必须再申请。 */
     fun onLoss() {
         isGranted = false
     }
 
+    /** 短暂丢失：当前没有焦点，等 GAIN 后恢复。 */
     fun onTransientLoss() {
         isGranted = false
     }
