@@ -493,7 +493,7 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 指针跟随顶/底栏的实际可见性；栏隐藏时指针一并隐藏，有效移动只唤出指针。其它界面不处理指针。
+    // 指针跟随顶/底栏的实际可见性：栏在场时直接跟随鼠标，栏隐藏时一并隐藏、只由有效移动唤出。其它界面不处理指针。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
