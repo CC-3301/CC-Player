@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.ui
 
-import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -10,14 +9,10 @@ class PlayerSessionOrientationTest {
     private val session = PlayerSessionOrientation()
 
     @Test
-    fun `转屏按钮产生的覆盖优先于方向设置`() {
+    fun `转屏按钮按当前横竖状态切到另一个方向`() {
         session.toggle(ScreenOrientation.Portrait)
 
         assertEquals(ScreenOrientation.Landscape, session.override)
-        assertEquals(
-            ScreenOrientation.Landscape,
-            session.resolve(OrientationMode.Portrait, 0.56),
-        )
     }
 
     @Test
@@ -34,14 +29,6 @@ class PlayerSessionOrientationTest {
     }
 
     @Test
-    fun `转屏覆盖不受视频宽高比影响`() {
-        session.toggle(ScreenOrientation.Landscape)
-
-        assertEquals(ScreenOrientation.Portrait, session.resolve(OrientationMode.FollowVideo, 1.78))
-        assertEquals(ScreenOrientation.Portrait, session.resolve(OrientationMode.FollowVideo, 0.56))
-    }
-
-    @Test
     fun `反向横屏下按转屏按钮切到竖屏`() {
         session.toggle(ScreenOrientation.ReverseLandscape)
 
@@ -55,37 +42,55 @@ class PlayerSessionOrientationTest {
         session.beginPlayback()
 
         assertNull(session.override)
-        assertEquals(
-            ScreenOrientation.Portrait,
-            session.resolve(OrientationMode.Portrait, 1.78),
-        )
     }
 
     @Test
-    fun `退出播放页清零转屏覆盖`() {
+    fun `离开播放页只清转屏结果`() {
         session.toggle(ScreenOrientation.Landscape)
 
-        session.endPlayback()
-
-        assertNull(session.override)
-        assertEquals(
-            ScreenOrientation.Landscape,
-            session.resolve(OrientationMode.Landscape, 0.56),
-        )
-    }
-
-    @Test
-    fun `清除覆盖后跟随视频继续按宽高比判定`() {
-        session.toggle(ScreenOrientation.Landscape)
         session.clearOverride()
 
-        assertEquals(
-            ScreenOrientation.Landscape,
-            session.resolve(OrientationMode.FollowVideo, 1.78),
-        )
-        assertEquals(
-            ScreenOrientation.Portrait,
-            session.resolve(OrientationMode.FollowVideo, 0.56),
-        )
+        assertNull(session.override)
+    }
+
+    @Test
+    fun `清除覆盖后不再有转屏结果`() {
+        session.toggle(ScreenOrientation.Landscape)
+
+        session.clearOverride()
+
+        assertNull(session.override)
+    }
+
+    @Test
+    fun `新会话不沿用上一次的比例`() {
+        session.onVideoAspectRatio(1.78)
+
+        session.beginPlayback()
+
+        assertNull(session.videoAspectRatio)
+    }
+
+    @Test
+    fun `离开播放页保留比例回到同一会话沿用`() {
+        session.onVideoAspectRatio(0.5625)
+
+        // 离开页面与回到同一会话都只清转屏结果。
+        session.clearOverride()
+        assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
+
+        session.toggle(ScreenOrientation.Portrait)
+        session.clearOverride()
+        assertEquals(0.5625, session.videoAspectRatio!!, 0.0)
+    }
+
+    @Test
+    fun `无效比例不覆盖已记录的比例`() {
+        session.onVideoAspectRatio(1.78)
+
+        listOf(null, 0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { ratio ->
+            session.onVideoAspectRatio(ratio)
+            assertEquals("比例 $ratio", 1.78, session.videoAspectRatio!!, 0.0)
+        }
     }
 }
