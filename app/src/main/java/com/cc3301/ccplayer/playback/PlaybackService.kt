@@ -49,6 +49,8 @@ class PlaybackService : Service() {
     private lateinit var playbackController: PlaybackController
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioOutputMonitor: AudioOutputMonitor
+    private lateinit var audioFocus: AudioFocusRequester
+    private lateinit var audioFocusPolicy: AudioFocusPolicy
     private lateinit var backgroundPolicy: BackgroundPlaybackPolicy
     private lateinit var coverCache: NotificationCoverCache
 
@@ -83,6 +85,27 @@ class PlaybackService : Service() {
             pausePlayback = playbackController::pauseForBackground,
             onPolicyChanged = ::requestRefresh,
         )
+        audioFocusPolicy = AudioFocusPolicy(
+            pausePlayback = playbackController::pause,
+            // 播完停在末帧时，焦点恢复不能把已经结束的会话重新播起来。
+            resumePlayback = {
+                if (playbackController.state.value != PlaybackState.Ended) playbackController.resume()
+            },
+            setDucked = { ducked ->
+                playbackEngine.setVolumePercent(if (ducked) DUCK_VOLUME_PERCENT else FULL_VOLUME_PERCENT)
+            },
+            isPaused = {
+                val state = playbackController.state.value
+                // 加载/切集阶段也可能已经被用户按了暂停：按播放意图判断，不只看状态。
+                state == PlaybackState.Paused || state == PlaybackState.Ended ||
+                    playbackController.playPauseIntentPaused
+            },
+        )
+        audioFocus = AudioFocusRequester(this) { change ->
+            audioFocusPolicy.onFocusChange(change)
+            // 永久丢失后不再持有焦点；下次要出声时重新申请，拿不到就继续停住。
+            if (change == AudioFocusChange.Loss) audioFocus.abandon()
+        }
         playbackEngine.initialize()
         audioOutputMonitor = AndroidAudioOutputMonitor(this)
         audioOutputMonitor.start(playbackController::handleAudioOutputLost)
@@ -101,6 +124,23 @@ class PlaybackService : Service() {
                 playbackController.currentIndex,
                 playbackController.playlist,
             ) { _, _, _, _, _ -> Unit }.collect { requestRefresh() }
+        }
+        // 焦点跟随播放状态：开始或继续播放前先确保拿到；停住或结束会释放并回基准音量。
+        // 暂停不释放；退后台不触发任何焦点命令。
+        stateScope.launch {
+            playbackController.state.collect { state ->
+                when (state) {
+                    PlaybackState.Loading, PlaybackState.Playing -> {
+                        // 拿不到焦点就不出声：延迟授予会等 GAIN 回调再按恢复意图继续。
+                        if (!audioFocus.request()) audioFocusPolicy.waitForFocus()
+                    }
+                    PlaybackState.Paused -> Unit
+                    PlaybackState.Idle, PlaybackState.Ended -> {
+                        audioFocus.abandon()
+                        audioFocusPolicy.reset()
+                    }
+                }
+            }
         }
         stateScope.launch {
             playbackController.progress.collect { current ->
@@ -143,6 +183,9 @@ class PlaybackService : Service() {
         stateScope.cancel()
         scope.cancel()
         audioOutputMonitor.stop()
+        audioFocus.abandon()
+        // 暂降期间结束也要把音量恢复到基准，不能把 20% 带进下一次会话。
+        audioFocusPolicy.reset()
         grantedCoverUri?.let {
             runCatching { revokeUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         }
@@ -445,5 +488,9 @@ class PlaybackService : Service() {
         const val OPEN_PLAYER_REQUEST_CODE = 100
         const val MAX_COVER_SIZE = 256
         const val APP_ICON_SIZE = 192
+
+        /** 音频焦点暂降时的输出音量百分比；拿到焦点后回到满音量。 */
+        const val DUCK_VOLUME_PERCENT = 20
+        const val FULL_VOLUME_PERCENT = 100
     }
 }

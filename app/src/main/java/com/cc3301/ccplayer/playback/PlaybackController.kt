@@ -136,6 +136,12 @@ class PlaybackController(
     private var holdBlack = false
 
     /**
+     * 黑屏期间不显示缓冲提示：后台切集与播放态回前台撤帧这两类黑屏。
+     * 出画面、回退原片、新加载与会话结束时清除。
+     */
+    private var quietBlack = false
+
+    /**
      * 当前是否有可渲染的 Surface。Surface 销毁后为假：
      * 切集以文件加载完成作为就绪，回前台由 Surface 重挂恢复画面。
      */
@@ -332,9 +338,6 @@ class PlaybackController(
     /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间铺黑底。 */
     private var awaitingSurfaceFrame = false
 
-    /** 本次 Surface 重挂是否已经请求过精确刷新；重挂期间的重复回调不再发。 */
-    private var surfaceRefreshIssued = false
-
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -465,11 +468,50 @@ class PlaybackController(
     /**
      * 界面前后台上报：加载看护不因前后台变化挂起，切集计时照常累计。
      * 后台播放开着时 Surface 可能还在，前后台与 Surface 分开记、同一处结算。
+     * 回前台时播放态一律撤掉屏上旧画面，纯黑等新帧；暂停态保留最后一帧。
      */
     fun setAppInForeground(foreground: Boolean) {
         if (this.foreground == foreground) return
         this.foreground = foreground
+        if (foreground) {
+            // 播放态撤旧画面等新帧；暂停态保留最后一帧，没有帧时补一次位置中性刷新。
+            if (paused) restorePausedFrameIfNoPicture() else dropFrameOnForegroundReturn()
+        }
         updateLoadTimers()
+    }
+
+    /**
+     * 回前台播放态不保留旧画面：撤掉屏上那一帧，纯黑等下一个新帧。
+     * 暂停态保留最后一帧，由 Surface 重挂的位置中性刷新重解，两条路径互不重叠。
+     * 片尾黑底与本来就没有画面时不处理。
+     */
+    private fun dropFrameOnForegroundReturn() {
+        if (!active || paused || holdBlack) return
+        if (screenFrame != ScreenFrame.None) {
+            screenFrame = ScreenFrame.None
+            originAspectRatio = null
+            // 撤帧已经发生：即使处于加载/切集阶段、本次不进入等新帧等待，黑屏期间也不显示提示。
+            quietBlack = true
+            settlePresentation()
+        }
+        // 与 Surface 重挂同一条等新帧路径：3 秒无新帧翻转一次视频输出，等待有上限。
+        val waiting = beginSurfaceRestore(reason = "回前台播放态")
+        // 本来就没有画面但确实进入等待：同样按黑屏无提示处理。
+        if (waiting && !_surfacePresentation.value.showsPicture) {
+            quietBlack = true
+            settlePresentation()
+        }
+    }
+
+    /**
+     * 暂停态回前台应当保留最后一帧；屏上已经没有帧（例如后台切集失败后回退原片）时，
+     * 走与 Surface 重挂同一条位置中性刷新，等播放核心重解当前帧。后台不做，避免多余命令。
+     */
+    private fun restorePausedFrameIfNoPicture() {
+        if (!active || !paused || !foreground || holdBlack) return
+        if (screenFrame != ScreenFrame.None) return
+        if (!_renderSurfaceAvailable.value) return
+        beginSurfaceRestore(reason = "回前台暂停态")
     }
 
     /**
@@ -487,8 +529,6 @@ class PlaybackController(
             screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
-            // 下一次重挂才重新请求精确刷新。
-            surfaceRefreshIssued = false
         }
         updateLoadTimers()
         finishLoadWithoutSurface()
@@ -496,32 +536,40 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂后等播放核心的首个新帧。
+     * Surface 重挂、回前台播放态撤帧，或回前台暂停态没有画面时，等播放核心的首个新帧。
      * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
-     * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态重挂生效（ADR-0026）；播放态只认播放位置前进。
+     * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态生效（ADR-0026）；
+     * 播放态不 seek，只等播放位置前进。每次进入恢复都重新允许一次刷新。
      * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
-    private fun beginSurfaceRestore() {
+    private fun beginSurfaceRestore(reason: String = "Surface 重挂"): Boolean {
+        // 同一次恢复里重挂与回前台可能各调一次：已有等待在跑时不重复刷新、也不重开计时。
+        // 等待还在但计时已收（比如当时没有 Surface）：允许重新进入，重挂后仍有 3 秒兜底。
+        if (awaitingSurfaceFrame && surfaceRestoreJob != null) return false
         cancelSurfaceRestore()
-        if (!active) return
+        if (!active) return false
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
-        if (loadPhase != LoadPhase.None) return
+        if (loadPhase != LoadPhase.None) return false
         // 片尾黑底不显示画面，不需要恢复。
-        if (holdBlack) return
+        if (holdBlack) return false
         awaitingSurfaceFrame = true
         diagnostics.log {
-            "Surface 重挂: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
+            "$reason: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
                 "阶段: ${loadPhaseLabel(loadPhase)}"
         }
         // 暂停态没有新解码帧：请求播放核心按当前位置重解一帧，不改变播放位置。
         // 片尾不刷新，避免 seek 重新触发 eof；切集还在等目标帧时交给原看护，不插刷新；
-        // 每次重挂只发一次。
-        if (paused && !surfaceRefreshIssued && !pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
-            surfaceRefreshIssued = true
-            engine.refreshFrame()
+        // 本次恢复只发一次。
+        if (paused) {
+            if (!pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
+                engine.refreshFrame()
+            }
+        } else {
+            // 播放态靠位置前进证明新帧上屏：武装引擎的下一条回报，不 seek。
+            engine.awaitFramePresentation()
         }
         // 刷新回执可能同步到达并已收尾：不再启动超时翻转。
-        if (!awaitingSurfaceFrame) return
+        if (!awaitingSurfaceFrame) return true
         surfaceRestoreJob = scope.launch {
             try {
                 val startedAtMillis = nowMillis()
@@ -540,6 +588,7 @@ class PlaybackController(
                 if (surfaceRestoreJob === runningJob) surfaceRestoreJob = null
             }
         }
+        return true
     }
 
     /** 结束本次恢复等待：迟到的翻转不再下发，旧画面留到真正出帧。 */
@@ -594,9 +643,9 @@ class PlaybackController(
         switchOriginEnded = false
         switchFailureReported = false
         holdBlack = false
-        surfaceRefreshIssued = false
         // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
         screenFrame = ScreenFrame.None
+        quietBlack = false
         switchOutputLive = false
         originAspectRatio = null
         loadTargetIndex = index
@@ -640,11 +689,15 @@ class PlaybackController(
         switchOriginExternalSubtitles = _externalSubtitles.value
         switchOriginSubtitleSelection = _subtitleSelection.value
         switchFailureReported = false
-        // 切集起点屏幕上的画面与比例都取自派生结果：黑底期间没有画面可沿用。
+        // 切集起点屏幕上的画面与比例都取自派生结果：黑底期间没有画面可沿用；
+        // 后台切集不继承屏上旧画面，回前台播放态一律纯黑等新帧。
         val presentation = _surfacePresentation.value
-        screenFrame = if (presentation.showsPicture) ScreenFrame.Origin else ScreenFrame.None
-        originAspectRatio = presentation.aspectRatio
+        val inheritOrigin = foreground && presentation.showsPicture
+        screenFrame = if (inheritOrigin) ScreenFrame.Origin else ScreenFrame.None
+        originAspectRatio = if (inheritOrigin) presentation.aspectRatio else null
         holdBlack = false
+        // 后台切集不显示缓冲提示：屏上没有可沿用的旧画面。
+        quietBlack = !foreground
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
         paused = false
@@ -667,6 +720,7 @@ class PlaybackController(
             holdBlack = holdBlack,
             originAspectRatio = originAspectRatio,
             targetAspectRatio = _videoAspectRatio.value,
+            quietBlack = quietBlack,
         )
     }
 
@@ -870,7 +924,6 @@ class PlaybackController(
         _subtitleSelection.value = SubtitleSelection.Off
         directoryEntries = emptyList()
         pausedAtEpisodeEnd = false
-        surfaceRefreshIssued = false
         resetLoadState()
         cancelSleepTimer()
     }
@@ -1268,6 +1321,7 @@ class PlaybackController(
         if (!needsFrameConfirmation) {
             // 首帧已可显示：屏上就是当前加载的画面，切集起点的旧帧到此撤掉、比例同时换新。
             screenFrame = ScreenFrame.Target
+            quietBlack = false
             settlePresentation()
             // 强信号本身就是一条进展，也是「帧已上屏」的证据：不再排等新帧窗口。
             noteLoadProgress(LoadProgress.FirstFrame)
@@ -1361,6 +1415,7 @@ class PlaybackController(
      */
     private fun confirmTargetFrame() {
         screenFrame = ScreenFrame.Target
+        quietBlack = false
         settlePresentation()
         if (switchFramePending) clearPendingSwitchFrame()
         if (loadPhase == LoadPhase.Switching) finishReady(LoadPhase.Switching, frameConfirmed = true)
@@ -1445,7 +1500,7 @@ class PlaybackController(
     /** 顺序播完且不再继续：结束会话，播放键可重开当前文件。 */
     private fun endSession() {
         clearPendingSwitchFrame()
-        surfaceRefreshIssued = false
+        quietBlack = false
         // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
         endSeekPreview(commit = false)
@@ -1548,7 +1603,10 @@ class PlaybackController(
         }
         // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
         // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
-        if (paused && _renderSurfaceAvailable.value) screenFrame = ScreenFrame.Target
+        if (paused && _renderSurfaceAvailable.value) {
+            screenFrame = ScreenFrame.Target
+            quietBlack = false
+        }
         settlePresentation()
         val duration = readyDuration()
         playedPositionMillis = loadStartPositionMillis
@@ -1911,6 +1969,8 @@ class PlaybackController(
         loadGeneration++
         loadPhase = LoadPhase.Restoring
         _restoring.value = true
+        // 恢复原片按既有提示规则处理，不再算后台切集的黑屏。
+        quietBlack = false
         // 进入恢复阶段后再派生：恢复期的黑底与沿用旧帧按这一阶段的规则判定。
         settlePresentation()
         // 恢复原片也走加载看护：读失败重发一次，10 秒无进展判失败。
@@ -1957,6 +2017,8 @@ class PlaybackController(
         }
         if (paused) {
             updateState(PlaybackState.Paused)
+            // 后台切集失败回退原片：屏上已没有旧画面时补一帧，回前台不会停在纯黑暂停。
+            restorePausedFrameIfNoPicture()
         } else {
             engine.resume()
             updateState(PlaybackState.Playing)
@@ -2167,6 +2229,7 @@ class PlaybackController(
         expectedLoadToken = 0
         switchFailureReported = false
         holdBlack = false
+        quietBlack = false
         screenFrame = ScreenFrame.None
         switchOutputLive = false
         originAspectRatio = null

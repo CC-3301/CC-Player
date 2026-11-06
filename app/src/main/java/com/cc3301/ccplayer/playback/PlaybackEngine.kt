@@ -96,6 +96,15 @@ interface PlaybackEngine {
      */
     fun refreshFrame()
 
+    /**
+     * 重新等下一个新帧上屏的回报：回前台播放态撤掉旧画面后，用它等真正的新帧。
+     * 不 seek、不改播放位置，也不碰音频。
+     */
+    fun awaitFramePresentation()
+
+    /** 按百分比设置音频输出音量（0–100）；只用于音频焦点暂降与恢复。 */
+    fun setVolumePercent(percent: Int)
+
     fun detachSurface()
 
     fun setSurfaceSize(width: Int, height: Int)

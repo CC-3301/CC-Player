@@ -226,6 +226,13 @@ class FakePlaybackEngine : PlaybackEngine {
         seekAudioCalls += "muted($muted)"
     }
 
+    /** 音频输出音量设置序列，百分比；音频焦点暂降用。 */
+    val volumePercents = mutableListOf<Int>()
+
+    override fun setVolumePercent(percent: Int) {
+        volumePercents += percent
+    }
+
     override fun setDecodeMode(mode: DecodeMode) {
         decodeModes += mode
         actions += "decode:${mode.name}"
@@ -261,6 +268,14 @@ class FakePlaybackEngine : PlaybackEngine {
     }
 
     override fun startVideoOutput() = Unit
+
+    /** 回前台撤画面后重新等新帧的武装次数。 */
+    var awaitFramePresentationCalls = 0
+        private set
+
+    override fun awaitFramePresentation() {
+        awaitFramePresentationCalls++
+    }
 
     override fun flipVideoOutput() {
         flipVideoOutputCalls++

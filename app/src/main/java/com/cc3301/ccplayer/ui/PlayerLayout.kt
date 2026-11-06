@@ -51,6 +51,17 @@ fun showPlayerBlackLayer(
     orientationPending ||
     (!orientationSettled && !hasKnownVideoAspectRatio(videoAspectRatio))
 
+/**
+ * 缓冲提示显示判据：缓冲中时，有画面、首次打开或这段黑屏未被静默标记才显示。
+ * 只有后台切集与播放态回前台撤帧两类黑屏会带静默标记。
+ */
+fun showsBufferingIndicator(
+    buffering: Boolean,
+    showsPicture: Boolean,
+    firstBuffering: Boolean,
+    quietBlack: Boolean,
+): Boolean = buffering && (showsPicture || firstBuffering || !quietBlack)
+
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp
 

@@ -357,6 +357,147 @@ class PlaybackControllerBackgroundTest {
         assertFalse(controller.surfacePresentation.value.showsPicture)
     }
 
+    @Test
+    fun `播放态回前台撤掉旧画面并等新帧`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        // 旧画面不保留：纯黑等下一个新帧，不 seek。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertEquals(1, engine.awaitFramePresentationCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+
+        engine.reportFramePresented()
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `暂停态回前台保留最后一帧`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+        assertEquals(0, engine.awaitFramePresentationCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `后台切集不继承屏上旧画面`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+
+        controller.setAppInForeground(false)
+        controller.next()
+
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertEquals(0, engine.awaitFramePresentationCalls)
+
+        // 回前台播放态同样不保留旧画面。
+        controller.setAppInForeground(true)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `播放态回前台撤帧后 3 秒无新帧只翻转一次`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS - 1)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        // 等待有上限：翻转后不再重复等，也不再翻转。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `回前台暂停态每次恢复都允许一次精确刷新`() = runTest {
+        engine.refreshEmitsFrame = false
+        val controller = pausedController()
+        // 第一次恢复：Surface 重挂，刷新一次，回执没来走 3 秒翻转。
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+
+        // 同一次恢复里回前台入口不重复刷新。
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+
+        // 下一次恢复仍允许一次刷新。
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        runCurrent()
+        assertEquals(2, engine.refreshFrameCalls)
+
+        // 让本次恢复的兜底计时走完，不把未完成的等待留到测试结束。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+    }
+
+    @Test
+    fun `前台切集进行中回前台撤帧后黑屏不显示缓冲提示`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.next()
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        advanceTimeBy(PlaybackController.BUFFER_INDICATOR_DELAY_MILLIS)
+        runCurrent()
+
+        // 切集缓冲灯照常亮起，但屏上旧画面已撤：黑屏期间不显示提示。
+        assertTrue(controller.buffering.value)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertTrue(controller.surfacePresentation.value.quietBlack)
+    }
+
+    @Test
+    fun `首次加载中回前台不留下黑屏无提示标记`() = runTest {
+        val controller = controller()
+        val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
+        controller.openPlaylist(files, files.first())
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertFalse(controller.surfacePresentation.value.quietBlack)
+    }
+
+    @Test
+    fun `前台切集继续沿用旧画面`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        controller.next()
+
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
     private fun TestScope.controller(): PlaybackController {
         engine.callbackScope = this
         return PlaybackController(
