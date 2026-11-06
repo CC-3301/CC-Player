@@ -323,7 +323,7 @@ class PlaybackController(
     /** 本次加载的来源；只用于诊断日志区分打开、手动、列表与片尾。 */
     private var loadSource = LoadTrigger.Open
 
-    /** 是否在前台；与 Surface 一起决定加载计时是否累积。 */
+    /** 是否在前台；与 Surface 一起决定等新帧窗口是否挂起。 */
     private var foreground = true
 
     /** 控制器自身 resume 的回声令牌；只吞掉同一令牌的 PLAYBACK_RESTART，不吞真实加载事件。 */
@@ -1802,7 +1802,7 @@ class PlaybackController(
     }
 
     /**
-     * 由 [updateLoadTimers] 调用：按加载看护的同一条判据排或停等新帧窗口。
+     * 由 [updateLoadTimers] 调用：前台且有可渲染 Surface 时排等新帧窗口，否则停表。
      * 暂停不挂起，否则暂停态下等不到帧会一直停在旧画面或黑底。
      */
     private fun updatePendingFrameTimer() {
