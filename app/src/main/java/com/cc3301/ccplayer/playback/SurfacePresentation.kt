@@ -16,10 +16,12 @@ enum class ScreenFrame {
  * 屏幕上现在该显示什么：界面只读这个派生结果，不再自行组合加载阶段、黑底与视频轨。
  *
  * [showsPicture] 为假时铺黑底；[aspectRatio] 是朝向解析与「比例未知期间铺黑」该用的比例。
+ * [quietBlack] 为真表示这次黑屏不显示缓冲提示：只有后台切集与播放态回前台撤帧这两类黑屏。
  */
 data class SurfacePresentation(
     val showsPicture: Boolean = false,
     val aspectRatio: Double? = null,
+    val quietBlack: Boolean = false,
 )
 
 /**
@@ -39,6 +41,7 @@ internal fun deriveSurfacePresentation(
     holdBlack: Boolean,
     originAspectRatio: Double?,
     targetAspectRatio: Double?,
+    quietBlack: Boolean = false,
 ): SurfacePresentation {
     val showsPicture = when {
         !targetHasVideo -> false
@@ -53,5 +56,6 @@ internal fun deriveSurfacePresentation(
     return SurfacePresentation(
         showsPicture = showsPicture,
         aspectRatio = aspectRatio,
+        quietBlack = quietBlack && !showsPicture,
     )
 }

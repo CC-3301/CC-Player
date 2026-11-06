@@ -1,7 +1,9 @@
 package com.cc3301.ccplayer.playback
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 派生规则的事实组合表：屏上那一帧、视频轨与片尾黑底决定画面与比例。 */
@@ -64,6 +66,31 @@ class SurfacePresentationTest {
             targetAspectRatio = null,
         )
         assertNull(target.aspectRatio)
+    }
+
+    @Test
+    fun `黑屏无提示标记只随显式事实带出，有画面时不算黑屏`() {
+        val quiet = deriveSurfacePresentation(
+            screenFrame = ScreenFrame.None,
+            targetHasVideo = true,
+            holdBlack = false,
+            originAspectRatio = null,
+            targetAspectRatio = TARGET_RATIO,
+            quietBlack = true,
+        )
+        assertTrue(quiet.quietBlack)
+        assertFalse(quiet.showsPicture)
+
+        val picture = deriveSurfacePresentation(
+            screenFrame = ScreenFrame.Target,
+            targetHasVideo = true,
+            holdBlack = false,
+            originAspectRatio = null,
+            targetAspectRatio = TARGET_RATIO,
+            quietBlack = true,
+        )
+        assertFalse(picture.quietBlack)
+        assertTrue(picture.showsPicture)
     }
 
     private companion object {

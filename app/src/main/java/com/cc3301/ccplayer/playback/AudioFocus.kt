@@ -5,11 +5,11 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 
-/** 音频焦点变化：短暂丢失要记住回来后继续，暂降只压低音量。 */
+/** 音频焦点变化：短暂丢失要记住回来后继续，永久丢失要记下不应出声，暂降只压低音量。 */
 enum class AudioFocusChange { Gain, Loss, TransientLoss, TransientDuck }
 
 /**
- * 音频焦点申请：播放开始时申请，暂停不释放，退后台不做任何焦点操作。
+ * 音频焦点申请：播放开始申请，暂停不释放，退后台不做任何焦点操作。
  * 申请与放弃都在主线程，回调也回到主线程。
  */
 class AudioFocusRequester(
@@ -29,28 +29,46 @@ class AudioFocusRequester(
         .setOnAudioFocusChangeListener { change -> dispatch(change) }
         .build()
 
-    private var held = false
+    /** 已向系统登记申请（含延迟授予）。 */
+    private var registered = false
 
-    /** 申请焦点；已经持有或系统没有音频服务时不重复申请。 */
-    fun request() {
-        val manager = audioManager ?: return
-        if (held) return
-        // 延迟授予同样先算持有：拿到焦点后由回调继续，失败才留待下次播放重试。
-        held = manager.requestAudioFocus(request) != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+    /** 此刻确实拿着焦点；延迟授予期间为假。 */
+    private var granted = false
+
+    /**
+     * 申请焦点；返回此刻是否已经拿到。延迟授予返回 false 并等 GAIN 回调，
+     * 调用方在拿到之前不能出声。
+     */
+    fun request(): Boolean {
+        val manager = audioManager ?: return false
+        if (granted) return true
+        if (!registered) {
+            val result = manager.requestAudioFocus(request)
+            registered = result != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+            granted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+        return granted
     }
 
-    /** 放弃焦点：永久丢失与停止播放时调用。 */
+    /** 放弃焦点：永久丢失、停止播放与会话结束时调用。 */
     fun abandon() {
         val manager = audioManager ?: return
-        if (!held) return
-        held = false
+        if (!registered) return
+        registered = false
+        granted = false
         manager.abandonAudioFocusRequest(request)
     }
 
     private fun dispatch(change: Int) {
         when (change) {
-            AudioManager.AUDIOFOCUS_GAIN -> onFocusChange(AudioFocusChange.Gain)
-            AudioManager.AUDIOFOCUS_LOSS -> onFocusChange(AudioFocusChange.Loss)
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                granted = registered
+                onFocusChange(AudioFocusChange.Gain)
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                granted = false
+                onFocusChange(AudioFocusChange.Loss)
+            }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> onFocusChange(AudioFocusChange.TransientLoss)
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> onFocusChange(AudioFocusChange.TransientDuck)
         }
@@ -58,14 +76,15 @@ class AudioFocusRequester(
 }
 
 /**
- * 音频焦点的处理规则：暂降时压低音量，短暂丢失暂停并在焦点回来后继续，永久丢失保持暂停。
+ * 音频焦点的处理规则：暂降时压低音量；短暂丢失不管当前是否在出声都记下「恢复后继续」；
+ * 永久丢失记下「不应出声」，恢复播放前必须重新拿到焦点；放弃焦点或会话结束时回到基准音量。
  * 只作用于播放控制层与引擎音量，不碰 Surface、视频输出与加载。
  */
 class AudioFocusPolicy(
     private val pausePlayback: () -> Unit,
     private val resumePlayback: () -> Unit,
     private val setDucked: (Boolean) -> Unit,
-    private val isPlaying: () -> Boolean,
+    private val isPaused: () -> Boolean,
 ) {
 
     private var ducked = false
@@ -82,16 +101,34 @@ class AudioFocusPolicy(
             }
             AudioFocusChange.TransientLoss -> {
                 duck(false)
-                if (!isPlaying()) return
+                // 暂停中的短暂丢失也记下恢复意图：GAIN 到了照常继续。
                 resumeAfterGain = true
-                pausePlayback()
+                pauseIfAudible()
             }
             AudioFocusChange.Loss -> {
                 duck(false)
                 resumeAfterGain = false
-                if (isPlaying()) pausePlayback()
+                pauseIfAudible()
             }
         }
+    }
+
+    /** 要出声但没拿到焦点：先停住；焦点回来时按恢复意图继续。 */
+    fun waitForFocus() {
+        resumeAfterGain = true
+        pauseIfAudible()
+    }
+
+    /** 会话结束或放弃焦点：回基准音量与初始意图。 */
+    fun reset() {
+        duck(false)
+        resumeAfterGain = false
+    }
+
+    /** 已经在暂停/结束态就不重复下发暂停：会误清片尾黑底之类的状态。 */
+    private fun pauseIfAudible() {
+        if (isPaused()) return
+        pausePlayback()
     }
 
     private fun duck(on: Boolean) {

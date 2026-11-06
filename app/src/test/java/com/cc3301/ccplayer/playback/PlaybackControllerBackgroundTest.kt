@@ -407,6 +407,52 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `播放态回前台撤帧后 3 秒无新帧只翻转一次`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS - 1)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        // 等待有上限：翻转后不再重复等，也不再翻转。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 3)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `回前台暂停态每次恢复都允许一次精确刷新`() = runTest {
+        engine.refreshEmitsFrame = false
+        val controller = pausedController()
+        // 第一次恢复：Surface 重挂，刷新一次，回执没来走 3 秒翻转。
+        controller.setRenderSurfaceAvailable(false)
+        controller.setRenderSurfaceAvailable(true)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+
+        // 第二次恢复：回前台暂停态且屏上仍无帧，仍要允许一次刷新。
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        runCurrent()
+        assertEquals(2, engine.refreshFrameCalls)
+
+        // 让本次恢复的兜底计时走完，不把未完成的等待留到测试结束。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+    }
+
+    @Test
     fun `前台切集继续沿用旧画面`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(30_000, 600_000)
