@@ -3,13 +3,13 @@ package com.cc3301.ccplayer.ui
 import android.content.pm.ActivityInfo
 import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * 方向档位 + 视频宽高比 + 转屏覆盖 → 下发的系统方向模式，接缝 12。
+ * 方向档位 + 视频宽高比 + 转屏覆盖 + 是否在播放页 → 下发的系统方向模式，接缝 12。
  *
- * 方向交给系统的传感器旋转模式，App 不再自己判角度；返回 null 表示这次不下发。
+ * 方向交给系统的传感器旋转模式，App 不再自己判角度；180° 反向由系统的 `allowAllRotations`
+ * 决定，这里不断言反向。
  */
 class ScreenOrientationModeTest {
 
@@ -18,7 +18,8 @@ class ScreenOrientationModeTest {
         ratio: Double? = null,
         override: ScreenOrientation? = null,
         audioOnly: Boolean = false,
-    ): Int? = screenOrientationMode(mode, ratio, override, audioOnly)
+        playerVisible: Boolean = true,
+    ): Int = screenOrientationMode(mode, ratio, override, audioOnly, playerVisible)
 
     @Test
     fun `四个档位各取对应的系统传感器模式`() {
@@ -48,14 +49,14 @@ class ScreenOrientationModeTest {
     fun `跟随视频按宽高比在横竖族之间切换`() {
         listOf(2.39, 1.0).forEach { ratio ->
             assertEquals(
-                "比例 ${ratio}",
+                "比例 $ratio",
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
                 mode(OrientationMode.FollowVideo, ratio),
             )
         }
         listOf(0.99, 0.5625).forEach { ratio ->
             assertEquals(
-                "比例 ${ratio}",
+                "比例 $ratio",
                 ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT,
                 mode(OrientationMode.FollowVideo, ratio),
             )
@@ -74,17 +75,16 @@ class ScreenOrientationModeTest {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT,
             mode(OrientationMode.Landscape, 0.5625, ScreenOrientation.Portrait),
         )
-        // 反向仍按族取模式。
-        assertEquals(
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE,
-            mode(OrientationMode.System, null, ScreenOrientation.ReverseLandscape),
-        )
     }
 
     @Test
-    fun `跟随视频比例未知时不下发`() {
+    fun `跟随视频比例未知时锁住当前方向`() {
         listOf(null, 0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY).forEach { ratio ->
-            assertNull("比例 $ratio", mode(OrientationMode.FollowVideo, ratio))
+            assertEquals(
+                "比例 $ratio",
+                ActivityInfo.SCREEN_ORIENTATION_LOCKED,
+                mode(OrientationMode.FollowVideo, ratio),
+            )
         }
     }
 
@@ -123,5 +123,22 @@ class ScreenOrientationModeTest {
                 mode(OrientationMode.System, ratio),
             )
         }
+    }
+
+    @Test
+    fun `离开播放页交回系统`() {
+        listOf(OrientationMode.System, OrientationMode.Landscape, OrientationMode.Portrait, OrientationMode.FollowVideo)
+            .forEach { tier ->
+                assertEquals(
+                    "档位 $tier",
+                    ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
+                    mode(tier, 1.78, ScreenOrientation.Landscape, playerVisible = false),
+                )
+            }
+        // 比例未知也交回系统，不锁在当前方向。
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED,
+            mode(OrientationMode.FollowVideo, null, playerVisible = false),
+        )
     }
 }

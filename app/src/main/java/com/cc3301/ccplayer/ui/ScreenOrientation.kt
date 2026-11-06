@@ -6,7 +6,7 @@ import com.cc3301.ccplayer.settings.OrientationMode
  * 屏幕朝向。`Portrait` / `ReversePortrait` 为竖屏族正向与反向，`Landscape` / `ReverseLandscape` 为
  * 横屏族正向与反向。
  *
- * `System` 表示四向全跟：它是屏幕方向档的期望族，跟随视频比例未知时也按它处理；
+ * `System` 表示四向全跟，它是屏幕方向档的期望族；跟随视频比例未知时不下发它，而是锁住当前方向。
  * 反向与正向同属一个族，只影响屏幕实际朝向，不改变下发的系统方向模式。
  */
 enum class ScreenOrientation { System, Portrait, ReversePortrait, Landscape, ReverseLandscape }
@@ -14,6 +14,10 @@ enum class ScreenOrientation { System, Portrait, ReversePortrait, Landscape, Rev
 /** 是否属于横屏族。 */
 fun ScreenOrientation.isLandscape(): Boolean =
     this == ScreenOrientation.Landscape || this == ScreenOrientation.ReverseLandscape
+
+/** 视频比例是否可用：空、非有限或非正都算未知。 */
+fun videoAspectRatioKnown(videoAspectRatio: Double?): Boolean =
+    videoAspectRatio != null && videoAspectRatio.isFinite() && videoAspectRatio > 0.0
 
 /**
  * 按方向设置与视频宽高比判定期望的族（ADR-0013）。
@@ -27,9 +31,8 @@ fun resolvedOrientation(mode: OrientationMode, videoAspectRatio: Double?): Scree
         OrientationMode.Landscape -> ScreenOrientation.Landscape
         OrientationMode.Portrait -> ScreenOrientation.Portrait
         OrientationMode.FollowVideo -> when {
-            videoAspectRatio == null || !videoAspectRatio.isFinite() || videoAspectRatio <= 0.0 ->
-                ScreenOrientation.System
-            videoAspectRatio >= 1.0 -> ScreenOrientation.Landscape
+            !videoAspectRatioKnown(videoAspectRatio) -> ScreenOrientation.System
+            videoAspectRatio != null && videoAspectRatio >= 1.0 -> ScreenOrientation.Landscape
             else -> ScreenOrientation.Portrait
         }
     }
@@ -76,7 +79,7 @@ fun awaitsVideoOrientation(
     if (rotationOverride != null) return false
     // 纯音频没有视频方向，等下去会永久占住方向。
     if (audioOnly) return false
-    return videoAspectRatio == null || !videoAspectRatio.isFinite() || videoAspectRatio <= 0.0
+    return !videoAspectRatioKnown(videoAspectRatio)
 }
 
 /** 转屏按钮：按当前是否为横屏给出另一个方向。 */

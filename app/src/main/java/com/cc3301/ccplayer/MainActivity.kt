@@ -72,6 +72,7 @@ import com.cc3301.ccplayer.playback.SubtitleSelection
 import com.cc3301.ccplayer.playback.SubtitleTrack
 import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
+import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -213,8 +214,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 本次播放的转屏结果；为空时按设置判定，退出播放页即清除。 */
     private val sessionOrientation = PlayerSessionOrientation()
 
-    /** 最近的设置方向档位。 */
-    private var playerOrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE
+    /** 本次播放会话的视频比例；离开播放页后为空，直到本次会话首个 presentation 到达。 */
+    private var sessionAspectRatio by mutableStateOf<Double?>(null)
 
     /** 上一次记录过的屏幕方向；方向真正变化时据此写一条诊断日志。 */
     private var lastScreenOrientation = ScreenOrientation.Portrait
@@ -292,7 +293,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 launch { binder.controller.restoring.collect { restoring = it } }
                 launch { binder.controller.playbackFailed.collect { playbackFailed = it } }
                 launch { binder.controller.buffering.collect { buffering = it } }
-                launch { binder.controller.surfacePresentation.collect { surfacePresentation = it } }
+                launch {
+                    binder.controller.surfacePresentation.collect {
+                        surfacePresentation = it
+                        // 本次会话首个 presentation 定下方向要用的比例；离开播放页即清空。
+                        if (playerVisible && it.aspectRatio != null) sessionAspectRatio = it.aspectRatio
+                    }
+                }
                 launch {
                     binder.controller.playbackFailures.collect {
                         // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
@@ -369,18 +376,17 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
                 }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
-                // 比例只读屏上那一帧的比例：切集期间跟随旧画面，不会因新文件先上报尺寸就转屏。
+                // 比例只认本次会话首个 presentation 上报的那一帧：切集期间跟随旧画面，不因新文件先报尺寸就转屏。
                 LaunchedEffect(
                     playerVisible,
                     orientationMode,
-                    surfacePresentation.aspectRatio,
+                    sessionAspectRatio,
                     sessionOrientation.override,
                     // 进页时播放列表还没落地；媒介身份变化后要重算一次纯音频判定。
                     playlist,
                     currentIndex,
                 ) {
-                    playerOrientationMode = orientationMode
-                    dispatchPlayerOrientation()
+                    dispatchPlayerOrientation(orientationMode)
                 }
                 val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
                     if (uri != null) addRoot(uri)
@@ -874,8 +880,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         pendingPlayback.clear()
         playbackEntry.reset()
         onSurfaceReleased()
-        restoreBrowserSystemUi()
         playerVisible = false
+        restoreBrowserSystemUi()
         updateKeepScreenOn()
     }
 
@@ -907,9 +913,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         onSurfaceReleased()
         pendingPlayback.clear()
         playbackEntry.reset()
-        // 先恢复系统栏与方向，再切回浏览页，避免 insets 变化让浏览页布局跳动。
-        restoreBrowserSystemUi()
         playerVisible = false
+        // 切回浏览页前恢复系统栏与方向，避免 insets 变化让浏览页布局跳动。
+        restoreBrowserSystemUi()
         playbackState = PlaybackState.Idle
         playbackFailed = false
         updateKeepScreenOn()
@@ -952,14 +958,16 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     /**
-     * 退出播放页：先同步恢复系统栏与方向，保证系统栏在页面切换前出现；
-     * 状态变化后 [LaunchedEffect] 会按非播放状态再兜底应用一次，重复调用无副作用。
+     * 退出播放页：恢复系统栏与方向，保证它们在页面切换前到位；调用前 [playerVisible] 必须已为 false。
+     *
+     * 比例作废、覆盖清零，方向由 [dispatchPlayerOrientation] 按非播放状态下发，重复调用无副作用。
      */
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
         sessionOrientation.endPlayback()
-        // 离开播放页把方向交回系统；状态变化后 [LaunchedEffect] 会再比对一次，相同时不写。
-        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        sessionAspectRatio = null
+        // 不在播放页时档位不参与判定，这里传哪个档位都只交回系统。
+        dispatchPlayerOrientation(OrientationMode.System)
     }
 
     /** 当前屏幕的四向方向，供转屏按钮从现状切换与方向日志判定。 */
@@ -977,23 +985,20 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
             ?: Surface.ROTATION_0
 
     /**
-     * 下发播放页方向；不在播放页时交回系统。
+     * 下发方向；这是 `requestedOrientation` 唯一的写入点。
      *
-     * 跟随视频比例未知时映射函数返回空，保持当前 requestedOrientation 等比例到达。
+     * 不在播放页时交回系统；跟随视频比例未知时锁住当前方向。
      * 与当前请求相同时不写，避免多余的方向变化。
      */
-    private fun dispatchPlayerOrientation() {
-        val target = if (playerVisible) {
-            screenOrientationMode(
-                mode = playerOrientationMode,
-                videoAspectRatio = surfacePresentation.aspectRatio,
-                rotationOverride = sessionOrientation.override,
-                audioOnly = currentMediaIsAudio(),
-            )
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
-        if (target == null || target == requestedOrientation) return
+    private fun dispatchPlayerOrientation(mode: OrientationMode) {
+        val target = screenOrientationMode(
+            mode = mode,
+            videoAspectRatio = sessionAspectRatio,
+            rotationOverride = sessionOrientation.override,
+            audioOnly = currentMediaIsAudio(),
+            playerVisible = playerVisible,
+        )
+        if (target == requestedOrientation) return
         requestedOrientation = target
     }
 
