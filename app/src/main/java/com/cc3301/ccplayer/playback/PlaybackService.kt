@@ -49,6 +49,8 @@ class PlaybackService : Service() {
     private lateinit var playbackController: PlaybackController
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioOutputMonitor: AudioOutputMonitor
+    private lateinit var audioFocus: AudioFocusRequester
+    private lateinit var audioFocusPolicy: AudioFocusPolicy
     private lateinit var backgroundPolicy: BackgroundPlaybackPolicy
     private lateinit var coverCache: NotificationCoverCache
 
@@ -83,6 +85,19 @@ class PlaybackService : Service() {
             pausePlayback = playbackController::pauseForBackground,
             onPolicyChanged = ::requestRefresh,
         )
+        audioFocusPolicy = AudioFocusPolicy(
+            pausePlayback = playbackController::pause,
+            resumePlayback = playbackController::resume,
+            setDucked = { ducked ->
+                playbackEngine.setVolumePercent(if (ducked) DUCK_VOLUME_PERCENT else FULL_VOLUME_PERCENT)
+            },
+            isPlaying = { playbackController.state.value == PlaybackState.Playing },
+        )
+        audioFocus = AudioFocusRequester(this) { change ->
+            // 永久丢失后不再持有焦点，下次真正开始播放时重新申请。
+            if (change == AudioFocusChange.Loss) audioFocus.abandon()
+            audioFocusPolicy.onFocusChange(change)
+        }
         playbackEngine.initialize()
         audioOutputMonitor = AndroidAudioOutputMonitor(this)
         audioOutputMonitor.start(playbackController::handleAudioOutputLost)
@@ -101,6 +116,16 @@ class PlaybackService : Service() {
                 playbackController.currentIndex,
                 playbackController.playlist,
             ) { _, _, _, _, _ -> Unit }.collect { requestRefresh() }
+        }
+        // 播放开始申请音频焦点，停止或播放结束时释放；暂停不释放，退后台也不碰焦点。
+        stateScope.launch {
+            playbackController.state.collect { state ->
+                when (state) {
+                    PlaybackState.Loading, PlaybackState.Playing -> audioFocus.request()
+                    PlaybackState.Idle, PlaybackState.Ended -> audioFocus.abandon()
+                    PlaybackState.Paused -> Unit
+                }
+            }
         }
         stateScope.launch {
             playbackController.progress.collect { current ->
@@ -143,6 +168,7 @@ class PlaybackService : Service() {
         stateScope.cancel()
         scope.cancel()
         audioOutputMonitor.stop()
+        audioFocus.abandon()
         grantedCoverUri?.let {
             runCatching { revokeUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         }
@@ -445,5 +471,9 @@ class PlaybackService : Service() {
         const val OPEN_PLAYER_REQUEST_CODE = 100
         const val MAX_COVER_SIZE = 256
         const val APP_ICON_SIZE = 192
+
+        /** 音频焦点暂降时的输出音量百分比；拿到焦点后回到满音量。 */
+        const val DUCK_VOLUME_PERCENT = 20
+        const val FULL_VOLUME_PERCENT = 100
     }
 }

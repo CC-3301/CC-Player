@@ -572,7 +572,8 @@ fun PlayerScreen(
                     .background(Color.Black),
             )
         }
-        if (buffering) {
+        // 黑屏期间不显示转圈与文字：只有已有画面的前台切集或首次缓冲才显示提示。
+        if (buffering && (surfacePresentation.showsPicture || firstBuffering)) {
             BufferingIndicator(modifier = Modifier.align(Alignment.Center))
         }
         PlayerGestureLayer(

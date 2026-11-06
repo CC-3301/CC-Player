@@ -357,6 +357,65 @@ class PlaybackControllerBackgroundTest {
         assertFalse(controller.surfacePresentation.value.showsPicture)
     }
 
+    @Test
+    fun `播放态回前台撤掉旧画面并等新帧`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        // 旧画面不保留：纯黑等下一个新帧，不 seek。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertEquals(1, engine.awaitFramePresentationCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+
+        engine.reportFramePresented()
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `暂停态回前台保留最后一帧`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+        assertEquals(0, engine.awaitFramePresentationCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `后台切集不继承屏上旧画面`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+
+        controller.setAppInForeground(false)
+        controller.next()
+
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertEquals(0, engine.awaitFramePresentationCalls)
+
+        // 回前台播放态同样不保留旧画面。
+        controller.setAppInForeground(true)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `前台切集继续沿用旧画面`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        controller.next()
+
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
     private fun TestScope.controller(): PlaybackController {
         engine.callbackScope = this
         return PlaybackController(

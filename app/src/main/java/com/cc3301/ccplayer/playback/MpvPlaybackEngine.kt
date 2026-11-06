@@ -130,6 +130,9 @@ class MpvPlaybackEngine(
         MPVLib.observeProperty(WIDTH_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(HEIGHT_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_INT64)
         MPVLib.observeProperty(EOF_REACHED_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_FLAG)
+        // 音频输出链变化常驻观测：切后台听感异常时靠它判断是否重建过 AO。
+        MPVLib.observeProperty(AO_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_STRING)
+        MPVLib.observeProperty(CURRENT_AO_PROPERTY, MPVLib.MpvFormat.MPV_FORMAT_STRING)
     }
 
     override fun setListener(listener: PlaybackEngine.Listener) {
@@ -308,6 +311,11 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyBoolean(MUTE_PROPERTY, muted)
     }
 
+    /** 按百分比设置音频输出音量；用于音频焦点暂降与恢复。 */
+    override fun setVolumePercent(percent: Int) {
+        MPVLib.setPropertyDouble(VOLUME_PROPERTY, percent.coerceIn(0, 100).toDouble())
+    }
+
     /** 读取排查丢声所需的播放核心状态；任何属性读取失败都只记为空值。 */
     private fun audioDebugSnapshot(): AudioDebugSnapshot = AudioDebugSnapshot(
         paused = readMpvProperty { MPVLib.getPropertyBoolean(PAUSE_PROPERTY) },
@@ -400,6 +408,15 @@ class MpvPlaybackEngine(
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
         }
+    }
+
+    /**
+     * 重新武装「下一个新帧上屏」回报：回前台撤掉旧画面后，靠下一条位置前进确认真正的新帧。
+     * 不 seek、不改播放位置，也不碰音频。
+     */
+    override fun awaitFramePresentation() {
+        if (released || attachedSurface == null || videoOutputStopped) return
+        awaitingSurfaceFrame = true
     }
 
     /**
@@ -624,6 +641,7 @@ class MpvPlaybackEngine(
                 }
             }
             MPVLib.MpvEvent.MPV_EVENT_AUDIO_RECONFIG -> {
+                logAudioEvent("音频重配")
                 listener?.onLoadActivity(LoadActivity.AudioReconfig, loadCoordinator.currentLoadedToken())
                 if (loadCoordinator.isFileLoaded && !hasVideoTrack) reportReady()
             }
@@ -736,7 +754,20 @@ class MpvPlaybackEngine(
         listener?.onPositionChanged(toMillis(positionSeconds), toMillis(durationSeconds))
     }
 
-    override fun eventProperty(property: String, value: String) = Unit
+    /** 音频输出链变化常驻观测；跟随诊断开关。 */
+    override fun eventProperty(property: String, value: String) {
+        when (property) {
+            AO_PROPERTY, CURRENT_AO_PROPERTY -> logAudioEvent("音频输出 $property=$value")
+        }
+    }
+
+    /** 音频相关诊断行：只在诊断开启时读属性写盘，失败不影响播放。 */
+    private fun logAudioEvent(prefix: String) {
+        if (!diagnostics.enabled) return
+        runCatching {
+            diagnostics.log { "$prefix: ${audioDebugSnapshot().debugText()}" }
+        }
+    }
 
     override fun eventProperty(property: String, value: Boolean) {
         when (property) {
