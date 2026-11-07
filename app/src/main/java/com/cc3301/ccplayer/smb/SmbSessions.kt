@@ -81,18 +81,41 @@ class SmbSessions(
         return resendUse(target, request)
     }
 
-    /** 打开一个随机读句柄；会话占用保持到句柄关闭。建立失败不重发。 */
-    suspend fun openRead(target: SmbTarget): ByteSource = SmbStreamSource(
-        try {
-            openLease(target)
+    /** 打开一个随机读句柄；会话占用保持到句柄关闭。会话建立失败不重发。 */
+    suspend fun openRead(target: SmbTarget): ByteSource {
+        val first = acquire(target)
+        val opened = try {
+            ReadLease(target, first, first.connection.openRead(target.path))
         } catch (cancellation: CancellationException) {
+            first.release()
             throw cancellation
         } catch (failure: Throwable) {
-            if (!smbConnectionLost(failure)) throw failure
+            if (!smbConnectionLost(failure)) {
+                first.release()
+                throw failure
+            }
             diagnostics.log { "SMB 打开失败，作废会话后重发: ${target.share} (${failure.message})" }
-            openLease(target)
-        },
-    )
+            first.discard()
+            first.release()
+            resendOpen(target)
+        }
+        return SmbStreamSource(opened)
+    }
+
+    /** 重连后重开一次；第二次失败同样作废会话。建立失败不重发。 */
+    private suspend fun resendOpen(target: SmbTarget): ReadLease {
+        val retry = acquire(target)
+        return try {
+            ReadLease(target, retry, retry.connection.openRead(target.path))
+        } catch (cancellation: CancellationException) {
+            retry.release()
+            throw cancellation
+        } catch (failure: Throwable) {
+            if (smbConnectionLost(failure)) retry.discard()
+            retry.release()
+            throw failure
+        }
+    }
 
     /** 重发一次；第二次失败同样作废会话，失败原样抛出。 */
     private suspend fun <T> resendUse(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
@@ -351,9 +374,16 @@ class SmbSessions(
             lease.release()
         }
 
+        /**
+         * 换会话：先按与 close 同一个开关判定；已经关过就只开新租约，不再作废旧会话，
+         * 否则会话被摘出表、闲置任务被取消，而引用已经交还，连接没人关。
+         */
         override fun replace(): SmbReadLease = runBlocking {
-            lease.discard()
-            close()
+            if (closed.compareAndSet(false, true)) {
+                lease.discard()
+                runCatching { handle.close() }
+                lease.release()
+            }
             openLease(target)
         }
     }
