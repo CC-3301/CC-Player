@@ -446,6 +446,9 @@ class PlaybackController(
     /** 本次 Surface 重挂后是否还在等播放核心的首个新帧；等待期间铺黑底。 */
     private var awaitingSurfaceFrame = false
 
+    /** 本次恢复已经请求过刷新；退后台只收计时，不清它，回前台重进时不再补一次。 */
+    private var refreshRequested = false
+
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -734,6 +737,7 @@ class PlaybackController(
      * 界面前后台上报：加载看护不因前后台变化挂起，切集计时照常累计。
      * 后台播放开着时 Surface 可能还在，前后台与 Surface 分开记、同一处结算。
      * 回前台时播放态一律撤掉屏上旧画面，纯黑等新帧；暂停态保留最后一帧。
+     * 退后台取消这次等新帧恢复：后台看不见画面，也不触发 3 秒无帧翻转。
      */
     fun setAppInForeground(foreground: Boolean) {
         if (this.foreground == foreground) return
@@ -741,6 +745,10 @@ class PlaybackController(
         if (foreground) {
             // 播放态撤旧画面等新帧；暂停态保留最后一帧，没有帧时补一次位置中性刷新。
             if (paused) restorePausedFrameIfNoPicture() else dropFrameOnForegroundReturn()
+        } else {
+            // 后台不做 3 秒无帧翻转：只收计时，恢复本身与已发出的刷新留着，
+            // 回前台重进同一次恢复，不重复刷新。
+            cancelSurfaceRestoreTimer()
         }
         updateLoadTimers()
     }
@@ -806,13 +814,16 @@ class PlaybackController(
      * Surface 重挂、回前台播放态撤帧，或回前台暂停态没有画面时，等播放核心的首个新帧。
      * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
      * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态生效（ADR-0026）；
-     * 播放态不 seek，只等播放位置前进。每次进入恢复都重新允许一次刷新。
+     * 播放态不 seek，只等播放位置前进。每次进入恢复都允许一次刷新；退后台只收掉翻转计时，
+     * 回前台重进同一次恢复时不重复刷新。
      * 片尾与切集还在等目标帧时不刷新。等待超时只翻转一次视频输出，不 seek、不改播放位置。
      */
     private fun beginSurfaceRestore(reason: String = "Surface 重挂"): Boolean {
         // 同一次恢复里重挂与回前台可能各调一次：已有等待在跑时不重复刷新、也不重开计时。
-        // 等待还在但计时已收（比如当时没有 Surface）：允许重新进入，重挂后仍有 3 秒兜底。
+        // 等待还在但计时已收（比如当时没有 Surface、或退后台收掉了计时）：允许重新进入，
+        // 重挂后仍有 3 秒兜底，但已经发过的刷新不再补一次。
         if (awaitingSurfaceFrame && surfaceRestoreJob != null) return false
+        val refreshed = refreshRequested
         cancelSurfaceRestore()
         if (!active) return false
         // 加载仍在等新帧时沿用加载的等待，不覆盖加载的就绪状态。
@@ -820,6 +831,7 @@ class PlaybackController(
         // 片尾黑底不显示画面，不需要恢复。
         if (holdBlack) return false
         awaitingSurfaceFrame = true
+        refreshRequested = refreshed
         diagnostics.log {
             "$reason: 等待新帧 | 播放状态: ${_state.value} | 暂停: ${if (paused) "是" else "否"} | " +
                 "阶段: ${loadPhaseLabel(loadPhase)}"
@@ -828,7 +840,8 @@ class PlaybackController(
         // 片尾不刷新，避免 seek 重新触发 eof；切集还在等目标帧时交给原看护，不插刷新；
         // 本次恢复只发一次。
         if (paused) {
-            if (!pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
+            if (!refreshRequested && !pausedAtEpisodeEnd && !reachedEnd() && !switchFramePending) {
+                refreshRequested = true
                 engine.refreshFrame()
             }
         } else {
@@ -841,9 +854,12 @@ class PlaybackController(
             try {
                 val startedAtMillis = nowMillis()
                 delay(SURFACE_RESTORE_WAIT_MILLIS)
-                if (!active || !_renderSurfaceAvailable.value) return@launch
+                // 退后台取消等待之外再判一次前台：翻转会重建整条视频输出，后台不能做。
+                if (!active || !_renderSurfaceAvailable.value || !foreground) return@launch
                 if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
                 awaitingSurfaceFrame = false
+                // 本次恢复到此收尾：下一次恢复重新允许一次刷新。
+                refreshRequested = false
                 engine.flipVideoOutput()
                 diagnostics.log {
                     "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出 | " +
@@ -860,9 +876,15 @@ class PlaybackController(
 
     /** 结束本次恢复等待：迟到的翻转不再下发，旧画面留到真正出帧。 */
     private fun cancelSurfaceRestore() {
+        cancelSurfaceRestoreTimer()
+        awaitingSurfaceFrame = false
+        refreshRequested = false
+    }
+
+    /** 只收翻转计时：恢复本身没结束，等待与已发出的刷新都留着。 */
+    private fun cancelSurfaceRestoreTimer() {
         surfaceRestoreJob?.cancel()
         surfaceRestoreJob = null
-        awaitingSurfaceFrame = false
     }
 
     /**
@@ -1635,7 +1657,7 @@ class PlaybackController(
         finishReady(phase)
     }
 
-    /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
+    /** Surface 不可渲染时，任何阶段的加载都以文件加载完成作为就绪。 */
     private fun finishLoadWithoutSurface() {
         val phase = loadPhase
         if (phase == LoadPhase.None) return
@@ -1908,8 +1930,8 @@ class PlaybackController(
             switchOriginEnded = false
         }
         // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
-        // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
-        if (paused && _renderSurfaceAvailable.value) {
+        // 只有前台且 Surface 可渲染时屏上才有画面可露；后台与 Surface 分离时维持黑底。
+        if (paused && foreground && _renderSurfaceAvailable.value) {
             screenFrame = ScreenFrame.Target
             quietBlack = false
         }
