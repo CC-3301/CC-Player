@@ -158,6 +158,8 @@ class LoopbackStreamServer(
         idsByKey.clear()
         // 在途建源不在这里等、也不打断：建好后由建源线程自己关掉。
         sourceOpener.shutdown()
+        // 已派发的关源照常跑完，不打断；之后不再接新任务。
+        sourceCloser.shutdown()
     }
 
     private fun acceptLoop() {
