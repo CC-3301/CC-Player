@@ -39,11 +39,12 @@ class WebDavStreams(
 
     /** 起播前试连一次：打开读句柄并留给播放复用；连不上或位置不属于任何书签时抛出来源失败异常。 */
     override suspend fun probe(location: String) {
+        // 打开前就记下交接代号：入口在这里挂起期间被作废时，迟到回来的句柄不能带着新代号移交。
+        val serial = synchronized(handoff) { handoffSerial }
         val target = targetOf(location)
         urlFor(location)
         // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
         if (server.hasFreshSource(location)) return
-        val serial = synchronized(handoff) { handoffSerial }
         val handle = transport.openRead(target.url, target.username, target.password, size = 0)
         handOff(location, handle, serial)
     }

@@ -686,6 +686,15 @@ class PlaybackController(
     }
 
     /**
+     * 暂停意图生效且停在片尾时归还当前目标：暂停在片尾是「当前目标不再被读取」的一个形态。
+     * 只在设定暂停的地方调用；引擎回声只更新状态，不判定归还，避免迟到的回声摘掉后一次加载的源。
+     */
+    private fun returnSourceIfPausedAtEpisodeEnd() {
+        if (!stoppedAtEndOfEpisode()) return
+        returnSourceOf(_currentIndex.value)
+    }
+
+    /**
      * 归还被换下的目标：回环条目按位置复用，同一个文件的两条列表项共用一条源，
      * 位置相同就不归还，否则会把换上来之后仍在读的那条源摘走。
      */
@@ -946,7 +955,10 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
-        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
+        if (loadPhase == LoadPhase.None) {
+            updateState(PlaybackState.Paused)
+            returnSourceIfPausedAtEpisodeEnd()
+        }
     }
 
     /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾。 */
@@ -1191,10 +1203,7 @@ class PlaybackController(
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
         if (loadPhase == LoadPhase.None) {
             updateState(PlaybackState.Paused)
-            // 暂停在片尾：当前目标不再需要字节源。
-            // mpv 只在属性真的变化时才发属性变更事件，已经暂停再按暂停不会回这条回声，
-            // 所以这里的判定不能只留给回声。
-            if (stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
+            returnSourceIfPausedAtEpisodeEnd()
         }
     }
 
@@ -1243,6 +1252,7 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         updateState(PlaybackState.Paused)
+        returnSourceIfPausedAtEpisodeEnd()
     }
 
     /**
@@ -1282,13 +1292,15 @@ class PlaybackController(
             LoadPhase.Switching, LoadPhase.Restoring -> switchOriginIndex
             else -> _currentIndex.value
         }
-        // 真正停止：当前目标不再需要字节源；切集中途停止时尚未接管的目标同样交还。
-        returnSourceOf(indexToSave)
-        if (loadPhase == LoadPhase.Switching) returnReplacedSource(loadTargetIndex, indexToSave)
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
         val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
-        if (active && !skipEndRestoreSave) {
-            _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
+        if (active) {
+            if (!skipEndRestoreSave) {
+                _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
+            }
+            // 真正停止：当前目标不再需要字节源；切集中途停止时尚未接管的目标同样交还。
+            returnSourceOf(indexToSave)
+            if (loadPhase == LoadPhase.Switching) returnReplacedSource(loadTargetIndex, indexToSave)
         }
         active = false
         paused = false
@@ -1823,8 +1835,6 @@ class PlaybackController(
                 }
                 this.paused = paused
                 updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
-                // 暂停在片尾：当前目标不再需要字节源。
-                if (paused && stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
             }
         }
     }
@@ -1961,6 +1971,7 @@ class PlaybackController(
         paused = true
         engine.pause()
         updateState(PlaybackState.Paused)
+        returnSourceIfPausedAtEpisodeEnd()
     }
 
     /** 播放已停在当前文件的末尾：位置到结尾，或文件播完时被定时暂停。 */
@@ -2454,8 +2465,8 @@ class PlaybackController(
         }
         if (paused) {
             updateState(PlaybackState.Paused)
-            // 片尾恢复停在片尾：当前目标不再需要字节源。
-            if (restoredAtEnd) returnSourceOf(_currentIndex.value)
+            // 片尾恢复同样停在一段片尾。
+            if (restoredAtEnd) returnSourceIfPausedAtEpisodeEnd()
             // 后台切集失败回退原片：屏上已没有旧画面时补一帧，回前台不会停在纯黑暂停。
             restorePausedFrameIfNoPicture()
         } else {

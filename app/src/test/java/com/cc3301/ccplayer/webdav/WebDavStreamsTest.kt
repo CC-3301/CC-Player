@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.webdav
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.network.BookmarkStore
 import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
@@ -10,6 +11,10 @@ import com.cc3301.ccplayer.streaming.httpRequest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -17,6 +22,33 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+/** 书签查询可被卡住的内存存储：用来在入口解析书签期间插入一次作废。 */
+private class GatedBookmarkStore : BookmarkStore {
+
+    private val state = MutableStateFlow<List<NetworkBookmark>>(emptyList())
+
+    val entered = CountDownLatch(1)
+
+    val release = CountDownLatch(1)
+
+    /** 置真时下一次读书签会卡到 [release] 放行为止。 */
+    @Volatile
+    var gate = false
+
+    override val bookmarks: Flow<List<NetworkBookmark>> = flow {
+        if (gate) {
+            gate = false
+            entered.countDown()
+            release.await()
+        }
+        emitAll(state)
+    }
+
+    override suspend fun save(bookmarks: List<NetworkBookmark>) {
+        state.value = bookmarks
+    }
+}
 
 class WebDavStreamsTest {
 
@@ -168,6 +200,32 @@ class WebDavStreamsTest {
         awaitClosed(returned)
         httpRequest(streams.urlFor(movie))
         assertEquals("作废的句柄不外借，播放重新打开", 2, transport.openedSizes.size)
+    }
+
+    @Test
+    fun `入口解析书签期间被作废，迟到回来的句柄不外借`() = runBlocking {
+        val store = GatedBookmarkStore()
+        val gatedSources = NetworkSourceRepository(store, FakeCredentialStore())
+        val gated = WebDavStreams(transport, WebDavLocator(gatedSources))
+        try {
+            gatedSources.add(NetworkBookmark.fromUrl(root, "cc")!!, password = "secret")
+            transport.addFile(movie, payload)
+            store.gate = true
+            val probing = thread { runBlocking { gated.probe(movie) } }
+            assertTrue("书签查询没有开始", store.entered.await(5, TimeUnit.SECONDS))
+
+            // 书签还没解析出来这次准备就作废了：恢复后打开的句柄不能移交给后一次打开。
+            gated.discardPreparedSource()
+            store.release.countDown()
+            probing.join(5_000)
+
+            val opened = transport.handles.values.last()
+            awaitClosed(opened)
+            httpRequest(gated.urlFor(movie))
+            assertEquals("作废的句柄不外借，播放重新打开", 2, transport.openedSizes.size)
+        } finally {
+            gated.close()
+        }
     }
 
     /** 关源在关源线程上做：等到句柄真的关上再断言。 */

@@ -74,11 +74,11 @@ class PlaybackEntryOpener(
             if (!entryState.isCurrent(generation)) {
                 // 这次准备作废：丢掉它自己探测预置的读句柄，不动后一次打开的。
                 current.streams?.discardPreparedSource()
-                finishPreparation(current)
+                preparation = null
                 return@launch
             }
             // 准备已结束：预置句柄交给播放或随失败丢掉，不再挂在入口上。
-            finishPreparation(current)
+            preparation = null
             prepared.fold(
                 onSuccess = { playback ->
                     if (!entryState.prepared(generation)) return@launch
@@ -133,10 +133,6 @@ class PlaybackEntryOpener(
         preparation = null
     }
 
-    /** 这次准备走到终点：不再算「当前这次」，之后的取消不丢它留下的句柄。 */
-    private fun finishPreparation(current: Preparation) {
-        if (preparation === current) preparation = null
-    }
 
     private data class PreparedPlayback(
         val current: MediaFile,

@@ -8,6 +8,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -77,13 +79,60 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
-    fun `引擎回声的暂停停在片尾时同样归还`() = runTest {
+    fun `片尾暂停后继续播放，迟到的暂停回声不再归还新源`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        engine.reportPositionChanged(600_000, 600_000)
+        controller.pause()
+        assertEquals(listOf("root/ep1.mkv"), returned)
+
+        // 继续：同一位置重开，新源在后一次加载里建好，又播到片尾。
+        controller.resume()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        engine.reportPositionChanged(600_000, 600_000)
+        startsAtReturn.clear()
+
+        // 上一轮加载遗留的暂停回声迟到到达：当前意图是播放，不能按旧事实再归还一次。
+        engine.reportPauseChanged(true)
+
+        assertTrue("迟到的回声不得摘掉新加载的源", startsAtReturn.isEmpty())
+        assertEquals(listOf("root/ep1.mkv"), returned)
+    }
+
+    @Test
+    fun `引擎回声的暂停不归还，只更新状态`() = runTest {
         val returned = mutableListOf<String>()
         val controller = playingController(returned)
         engine.reportPositionChanged(600_000, 600_000)
 
-        // 不经过控制层的暂停（播完停在末帧、音频焦点丢失）只有引擎回声。
+        // 不是控制层设定的暂停意图（keep-open 停在末帧）：只压状态，不碰字节源。
         engine.reportPauseChanged(true)
+
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue("回声不判定归还", returned.isEmpty())
+    }
+
+    @Test
+    fun `退后台暂停停在片尾时归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        engine.reportPositionChanged(600_000, 600_000)
+
+        controller.pauseForBackground()
+
+        assertEquals(listOf("root/ep1.mkv"), returned)
+    }
+
+    @Test
+    fun `定时暂停停在片尾时归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        engine.reportPositionChanged(600_000, 600_000)
+        controller.startSleepTimer(SleepTimerOption.AfterDuration(1))
+
+        advanceTimeBy(60_000L)
+        runCurrent()
 
         assertEquals(listOf("root/ep1.mkv"), returned)
     }
