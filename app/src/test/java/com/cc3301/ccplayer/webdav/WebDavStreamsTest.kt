@@ -118,16 +118,38 @@ class WebDavStreamsTest {
     }
 
     @Test
-    fun `停播关闭字节源后下一次请求重新建立`() = runTest {
+    fun `归还后关掉已就绪的源，下一次请求重新建立`() = runTest {
         addSource(root)
         transport.addFile(movie, payload)
         httpRequest(streams.urlFor(movie))
 
-        streams.closeByteSources()
+        streams.returnSource(movie)
 
-        assertTrue(transport.handles.getValue(movie).closed)
+        awaitClosed(transport.handles.getValue(movie))
         httpRequest(streams.urlFor(movie))
         assertEquals(2, transport.openedSizes.size)
+    }
+
+    @Test
+    fun `取消打开丢掉探测预置的句柄`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+        streams.probe(movie)
+        val prepared = transport.handles.getValue(movie)
+
+        streams.discardPreparedSource()
+
+        assertTrue("不等下一次探测或关闭，当场丢", prepared.closed)
+    }
+
+    /** 关源在关源线程上做：等到句柄真的关上再断言。 */
+    private fun awaitClosed(handle: RecordingWebDavHandle, timeoutMillis: Long = 2_000) {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (handle.closed) return
+            Thread.sleep(10)
+        }
+        assertTrue("句柄没有关闭", handle.closed)
     }
 
     @Test

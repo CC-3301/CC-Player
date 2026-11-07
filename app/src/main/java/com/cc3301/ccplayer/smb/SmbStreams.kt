@@ -32,13 +32,16 @@ class SmbStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
+    override fun returnSource(location: String) {
+        server.returnSource(location)
+    }
+
     override fun discardByteSources() {
         server.discardSources()
     }
 
-    override fun closeByteSources() {
-        server.closeSources()
-    }
+    /** SMB 探测只取会话做存活确认，不留读句柄，没有要丢的预置句柄。 */
+    override fun discardPreparedSource() = Unit
 
     override fun close() {
         server.close()

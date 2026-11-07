@@ -53,12 +53,14 @@ class WebDavStreams(
         server.discardSources()
     }
 
-    /**
-     * 只关代理已建成的播放源：换目标与停播时用。
-     * 探测预置的句柄不在这里关，它由 [handOff] 覆盖、[discardByteSources] 标记陈旧、[close] 收尾。
-     */
-    override fun closeByteSources() {
-        server.closeSources()
+    /** 归还播放源：探测预置的句柄不在这条路径上，它由 [handOff] 覆盖、[discardPreparedSource] 丢弃、[close] 收尾。 */
+    override fun returnSource(location: String) {
+        server.returnSource(location)
+    }
+
+    /** 取消打开：探测预置的句柄当场丢掉，不等下一次探测或关闭。 */
+    override fun discardPreparedSource() {
+        closePrepared()
     }
 
     override fun close() {

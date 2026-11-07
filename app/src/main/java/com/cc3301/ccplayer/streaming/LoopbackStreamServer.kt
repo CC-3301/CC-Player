@@ -45,6 +45,9 @@ private const val STALL_CHECK_INTERVAL_MILLIS = 100L
  * 字节源打陈旧标记（下一次请求重建时由建源线程关掉旧源、解除阻塞），再断开连接，
  * 让播放核心立刻收到读错误；等建源与空闲长连接都不判停滞。
  * [close] 关闭全部已建立的字节源。
+ *
+ * 条目是字节源的唯一持有者：创建与关闭都在 IO 线程，界面线程只发命令、不等网络动作；
+ * [returnSource] 当场摘走当时已就绪的源，关闭交给关源线程。
  */
 class LoopbackStreamServer(
     port: Int = 0,
@@ -53,6 +56,10 @@ class LoopbackStreamServer(
     /** 建源线程：SMB 重连可能长时间阻塞，不能挂在请求线程上。 */
     private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "loopback-source-open").apply { isDaemon = true }
+    },
+    /** 关源线程：归还只摘走，关闭要发协议请求，不留在界面线程上做。 */
+    private val sourceCloser: ExecutorService = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "loopback-source-close").apply { isDaemon = true }
     },
     /** 诊断日志出口：连接级打点跟随设置开关，不逐读、不逐帧。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
@@ -93,11 +100,28 @@ class LoopbackStreamServer(
     }
 
     /**
-     * 关闭已建立的字节源，地址与条目保留：停播后当场交还句柄与会话占用，下一次请求重新建源。
-     * 与 [discardSources] 的区别是这里真的关，所以只在没有播放时要读的时候调用。
+     * 归还当前目标不再需要的字节源：当场摘走当时已就绪的那一条，再在关源线程上关闭。
+     * 摘走之后才建好的源不属于这次归还，在途建源不受影响；返回是否真的摘走了源。
      */
-    fun closeSources() {
-        entries.values.forEach { it.closeSource() }
+    fun returnSource(key: String): Boolean {
+        val id = idsByKey[key] ?: return false
+        val source = entries[id]?.takeReadySource() ?: return false
+        sourceCloser.execute { closeTakenSource(id, source) }
+        return true
+    }
+
+    /** 关闭一条已摘走的源，记一条耗时：关闭失败只留原因，不回调请求线程。 */
+    private fun closeTakenSource(id: String, source: ByteSource) {
+        val startedAtNanos = System.nanoTime()
+        val failure = runCatching { source.close() }.exceptionOrNull()
+        val elapsedMillis = elapsedMillis(startedAtNanos)
+        diagnostics.log {
+            if (failure == null) {
+                "归还字节源: $id | 耗时: ${elapsedMillis}ms"
+            } else {
+                "归还字节源: $id | 耗时: ${elapsedMillis}ms | 失败: ${failure.javaClass.simpleName}"
+            }
+        }
     }
 
     /** 这条流是否已有可直接复用的字节源；没有源或已登记陈旧时为 false。 */
@@ -601,7 +625,8 @@ class LoopbackStreamServer(
     )
 
     /**
-     * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
+     * 一条流：条目是这条流字节源的唯一持有者，状态只有三种——无源、建源中、就绪。
+     * 对外只提供「原子摘走当前已就绪的源」；在途建源不受归还影响，建好的源仍归条目持有。
      * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
      *
      * 重建不持锁也不占用请求线程：锁只保护「谁在重建」与 source 引用的切换，
@@ -621,9 +646,6 @@ class LoopbackStreamServer(
         /** 已登记陈旧：不打断正在进行的读取，下一次请求先关闭再重建。 */
         @Volatile
         private var stale = false
-
-        /** 建源期间被要求关闭源：这一轮建好的源由它自己关掉，不发布。 */
-        private var cleared = false
 
         @Volatile
         private var closed = false
@@ -655,8 +677,6 @@ class LoopbackStreamServer(
                     consumeStale()
                     val created = Rebuild()
                     rebuilding = created
-                    // 每轮建源重新计：上一轮留下的关闭要求不跨轮生效。
-                    cleared = false
                     started = true
                     created
                 }
@@ -683,6 +703,7 @@ class LoopbackStreamServer(
          * 建源：关闭旧源与建立新源都不持锁，锁只在发布结果时短暂持有。
          * 建源期间收到陈旧标记时，建好的这一条立即作废再建一次；二次建源期间再来的标记留给下一次请求。
          * 建源期间这条流被关闭时，建出来的源在这里自己关掉。
+         * 建源与归还互不打断：归还摘不到就绪的源就不动手。
          */
         private fun rebuild(round: Rebuild) {
             var result: ByteSource? = null
@@ -701,22 +722,15 @@ class LoopbackStreamServer(
                     created = open()
                 }
                 var kept = false
-                var clearedThisRound = false
                 synchronized(lock) {
-                    if (!closed && !cleared) {
+                    if (!closed) {
                         source = created
                         result = created
                         kept = true
                     }
-                    clearedThisRound = cleared
-                    cleared = false
                     rebuilding = null
                 }
-                if (!kept) {
-                    runCatching { created.close() }
-                    // 本轮要求关闭：按这个原因收尾，不能报成「流已关闭」。
-                    if (clearedThisRound) failure = IllegalStateException("字节源被要求关闭")
-                }
+                if (!kept) runCatching { created.close() }
             } catch (thrown: Throwable) {
                 failure = thrown
                 synchronized(lock) { rebuilding = null }
@@ -726,19 +740,12 @@ class LoopbackStreamServer(
             round.finished.countDown()
         }
 
-        /**
-         * 关闭缓存源并清空，条目与地址保留。
-         * 建源期间被关闭时由 [cleared] 让这一轮建好的源自己关掉，不会没人认领。
-         */
-        fun closeSource() {
-            var current: ByteSource? = null
-            synchronized(lock) {
-                current = source
-                source = null
-                stale = false
-                if (rebuilding != null) cleared = true
-            }
-            current?.let { runCatching { it.close() } }
+        /** 原子摘走当前已就绪的源；没有就绪源时返回 null，在途建源不受影响。 */
+        fun takeReadySource(): ByteSource? = synchronized(lock) {
+            val current = source ?: return null
+            source = null
+            stale = false
+            current
         }
 
         /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */

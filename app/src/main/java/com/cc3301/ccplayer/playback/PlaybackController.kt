@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.compareNatural
 import com.cc3301.ccplayer.progress.MediaProgress
 import com.cc3301.ccplayer.progress.PlaybackProgressRepository
@@ -49,10 +50,15 @@ class PlaybackController(
     private val nowMillis: () -> Long = { SystemClock.elapsedRealtime() },
     /** 读失败重发前丢弃已建立的字节源，返回是否真的丢弃了；字节源由界面侧持有，绑定后注入。 */
     discardByteSources: suspend () -> Boolean = { false },
+    /** 归还出口：当前目标不再需要它的字节源时按位置交还；未注入时按没有源可还处理。 */
+    returnSource: (String) -> Unit = { },
 ) : PlaybackEngine.Listener {
 
-    /** 字节源丢弃出口：服务先构造控制层，界面绑定后再注入；未注入时按没有源可丢处理。 */
+    /** 字节源丢弃出口：服务先构造控制层，界面绑定后再注入。 */
     private var loadSourceDiscard = discardByteSources
+
+    /** 字节源归还出口：界面侧当场摘走已就绪的源、在后台关闭。 */
+    private var sourceReturn = returnSource
 
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
@@ -616,8 +622,10 @@ class PlaybackController(
         }
     }
 
-    /** 换一个目标：落库旧进度、结束旧会话状态；加载代际由 [startSession] 接着推进。 */
+    /** 换一个目标：落库旧进度、归还旧目标的字节源并结束旧会话状态；加载代际由 [startSession] 接着推进。 */
     private fun replaceSession() {
+        // 在发起那一刻归还：之后新目标建好的源不属于这次归还。
+        returnSourceOf(_currentIndex.value)
         _playbackFailed.value = false
         active = false
         paused = false
@@ -665,6 +673,16 @@ class PlaybackController(
         if (!current.releaseAudioOwnership()) return
         syncAudioMute()
         if (!audioMuted) engine.fadeInAudio(FADE_IN_MILLIS)
+    }
+
+    /**
+     * 按位置归还字节源：只有网络目标持有字节源，本地目标直接跳过。
+     * 只交还已就绪的那一条，界面侧负责摘走与后台关闭。
+     */
+    private fun returnSourceOf(index: Int) {
+        val media = _playlist.value.getOrNull(index) ?: return
+        if (media.source != MediaSource.Network) return
+        sourceReturn(media.location)
     }
 
     /** 旧会话的进度落库；换片开始前用，避免打开交接把旧进度丢掉。 */
@@ -740,11 +758,15 @@ class PlaybackController(
     }
 
     /**
-     * 绑定界面后注入切集的字节源丢弃出口：字节源由界面侧持有，服务只负责构造控制层。
-     * 返回是否真的丢弃了源，只有真丢弃才计入诊断日志的字节源重建次数。
+     * 绑定界面后注入字节源出口：丢弃（退后台、切集重发前）与归还（当前目标不再需要该源）。
+     * 字节源由界面侧持有，服务只负责构造控制层；丢弃返回是否真的丢了源，只有真丢才计入字节源重建次数。
      */
-    fun attachLoadSources(discardByteSources: suspend () -> Boolean) {
+    fun attachNetworkSources(
+        discardByteSources: suspend () -> Boolean,
+        returnSource: (String) -> Unit,
+    ) {
         loadSourceDiscard = discardByteSources
+        sourceReturn = returnSource
     }
 
     /**
@@ -1152,7 +1174,11 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
-        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
+        if (loadPhase == LoadPhase.None) {
+            updateState(PlaybackState.Paused)
+            // 暂停在片尾：当前目标不再需要字节源。
+            if (stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
+        }
     }
 
     /**
@@ -1235,6 +1261,8 @@ class PlaybackController(
     private fun discardSession() {
         _playbackFailed.value = false
         val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
+        // 真正停止：当前目标不再需要字节源。
+        returnSourceOf(indexToSave)
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
         val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
         if (active && !skipEndRestoreSave) {
@@ -1773,6 +1801,8 @@ class PlaybackController(
                 }
                 this.paused = paused
                 updateState(if (paused) PlaybackState.Paused else PlaybackState.Playing)
+                // 暂停在片尾：当前目标不再需要字节源。
+                if (paused && stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
             }
         }
     }
@@ -1831,6 +1861,8 @@ class PlaybackController(
             _sleepTimerOption.value = null
             pausedAtEpisodeEnd = true
             updateState(PlaybackState.Paused)
+            // 暂停在片尾：当前目标不再需要字节源。
+            returnSourceOf(_currentIndex.value)
             return
         }
         // 自然播完后的下一集与手动切集共用同一条切换路径。
@@ -1854,6 +1886,8 @@ class PlaybackController(
         active = false
         endSeekPreview(commit = false)
         updateState(PlaybackState.Ended)
+        // 播到结束：当前目标不再需要字节源。
+        returnSourceOf(_currentIndex.value)
     }
 
     /** 用户恢复播放操作：解除片尾黑底，并允许后续失败重新提示。 */
@@ -1939,6 +1973,8 @@ class PlaybackController(
     /** 切集就绪：目标画面直接替换屏幕上的旧画面，进度从新文件开始。 */
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
+        // 切集接管成功：原目标不再需要它的字节源；新目标是另一条流，不受影响。
+        returnSourceOf(switchOriginIndex)
         logLoadSucceeded()
         generation?.markReady()
         // 切集就绪（打开交接被切集接管的路径同样到此放声）。
@@ -2363,6 +2399,7 @@ class PlaybackController(
         if (loadPhase != LoadPhase.Restoring) return
         logLoadSucceeded()
         // 片尾恢复没有可续播位置：用户按过播放就从 0 重开，不能在片尾 resume。
+        val restoredAtEnd = restoreAtEndOfEpisode
         val restartFromStart = restartFromStartAfterRestore && restoreAtEndOfEpisode && !paused
         restartFromStartAfterRestore = false
         // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
@@ -2392,6 +2429,8 @@ class PlaybackController(
         }
         if (paused) {
             updateState(PlaybackState.Paused)
+            // 片尾恢复停在片尾：当前目标不再需要字节源。
+            if (restoredAtEnd) returnSourceOf(_currentIndex.value)
             // 后台切集失败回退原片：屏上已没有旧画面时补一帧，回前台不会停在纯黑暂停。
             restorePausedFrameIfNoPicture()
         } else {

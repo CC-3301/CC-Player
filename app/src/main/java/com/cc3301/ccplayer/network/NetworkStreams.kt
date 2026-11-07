@@ -18,11 +18,14 @@ interface NetworkStreams : Closeable {
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
 
+    /** 当前目标不再需要该源：当场摘走已就绪的那一条，在后台关闭；地址保留，下一次请求重新建立。 */
+    fun returnSource(location: String)
+
     /** 丢弃已建立的字节源；之后的请求重新建立。退到后台后底层连接可能已失效。 */
     fun discardByteSources()
 
-    /** 关闭已建立的字节源，地址保留：停播后当场交还句柄与会话占用，下一次请求重新建立。 */
-    fun closeByteSources()
+    /** 取消打开：丢弃探测预置的读句柄，不等下一次探测或关闭。 */
+    fun discardPreparedSource()
 }
 
 /**
@@ -36,14 +39,18 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
 
+    override fun returnSource(location: String) {
+        streamsFor(location).returnSource(location)
+    }
+
     /** 同一个代理登记在多个方案下时只丢弃一次。 */
     override fun discardByteSources() {
         streamsByScheme.values.toSet().forEach { streams -> streams.discardByteSources() }
     }
 
-    /** 同一个代理登记在多个方案下时只关闭一次。 */
-    override fun closeByteSources() {
-        streamsByScheme.values.toSet().forEach { streams -> streams.closeByteSources() }
+    /** 同一个代理登记在多个方案下时只丢一次。 */
+    override fun discardPreparedSource() {
+        streamsByScheme.values.toSet().forEach { streams -> streams.discardPreparedSource() }
     }
 
     /** 同一个代理登记在多个方案下时只关一次。 */

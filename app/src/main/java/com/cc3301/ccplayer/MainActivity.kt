@@ -287,16 +287,16 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
-            // 字节源由界面侧持有：切集重试前的丢弃由这里注入。
-            binder.controller.attachLoadSources(discardByteSources = ::discardByteSourcesForSwitch)
+            // 字节源由界面侧持有：切集重试前的丢弃与当前目标不再需要时的归还都由这里注入。
+            binder.controller.attachNetworkSources(
+                discardByteSources = ::discardByteSourcesForSwitch,
+                returnSource = ::returnByteSource,
+            )
             stateCollection = lifecycleScope.launch {
                 launch {
                     binder.controller.state.collect {
                         playbackState = it
                         updateKeepScreenOn()
-                        // 片尾、失败与换目标（控制层换目标先发一次 Idle）都交还旧播放源：
-                        // 读句柄与会话引用不能等到离开播放页才放。探测预置的句柄不受这条路径影响。
-                        if (it == PlaybackState.Idle || it == PlaybackState.Ended) closeByteSourcesOnStop()
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
                         if (it != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
@@ -1121,15 +1121,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         }
     }
 
-    /** 停播后关闭已建立的字节源：关句柄会发网络请求，不在主线程做。 */
-    private fun closeByteSourcesOnStop() {
-        val networkStreams = streams ?: return
-        lifecycleScope.launch(Dispatchers.IO) { runCatching { networkStreams.closeByteSources() } }
+    /**
+     * 归还当前目标不再需要的字节源：回环条目当场摘走已就绪的源，关闭在关源线程上做。
+     * 这里只转发位置，不等任何网络动作。
+     */
+    private fun returnByteSource(location: String) {
+        streams?.returnSource(location)
     }
 
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
-        playback?.controller?.attachLoadSources(discardByteSources = { false })
+        playback?.controller?.attachNetworkSources(discardByteSources = { false }, returnSource = { })
         stateCollection?.cancel()
         stateCollection = null
         playback = null

@@ -11,6 +11,12 @@ private class FakeNetworkStreams : NetworkStreams {
 
     val probed = mutableListOf<String>()
 
+    val returned = mutableListOf<String>()
+
+    var discards = 0
+
+    var preparedDiscards = 0
+
     var closes = 0
 
     override suspend fun probe(location: String) {
@@ -19,9 +25,17 @@ private class FakeNetworkStreams : NetworkStreams {
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
 
-    override fun discardByteSources() = Unit
+    override fun returnSource(location: String) {
+        returned += location
+    }
 
-    override fun closeByteSources() = Unit
+    override fun discardByteSources() {
+        discards++
+    }
+
+    override fun discardPreparedSource() {
+        preparedDiscards++
+    }
 
     override fun close() {
         closes++
@@ -66,6 +80,23 @@ class RoutingNetworkStreamsTest {
         val exception = runCatching { streams.urlFor("ftp://nas/media/电影.mkv") }.exceptionOrNull()
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
+    }
+
+    @Test
+    fun `归还按方案分派`() {
+        streams.returnSource("smb://nas/media/电影.mkv")
+        streams.returnSource("https://dav.example.com/dav/电影.mkv")
+
+        assertEquals(listOf("smb://nas/media/电影.mkv"), smb.returned)
+        assertEquals(listOf("https://dav.example.com/dav/电影.mkv"), webDav.returned)
+    }
+
+    @Test
+    fun `丢弃探测预置句柄时同一个代理只丢一次`() {
+        streams.discardPreparedSource()
+
+        assertEquals(1, smb.preparedDiscards)
+        assertEquals(1, webDav.preparedDiscards)
     }
 
     @Test

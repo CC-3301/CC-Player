@@ -40,6 +40,9 @@ class PlaybackEntryOpener(
 
     private var job: Job? = null
 
+    /** 这次准备用到的字节源出口：取消时用它丢掉探测预置的读句柄。 */
+    private var preparedStreams: NetworkStreams? = null
+
     /**
      * 点开 [entry]。[enterBeforePreparing] 为真时立即进入播放页再准备；
      * 为假时准备完成后才进入，保持原行为。
@@ -47,7 +50,7 @@ class PlaybackEntryOpener(
      * 返回这次打开分配到的代际。
      */
     fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean): Int {
-        job?.cancel()
+        cancel()
         val generation = entryState.begin(preparing = enterBeforePreparing)
         if (enterBeforePreparing) onEnterPlayer()
         val started = scope.launch(start = CoroutineStart.LAZY) {
@@ -61,6 +64,8 @@ class PlaybackEntryOpener(
             }
             // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
             if (!entryState.isCurrent(generation)) return@launch
+            // 准备已结束：预置句柄交给播放或随失败丢掉，不再挂在入口上。
+            preparedStreams = null
             prepared.fold(
                 onSuccess = { playback ->
                     if (!entryState.prepared(generation)) return@launch
@@ -96,6 +101,7 @@ class PlaybackEntryOpener(
             return PreparedPlayback(entry, entries, plainEntries)
         }
         val streams = networkStreams()
+        preparedStreams = streams
         streams.probe(entry.location)
         return PreparedPlayback(
             entry.withPlaybackLocation(streams),
@@ -104,10 +110,12 @@ class PlaybackEntryOpener(
         )
     }
 
-    /** 离开播放页时取消尚未完成的准备。 */
+    /** 取消尚未完成的准备：连同它探测预置的读句柄一起丢掉，不等下一次探测或关闭。 */
     fun cancel() {
         job?.cancel()
         job = null
+        preparedStreams?.discardPreparedSource()
+        preparedStreams = null
     }
 
     private data class PreparedPlayback(

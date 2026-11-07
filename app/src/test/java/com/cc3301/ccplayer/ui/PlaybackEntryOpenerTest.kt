@@ -38,9 +38,16 @@ private class GatedNetworkStreams : NetworkStreams {
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
 
+    /** 探测预置句柄被取消打开丢掉的次数。 */
+    var preparedDiscards = 0
+
+    override fun returnSource(location: String) = Unit
+
     override fun discardByteSources() = Unit
 
-    override fun closeByteSources() = Unit
+    override fun discardPreparedSource() {
+        preparedDiscards++
+    }
 
     override fun close() = Unit
 }
@@ -146,6 +153,26 @@ class PlaybackEntryOpenerTest {
         assertEquals(listOf("http://127.0.0.1:1/第1集.mkv"), result.playlist.map { it.playbackLocation })
         assertEquals(listOf("http://127.0.0.1:1/第1集.srt"), result.directoryEntries.map { it.playbackLocation })
         assertEquals(0, recorder.leaveCount)
+    }
+
+    @Test
+    fun `取消打开丢掉探测预置的读句柄`() = runTest {
+        val streams = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { streams },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        // 探测还卡在门里：这次打开的预置句柄当场丢掉，不等下一次探测或关闭。
+        opener.cancel()
+
+        assertEquals(1, streams.preparedDiscards)
+        assertNull(recorder.opened)
     }
 
     @Test

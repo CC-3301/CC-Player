@@ -103,13 +103,23 @@ class SmbStreamsTest {
         val url = stopsWithSources.urlFor(movie)
 
         httpRequest(url)
-        stopsWithSources.closeByteSources()
+        stopsWithSources.returnSource(movie)
+        awaitClosed(connector.handles.getValue("media/电影.mkv"))
         advanceTimeBy(1_001)
         runCurrent()
 
-        assertTrue(connector.handles.getValue("media/电影.mkv").closed)
         assertEquals("停播后闲置回收能关掉会话", listOf("media"), connector.closedShares)
         stopsWithSources.close()
+    }
+
+    /** 关源在关源线程上做：等到句柄真的关上再断言。 */
+    private fun awaitClosed(handle: RecordingSmbHandle, timeoutMillis: Long = 2_000) {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (handle.closed) return
+            Thread.sleep(10)
+        }
+        assertTrue("句柄没有关闭", handle.closed)
     }
 
     @Test
