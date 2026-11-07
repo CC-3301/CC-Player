@@ -198,6 +198,18 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `服务关闭后归还仍把源关掉，不丢关闭`() {
+        httpRequest(url)
+        assertFalse(source.closed)
+
+        // 关闭服务后线程池不再接任务：这一笔归还不能既不在条目里也不在线程池里。
+        server.close()
+        server.returnSource(key)
+
+        assertTrue(source.closed)
+    }
+
+    @Test
     fun `归还在后台关闭，不阻塞调用方`() {
         val closing = CountDownLatch(1)
         val release = CountDownLatch(1)

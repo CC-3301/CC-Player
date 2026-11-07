@@ -40,8 +40,14 @@ class PlaybackEntryOpener(
 
     private var job: Job? = null
 
-    /** 这次准备用到的字节源出口：取消时用它丢掉探测预置的读句柄。 */
-    private var preparedStreams: NetworkStreams? = null
+    /** 当前这次准备：取消时只丢它自己探测预置的读句柄，不碰后一次打开的。 */
+    private var preparation: Preparation? = null
+
+    /** 一次准备用到的字节源出口；由这次准备的协程持有，避免共享槽互相覆盖。 */
+    private class Preparation {
+        @Volatile
+        var streams: NetworkStreams? = null
+    }
 
     /**
      * 点开 [entry]。[enterBeforePreparing] 为真时立即进入播放页再准备；
@@ -53,19 +59,26 @@ class PlaybackEntryOpener(
         cancel()
         val generation = entryState.begin(preparing = enterBeforePreparing)
         if (enterBeforePreparing) onEnterPlayer()
+        val current = Preparation()
+        preparation = current
         val started = scope.launch(start = CoroutineStart.LAZY) {
             val prepared = try {
                 val plainEntries = directoryEntries()
-                Result.success(prepare(entry, entries, plainEntries))
+                Result.success(prepare(entry, entries, plainEntries, current))
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (failure: Exception) {
                 Result.failure<PreparedPlayback>(failure)
             }
-            // 准备已结束：预置句柄交给播放或随失败丢掉，不再挂在入口上。
-            preparedStreams = null
             // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
-            if (!entryState.isCurrent(generation)) return@launch
+            if (!entryState.isCurrent(generation)) {
+                // 这次准备作废：丢掉它自己探测预置的读句柄，不动后一次打开的。
+                current.streams?.discardPreparedSource()
+                finishPreparation(current)
+                return@launch
+            }
+            // 准备已结束：预置句柄交给播放或随失败丢掉，不再挂在入口上。
+            finishPreparation(current)
             prepared.fold(
                 onSuccess = { playback ->
                     if (!entryState.prepared(generation)) return@launch
@@ -96,12 +109,13 @@ class PlaybackEntryOpener(
         entry: MediaFile,
         entries: List<MediaFile>,
         plainEntries: List<MediaFile>,
+        current: Preparation,
     ): PreparedPlayback {
         if (entry.source != MediaSource.Network) {
             return PreparedPlayback(entry, entries, plainEntries)
         }
         val streams = networkStreams()
-        preparedStreams = streams
+        current.streams = streams
         streams.probe(entry.location)
         return PreparedPlayback(
             entry.withPlaybackLocation(streams),
@@ -114,8 +128,14 @@ class PlaybackEntryOpener(
     fun cancel() {
         job?.cancel()
         job = null
-        preparedStreams?.discardPreparedSource()
-        preparedStreams = null
+        val cancelled = preparation ?: return
+        cancelled.streams?.discardPreparedSource()
+        preparation = null
+    }
+
+    /** 这次准备走到终点：不再算「当前这次」，之后的取消不丢它留下的句柄。 */
+    private fun finishPreparation(current: Preparation) {
+        if (preparation === current) preparation = null
     }
 
     private data class PreparedPlayback(

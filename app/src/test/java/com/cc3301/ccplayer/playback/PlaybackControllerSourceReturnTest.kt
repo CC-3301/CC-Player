@@ -24,12 +24,18 @@ class PlaybackControllerSourceReturnTest {
     private val engine = FakePlaybackEngine()
     private val progress = FakePlaybackProgressRepository()
 
+    /** 每次归还发生时，引擎已经下发过几次加载：用来断言归还晚于新加载下发。 */
+    private val startsAtReturn = mutableListOf<Int>()
+
     private fun TestScope.controller(returned: MutableList<String>): PlaybackController = PlaybackController(
         engine,
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
-        returnSource = { location -> returned += location },
+        returnSource = { location ->
+            returned += location
+            startsAtReturn += engine.startedUrls.size
+        },
     )
 
     private fun mediaFile(name: String): MediaFile =
@@ -59,12 +65,24 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
-    fun `暂停在片尾归还当前目标的字节源`() = runTest {
+    fun `按下暂停停在片尾时当场归还`() = runTest {
         val returned = mutableListOf<String>()
         val controller = playingController(returned)
         engine.reportPositionChanged(600_000, 600_000)
 
+        // 已经暂停再按暂停不会回属性变更回声，按下那一刻就要交还。
         controller.pause()
+
+        assertEquals(listOf("root/ep1.mkv"), returned)
+    }
+
+    @Test
+    fun `引擎回声的暂停停在片尾时同样归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        engine.reportPositionChanged(600_000, 600_000)
+
+        // 不经过控制层的暂停（播完停在末帧、音频焦点丢失）只有引擎回声。
         engine.reportPauseChanged(true)
 
         assertEquals(listOf("root/ep1.mkv"), returned)
@@ -187,6 +205,52 @@ class PlaybackControllerSourceReturnTest {
         controller.stop()
 
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), returned)
+    }
+
+    @Test
+    fun `连点前移时旧目标在新加载下发后才归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned, names = arrayOf("ep1.mkv", "ep2.mkv", "ep3.mkv"))
+        controller.next()
+        startsAtReturn.clear()
+
+        controller.next()
+
+        // 归还晚于新加载下发：交还那一刻引擎已经换到 ep3，旧目标不再被读。
+        assertEquals(listOf("root/ep3.mkv"), engine.startedUrls.takeLast(1))
+        assertEquals(listOf(3), startsAtReturn)
+        assertEquals(listOf("root/ep2.mkv"), returned)
+    }
+
+    @Test
+    fun `列表里有同位置重复项，从一个切到另一个不归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = controller(returned)
+        val first = mediaFile("ep1.mkv")
+        // 两条列表项指向同一个文件：位置相同，索引不同。
+        val duplicate = first.copy(name = "ep1 副本.mkv")
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, duplicate), first)
+        engine.reportMediaLoaded()
+
+        controller.next()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        engine.reportPositionChanged(1_000, 600_000)
+
+        assertEquals(1, controller.currentIndex.value)
+        assertTrue("同一位置的两条列表项共用一条回环条目，不能归还", returned.isEmpty())
+    }
+
+    @Test
+    fun `首次加载中按停止归还正在加载的目标`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = controller(returned)
+        val files = listOf(mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
+
+        controller.stop()
+
+        assertEquals(listOf("root/ep1.mkv"), returned)
     }
 
     @Test

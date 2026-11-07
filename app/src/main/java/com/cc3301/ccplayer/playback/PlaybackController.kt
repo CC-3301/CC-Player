@@ -685,6 +685,17 @@ class PlaybackController(
         sourceReturn(media.location)
     }
 
+    /**
+     * 归还被换下的目标：回环条目按位置复用，同一个文件的两条列表项共用一条源，
+     * 位置相同就不归还，否则会把换上来之后仍在读的那条源摘走。
+     */
+    private fun returnReplacedSource(replacedIndex: Int, readingIndex: Int) {
+        val replaced = _playlist.value.getOrNull(replacedIndex) ?: return
+        val reading = _playlist.value.getOrNull(readingIndex) ?: return
+        if (replaced.location == reading.location) return
+        returnSourceOf(replacedIndex)
+    }
+
     /** 旧会话的进度落库；换片开始前用，避免打开交接把旧进度丢掉。 */
     private fun saveSessionPosition() {
         if (!active) return
@@ -1112,9 +1123,9 @@ class PlaybackController(
         // 前移之前记下旧目标：申请新加载后当前索引已经换成新目标。
         val previousTarget = loadTargetIndex
         applySwitchTarget(index, media, newSwitch = false)
-        // 前一个目标不再被读取，在发起那一刻交还；目标没变时不动。
-        if (previousTarget != index) returnSourceOf(previousTarget)
         startSwitchTarget()
+        // 新加载已经下发，引擎不再读前一个目标，此刻才交还它。
+        returnReplacedSource(previousTarget, index)
     }
 
     /**
@@ -1178,7 +1189,13 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
-        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
+        if (loadPhase == LoadPhase.None) {
+            updateState(PlaybackState.Paused)
+            // 暂停在片尾：当前目标不再需要字节源。
+            // mpv 只在属性真的变化时才发属性变更事件，已经暂停再按暂停不会回这条回声，
+            // 所以这里的判定不能只留给回声。
+            if (stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
+        }
     }
 
     /**
@@ -1260,12 +1277,14 @@ class PlaybackController(
      */
     private fun discardSession() {
         _playbackFailed.value = false
-        val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
-        // 真正停止：当前目标不再需要字节源；切集中途停止时目标尚未接管，同样交还。
-        returnSourceOf(indexToSave)
-        if (loadPhase == LoadPhase.Switching && loadTargetIndex != indexToSave) {
-            returnSourceOf(loadTargetIndex)
+        // 切集与恢复阶段记的是起点；首次加载没有起点，取正在加载的当前目标。
+        val indexToSave = when (loadPhase) {
+            LoadPhase.Switching, LoadPhase.Restoring -> switchOriginIndex
+            else -> _currentIndex.value
         }
+        // 真正停止：当前目标不再需要字节源；切集中途停止时尚未接管的目标同样交还。
+        returnSourceOf(indexToSave)
+        if (loadPhase == LoadPhase.Switching) returnReplacedSource(loadTargetIndex, indexToSave)
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
         val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
         if (active && !skipEndRestoreSave) {
@@ -1976,9 +1995,8 @@ class PlaybackController(
     /** 切集就绪：目标画面直接替换屏幕上的旧画面，进度从新文件开始。 */
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
-        // 切集接管成功：原目标不再需要它的字节源。目标与起点是同一位置时不归还——
-        // 回环条目按地址复用，新加载可能正读着条目里那条源。
-        if (switchOriginIndex != _currentIndex.value) returnSourceOf(switchOriginIndex)
+        // 切集接管成功：原目标不再需要它的字节源。
+        returnReplacedSource(switchOriginIndex, _currentIndex.value)
         logLoadSucceeded()
         generation?.markReady()
         // 切集就绪（打开交接被切集接管的路径同样到此放声）。
@@ -2348,13 +2366,14 @@ class PlaybackController(
      */
     private fun restoreOrigin() {
         val originIndex = switchOriginIndex
+        // 失败或取消的那个目标不再被读取；回到同一位置时它正被原片读取，不归还。
+        // 这一步排在早退之前：原片条目没了也要把它交还。
+        returnReplacedSource(loadTargetIndex, originIndex)
         val origin = _playlist.value.getOrNull(originIndex)
         if (origin == null) {
             resetLoadState()
             return
         }
-        // 失败或取消的那个目标不再被读取；回到同一位置时它正被原片读取，不归还。
-        if (loadTargetIndex != originIndex) returnSourceOf(loadTargetIndex)
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (

@@ -76,6 +76,10 @@ class LoopbackStreamServer(
     @Volatile
     private var lastWatchdogFailureAtNanos = 0L
 
+    /** 服务已关闭：关闭后的关源派发不再进线程池。 */
+    @Volatile
+    private var closed = false
+
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
         isDaemon = true
@@ -106,7 +110,7 @@ class LoopbackStreamServer(
     fun returnSource(key: String) {
         val id = idsByKey[key] ?: return
         val source = entries[id]?.takeReadySource() ?: return
-        sourceCloser.execute { closeTakenSource(id, source) }
+        dispatchClose("归还字节源: $id", source)
     }
 
     /**
@@ -114,12 +118,19 @@ class LoopbackStreamServer(
      * 探测预置句柄不走归还路径，但关闭同样只在关源线程执行。
      */
     fun closeInBackground(source: ByteSource) {
-        sourceCloser.execute { closeAndLog("关闭字节源", source) }
+        dispatchClose("关闭字节源", source)
     }
 
-    /** 关闭一条已摘走的源并记一条耗时：关闭失败只留原因，不回调请求线程。 */
-    private fun closeTakenSource(id: String, source: ByteSource) {
-        closeAndLog("归还字节源: $id", source)
+    /**
+     * 派发一次关闭。服务已关闭、线程池不接任务时当场关闭，否则句柄既不在条目里
+     * 也不在线程池里，等于漏关；这条路径不指望线程池抛异常来兜。
+     */
+    private fun dispatchClose(label: String, source: ByteSource) {
+        if (closed) {
+            closeAndLog(label, source)
+            return
+        }
+        sourceCloser.execute { closeAndLog(label, source) }
     }
 
     private fun closeAndLog(label: String, source: ByteSource) {
@@ -157,6 +168,8 @@ class LoopbackStreamServer(
 
     /** 关闭监听、断开已建立的连接并关闭全部字节源；关源要发协议请求，必须在非界面线程调用。 */
     override fun close() {
+        // 先置已关闭：之后到达的关闭派发当场做，不再进线程池。
+        closed = true
         runCatching { serverSocket.close() }
         stallWatchdog.interrupt()
         // 监听关掉不影响已建立的连接：逐个断开，处理线程不会残留在读上。
