@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.library
 
 import java.io.IOException
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -49,11 +50,11 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络主候选非纯色时返回该帧且不试退避候选`() {
+    fun `网络主候选非纯色时返回该帧且不试退避候选`() = runTest {
         val asked = mutableListOf<Long>()
 
         val frame = extractNetworkFrame(
-            durationMillis = 300_000,
+            positions = networkFrameCandidates(300_000),
             decode = { micros ->
                 asked += micros
                 "正常帧"
@@ -66,12 +67,12 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络主候选纯色时退到 60 秒与 90 秒候选`() {
+    fun `网络主候选纯色时退到 60 秒与 90 秒候选`() = runTest {
         val asked = mutableListOf<Long>()
         var released = 0
 
         val frame = extractNetworkFrame(
-            durationMillis = 90_000,
+            positions = networkFrameCandidates(90_000),
             decode = { micros ->
                 asked += micros
                 if (micros == 90_000_000L) "正常帧" else "纯色帧"
@@ -86,12 +87,12 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络三个候选都是纯色时保持占位图`() {
+    fun `网络三个候选都是纯色时保持占位图`() = runTest {
         val asked = mutableListOf<Long>()
         var released = 0
 
         val frame = extractNetworkFrame(
-            durationMillis = 90_000,
+            positions = networkFrameCandidates(90_000),
             decode = { micros ->
                 asked += micros
                 "纯色帧"
@@ -106,12 +107,12 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络主候选解不出时保持占位图且不试退避候选`() {
+    fun `网络主候选解不出时保持占位图且不试退避候选`() = runTest {
         var decodes = 0
         var asked: Long? = null
 
         val frame = extractNetworkFrame<String>(
-            durationMillis = null,
+            positions = networkFrameCandidates(null),
             decode = { micros ->
                 decodes++
                 asked = micros
@@ -154,7 +155,7 @@ class ThumbnailFramePolicyTest {
         val decoded = decodedFrames<Int>(framePositions(100_000, LOCAL_FRAME_COUNT)) { null }
 
         assertTrue(decoded.isEmpty())
-        assertNull(chooseFrame(decoded) { false })
+        assertNull(chooseFrame(decoded, isSolid = { false }))
     }
 
     @Test
@@ -170,6 +171,61 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
+    fun `近黑帧不算可用封面`() {
+        // 有明暗变化但整体很暗的帧能通过纯色判据，必须由暗度判据拦下。
+        assertFalse(isSolidLuminance(intArrayOf(4, 20, 6, 18)))
+        assertTrue(isDarkLuminance(intArrayOf(4, 20, 6, 18)))
+        assertTrue(isUnusableLuminance(intArrayOf(4, 20, 6, 18)))
+
+        assertFalse(isDarkLuminance(intArrayOf(40, 120, 80, 160)))
+        assertFalse(isUnusableLuminance(intArrayOf(40, 120, 80, 160)))
+    }
+
+    @Test
+    fun `纯黑帧同时按纯色与近黑处理`() {
+        assertTrue(isSolidLuminance(intArrayOf(0, 0, 0)))
+        assertTrue(isDarkLuminance(intArrayOf(0, 0, 0)))
+        assertTrue(isUnusableLuminance(intArrayOf(0, 0, 0)))
+    }
+
+    @Test
+    fun `全部候选近黑时没有可用帧`() {
+        val frames = listOf(
+            FramePosition(1, fallback = false) to "近黑片头",
+            FramePosition(2, fallback = true) to "近黑兜底",
+            FramePosition(3, fallback = false) to "近黑片尾",
+        )
+
+        assertNull(chooseFrame(frames, isSolid = { false }, isDark = { true }))
+    }
+
+    @Test
+    fun `兜底帧近黑时改用其它非近黑帧`() {
+        val frames = listOf(
+            FramePosition(1, fallback = false) to "纯色片头",
+            FramePosition(2, fallback = true) to "近黑兜底",
+            FramePosition(3, fallback = false) to "正常片尾",
+        )
+
+        assertEquals("正常片尾", chooseFrame(frames, isSolid = { it == "纯色片头" }, isDark = { it == "近黑兜底" }))
+    }
+
+    @Test
+    fun `网络候选近黑时退到下一个候选`() = runTest {
+        val asked = mutableListOf<Long>()
+
+        val frame = extractNetworkFrame(
+            positions = networkFrameCandidates(90_000),
+            decode = { micros -> asked += micros; micros },
+            isSolid = { false },
+            isDark = { micros -> micros != 90_000_000L },
+        )
+
+        assertEquals(90_000_000L, frame)
+        assertEquals(listOf(1_000_000L, 60_000_000L, 90_000_000L), asked)
+    }
+
+    @Test
     fun `优先选第一帧非纯色`() {
         val frames = listOf(
             FramePosition(1, fallback = false) to "黑帧",
@@ -177,7 +233,7 @@ class ThumbnailFramePolicyTest {
             FramePosition(3, fallback = false) to "另一帧",
         )
 
-        assertEquals("正常帧", chooseFrame(frames) { it == "黑帧" })
+        assertEquals("正常帧", chooseFrame(frames, isSolid = { it == "黑帧" }))
     }
 
     @Test
@@ -188,12 +244,12 @@ class ThumbnailFramePolicyTest {
             FramePosition(3, fallback = false) to "片尾黑帧",
         )
 
-        assertEquals("三分之一黑帧", chooseFrame(frames) { true })
+        assertEquals("三分之一黑帧", chooseFrame(frames, isSolid = { true }))
     }
 
     @Test
     fun `没有可用帧时返回空`() {
-        assertNull(chooseFrame(emptyList<Pair<FramePosition, String>>()) { true })
+        assertNull(chooseFrame(emptyList<Pair<FramePosition, String>>(), isSolid = { true }))
     }
 
     @Test
@@ -203,13 +259,13 @@ class ThumbnailFramePolicyTest {
             FramePosition(3, fallback = false) to "片尾纯色帧",
         )
 
-        assertEquals("片头纯色帧", chooseFrame(frames) { true })
+        assertEquals("片头纯色帧", chooseFrame(frames, isSolid = { true }))
     }
 
     @Test
     fun `候选帧全空时按抽取失败抛出`() {
         try {
-            requireDecodedFrame(emptyList<Pair<FramePosition, String>>()) { false }
+            requireDecodedFrame(emptyList<Pair<FramePosition, String>>(), isSolid = { false })
             fail("应抛出抽取失败")
         } catch (expected: IOException) {
             // 预期失败路径。

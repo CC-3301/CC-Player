@@ -17,7 +17,7 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.cc3301.ccplayer"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.cc3301.ccplayer"
@@ -91,6 +91,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.media)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.inspector.frame)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)

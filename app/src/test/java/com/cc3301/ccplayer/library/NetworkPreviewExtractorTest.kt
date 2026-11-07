@@ -39,16 +39,16 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `网络取图成功时返回解码结果并关闭句柄`() = runTest {
-        var askedKind: MediaKind? = null
+        var askedFile: MediaFile? = null
         val extractor = extractor(
-            NetworkPreviewDecoder { opened, kind, _ ->
-                askedKind = kind
+            NetworkPreviewDecoder { opened, file, _ ->
+                askedFile = file
                 ByteArray(8).also { buffer -> opened.readAt(0, buffer, 0, buffer.size) }
             },
         )
 
         assertArrayEquals(payload.copyOfRange(0, 8), extractor.imageBytes(movie, NETWORK_TARGET_WIDTH)!!)
-        assertEquals(MediaKind.Video, askedKind)
+        assertEquals(movie, askedFile)
         assertEquals("解码与预读各开一条句柄", 2, reads.opened.size)
         assertEquals("文件大小取自目录列表", setOf(movie.size), reads.sizes.toSet())
         assertTrue("句柄全部关闭", reads.sources.all { source -> source.closed })
@@ -181,17 +181,18 @@ class NetworkPreviewExtractorTest {
 
     @Test
     fun `音频按内嵌封面取图`() = runTest {
-        var askedKind: MediaKind? = null
+        var askedFile: MediaFile? = null
         val extractor = extractor(
-            NetworkPreviewDecoder { _, kind, _ ->
-                askedKind = kind
+            NetworkPreviewDecoder { _, file, _ ->
+                askedFile = file
                 ByteArray(2)
             },
         )
 
-        extractor.imageBytes(movie.copy(name = "歌.mp3"), NETWORK_TARGET_WIDTH)
+        val audio = movie.copy(name = "歌.mp3")
+        extractor.imageBytes(audio, NETWORK_TARGET_WIDTH)
 
-        assertEquals(MediaKind.Audio, askedKind)
+        assertEquals(audio, askedFile)
         assertTrue(reads.sources.all { source -> source.closed })
     }
 

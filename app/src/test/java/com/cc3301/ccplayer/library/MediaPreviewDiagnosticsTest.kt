@@ -53,7 +53,7 @@ class MediaPreviewDiagnosticsTest {
     }
 
     @Test
-    fun `网络封面入队与取许可等待分成两行记`() = runTest {
+    fun `网络封面入队、等名额与等许可各记一行`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val source = source(Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true })
         extractor.imageBytes = byteArrayOf(1, 2, 3)
@@ -62,8 +62,26 @@ class MediaPreviewDiagnosticsTest {
 
         val text = sink.lines.joinToString("\n")
         assertTrue("应记入队：$text", text.contains("网络封面: 电影.mkv 入队"))
-        assertTrue("应记取许可等待：$text", text.contains("网络封面: 电影.mkv 取许可等待 "))
+        assertTrue("应记等预打开名额：$text", text.contains("网络封面: 电影.mkv 等预打开名额 "))
+        assertTrue("应记打开数据源：$text", text.contains("网络封面: 电影.mkv 打开数据源 "))
+        assertTrue("应记等解码许可：$text", text.contains("网络封面: 电影.mkv 等解码许可 "))
+        assertTrue("应记开始抽帧：$text", text.contains("网络封面: 电影.mkv 开始抽帧"))
+        assertTrue("应记抽帧完成：$text", text.contains("网络封面: 电影.mkv 抽帧完成 "))
         assertFalse(text.contains("user:pass"))
+    }
+
+    @Test
+    fun `本地封面等许可与抽帧耗时各记一行`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val source = source(Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true })
+        extractor.imageBytes = byteArrayOf(1, 2, 3)
+
+        source.preview(MediaFile(name = "电影.mkv", location = "content://media/电影.mkv"))
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue("应记等解码许可：$text", text.contains("本地封面: 电影.mkv 等解码许可 "))
+        assertTrue("应记开始抽帧：$text", text.contains("本地封面: 电影.mkv 开始抽帧"))
+        assertTrue("应记抽帧完成：$text", text.contains("本地封面: 电影.mkv 抽帧完成 "))
     }
 
     private fun source(diagnostics: Diagnostics): CachedMediaPreviewSource =
