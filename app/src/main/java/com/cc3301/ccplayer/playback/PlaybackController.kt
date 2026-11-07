@@ -662,7 +662,7 @@ class PlaybackController(
 
     /** 切换到播放列表索引 [index] 的条目；超出范围、首次加载、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
-        // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
+        // 加载期间播放列表条目不可用：切集时目标只能按上一集/下一集前移，首次加载时不动作。
         if (loadPhase != LoadPhase.None) {
             diagnostics.log { "播放列表选择未执行: ${loadPhaseLabel(loadPhase)}阶段（索引 $index）" }
             return
