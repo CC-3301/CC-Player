@@ -18,8 +18,9 @@ keystore.properties
 # 本机 SDK 路径
 local.properties
 
-# 交接文档
+# 交接文档与临时决策记录
 HANDOFF.md
+DECISIONS.md
 
 # pi Agent
 .pi/
