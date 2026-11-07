@@ -7,6 +7,8 @@ import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.streaming.httpRequest
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -14,11 +16,17 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 一次准备加一次试连：测试只关心试连结果时用。 */
+private suspend fun SmbStreams.probeForTest(location: String) {
+    prepare(location).probe(location)
+}
+
 class SmbStreamsTest {
 
     private val connector = FakeSmbConnector()
     private val sources = NetworkSourceRepository(FakeBookmarkStore(), FakeCredentialStore())
-    private val streams = SmbStreams(connector, SmbLocator(sources))
+    private val sessions = SmbSessions(connector)
+    private val streams = SmbStreams(sessions, SmbLocator(sources))
 
     private val root = "smb://nas/media"
     private val movie = "$root/电影.mkv"
@@ -68,20 +76,59 @@ class SmbStreamsTest {
         addSource(root)
         connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
-        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+        val exception = runCatching { streams.probeForTest(movie) }.exceptionOrNull()
 
         assertEquals(MediaFailure.Unreachable, (exception as MediaSourceException).failure)
     }
 
     @Test
     fun `起播前试连能发现不属于任何书签的位置`() = runTest {
-        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+        val exception = runCatching { streams.probeForTest(movie) }.exceptionOrNull()
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
     }
 
     @Test
-    fun `关闭后已建立的读句柄一并关闭`() = runTest {
+    fun `探测与播放共用一次握手`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+
+        streams.probeForTest(movie)
+        assertArrayEquals(payload, httpRequest(streams.urlFor(movie)).body)
+
+        assertEquals("会话建立只发生一次", 1, connector.shares.size)
+    }
+
+    @Test
+    fun `停播关闭字节源后会话引用归零并能闲置回收`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        val stopsWithSources = SmbStreams(sessions, SmbLocator(sources))
+        val url = stopsWithSources.urlFor(movie)
+
+        httpRequest(url)
+        stopsWithSources.returnSource(movie)
+        awaitClosed(connector.handles.getValue("media/电影.mkv"))
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertEquals("停播后闲置回收能关掉会话", listOf("media"), connector.closedShares)
+        stopsWithSources.close()
+    }
+
+    /** 关源在关源线程上做：等到句柄真的关上再断言。 */
+    private fun awaitClosed(handle: RecordingSmbHandle, timeoutMillis: Long = 2_000) {
+        val deadline = System.nanoTime() + timeoutMillis * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (handle.closed) return
+            Thread.sleep(10)
+        }
+        assertTrue("句柄没有关闭", handle.closed)
+    }
+
+    @Test
+    fun `关闭代理后读句柄关闭但会话留给下次取用`() = runTest {
         addSource(root)
         connector.addFile("media", "电影.mkv", payload)
         httpRequest(streams.urlFor(movie))
@@ -89,7 +136,6 @@ class SmbStreamsTest {
         streams.close()
 
         assertEquals(true, connector.handles.getValue("media/电影.mkv").closed)
-        // 先关连接让阻塞读退出，再尽力关句柄。
-        assertEquals(listOf("connection", "handle"), connector.closeOrder)
+        assertTrue("会话归应用级会话层管，不随代理关闭", connector.closedShares.isEmpty())
     }
 }

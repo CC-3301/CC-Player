@@ -45,6 +45,9 @@ private const val STALL_CHECK_INTERVAL_MILLIS = 100L
  * 字节源打陈旧标记（下一次请求重建时由建源线程关掉旧源、解除阻塞），再断开连接，
  * 让播放核心立刻收到读错误；等建源与空闲长连接都不判停滞。
  * [close] 关闭全部已建立的字节源。
+ *
+ * 条目是字节源的唯一持有者：创建与关闭都在 IO 线程，界面线程只发命令、不等网络动作；
+ * [returnSource] 当场摘走当时已就绪的源，关闭交给关源线程。
  */
 class LoopbackStreamServer(
     port: Int = 0,
@@ -53,6 +56,10 @@ class LoopbackStreamServer(
     /** 建源线程：SMB 重连可能长时间阻塞，不能挂在请求线程上。 */
     private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "loopback-source-open").apply { isDaemon = true }
+    },
+    /** 关源线程：归还只摘走，关闭要发协议请求，不留在界面线程上做；关闭串行，避免同时开多条协议关闭。 */
+    private val sourceCloser: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "loopback-source-close").apply { isDaemon = true }
     },
     /** 诊断日志出口：连接级打点跟随设置开关，不逐读、不逐帧。 */
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
@@ -68,6 +75,13 @@ class LoopbackStreamServer(
     /** 看门狗异常的限频打点时刻：一分钟最多一条。 */
     @Volatile
     private var lastWatchdogFailureAtNanos = 0L
+
+    /** 服务已关闭：关闭后的关源派发不再进线程池。 */
+    @Volatile
+    private var closed = false
+
+    /** 关闭状态与关源线程池的收尾共用这把锁：判已关闭与投递不会交叉。 */
+    private val closeLock = Any()
 
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
@@ -92,6 +106,58 @@ class LoopbackStreamServer(
         entries.values.forEach { it.markStale() }
     }
 
+    /**
+     * 归还当前目标不再需要的字节源：当场摘走当时已就绪的那一条，再在关源线程上关闭。
+     * 摘走之后才建好的源不属于这次归还，在途建源不受影响；没有就绪源时不动手。
+     */
+    fun returnSource(key: String) {
+        val id = idsByKey[key] ?: return
+        val source = entries[id]?.takeReadySource() ?: return
+        dispatchClose("归还字节源: $id", source)
+    }
+
+    /**
+     * 在关源线程关闭一条已摘走的字节源：调用线程只派发、不等网络动作。
+     * 探测预置句柄不走归还路径，但关闭同样只在关源线程执行。
+     */
+    fun closeInBackground(source: ByteSource) {
+        dispatchClose("关闭字节源", source)
+    }
+
+    /**
+     * 派发一次关闭，调用线程只派发、不做 I/O。
+     * 「判已关闭」与「投递」在同一临界区，[close] 也在这把锁里关池，
+     * 所以不会出现判完未关闭却投递到已关池的情况。已关闭时另起一条一次性关源线程关掉，
+     * 否则句柄既不在条目里也不在线程池里，等于漏关。
+     */
+    private fun dispatchClose(label: String, source: ByteSource) {
+        val task = Runnable { closeAndLog(label, source) }
+        val startStandalone = synchronized(closeLock) {
+            if (!closed) sourceCloser.execute(task)
+            closed
+        }
+        if (startStandalone) Thread(task, FINAL_CLOSE_THREAD).apply { isDaemon = true }.start()
+    }
+
+    private fun closeAndLog(label: String, source: ByteSource) {
+        val startedAtNanos = System.nanoTime()
+        val failure = runCatching { source.close() }.exceptionOrNull()
+        val elapsedMillis = elapsedMillis(startedAtNanos)
+        diagnostics.log {
+            if (failure == null) {
+                "$label | 耗时: ${elapsedMillis}ms"
+            } else {
+                "$label | 耗时: ${elapsedMillis}ms | 失败: ${failure.javaClass.simpleName}"
+            }
+        }
+    }
+
+    /** 这条流是否已有可直接复用的字节源；没有源或已登记陈旧时为 false。 */
+    fun hasFreshSource(key: String): Boolean {
+        val id = idsByKey[key] ?: return false
+        return entries[id]?.hasFreshSource() == true
+    }
+
     /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
     fun serve(key: String, open: () -> ByteSource): String {
         val id = idsByKey.computeIfAbsent(key) {
@@ -106,7 +172,13 @@ class LoopbackStreamServer(
         return "http://$LOOPBACK_ADDRESS:$port/$id"
     }
 
+    /** 关闭监听、断开已建立的连接并关闭全部字节源；关源要发协议请求，必须在非界面线程调用。 */
     override fun close() {
+        // 先置已关闭并关池：之后的关源派发改走一次性线程，不会再投递到这个池。
+        synchronized(closeLock) {
+            closed = true
+            sourceCloser.shutdown()
+        }
         runCatching { serverSocket.close() }
         stallWatchdog.interrupt()
         // 监听关掉不影响已建立的连接：逐个断开，处理线程不会残留在读上。
@@ -587,7 +659,8 @@ class LoopbackStreamServer(
     )
 
     /**
-     * 一条流：opener 只在第一次用到时跑一次，之后复用同一个字节源。
+     * 一条流：条目是这条流字节源的唯一持有者，状态只有三种——无源、建源中、就绪。
+     * 对外只提供「原子摘走当前已就绪的源」；在途建源不受归还影响，建好的源仍归条目持有。
      * 陈旧标记在退后台时打上，下一次请求关闭重建；失败废弃只认被废弃的那一条源。
      *
      * 重建不持锁也不占用请求线程：锁只保护「谁在重建」与 source 引用的切换，
@@ -664,6 +737,7 @@ class LoopbackStreamServer(
          * 建源：关闭旧源与建立新源都不持锁，锁只在发布结果时短暂持有。
          * 建源期间收到陈旧标记时，建好的这一条立即作废再建一次；二次建源期间再来的标记留给下一次请求。
          * 建源期间这条流被关闭时，建出来的源在这里自己关掉。
+         * 建源与归还互不打断：归还摘不到就绪的源就不动手。
          */
         private fun rebuild(round: Rebuild) {
             var result: ByteSource? = null
@@ -700,6 +774,14 @@ class LoopbackStreamServer(
             round.finished.countDown()
         }
 
+        /** 原子摘走当前已就绪的源；没有就绪源时返回 null，在途建源不受影响。 */
+        fun takeReadySource(): ByteSource? = synchronized(lock) {
+            val current = source ?: return null
+            source = null
+            stale = false
+            current
+        }
+
         /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */
         private fun consumeStale(): Boolean {
             if (!stale) return false
@@ -716,16 +798,20 @@ class LoopbackStreamServer(
         }
 
         /**
-         * 废弃指定的字节源：缓存里还是这一条时才关闭并清空。
-         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应。
+         * 废弃指定的字节源：缓存里还是这一条时才摘掉并关闭。
+         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应；
+         * 关闭要发协议请求，放在锁外做，别把同一 entry 的另一条请求堵住。
          */
         fun invalidate(expired: ByteSource) {
+            var matched = false
             synchronized(lock) {
-                if (source !== expired) return
-                source = null
-                stale = false
-                runCatching { expired.close() }
+                if (source === expired) {
+                    source = null
+                    stale = false
+                    matched = true
+                }
             }
+            if (matched) runCatching { expired.close() }
         }
 
         /** 关闭这条流：只改状态并关掉当前源，不等在途建源；建好的源由建源线程自己关掉。 */
@@ -753,6 +839,9 @@ class LoopbackStreamServer(
     }
 
     private companion object {
+        /** 服务已关闭后的一次性关源线程名。 */
+        const val FINAL_CLOSE_THREAD = "loopback-source-close-final"
+
         const val LOOPBACK_ADDRESS = "127.0.0.1"
         const val CONTENT_TYPE = "application/octet-stream"
         const val RANGE_HEADER = "Range"

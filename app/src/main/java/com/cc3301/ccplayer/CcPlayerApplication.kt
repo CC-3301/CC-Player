@@ -17,6 +17,7 @@ import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbMediaReads
+import com.cc3301.ccplayer.smb.SmbSessions
 import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
@@ -47,6 +48,11 @@ class CcPlayerApplication : Application() {
     /** 网络随机读：封面等预览共用一份，避免各自再建一套会话池。 */
     val networkReads: NetworkMediaReads by lazy { createNetworkReads() }
 
+    /** 应用级 SMB 会话：目录浏览、封面与播放共用，闲置回收由会话层负责。 */
+    val smbSessions: SmbSessions by lazy {
+        SmbSessions(SmbJConnector(diagnostics = diagnostics), diagnostics = diagnostics)
+    }
+
     private val previewHolder = MediaPreviewHolder {
         // 后台范围用进程级 scope：时长补读等任务跟随应用，不随界面重建。
         CachedMediaPreviewSource.create(this, networkReads, diagnostics, backgroundScope = scope)
@@ -64,11 +70,7 @@ class CcPlayerApplication : Application() {
         val webDavReads = WebDavMediaReads(OkHttpWebDavTransport(), WebDavLocator(sources))
         return RoutingMediaReads(
             mapOf(
-                SmbLocation.SCHEME to SmbMediaReads(
-                    // 预览读的协商结果记一次日志：方言决定块大小（SMB2.0.2 只有 64 KiB）。
-                    SmbJConnector(diagnostics = diagnostics),
-                    SmbLocator(sources),
-                ),
+                SmbLocation.SCHEME to SmbMediaReads(smbSessions, SmbLocator(sources)),
                 WebDavAddress.SCHEME_HTTP to webDavReads,
                 WebDavAddress.SCHEME_HTTPS to webDavReads,
             ),

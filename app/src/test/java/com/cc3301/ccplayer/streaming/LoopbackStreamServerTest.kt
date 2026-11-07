@@ -20,6 +20,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.atomic.AtomicInteger
 
 class LoopbackStreamServerTest {
@@ -28,7 +29,8 @@ class LoopbackStreamServerTest {
     private val server = LoopbackStreamServer()
     private val source = RecordingByteSource(payload)
     private var opened = 0
-    private val url = server.serve("smb://nas/media/电影.mkv") {
+    private val key = "smb://nas/media/电影.mkv"
+    private val url = server.serve(key) {
         opened++
         source
     }
@@ -180,6 +182,242 @@ class LoopbackStreamServerTest {
         assertArrayEquals(payload, httpRequest(url).body)
         assertTrue(source.closed)
         assertEquals(2, opened)
+    }
+
+    @Test
+    fun `归还当场摘走已就绪的源并在后台关闭`() {
+        httpRequest(url)
+        assertEquals(1, opened)
+        assertFalse(source.closed)
+
+        server.returnSource(key)
+
+        awaitCondition { source.closed }
+        // 摘走之后的下一次请求重新建源。
+        assertArrayEquals(payload, httpRequest(url).body)
+        assertEquals(2, opened)
+    }
+
+    @Test
+    fun `关闭与派发并发时不抛异常也不丢关闭`() {
+        // 派发线程与关闭线程同时起跑：判已关闭与投递在同一临界区，不会投到已关的池上。
+        val closed = AtomicInteger()
+        val sources = (0 until 200).map {
+            object : ByteSource {
+                override val size: Long = payload.size.toLong()
+
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+                override fun close() {
+                    closed.incrementAndGet()
+                }
+            }
+        }
+        val barrier = CyclicBarrier(2)
+        val failures = CopyOnWriteArrayList<Throwable>()
+        val dispatching = Thread {
+            barrier.await()
+            sources.forEach { source ->
+                runCatching { server.closeInBackground(source) }.onFailure(failures::add)
+            }
+        }
+        val closing = Thread {
+            barrier.await()
+            runCatching { server.close() }.onFailure(failures::add)
+        }
+        dispatching.start()
+        closing.start()
+        dispatching.join(5_000)
+        closing.join(5_000)
+
+        assertTrue("并发关闭不应抛异常: ${failures.firstOrNull()}", failures.isEmpty())
+        assertFalse("派发线程没有卡住", dispatching.isAlive)
+        assertFalse("关闭线程没有卡住", closing.isAlive)
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline && closed.get() < sources.size) Thread.sleep(10)
+        assertEquals("每一条都关掉", sources.size, closed.get())
+    }
+
+    @Test
+    fun `归还在后台关闭，不阻塞调用方`() {
+        val closing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val slow = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                if (position >= payload.size) return 0
+                val count = minOf(length.toLong(), payload.size - position).toInt()
+                payload.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+                return count
+            }
+
+            override fun close() {
+                closing.countDown()
+                release.await()
+            }
+        }
+        val slowKey = "smb://nas/media/慢关闭.mkv"
+        val slowUrl = server.serve(slowKey) { slow }
+        httpRequest(slowUrl)
+
+        val started = System.nanoTime()
+        server.returnSource(slowKey)
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+
+        try {
+            assertTrue("归还耗时 $elapsedMillis ms", elapsedMillis < 1_000)
+            assertTrue("关闭没在后台开始", closing.await(2, TimeUnit.SECONDS))
+        } finally {
+            release.countDown()
+        }
+    }
+
+    @Test
+    fun `归还记一条关闭耗时日志`() {
+        val diagnostics = RecordingDiagnostics()
+        val logged = LoopbackStreamServer(diagnostics = diagnostics)
+        try {
+            val target = logged.serve(key) { RecordingByteSource(payload) }
+            httpRequest(target)
+
+            logged.returnSource(key)
+
+            awaitCondition { diagnostics.messages.any { it.startsWith("归还字节源") } }
+            assertTrue(diagnostics.messages.any { it.contains("耗时:") })
+        } finally {
+            logged.close()
+        }
+    }
+
+    @Test
+    fun `没有就绪源时归还不动手`() {
+        server.returnSource(key)
+
+        // 不动手的判据：下一次请求仍复用第一次建好的源，没有多建一条。
+        assertArrayEquals(payload, httpRequest(url).body)
+        assertEquals(1, opened)
+        assertFalse(source.closed)
+    }
+
+    @Test
+    fun `建源失败那一轮里的归还留不下关闭要求`() {
+        val entered = CountDownLatch(1)
+        val unblock = CountDownLatch(1)
+        var opens = 0
+        var failing = true
+        val failKey = "smb://nas/media/建源失败后归还.mkv"
+        val target = server.serve(failKey) {
+            opens++
+            if (failing) {
+                entered.countDown()
+                unblock.await()
+                throw IOException("建源失败")
+            }
+            source
+        }
+
+        val request = Thread { httpRequest(target) }.apply { start() }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        // 建源在途：归还摘不到就绪的源，也不会把关闭要求留给下一轮。
+        server.returnSource(failKey)
+        unblock.countDown()
+        request.join(5_000)
+
+        failing = false
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+        assertFalse(source.closed)
+    }
+
+    @Test
+    fun `归还时还在建源的那条源不受影响`() {
+        val building = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val builtClosed = AtomicBoolean(false)
+        val builtKey = "smb://nas/media/在途建源.mkv"
+        val built = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                if (position >= payload.size) return 0
+                val count = minOf(length.toLong(), payload.size - position).toInt()
+                payload.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+                return count
+            }
+
+            override fun close() {
+                builtClosed.set(true)
+            }
+        }
+        val target = server.serve(builtKey) {
+            building.countDown()
+            release.await()
+            built
+        }
+        val request = Thread { httpRequest(target) }.apply {
+            isDaemon = true
+            start()
+        }
+        assertTrue(building.await(5, TimeUnit.SECONDS))
+
+        // 建源在途：归还摘不到就绪的源，也不打断这次建源。
+        server.returnSource(builtKey)
+        release.countDown()
+        request.join(5_000)
+
+        assertFalse("在途建好的源仍归条目持有", builtClosed.get())
+        assertArrayEquals(payload, httpRequest(target).body)
+        // 这次请求读完了，条目里已是那条在途建好的源；再归还才摘得走。
+        server.returnSource(builtKey)
+        awaitCondition { builtClosed.get() }
+    }
+
+    @Test
+    fun `换目标时归还旧目标，不误关新目标刚建的源`() {
+        val oldKey = "smb://nas/media/旧目标.mkv"
+        val old = RecordingByteSource(payload)
+        val oldUrl = server.serve(oldKey) { old }
+        val building = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val newClosed = AtomicBoolean(false)
+        val newKey = "smb://nas/media/新目标.mkv"
+        val fresh = object : ByteSource {
+            override val size: Long = payload.size.toLong()
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+                if (position >= payload.size) return 0
+                val count = minOf(length.toLong(), payload.size - position).toInt()
+                payload.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+                return count
+            }
+
+            override fun close() {
+                newClosed.set(true)
+            }
+        }
+        var newOpens = 0
+        val newUrl = server.serve(newKey) {
+            newOpens++
+            building.countDown()
+            release.await()
+            fresh
+        }
+        httpRequest(oldUrl)
+        val request = Thread { httpRequest(newUrl) }.apply {
+            isDaemon = true
+            start()
+        }
+        assertTrue(building.await(5, TimeUnit.SECONDS))
+
+        server.returnSource(oldKey)
+        awaitCondition { old.closed }
+        assertFalse("归还旧目标不打断新目标的在途建源", newClosed.get())
+
+        release.countDown()
+        request.join(5_000)
+        assertEquals("新目标下一次请求仍复用刚建好的源", 1, newOpens)
+        assertFalse("新目标刚建的源不受这次归还影响", newClosed.get())
     }
 
     @Test

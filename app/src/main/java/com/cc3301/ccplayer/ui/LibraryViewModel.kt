@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.cc3301.ccplayer.CcPlayerApplication
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.DirectoryMediaLibrary
@@ -819,10 +820,12 @@ class LibraryViewModel(
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val appContext = context.applicationContext
+                val app = appContext as CcPlayerApplication
                 val sources = NetworkSourceRepository(
                     store = DataStoreBookmarkStore.create(appContext),
                     credentials = EncryptedCredentialStore.create(appContext),
                 )
+                // 目录浏览与封面、播放共用同一条应用级会话；源校验用一次性连接，不占会话表。
                 val smbConnector = SmbJConnector()
                 val smbLocator = SmbLocator(sources)
                 val webDavTransport = OkHttpWebDavTransport()
@@ -830,7 +833,7 @@ class LibraryViewModel(
                 val tree = RoutingMediaFileTree(
                     mapOf(
                         RoutingMediaFileTree.SAF_SCHEME to SafMediaFileTree(appContext),
-                        SmbLocation.SCHEME to SmbMediaFileTree(smbConnector, smbLocator),
+                        SmbLocation.SCHEME to SmbMediaFileTree(app.smbSessions, smbLocator),
                         WebDavAddress.SCHEME_HTTP to WebDavMediaFileTree(webDavTransport, webDavLocator),
                         WebDavAddress.SCHEME_HTTPS to WebDavMediaFileTree(webDavTransport, webDavLocator),
                     ),

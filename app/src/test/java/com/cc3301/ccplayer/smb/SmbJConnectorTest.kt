@@ -1,10 +1,7 @@
 package com.cc3301.ccplayer.smb
 
 import com.hierynomus.mssmb2.SMB2Dialect
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.test.runTest
+import com.hierynomus.protocol.commons.socket.ProxySocketFactory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -35,61 +32,18 @@ class SmbJConnectorTest {
     }
 
     @Test
-    fun `重建后建连走新客户端`() = runTest {
-        val clients = CopyOnWriteArrayList<RecordingSmbClient>()
-        val connector = SmbJConnector(clientFactory = { config -> RecordingSmbClient(config).also { clients += it } })
-
-        runCatching { connector.connect("nas", 445, "media", "cc", "secret") }
-        assertEquals("重建前用第一个客户端", 1, clients[0].connects.size)
-
-        connector.reset()
-        runCatching { connector.connect("nas", 445, "media", "cc", "secret") }
-
-        assertEquals(2, clients.size)
-        assertEquals("重建后由新客户端建连", 1, clients[1].connects.size)
-        assertTrue("旧客户端已关闭", clients[0].closed)
-        assertFalse("新客户端仍可用", clients[1].closed)
+    fun `建连超时由 socket 工厂给出`() {
+        // smbj 的 withTimeout 管不到建连，建连超时只能由 socket 工厂带出去；3 秒是构造参数。
+        assertTrue(SmbJConnector.smb2OnlyConfig().socketFactory is ProxySocketFactory)
     }
 
     @Test
-    fun `并发重建不关掉刚换上的新客户端`() {
-        val clients = CopyOnWriteArrayList<RecordingSmbClient>()
-        val creating = AtomicInteger(0)
-        val entered = CountDownLatch(1)
-        val release = CountDownLatch(1)
-        val connector = SmbJConnector(
-            clientFactory = { config ->
-                if (creating.getAndIncrement() == 1) {
-                    // 第一次重建卡在建新实例之前，制造「第二次重建同时到达」的窗口。
-                    entered.countDown()
-                    release.await()
-                }
-                RecordingSmbClient(config).also { clients += it }
-            },
-        )
+    fun `socket 空闲不短于闲置回收窗口，单次读另有上限`() {
+        val config = SmbJConnector.smb2OnlyConfig()
 
-        val first = Thread { connector.reset() }
-        first.start()
-        entered.await()
-
-        val second = Thread { connector.reset() }
-        second.start()
-        // 第二个调用先取客户端快照再等锁：等它阻塞在锁上，快照必然还是旧实例。
-        awaitBlocked(second)
-        release.countDown()
-        first.join()
-        second.join()
-
-        assertEquals("两次重建只换掉旧客户端", 2, clients.size)
-        assertTrue("旧客户端被关闭", clients[0].closed)
-        assertFalse("刚换上的新客户端不得被关闭", clients[1].closed)
+        assertEquals(150_000, config.soTimeout)
+        assertEquals(8_000L, config.readTimeout)
+        assertEquals(8_000L, config.writeTimeout)
+        assertEquals(8_000L, config.transactTimeout)
     }
-
-    /** 等到线程阻塞在锁上，最多等 5 秒。 */
-    private fun awaitBlocked(thread: Thread) {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (thread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(1)
-    }
-
-
 }

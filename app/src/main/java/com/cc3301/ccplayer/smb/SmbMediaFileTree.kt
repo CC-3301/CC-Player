@@ -7,13 +7,13 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
 
 /**
- * SMB 文件树：位置经 [SmbLocator] 取到凭据后连上共享，再列举子项。
+ * SMB 文件树：位置经 [SmbLocator] 取到凭据后从会话层取会话列举子项。
  *
- * 每次操作独立建连并在结束时关闭，不长期占用服务器会话。[resolve] 只看书签，不连服务器，
+ * 会话与封面、播放共用同一条，闲置回收由会话层负责。[resolve] 只看书签，不连服务器，
  * 否则服务器临时不可达时根目录会从列表里消失。服务器根只列可浏览的共享，隐藏的管理共享不列。
  */
 class SmbMediaFileTree(
-    private val connector: SmbConnector,
+    private val sessions: SmbSessions,
     private val locator: SmbLocator,
 ) : MediaFileTree {
 
@@ -31,7 +31,7 @@ class SmbMediaFileTree(
         val target = locator.locate(directory.location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：${directory.location}")
         val entries = if (target.share.isEmpty()) {
-            connector.shares(
+            sessions.shares(
                 host = target.host,
                 port = target.port,
                 username = target.username,
@@ -39,13 +39,7 @@ class SmbMediaFileTree(
             ).filterNot { share -> share.endsWith("$") }
                 .map { share -> SmbEntry(name = share, isDirectory = true, size = 0, lastModified = 0) }
         } else {
-            connector.connect(
-                host = target.host,
-                port = target.port,
-                share = target.share,
-                username = target.username,
-                password = target.password,
-            ).use { connection -> connection.list(target.path) }
+            sessions.use(target) { connection -> connection.list(target.path) }
         }
         return entries.map { entry -> entry.asMediaFile(target.childLocation(entry.name)) }
     }

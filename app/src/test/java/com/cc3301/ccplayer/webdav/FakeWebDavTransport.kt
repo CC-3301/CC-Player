@@ -43,8 +43,12 @@ class FakeWebDavTransport : WebDavTransport {
         return childrenByUrl[url].orEmpty()
     }
 
+    /** 打开读句柄前执行；测试用它把打开卡在中间。 */
+    var openGate: (() -> Unit)? = null
+
     override suspend fun openRead(url: String, username: String, password: String?, size: Long): WebDavReadHandle {
         failure?.let { throw it }
+        openGate?.invoke()
         logins += username to password
         openedSizes += size
         val bytes = bytesByUrl[url] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$url")
@@ -60,6 +64,9 @@ class RecordingWebDavHandle(
 
     var closed = false
 
+    /** 关闭发生在哪条线程上：关闭只该在关源线程执行。 */
+    var closedOn: String? = null
+
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
@@ -72,6 +79,7 @@ class RecordingWebDavHandle(
 
     override fun close() {
         closed = true
+        closedOn = Thread.currentThread().name
     }
 }
 

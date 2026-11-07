@@ -10,6 +10,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.testVideo
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.PreparedSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -30,13 +31,27 @@ private class GatedNetworkStreams : NetworkStreams {
 
     val probed = mutableListOf<String>()
 
-    override suspend fun probe(location: String) {
-        gate.await()
-        probed += location
-        failure?.let { throw it }
+    /** 探测真正完成（门放行后）的时刻；用来在准备返回前插入另一次打开。 */
+    var onProbed: (() -> Unit)? = null
+
+    override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override suspend fun probe(location: String) {
+            gate.await()
+            probed += location
+            failure?.let { throw it }
+        }
+
+        override fun discard() {
+            preparedDiscards++
+        }
     }
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
+
+    /** 探测预置句柄被取消打开丢掉的次数。 */
+    var preparedDiscards = 0
+
+    override fun returnSource(location: String) = Unit
 
     override fun discardByteSources() = Unit
 
@@ -144,6 +159,85 @@ class PlaybackEntryOpenerTest {
         assertEquals(listOf("http://127.0.0.1:1/第1集.mkv"), result.playlist.map { it.playbackLocation })
         assertEquals(listOf("http://127.0.0.1:1/第1集.srt"), result.directoryEntries.map { it.playbackLocation })
         assertEquals(0, recorder.leaveCount)
+    }
+
+    @Test
+    fun `取消打开丢掉探测预置的读句柄`() = runTest {
+        val streams = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { streams },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        // 探测还卡在门里：这次打开的预置句柄当场丢掉，不等下一次探测或关闭。
+        opener.cancel()
+
+        assertEquals(1, streams.preparedDiscards)
+        assertNull(recorder.opened)
+    }
+
+    @Test
+    fun `准备回来时已经开始了另一次打开，预置句柄一并丢掉`() = runTest {
+        val stale = GatedNetworkStreams()
+        val fresh = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        var current = stale
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { current },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        // 门还没放行就开始了另一次打开：前一次回来时代际已不符。
+        current = fresh
+        fresh.gate.complete(Unit)
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        stale.gate.complete(Unit)
+        runCurrent()
+
+        assertEquals("作废的那次打开要把预置句柄丢掉", 1, stale.preparedDiscards)
+        // 只有后一次打开落到播放，作废的那次不起播。
+        assertEquals(1, recorder.events.count { it.startsWith("start:") })
+        assertEquals(listOf(networkVideo.location), fresh.probed)
+        assertTrue(stale.probed.isEmpty())
+    }
+
+    @Test
+    fun `前一次打开作废时不丢后一次刚探好的句柄`() = runTest {
+        val stale = GatedNetworkStreams()
+        val fresh = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        var current = stale
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { current },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        // 第二次打开进场，它的探测先完成；第一次的准备随后才从阻塞调用里回来。
+        current = fresh
+        fresh.gate.complete(Unit)
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        assertEquals(listOf(networkVideo.location), fresh.probed)
+
+        stale.gate.complete(Unit)
+        runCurrent()
+
+        assertEquals("作废的第一次打开丢自己的句柄", 1, stale.preparedDiscards)
+        assertEquals("不能丢后一次刚探好的句柄", 0, fresh.preparedDiscards)
+        assertEquals(listOf(networkVideo.location), fresh.probed)
     }
 
     @Test

@@ -75,7 +75,6 @@ import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
@@ -121,6 +120,7 @@ import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavStreams
+import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -147,6 +147,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
     private val diagnostics get() = (application as CcPlayerApplication).diagnostics
+
+    /** 应用级 SMB 会话：与目录浏览、封面共用同一条。 */
+    private val smbSessions get() = (application as CcPlayerApplication).smbSessions
 
     private val diagnosticsExporter by lazy {
         DiagnosticsExporter(
@@ -284,8 +287,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
-            // 字节源由界面侧持有：切集重试前的丢弃由这里注入。
-            binder.controller.attachLoadSources(discardByteSources = ::discardByteSourcesForSwitch)
+            // 字节源由界面侧持有：切集重试前的丢弃与当前目标不再需要时的归还都由这里注入。
+            binder.controller.attachNetworkSources(
+                discardByteSources = ::discardByteSourcesForSwitch,
+                returnSource = ::returnByteSource,
+            )
             stateCollection = lifecycleScope.launch {
                 launch {
                     binder.controller.state.collect {
@@ -795,7 +801,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources), diagnostics)
         return RoutingNetworkStreams(
             mapOf(
-                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources), diagnostics),
+                SmbLocation.SCHEME to SmbStreams(smbSessions, SmbLocator(sources), diagnostics),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
             ),
@@ -1093,14 +1099,39 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         stopPlaybackService()
     }
 
+    /**
+     * 摘掉回环代理并在 IO 上关闭：关闭要发协议层关闭请求，死会话最坏吃满单次请求上限。
+     * 退出应用时 lifecycleScope 已不可靠，用独立线程保证关完。
+     */
     private fun releaseNetworkStreams() {
-        streams?.close()
+        val networkStreams = streams ?: return
         streams = null
+        thread(isDaemon = true, name = "network-streams-close") {
+            val startedAt = SystemClock.elapsedRealtime()
+            val failure = runCatching { networkStreams.close() }.exceptionOrNull()
+            val elapsedMillis = SystemClock.elapsedRealtime() - startedAt
+            // 尽力关：进程先死就交给系统断链，这里只留耗时与失败原因。
+            diagnostics.log {
+                if (failure == null) {
+                    "关闭网络流完成: $elapsedMillis ms"
+                } else {
+                    "关闭网络流失败: $elapsedMillis ms (${failure::class.java.simpleName}: ${failure.message})"
+                }
+            }
+        }
+    }
+
+    /**
+     * 归还当前目标不再需要的字节源：回环条目当场摘走已就绪的源，关闭在关源线程上做。
+     * 这里只转发位置，不等任何网络动作。
+     */
+    private fun returnByteSource(location: String) {
+        streams?.returnSource(location)
     }
 
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
-        playback?.controller?.attachLoadSources(discardByteSources = { false })
+        playback?.controller?.attachNetworkSources(discardByteSources = { false }, returnSource = { })
         stateCollection?.cancel()
         stateCollection = null
         playback = null

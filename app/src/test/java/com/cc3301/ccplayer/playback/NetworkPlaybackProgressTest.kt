@@ -17,6 +17,7 @@ import com.cc3301.ccplayer.smb.FakeSmbConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbMediaFileTree
+import com.cc3301.ccplayer.smb.SmbSessions
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.smb.fileEntry
 import com.cc3301.ccplayer.webdav.FakeWebDavTransport
@@ -138,7 +139,7 @@ class NetworkPlaybackProgressTest {
         progress.records["$smbRoot/还在.mkv"] = record("$smbRoot/还在.mkv")
         progress.records["$smbRoot/已移走.mkv"] = record("$smbRoot/已移走.mkv")
         val library = ProgressCleanupMediaLibrary(
-            DirectoryMediaLibrary(SmbMediaFileTree(smbConnector, SmbLocator(sources))),
+            DirectoryMediaLibrary(SmbMediaFileTree(SmbSessions(smbConnector), SmbLocator(sources))),
             progress,
         )
 
@@ -163,7 +164,7 @@ class NetworkPlaybackProgressTest {
 
     private fun newStreams(): NetworkStreams = RoutingNetworkStreams(
         mapOf(
-            SmbLocation.SCHEME to SmbStreams(smbConnector, SmbLocator(sources)),
+            SmbLocation.SCHEME to SmbStreams(SmbSessions(smbConnector), SmbLocator(sources)),
             WebDavAddress.SCHEME_HTTPS to WebDavStreams(webDavTransport, WebDavLocator(sources)),
         ),
     ).also { openedStreams += it }
