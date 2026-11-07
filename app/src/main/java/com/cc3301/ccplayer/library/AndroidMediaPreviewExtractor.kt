@@ -111,26 +111,32 @@ class AndroidMediaPreviewExtractor(
         file: MediaFile,
     ): ByteArray? {
         val systemPicture = embeddedPictureOrNull(retriever)
-        var systemDecodeFailed = false
+        var systemDecodeFailure: PreviewStageException? = null
         if (systemPicture != null) {
             try {
                 return encodeCover(systemPicture, targetWidth)
             } catch (decode: PreviewStageException) {
-                // 系统给了图却解不出来：继续走 ID3 兜底，兜底也解不出来再按抽取失败收尾。
-                systemDecodeFailed = true
+                // 系统给了图却解不出来：继续走 ID3 兜底；两条都失败时保留这次解码失败作为阶段。
+                systemDecodeFailure = decode
             }
         }
         val id3 = readLocalId3Cover(context, file)
         diagnostics.log {
-            val systemLabel = if (systemDecodeFailed) "解码失败" else "无"
+            val systemLabel = if (systemDecodeFailure != null) "解码失败" else "无"
             "封面兜底: ${file.name} 系统取图${systemLabel}，ID3 解析 ${id3Label(id3)}"
         }
         return when (id3) {
             is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
-            is Id3CoverResult.Missing ->
-                if (systemDecodeFailed) throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败") else null
+            is Id3CoverResult.Missing -> {
+                val decode = systemDecodeFailure
+                if (decode != null) throw decode
+                null
+            }
 
-            is Id3CoverResult.Failed -> throw PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
+            is Id3CoverResult.Failed -> {
+                val decode = systemDecodeFailure
+                throw if (decode != null) decode else PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
+            }
         }
     }
 }
@@ -168,25 +174,31 @@ private class AndroidNetworkPreviewDecoder(
         targetWidth: Int,
     ): ByteArray? {
         val systemPicture = embeddedPictureOrNull(retriever)
-        var systemDecodeFailed = false
+        var systemDecodeFailure: PreviewStageException? = null
         if (systemPicture != null) {
             try {
                 return encodeCover(systemPicture, targetWidth)
             } catch (decode: PreviewStageException) {
-                systemDecodeFailed = true
+                systemDecodeFailure = decode
             }
         }
         val id3 = readId3Cover(ByteSourceCoverSource(source))
         diagnostics.log {
-            val systemLabel = if (systemDecodeFailed) "解码失败" else "无"
+            val systemLabel = if (systemDecodeFailure != null) "解码失败" else "无"
             "网络封面: 系统取图${systemLabel}，ID3 解析 ${id3Label(id3)}"
         }
         return when (id3) {
             is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
-            is Id3CoverResult.Missing ->
-                if (systemDecodeFailed) throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败") else null
+            is Id3CoverResult.Missing -> {
+                val decode = systemDecodeFailure
+                if (decode != null) throw decode
+                null
+            }
 
-            is Id3CoverResult.Failed -> throw PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
+            is Id3CoverResult.Failed -> {
+                val decode = systemDecodeFailure
+                throw if (decode != null) decode else PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
+            }
         }
     }
 }

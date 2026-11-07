@@ -145,9 +145,11 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
         val frameId = String(header, 0, idLength, Charsets.ISO_8859_1)
         val size = frameSize(header, major)
         if (size <= 0) break
-        // 帧长越过标签末尾说明标签被截断或损坏，按读取失败处理，不能当成“确认无图”。
+        // 帧长越过标签末尾说明标签被截断或损坏；已经取到封面就以它为准，
+        // 还没取到才按读取失败处理，不能当成“确认无图”。
         if (position + frameHeaderSize + size > body.size) {
-            return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
+            if (pictures.isEmpty()) return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
+            break
         }
         val flags = frameFlags(header, major)
         if (frameId == pictureFrameId(major)) {
@@ -177,15 +179,17 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
 }
 
 /**
- * 扩展头占用的字节数：v2.3 的长度字段已经包含它自己的 4 字节，直接按该值跳过；
- * v2.4 的长度字段是 syncsafe 且不含自身，要再加 4 字节。
+ * 扩展头占用的字节数（含长度字段自己）。
+ *
+ * v2.3 规范：长度字段的值不含它自己的 4 字节（6 或 10 字节描述的是后面的内容），所以要再加 4。
+ * v2.4 规范：长度字段是整个扩展头的长度（含自身 4 字节）且为 syncsafe，直接按该值跳过。
  */
 private fun extendedHeaderSize(body: CoverByteSource, major: Int, headerFlags: Int): Long {
     if (headerFlags and ID3_FLAG_EXTENDED_HEADER == 0) return 0
     return when (major) {
         2 -> 0
-        3 -> body.readFully(0, 4)?.let { bytes -> plainInt(bytes, 0, 4) } ?: 0
-        else -> body.readFully(0, 4)?.let { bytes -> 4L + syncSafe(bytes, 0) } ?: 0
+        3 -> body.readFully(0, 4)?.let { bytes -> 4L + plainInt(bytes, 0, 4) } ?: 0
+        else -> body.readFully(0, 4)?.let { bytes -> syncSafe(bytes, 0).toLong() } ?: 0
     }
 }
 

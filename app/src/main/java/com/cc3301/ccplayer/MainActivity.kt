@@ -407,6 +407,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                 // 播放页封面只给纯音频目标：直接读列表共用的封面缓存，不在这里另做解码。
                 val currentMedia = playlist.getOrNull(currentIndex)
                 val audioTarget = currentMedia?.let { mediaKindOf(it.name) == MediaKind.Audio } == true
+                // 同一个目标进出播放页时不清空，避免封面闪一帧占位；只有换目标才清。
+                var producedCoverLocation by remember { mutableStateOf<String?>(null) }
                 val playerCover by produceState<File?>(
                     null,
                     currentMedia?.location,
@@ -414,11 +416,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     currentMedia?.lastModified,
                     playerVisible,
                 ) {
-                    // 换目标时先清空，避免音频切音频短暂留着上一张封面。
-                    value = null
-                    if (playerVisible && audioTarget) {
-                        value = currentMedia?.let { media -> mediaPreview.cachedImage(media) }
+                    val target = currentMedia?.takeIf { playerVisible && audioTarget }
+                    if (target != null && target.location != producedCoverLocation) {
+                        // 目标变了才清空，避免音频切音频短暂留着上一张封面。
+                        value = null
+                        producedCoverLocation = target.location
                     }
+                    if (target != null) value = mediaPreview.cachedImage(target)
                 }
 
                 when {

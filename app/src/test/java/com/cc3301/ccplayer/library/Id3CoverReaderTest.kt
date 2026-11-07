@@ -146,11 +146,37 @@ class Id3CoverReaderTest {
     }
 
     @Test
-    fun `扩展头之后仍能找到封面帧`() {
+    fun `v2_3 扩展头跳过后能找到封面帧`() {
         val picture = byteArrayOf(8, 8)
-        // v2.3 扩展头：长度字段 6 已包含它自己的 4 字节，后面跟 2 字节 flag。
-        val extended = byteArrayOf(0, 0, 0, 6, 0, 0) + apicFrame(picture, type = 3)
+        // v2.3 的长度字段不含自身 4 字节：6 = 2 字节 flag + 4 字节 padding 长度，帧从 4 + 6 之后开始。
+        val extended = byteArrayOf(0, 0, 0, 6) + ByteArray(6) + apicFrame(picture, type = 3)
         val tag = id3Header(major = 3, flags = 0x40, tagSize = extended.size) + extended
+
+        val result = readId3Cover(ByteSourceOf(tag))
+
+        assertArrayEquals(picture, (result as Id3CoverResult.Picture).bytes)
+    }
+
+    @Test
+    fun `v2_4 扩展头跳过后能找到封面帧`() {
+        val picture = byteArrayOf(4, 2)
+        // v2.4 的长度字段含自身 4 字节且是 syncsafe：6 = 4 字节长度 + 1 字节 flag 数 + 1 字节 flag。
+        val extended = syncSafeBytes(6) + byteArrayOf(1, 0) + apicFrame(picture, type = 3, major = 4)
+        val tag = id3Header(major = 4, flags = 0x40, tagSize = extended.size) + extended
+
+        val result = readId3Cover(ByteSourceOf(tag))
+
+        assertArrayEquals(picture, (result as Id3CoverResult.Picture).bytes)
+    }
+
+    @Test
+    fun `封面帧后面的坏帧不影响已取到的封面`() {
+        val picture = byteArrayOf(6, 6)
+        val good = apicFrame(picture, type = 3)
+        // 帧头声明 100 字节却没有帧体：标签到止为止，但封面已经在前一帧取到了。
+        val broken = "APIC".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(0, 0, 0, 100) + byteArrayOf(0, 0)
+        val body = good + broken
+        val tag = id3Header(major = 3, flags = 0, tagSize = body.size) + body
 
         val result = readId3Cover(ByteSourceOf(tag))
 
