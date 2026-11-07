@@ -1109,7 +1109,11 @@ class PlaybackController(
         val media = _playlist.value.getOrNull(index) ?: return
         // 连点只把目标前移并进事件时间线，不再单独写一行日志。
         loadRetargets += "目标前移@${guardElapsed.elapsedMillis()}ms(${media.name})"
+        // 前移之前记下旧目标：申请新加载后当前索引已经换成新目标。
+        val previousTarget = loadTargetIndex
         applySwitchTarget(index, media, newSwitch = false)
+        // 前一个目标不再被读取，在发起那一刻交还；目标没变时不动。
+        if (previousTarget != index) returnSourceOf(previousTarget)
         startSwitchTarget()
     }
 
@@ -1174,11 +1178,7 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
-        if (loadPhase == LoadPhase.None) {
-            updateState(PlaybackState.Paused)
-            // 暂停在片尾：当前目标不再需要字节源。
-            if (stoppedAtEndOfEpisode()) returnSourceOf(_currentIndex.value)
-        }
+        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Paused)
     }
 
     /**
@@ -1261,8 +1261,11 @@ class PlaybackController(
     private fun discardSession() {
         _playbackFailed.value = false
         val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
-        // 真正停止：当前目标不再需要字节源。
+        // 真正停止：当前目标不再需要字节源；切集中途停止时目标尚未接管，同样交还。
         returnSourceOf(indexToSave)
+        if (loadPhase == LoadPhase.Switching && loadTargetIndex != indexToSave) {
+            returnSourceOf(loadTargetIndex)
+        }
         // 片尾恢复的原片已经看完，退出时不再写回片尾附近的进度。
         val skipEndRestoreSave = loadPhase == LoadPhase.Restoring && restoreAtEndOfEpisode
         if (active && !skipEndRestoreSave) {
@@ -1973,8 +1976,9 @@ class PlaybackController(
     /** 切集就绪：目标画面直接替换屏幕上的旧画面，进度从新文件开始。 */
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
-        // 切集接管成功：原目标不再需要它的字节源；新目标是另一条流，不受影响。
-        returnSourceOf(switchOriginIndex)
+        // 切集接管成功：原目标不再需要它的字节源。目标与起点是同一位置时不归还——
+        // 回环条目按地址复用，新加载可能正读着条目里那条源。
+        if (switchOriginIndex != _currentIndex.value) returnSourceOf(switchOriginIndex)
         logLoadSucceeded()
         generation?.markReady()
         // 切集就绪（打开交接被切集接管的路径同样到此放声）。
@@ -2349,6 +2353,8 @@ class PlaybackController(
             resetLoadState()
             return
         }
+        // 失败或取消的那个目标不再被读取；回到同一位置时它正被原片读取，不归还。
+        if (loadTargetIndex != originIndex) returnSourceOf(loadTargetIndex)
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (

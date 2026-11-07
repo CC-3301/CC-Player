@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.progress.FakePlaybackProgressRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -64,6 +65,7 @@ class PlaybackControllerSourceReturnTest {
         engine.reportPositionChanged(600_000, 600_000)
 
         controller.pause()
+        engine.reportPauseChanged(true)
 
         assertEquals(listOf("root/ep1.mkv"), returned)
     }
@@ -75,6 +77,7 @@ class PlaybackControllerSourceReturnTest {
         engine.reportPositionChanged(500_000, 600_000)
 
         controller.pause()
+        engine.reportPauseChanged(true)
 
         assertTrue(returned.isEmpty())
     }
@@ -118,6 +121,75 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
+    fun `单集循环重载同一位置不归还，也不弹播放失败`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned, names = arrayOf("ep1.mkv"))
+        val failures = mutableListOf<PlaybackFailure>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            controller.playbackFailures.collect { failures += it }
+        }
+        controller.setLoopMode(LoopMode.SingleLoop)
+
+        engine.reportPlaybackEnded()
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        engine.reportPositionChanged(1_000, 600_000)
+
+        assertTrue("同一位置重载不产生交还", returned.isEmpty())
+        assertTrue("正在读的源不能被摘走", failures.isEmpty())
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `点列表里当前正在播的那一项不归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+
+        controller.play(mediaFile("ep1.mkv"))
+
+        assertTrue(returned.isEmpty())
+        assertEquals(0, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `切集失败回退原片时归还失败目标`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        controller.next()
+        val target = engine.currentLoadToken
+
+        // 第一次按既有护栏重发一次，第二次才判失败并回退原片。
+        engine.reportPlaybackFailed(loadToken = target)
+        engine.reportPlaybackFailed(loadToken = engine.currentLoadToken)
+
+        assertEquals("失败目标不再被读取", listOf("root/ep2.mkv"), returned)
+        assertTrue(controller.restoring.value)
+    }
+
+    @Test
+    fun `切集目标前移时归还前一个目标`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned, names = arrayOf("ep1.mkv", "ep2.mkv", "ep3.mkv"))
+        controller.next()
+
+        controller.next()
+
+        assertEquals("前移后前一个目标不再被读取", listOf("root/ep2.mkv"), returned)
+        assertEquals(2, controller.currentIndex.value)
+    }
+
+    @Test
+    fun `切集中途停止同时归还起点与目标`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        controller.next()
+
+        controller.stop()
+
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), returned)
+    }
+
+    @Test
     fun `本地目标不归还字节源`() = runTest {
         val returned = mutableListOf<String>()
         val controller = controller(returned)
@@ -131,13 +203,13 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
-    fun `切集期间停止归还原目标`() = runTest {
+    fun `切集中途停止把起点与目标一起归还`() = runTest {
         val returned = mutableListOf<String>()
         val controller = playingController(returned)
         controller.next()
 
         controller.stop()
 
-        assertEquals(listOf("root/ep1.mkv"), returned)
+        assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), returned)
     }
 }
