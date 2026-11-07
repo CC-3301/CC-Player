@@ -301,4 +301,17 @@ class PlayerBarsVisibilityTest {
         )
         assertFalse(pointer.visible)
     }
+
+    @Test
+    fun `准备期顶栏只留返回且底栏隐藏`() {
+        assertFalse(playerTopBarExtrasVisible(preparing = true))
+        assertFalse(playerBottomBarVisible(barsShown = true, preparing = true))
+    }
+
+    @Test
+    fun `接手后顶栏与底栏恢复`() {
+        assertTrue(playerTopBarExtrasVisible(preparing = false))
+        assertTrue(playerBottomBarVisible(barsShown = true, preparing = false))
+        assertFalse(playerBottomBarVisible(barsShown = false, preparing = false))
+    }
 }

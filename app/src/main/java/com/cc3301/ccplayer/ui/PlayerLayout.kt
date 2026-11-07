@@ -60,24 +60,59 @@ fun showPlayerBlackLayer(
 fun showsPlayerCoverLayer(audioTarget: Boolean, showsPicture: Boolean): Boolean =
     audioTarget && !showsPicture
 
-/**
- * 缓冲提示用的首次缓冲判据：被静默标记的黑屏不显示提示。
- * 打开另一个目标与后台切集、播放态回前台撤帧一样属于这类黑屏；
- * 这里只压提示本身，控制层显隐仍按「首次缓冲」原值。
- */
-fun firstBufferingForIndicator(firstBuffering: Boolean, quietBlack: Boolean): Boolean =
-    firstBuffering && !quietBlack
+/** 缓冲提示所属的加载类型。 */
+enum class BufferingLoadKind {
+    Open,
+    Switch,
+    Restore,
+    Idle,
+}
+
+/** 一次缓冲提示的最终形态：是否显示，以及是否带文字。 */
+data class BufferingHint(
+    val visible: Boolean,
+    val showText: Boolean,
+)
+
+/** 按加载触发类型归类缓冲提示：恢复先于切集，切集先于首次打开。 */
+fun bufferingLoadKind(
+    switching: Boolean,
+    restoring: Boolean,
+    initialLoading: Boolean,
+): BufferingLoadKind = when {
+    restoring -> BufferingLoadKind.Restore
+    switching -> BufferingLoadKind.Switch
+    initialLoading -> BufferingLoadKind.Open
+    else -> BufferingLoadKind.Idle
+}
 
 /**
- * 缓冲提示显示判据：缓冲中时，有画面、首次打开或这段黑屏未被静默标记才显示。
- * 后台切集、播放态回前台撤帧与打开另一个目标这三类黑屏会带静默标记。
+ * 缓冲提示判据：打开与恢复原片显示转圈和「正在缓冲」；切集（含片尾自动切集）不显示。
+ * 其余情况维持旧规则：有画面或这段黑屏未被静默标记才显示。
  */
-fun showsBufferingIndicator(
+fun bufferingHint(
+    kind: BufferingLoadKind,
     buffering: Boolean,
     showsPicture: Boolean,
-    firstBuffering: Boolean,
     quietBlack: Boolean,
-): Boolean = buffering && (showsPicture || firstBuffering || !quietBlack)
+): BufferingHint = when (kind) {
+    BufferingLoadKind.Open,
+    BufferingLoadKind.Restore,
+    -> if (buffering) {
+        BufferingHint(visible = true, showText = true)
+    } else {
+        BufferingHint(visible = false, showText = false)
+    }
+
+    BufferingLoadKind.Switch -> BufferingHint(visible = false, showText = false)
+
+    BufferingLoadKind.Idle ->
+        if (buffering && (showsPicture || !quietBlack)) {
+            BufferingHint(visible = true, showText = true)
+        } else {
+            BufferingHint(visible = false, showText = false)
+        }
+}
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */
 val PlayerSideTouchTarget = 48.dp

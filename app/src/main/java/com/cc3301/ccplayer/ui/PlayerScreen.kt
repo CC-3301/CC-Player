@@ -301,9 +301,9 @@ private fun PlayerTextButton(
     }
 }
 
-/** 缓冲指示：转圈与“正在缓冲”，首次打开叠在黑屏上，切集叠在屏幕上停住的旧画面上。 */
+/** 缓冲指示：打开与恢复原片显示转圈和“正在缓冲”；切集不渲染这一层。 */
 @Composable
-private fun BufferingIndicator(modifier: Modifier = Modifier) {
+private fun BufferingIndicator(showText: Boolean, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -313,23 +313,25 @@ private fun BufferingIndicator(modifier: Modifier = Modifier) {
             strokeWidth = PlayerBufferingSpinnerStrokeWidth,
             modifier = Modifier.size(PlayerBufferingSpinnerSize),
         )
-        val text = stringResource(R.string.player_buffering)
-        val style = MaterialTheme.typography.bodyMedium
-        // Stroke 以字形中心为轴，内侧一半会被填充层盖住；按两倍宽度绘制，露在外侧的可见描边等于常量宽度。
-        val strokeWidth = with(LocalDensity.current) { (PlayerBufferingTextStrokeWidth * 2f).toPx() }
-        Box(modifier = Modifier.padding(top = AppSpacing.Sm)) {
-            // 先画描边层，再画填充层。
-            Text(
-                text = text,
-                style = style.copy(drawStyle = Stroke(width = strokeWidth)),
-                color = PlayerBufferingTextScrimColor.copy(alpha = PLAYER_BUFFERING_TEXT_SCRIM_ALPHA),
-                modifier = Modifier.clearAndSetSemantics {},
-            )
-            Text(
-                text = text,
-                style = style,
-                color = AppColors.Foreground,
-            )
+        if (showText) {
+            val text = stringResource(R.string.player_buffering)
+            val style = MaterialTheme.typography.bodyMedium
+            // Stroke 以字形中心为轴，内侧一半会被填充层盖住；按两倍宽度绘制，露在外侧的可见描边等于常量宽度。
+            val strokeWidth = with(LocalDensity.current) { (PlayerBufferingTextStrokeWidth * 2f).toPx() }
+            Box(modifier = Modifier.padding(top = AppSpacing.Sm)) {
+                // 先画描边层，再画填充层。
+                Text(
+                    text = text,
+                    style = style.copy(drawStyle = Stroke(width = strokeWidth)),
+                    color = PlayerBufferingTextScrimColor.copy(alpha = PLAYER_BUFFERING_TEXT_SCRIM_ALPHA),
+                    modifier = Modifier.clearAndSetSemantics {},
+                )
+                Text(
+                    text = text,
+                    style = style,
+                    color = AppColors.Foreground,
+                )
+            }
         }
     }
 }
@@ -386,6 +388,8 @@ fun PlayerScreen(
     restoring: Boolean,
     buffering: Boolean,
     initialLoading: Boolean,
+    /** 准备期：顶栏只留返回、底栏隐藏；接手后恢复。 */
+    preparing: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
@@ -426,6 +430,11 @@ fun PlayerScreen(
         switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
     }
     val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
+    val bufferingKind = bufferingLoadKind(
+        switching = switching,
+        restoring = restoring,
+        initialLoading = initialLoading,
+    )
     // 首次撤黑门：进页盖着黑等屏幕转过来，方向对齐或等满时限后再撤黑。
     // 比例未知期间一直盖黑由比例判据负责，不进这道门，也不设超时。
     var placementGate by remember { mutableStateOf(PlayerPlacementGate()) }
@@ -628,18 +637,18 @@ fun PlayerScreen(
         if (showsPlayerCoverLayer(audioTarget = audioTarget, showsPicture = surfacePresentation.showsPicture)) {
             PlayerCoverLayer(coverFile = coverFile, modifier = Modifier.fillMaxSize())
         }
-        // 提示规则：有画面时叠在画面上；首次打开的黑屏照常显示；其余黑屏按原有规则显示。
-        // 被静默标记的黑屏（后台切集、播放态回前台撤帧、打开另一个目标）不显示转圈与文字；
-        // 打开另一个目标只压提示，不改控制层显隐判据。
-        if (
-            showsBufferingIndicator(
-                buffering = buffering,
-                showsPicture = surfacePresentation.showsPicture,
-                firstBuffering = firstBufferingForIndicator(firstBuffering, surfacePresentation.quietBlack),
-                quietBlack = surfacePresentation.quietBlack,
+        // 提示规则：打开与恢复原片显示转圈和「正在缓冲」；切集与片尾自动切集不显示。
+        val hint = bufferingHint(
+            kind = bufferingKind,
+            buffering = buffering,
+            showsPicture = surfacePresentation.showsPicture,
+            quietBlack = surfacePresentation.quietBlack,
+        )
+        if (hint.visible) {
+            BufferingIndicator(
+                showText = hint.showText,
+                modifier = Modifier.align(Alignment.Center),
             )
-        ) {
-            BufferingIndicator(modifier = Modifier.align(Alignment.Center))
         }
         PlayerGestureLayer(
             locked = locked,
@@ -817,6 +826,7 @@ fun PlayerScreen(
                     initialLoading = initialLoading,
                     restoring = restoring,
                 ),
+                preparing = preparing,
                 onBack = onClose,
                 onRotate = {
                     controls.showByUserAction()
@@ -833,7 +843,7 @@ fun PlayerScreen(
             )
         }
         AnimatedVisibility(
-            visible = barsShown,
+            visible = playerBottomBarVisible(barsShown, preparing),
             enter = fadeIn(tween(CONTROLS_FADE_IN_MILLIS.toInt())),
             exit = fadeOut(tween(if (controls.hiddenImmediately) 0 else CONTROLS_FADE_OUT_MILLIS.toInt())),
             modifier = Modifier.align(Alignment.BottomCenter),
@@ -1372,6 +1382,7 @@ private fun PlayerTopBar(
     rotateAppearanceEnabled: Boolean,
     moreEnabled: Boolean,
     moreAppearanceEnabled: Boolean,
+    preparing: Boolean = false,
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
@@ -1406,36 +1417,38 @@ private fun PlayerTopBar(
                     tint = AppColors.Foreground,
                 )
             }
-            Text(
-                text = title,
-                style = playerOverlayTextStyle(),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = AppSpacing.Xs),
-            )
-            PlayerIconButtonSurface(
-                onClick = onRotate,
-                enabled = interactive && rotateEnabled,
-                modifier = Modifier.size(PlayerSideTouchTarget),
-            ) {
-                Icon(
-                    painter = painterResource(R.drawable.ic_player_screen_rotation),
-                    contentDescription = stringResource(R.string.player_rotate),
-                    tint = if (rotateAppearanceEnabled) AppColors.Foreground else DisabledToolColor,
+            if (playerTopBarExtrasVisible(preparing)) {
+                Text(
+                    text = title,
+                    style = playerOverlayTextStyle(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = AppSpacing.Xs),
                 )
-            }
-            PlayerIconButtonSurface(
-                onClick = onToggleMore,
-                enabled = interactive && moreEnabled,
-                modifier = Modifier.size(PlayerSideTouchTarget),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.MoreVert,
-                    contentDescription = stringResource(R.string.player_more),
-                    tint = if (moreAppearanceEnabled) playerToolColor(moreVisible) else DisabledToolColor,
-                )
+                PlayerIconButtonSurface(
+                    onClick = onRotate,
+                    enabled = interactive && rotateEnabled,
+                    modifier = Modifier.size(PlayerSideTouchTarget),
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_player_screen_rotation),
+                        contentDescription = stringResource(R.string.player_rotate),
+                        tint = if (rotateAppearanceEnabled) AppColors.Foreground else DisabledToolColor,
+                    )
+                }
+                PlayerIconButtonSurface(
+                    onClick = onToggleMore,
+                    enabled = interactive && moreEnabled,
+                    modifier = Modifier.size(PlayerSideTouchTarget),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MoreVert,
+                        contentDescription = stringResource(R.string.player_more),
+                        tint = if (moreAppearanceEnabled) playerToolColor(moreVisible) else DisabledToolColor,
+                    )
+                }
             }
         }
     }

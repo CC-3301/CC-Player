@@ -315,6 +315,40 @@ class PlaybackControllerOpenHandoverTest {
         assertEquals(listOf(true, false), engine.muteCalls)
     }
 
+    @Test
+    fun `打开目标不在列表时不接受并撤回交接`() = runTest {
+        val controller = playingController()
+        val oldToken = engine.currentLoadToken
+
+        controller.beginOpenHandover()
+        val accepted = controller.openPlaylist(
+            files = listOf(mediaFile("a.mkv")),
+            current = mediaFile("b.mkv"),
+            generation = 9,
+        )
+
+        assertFalse(accepted)
+        // 旧目标恢复出声与画面，不静默起播一个不在列表里的目标。
+        assertEquals(listOf(true, false), engine.muteCalls)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+        assertEquals(oldToken, engine.currentLoadToken)
+    }
+
+    @Test
+    fun `打开被接受时沿用入口代际开始加载`() = runTest {
+        val controller = playingController()
+
+        controller.beginOpenHandover()
+        val accepted = controller.openPlaylist(
+            files = listOf(mediaFile("c.mkv")),
+            current = mediaFile("c.mkv"),
+            generation = 9,
+        )
+
+        assertTrue(accepted)
+        assertEquals("root/c.mkv", engine.startedUrls.last())
+    }
+
     private fun mediaFile(name: String): MediaFile = MediaFile(name = name, location = "root/${name}")
 
     private fun open(controller: PlaybackController, vararg names: String) {

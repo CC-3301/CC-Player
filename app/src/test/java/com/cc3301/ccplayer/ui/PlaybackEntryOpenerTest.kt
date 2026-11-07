@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,19 +52,21 @@ private data class OpenedPlayback(
 /** 记录入口实际产生的界面动作。 */
 private class EntryRecorder {
     val events = mutableListOf<String>()
-    val enterStates = mutableListOf<Boolean>()
+    var enterCount = 0
     var opened: OpenedPlayback? = null
+    var openedGeneration: Int? = null
     var shownFailure: MediaFailure? = null
     var leaveCount = 0
 
-    fun enter(preparing: Boolean) {
-        enterStates += preparing
-        events += "enter:$preparing"
+    fun enter() {
+        enterCount += 1
+        events += "enter"
     }
 
-    fun start(current: MediaFile, playlist: List<MediaFile>, directoryEntries: List<MediaFile>) {
+    fun start(current: MediaFile, playlist: List<MediaFile>, directoryEntries: List<MediaFile>, generation: Int) {
         opened = OpenedPlayback(current, playlist, directoryEntries)
-        events += "start"
+        openedGeneration = generation
+        events += "start:$generation"
     }
 
     fun showFailure(failure: MediaFailure) {
@@ -80,6 +83,8 @@ private class EntryRecorder {
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackEntryOpenerTest {
 
+    private val entryState = PlaybackEntryState()
+
     private val networkVideo = testVideo("第1集.mkv", "smb://nas/media/第1集.mkv")
         .copy(source = MediaSource.Network)
     private val subtitle = testVideo("第1集.srt", "smb://nas/media/第1集.srt")
@@ -93,6 +98,7 @@ class PlaybackEntryOpenerTest {
         diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     ): PlaybackEntryOpener = PlaybackEntryOpener(
         scope = scope,
+        entryState = entryState,
         directoryEntries = directoryEntries,
         networkStreams = streams,
         onEnterPlayer = recorder::enter,
@@ -119,7 +125,8 @@ class PlaybackEntryOpenerTest {
 
         opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
 
-        assertEquals(listOf(true), recorder.enterStates)
+        assertEquals(1, recorder.enterCount)
+        assertEquals(EntryPhase.Preparing, entryState.phase)
         assertNull(recorder.opened)
 
         directoryGate.complete(Unit)
@@ -131,6 +138,8 @@ class PlaybackEntryOpenerTest {
 
         assertEquals(listOf(networkVideo.location), streams.probed)
         val result = requireNotNull(recorder.opened)
+        assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
+        assertEquals(entryState.generation, recorder.openedGeneration)
         assertEquals("http://127.0.0.1:1/第1集.mkv", result.current.playbackLocation)
         assertEquals(listOf("http://127.0.0.1:1/第1集.mkv"), result.playlist.map { it.playbackLocation })
         assertEquals(listOf("http://127.0.0.1:1/第1集.srt"), result.directoryEntries.map { it.playbackLocation })
@@ -155,14 +164,15 @@ class PlaybackEntryOpenerTest {
         opener.open(audio, listOf(audio), enterBeforePreparing = false)
         runCurrent()
 
-        assertTrue("音频不预先进入播放页", recorder.enterStates.isEmpty())
-        assertTrue(recorder.events.isEmpty())
+        assertTrue("音频不预先进入播放页", recorder.events.isEmpty())
+        assertNull(entryState.phase)
 
         directoryGate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(listOf("enter:false", "start"), recorder.events)
+        assertEquals(listOf("enter", "start:${entryState.generation}"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
+        assertNull("音频进入时不显示准备期界面", entryState.phase)
     }
 
     @Test
@@ -179,11 +189,11 @@ class PlaybackEntryOpenerTest {
         opener.open(audio, listOf(audio), enterBeforePreparing = false)
         advanceUntilIdle()
 
-        assertTrue(recorder.enterStates.isEmpty())
+        assertEquals(0, recorder.enterCount)
         assertNull(recorder.opened)
         assertEquals(MediaFailure.Unknown, recorder.shownFailure)
         assertEquals(0, recorder.leaveCount)
-        assertEquals(listOf("failure:Unknown"), recorder.events)
+        assertEquals(EntryPhase.Failed, entryState.phase)
     }
 
     @Test
@@ -205,7 +215,8 @@ class PlaybackEntryOpenerTest {
         assertNull(recorder.opened)
         assertEquals(MediaFailure.Authentication, recorder.shownFailure)
         assertEquals(1, recorder.leaveCount)
-        assertEquals(listOf("enter:true", "failure:Authentication", "leave"), recorder.events)
+        assertEquals(listOf("enter", "failure:Authentication", "leave"), recorder.events)
+        assertEquals(EntryPhase.Failed, entryState.phase)
     }
 
     @Test
@@ -266,6 +277,53 @@ class PlaybackEntryOpenerTest {
         advanceUntilIdle()
 
         assertNull(recorder.opened)
+        assertNull(recorder.shownFailure)
+        assertEquals(0, recorder.leaveCount)
+    }
+
+    @Test
+    fun `取消打开后迟到的准备成功被丢弃`() = runTest {
+        val streams = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { streams },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        val generation = entryState.generation
+        // 取消只清入口阶段，不打断阻塞中的准备：迟到的成功必须按代际丢弃。
+        entryState.cancelEntry()
+        streams.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertNull(recorder.opened)
+        assertNull(recorder.shownFailure)
+        assertEquals(0, recorder.leaveCount)
+        assertFalse(entryState.isCurrent(generation))
+    }
+
+    @Test
+    fun `取消打开后迟到的准备失败不提示也不离开`() = runTest {
+        val streams = GatedNetworkStreams()
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = { emptyList() },
+            streams = { streams },
+        )
+
+        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        runCurrent()
+        entryState.cancelEntry()
+        streams.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+        streams.gate.complete(Unit)
+        advanceUntilIdle()
+
         assertNull(recorder.shownFailure)
         assertEquals(0, recorder.leaveCount)
     }

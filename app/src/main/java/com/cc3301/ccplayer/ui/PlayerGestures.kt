@@ -234,6 +234,12 @@ fun playerBarsVisible(
     (controlsVisible || firstBuffering) &&
     panelBarsVisible
 
+/** 准备期顶栏只保留返回：标题、转屏与更多都不显示；接手后恢复。 */
+fun playerTopBarExtrasVisible(preparing: Boolean): Boolean = !preparing
+
+/** 准备期隐藏底栏；接手后按控制层显隐恢复。 */
+fun playerBottomBarVisible(barsShown: Boolean, preparing: Boolean): Boolean = barsShown && !preparing
+
 /** 顶/底栏的两个判据：动画目标只看完全可见；在场（指针与退场可点）看可见或淡出中。 */
 data class PlayerBarsPresence(val shown: Boolean, val present: Boolean)
 

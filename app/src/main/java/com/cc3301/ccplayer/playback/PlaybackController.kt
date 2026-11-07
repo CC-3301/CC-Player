@@ -131,8 +131,8 @@ class PlaybackController(
      */
     private var generation: LoadGeneration? = null
 
-    /** 代际序号：进程内只增，迟到的续播查询据此丢弃。 */
-    private var generationSerial = 0
+    /** 入口分配的代际号：同一会话的每个加载代际都沿用它，控制层不另发一套序列。 */
+    private var entryGeneration = 0
 
     /** 已下发给引擎的静音状态；只在推导结果变化时写一次。 */
     private var audioMuted = false
@@ -507,16 +507,23 @@ class PlaybackController(
     /**
      * 以 [files] 为播放列表起播 [current]；列表只收媒体文件，按名称自然排序。
      * [directoryEntries] 是当前目录的原始条目（含被媒体列表过滤掉的外挂字幕），用于外挂字幕匹配。
-     * [current] 不在列表里时不动作。
+     * [generation] 是入口分配的代际号，本次会话的加载代际沿用它。
+     * [current] 不在列表里时不动作并返回 false。
      */
-    fun openPlaylist(files: List<MediaFile>, current: MediaFile, directoryEntries: List<MediaFile> = emptyList()) {
+    fun openPlaylist(
+        files: List<MediaFile>,
+        current: MediaFile,
+        directoryEntries: List<MediaFile> = emptyList(),
+        generation: Int = 0,
+    ): Boolean {
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) {
             // 打开不会发生：撤回交接，旧目标照常出声与出画面。
             cancelOpenHandover()
-            return
+            return false
         }
+        entryGeneration = generation
         // 正在播放时换列表按「打开另一个目标」处理：旧片立停出声、旧画面撤掉，
         // 不在新旧目标之间做切集回退。解码模式属于本次会话的临时选择，结束旧会话会重置成默认值。
         // 换片不向播放核心发停止：mpv 的 stop 紧跟 loadfile 会把新加载一并终止，
@@ -529,11 +536,12 @@ class PlaybackController(
             this.directoryEntries = directoryEntries
             setDecodeMode(decodeMode)
             startSession(index, playlist[index])
-            return
+            return true
         }
         _playlist.value = playlist
         this.directoryEntries = directoryEntries
         playAt(index)
+        return true
     }
 
     /**
@@ -628,11 +636,8 @@ class PlaybackController(
         loadGeneration++
     }
 
-    /** 新建一个代际；序号进程内只增，迟到的续播查询据此丢弃。 */
-    private fun newGeneration(): LoadGeneration {
-        generationSerial++
-        return LoadGeneration(generationSerial, nowMillis)
-    }
+    /** 新建一个代际：沿用入口分配的代际号，不另发一套序列。 */
+    private fun newGeneration(): LoadGeneration = LoadGeneration(entryGeneration, nowMillis)
 
     /** 静音的唯一写入口：由当前代际的出声归属与预览静音推导，变化时才下发一次命令。 */
     private fun syncAudioMute() {

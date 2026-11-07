@@ -82,7 +82,7 @@ internal data class HandoverSnapshot(
  * 直到下一次加载意图替换它或会话结束把它作废。
  */
 internal class LoadGeneration(
-    /** 进程内只增的代际序号；异步查询据此丢弃迟到的结果。 */
+    /** 入口分配的代际号；同一会话的每个加载代际都沿用它。 */
     val id: Int,
     nowMillis: () -> Long,
 ) {
