@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -74,8 +75,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
@@ -94,6 +93,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -167,6 +167,9 @@ private val PlayerTopBarHeight = 56.dp
 
 /** “更多”面板为底部控制条预留的高度。 */
 private val PlayerControlBarReserve = 224.dp
+
+/** “更多”面板内统一的行高。 */
+private val PlayerMoreRowHeight = 48.dp
 
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
@@ -2095,6 +2098,7 @@ private fun MorePanel(
             .heightIn(max = panelMaxHeight)
             .playerPanel()
             .blockPlayerGestures()
+            .padding(vertical = AppSpacing.Lg)
             .verticalScroll(rememberScrollState()),
     ) {
         MoreChoiceRow(
@@ -2212,8 +2216,9 @@ private fun MoreChoiceRow(
                     if (enabled) Modifier.playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
                     else Modifier,
                 )
+                .height(PlayerMoreRowHeight)
                 .semantics { stateDescription = expandedState }
-                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
+                .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
         ) {
@@ -2259,7 +2264,8 @@ private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onC
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.MorePanelRow),
                 )
-                .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
+                .height(PlayerMoreRowHeight)
+                .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -2303,7 +2309,8 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.AutoPlayNextRow),
                 )
-                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
+                .height(PlayerMoreRowHeight)
+                .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
         ) {
@@ -2313,19 +2320,33 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
                 color = if (enabled) AppColors.Foreground else DisabledToolColor,
                 modifier = Modifier.weight(1f),
             )
-            Switch(
-                checked = checked,
-                enabled = enabled,
-                onCheckedChange = null,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                    checkedTrackColor = AppColors.AccentDeep,
-                    uncheckedThumbColor = AppColors.SwitchThumb,
-                    uncheckedTrackColor = AppColors.SurfaceHighest,
-                    uncheckedBorderColor = Color.Transparent,
-                ),
-            )
+            MoreSwitch(checked = checked, enabled = enabled)
         }
+    }
+}
+
+/** 自动连播开关：固定 44×26，右边界与下拉箭头共用同一条基准线。 */
+@Composable
+private fun MoreSwitch(checked: Boolean, enabled: Boolean) {
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) 21.dp else 3.dp,
+        label = "player-switch-thumb",
+    )
+    Box(
+        modifier = Modifier
+            .size(width = 44.dp, height = 26.dp)
+            .alpha(if (enabled) 1f else 0.38f)
+            .clip(CircleShape)
+            .background(if (checked) AppColors.AccentDeep else AppColors.SurfaceHighest),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(x = thumbOffset.roundToPx(), y = 0) }
+                .size(20.dp)
+                .clip(CircleShape)
+                .background(if (checked) Color.White else AppColors.SwitchThumb),
+        )
     }
 }
 
@@ -2337,7 +2358,8 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = AppSpacing.Xs, bottom = AppSpacing.Sm),
+            .height(PlayerMoreRowHeight)
+            .padding(horizontal = AppSpacing.Lg),
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2364,7 +2386,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
                 errorLabelColor = AppColors.Danger,
                 errorCursorColor = AppColors.Danger,
             ),
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.size(width = 120.dp, height = PlayerMoreRowHeight),
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
