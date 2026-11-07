@@ -20,6 +20,9 @@ object MpvOptions {
     /** 只把 error 及以上日志送进日志桥。 */
     const val MSG_LEVEL = "all=error"
 
+    /** 音频缓冲（秒）：拆视频输出会同步阻塞播放核心，缓冲越大越不容易欠载断音。 */
+    const val AUDIO_BUFFER = "0.5"
+
     fun initial(cacheDir: String): Map<String, String> = linkedMapOf(
         "config" to "no",
         "terminal" to "no",
@@ -29,6 +32,7 @@ object MpvOptions {
         "force-window" to "no",
         "vo" to VIDEO_OUTPUT,
         "hwdec" to HWDEC,
+        "audio-buffer" to AUDIO_BUFFER,
         "gpu-shader-cache-dir" to cacheDir,
         "icc-cache-dir" to cacheDir,
     )

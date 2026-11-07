@@ -54,8 +54,16 @@ fun showPlayerBlackLayer(
     (!orientationSettled && !hasKnownVideoAspectRatio(videoAspectRatio))
 
 /**
+ * 缓冲提示用的首次缓冲判据：被静默标记的黑屏不显示提示。
+ * 打开另一个目标与后台切集、播放态回前台撤帧一样属于这类黑屏；
+ * 这里只压提示本身，控制层显隐仍按「首次缓冲」原值。
+ */
+fun firstBufferingForIndicator(firstBuffering: Boolean, quietBlack: Boolean): Boolean =
+    firstBuffering && !quietBlack
+
+/**
  * 缓冲提示显示判据：缓冲中时，有画面、首次打开或这段黑屏未被静默标记才显示。
- * 只有后台切集与播放态回前台撤帧两类黑屏会带静默标记。
+ * 后台切集、播放态回前台撤帧与打开另一个目标这三类黑屏会带静默标记。
  */
 fun showsBufferingIndicator(
     buffering: Boolean,

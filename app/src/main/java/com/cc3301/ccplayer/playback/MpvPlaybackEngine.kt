@@ -50,6 +50,24 @@ class MpvPlaybackEngine(
     @Volatile
     private var awaitingLoadFrame = false
 
+    /** 视频输出重建后等音频重新出声的探针；跟随诊断开关，出声、无音频或超时后收摊。 */
+    @Volatile
+    private var audioResumeWatch: AudioResumeWatch? = null
+
+    /** 探针起算时刻：视频输出重建完成的那一刻。 */
+    @Volatile
+    private var audioResumeArmedAtNanos = 0L
+
+    /** 探针、轮询任务与它们的取消都在同一把锁内。 */
+    private val audioResumeLock = Any()
+
+    private var audioResumeFuture: ScheduledFuture<*>? = null
+
+    /** 探针自己的轮询线程：不依赖播放位置事件，暂停态也能按时收摊。 */
+    private val audioResumeExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "mpv-audio-resume").apply { isDaemon = true }
+    }
+
     /** 位置前进判定：seek 后先重建基线，避免队列里的旧位置冒充前进。 */
     private val positionGate = PositionProgressGate()
 
@@ -148,6 +166,8 @@ class MpvPlaybackEngine(
         durationSeconds = 0.0
         hasVideoTrack = false
         awaitingLoadFrame = true
+        // 新文件的时间轴从头开始：上一轮重建的出声探针作废，不能拿新文件的位置充数。
+        endAudioResume(null)
         seekDiagnostics.reset()
         seekQueue.reset()
         positionGate.onStart(startPositionMillis)
@@ -405,8 +425,12 @@ class MpvPlaybackEngine(
         awaitingSurfaceFrame = true
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         postVideoOutput {
+            val startedAtNanos = System.nanoTime()
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
+            val finishedAtNanos = System.nanoTime()
+            logVideoOutputTiming("视频输出重建完成", finishedAtNanos - startedAtNanos)
+            awaitAudioResume(finishedAtNanos)
         }
     }
 
@@ -442,6 +466,8 @@ class MpvPlaybackEngine(
         if (released || attachedSurface == null || videoOutputStopped) return
         if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
         if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return
+        // 刷新会让 audio-pts 跳变：探针基线在命令下发前重新起算，暂停态重挂不误报出声。
+        resetAudioResumeBaseline()
         val serial = loadCoordinator.beginRefreshSeek()
         armRefreshTimeout(serial)
         runCatching { MPVLib.command(arrayOf("seek", "0", "relative+exact")) }
@@ -533,11 +559,14 @@ class MpvPlaybackEngine(
     /** 投递分离任务：先关输出再撤窗口，最后摘挂载；投递被拒时留痕。 */
     private fun postDetach() {
         val accepted = videoOutputQueue.postAlways {
+            val startedAtNanos = System.nanoTime()
             detachVideoOutput(
                 setProperty = { name, value -> MPVLib.setPropertyString(name, value) },
                 setOption = { name, value -> MPVLib.setOptionString(name, value) },
                 detachSurface = { MPVLib.detachSurface() },
             )
+            // 只量视频输出线程上的拆卸动作；播放核心等它返回的排队时间不在这条里。
+            logVideoOutputTiming("拆视频输出（仅视频输出线程动作）", System.nanoTime() - startedAtNanos)
         }
         if (!accepted) diagnostics.log("分离: 视频输出线程不再受理，分离任务没投递")
     }
@@ -571,6 +600,8 @@ class MpvPlaybackEngine(
         }
         seekQueue.reset()
         loadCoordinator.discardRefreshSeek()
+        endAudioResume(null)
+        audioResumeExecutor.shutdownNow()
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
         // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
@@ -614,6 +645,8 @@ class MpvPlaybackEngine(
             MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED -> onFileLoaded()
             // 从这里开始，后面的 ready 才算 seek 之后的信号。
             MPVLib.MpvEvent.MPV_EVENT_SEEK -> {
+                // 这一跳会把 audio-pts 整体挪走：探针基线重新起算，跳变不算重新出声。
+                resetAudioResumeBaseline()
                 val event = loadCoordinator.onSeekEvent()
                 when {
                     // 坟标只消费迟到的 SEEK，不改写 accepted，也不写 seek 诊断。
@@ -731,6 +764,80 @@ class MpvPlaybackEngine(
         )
     }
 
+    /** 视频输出相关耗时：只在诊断开启时写盘。 */
+    private fun logVideoOutputTiming(label: String, elapsedNanos: Long) {
+        if (!diagnostics.enabled) return
+        diagnostics.log { "$label: 耗时 ${elapsedNanos / 1_000_000}ms" }
+    }
+
+    /**
+     * 重建完成后等音频重新出声：重建返回时播放核心才不再被阻塞。
+     * 判据交给 [AudioResumeWatch]（连续前进才算出声），采样由自己的轮询线程驱动，
+     * 上限按墙上时间收摊，不依赖播放位置事件。
+     */
+    private fun awaitAudioResume(rebuildFinishedAtNanos: Long) {
+        if (!diagnostics.enabled || released) return
+        val watch = AudioResumeWatch()
+        synchronized(audioResumeLock) {
+            audioResumeWatch = watch
+            audioResumeArmedAtNanos = rebuildFinishedAtNanos
+            audioResumeFuture?.cancel(false)
+            audioResumeFuture = runCatching {
+                audioResumeExecutor.scheduleWithFixedDelay(
+                    { probeAudioResume() },
+                    AUDIO_RESUME_POLL_INTERVAL_MILLIS,
+                    AUDIO_RESUME_POLL_INTERVAL_MILLIS,
+                    TimeUnit.MILLISECONDS,
+                )
+            }.getOrNull()
+        }
+    }
+
+    /** 轮询一次 audio-pts；确认连续前进、没有音频或超过上限就收摊。 */
+    private fun probeAudioResume() {
+        // 写侧持 [audioResumeLock]：读侧也必须在同一把锁内取快照，不能裸读字段。
+        var candidate: AudioResumeWatch? = null
+        var armedAtNanos = 0L
+        synchronized(audioResumeLock) {
+            candidate = audioResumeWatch
+            armedAtNanos = audioResumeArmedAtNanos
+        }
+        val watch = candidate ?: return
+        if (released) {
+            endAudioResume(null)
+            return
+        }
+        val elapsedMillis = (System.nanoTime() - armedAtNanos) / 1_000_000
+        val audioPtsSeconds = readMpvProperty { MPVLib.getPropertyDouble(AUDIO_PTS_PROPERTY) }?.finiteOrNull()
+        when (watch.sample(audioPtsSeconds, elapsedMillis)) {
+            // 出声时刻取第一次前进那一刻，不是确认那一刻：固定少算一个采样间隔。
+            AudioResumeWatch.Sample.Confirmed ->
+                endAudioResume("重新出声: 距重建完成 ${watch.resumedAtMillis ?: elapsedMillis}ms")
+            AudioResumeWatch.Sample.Unavailable ->
+                endAudioResume("重新出声: 没有音频输出")
+            AudioResumeWatch.Sample.Idle, AudioResumeWatch.Sample.Pending ->
+                if (elapsedMillis > AUDIO_RESUME_WAIT_MILLIS) {
+                    endAudioResume("重新出声: ${AUDIO_RESUME_WAIT_MILLIS / 1_000} 秒内没有等到音频连续前进")
+                }
+        }
+    }
+
+    /** 收摊：停掉轮询并按需写一行诊断。 */
+    private fun endAudioResume(line: String?) {
+        synchronized(audioResumeLock) {
+            audioResumeWatch = null
+            audioResumeFuture?.cancel(false)
+            audioResumeFuture = null
+        }
+        if (line != null) diagnostics.log { line }
+    }
+
+    /** seek 与位置中性刷新会让 audio-pts 跳变：探针基线重新起算，跳变不算出声。 */
+    private fun resetAudioResumeBaseline() {
+        val watch = synchronized(audioResumeLock) { audioResumeWatch }
+        watch?.reset()
+    }
+
     override fun eventProperty(property: String) = Unit
 
     override fun eventProperty(property: String, value: Long) {
@@ -739,7 +846,10 @@ class MpvPlaybackEngine(
             HEIGHT_PROPERTY -> videoHeight = value.toInt()
             else -> return
         }
-        listener?.onVideoSizeChanged(videoWidth, videoHeight)
+        // 尺寸属于产生它的那次加载：在途加载优先，其次才是已打开的文件。
+        // 没有加载归属的尺寸不上报，旧目标迟到的尺寸不能带偏方向。
+        val token = loadCoordinator.pendingLoadToken() ?: loadCoordinator.currentLoadedToken() ?: return
+        listener?.onVideoSizeChanged(videoWidth, videoHeight, token)
     }
 
     override fun eventProperty(property: String, value: Double) {
@@ -812,6 +922,16 @@ class MpvPlaybackEngine(
     private companion object {
         /** 在途 seek 的回执超时：超时按执行完处理并补发下一条，避免一段手势停在第一帧。 */
         const val SEEK_IN_FLIGHT_TIMEOUT_MILLIS = 3_000L
+
+        /** 重建完成后最多观察音频重新出声的时间；到点只记一行，不重试。 */
+        const val AUDIO_RESUME_WAIT_MILLIS = 3_000L
+
+        /**
+         * 探针的轮询间隔：不依赖播放位置事件，暂停态也能按时收摊；也是出声时刻的采样粒度。
+         * 必须明显大于 [AudioResumeWatch.MIN_ADVANCE_SECONDS]（20ms），
+         * 否则相邻两次采样之间的位置变化达不到判据，连续前进永远确认不了。
+         */
+        const val AUDIO_RESUME_POLL_INTERVAL_MILLIS = 50L
 
         /** 释放时等视频输出线程排空队列的上限；超时即放弃销毁，不能把退出挂住。 */
         const val VIDEO_OUTPUT_RELEASE_WAIT_MILLIS = 2_000L
