@@ -158,7 +158,7 @@ class WebDavStreamsTest {
 
         assertTrue("丢弃路径不碰 I/O", !prepared.closed)
         httpRequest(streams.urlFor(movie))
-        assertTrue("取用时关掉留下的句柄", prepared.closed)
+        awaitClosed(prepared)
         assertEquals(2, transport.openedSizes.size)
     }
 
