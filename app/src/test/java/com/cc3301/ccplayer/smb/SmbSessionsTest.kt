@@ -222,10 +222,12 @@ class SmbSessionsTest {
         source.close()
 
         runCatching { source.readAt(0, ByteArray(16), 0, 16) }
+
+        // 迟到的作废不再碰会话表：连接交给闲置回收，不在这里当场关。
+        assertTrue("迟到的作废不摘会话", connector.closedShares.isEmpty())
         advanceTimeBy(1_001)
         runCurrent()
-
-        assertEquals("迟到的作废不再把会话摘出表外", listOf("media"), connector.closedShares)
+        assertEquals(listOf("media"), connector.closedShares)
     }
 
     @Test
