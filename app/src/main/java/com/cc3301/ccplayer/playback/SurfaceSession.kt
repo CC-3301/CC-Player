@@ -6,8 +6,8 @@ import android.view.Surface
  * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
  *
  * Surface 回调、尺寸变化与服务连接只向这里转发。
- * 拆挂只由 SurfaceHolder 回调触发：surfaceCreated 挂载，surfaceDestroyed 先标记不可用、
- * 再由回调路径调用 [detach] 分离；Activity 的停止与恢复不拆不挂。挂载与分离幂等，可重复、可乱序。
+ * 拆挂只由 Surface 生命周期回调触发：Surface 就绪时挂载，Surface 真正销毁时先标记不可用、
+ * 再分离；Activity 的停止与恢复（窗口不可见）不拆不挂。挂载与分离幂等，可重复、可乱序。
  */
 class SurfaceSession(
     private val attach: (Surface) -> Boolean,
@@ -28,8 +28,6 @@ class SurfaceSession(
     /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，销毁时先标记不可用。 */
     private var mountedSurface: Surface? = null
 
-    /** 已挂载的 Surface 已被销毁；即使对象身份被复用，也必须先分离再重挂。 */
-    private var mountedSurfaceDestroyed = false
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
@@ -50,10 +48,13 @@ class SurfaceSession(
         if (mounted) resize(width, height)
     }
 
-    /** Surface 已销毁：只标记不可用，分离由 SurfaceHolder 回调路径随后调用 [detach] 完成。 */
+    /**
+     * Surface 真正销毁：先标记不可用，再分离挂载。窗口不可见不会走到这里，
+     * 画面载体由应用进程持有，系统不会因为窗口不可见而释放它。
+     */
     fun onSurfaceDestroyed() {
         surface = null
-        if (mounted) mountedSurfaceDestroyed = true
+        detachIfMounted()
         publish()
     }
 
@@ -69,13 +70,6 @@ class SurfaceSession(
     /** 播放服务断开：旧引擎的挂载不再有效，重新连上时补挂。 */
     fun onEngineLost() {
         mountedSurface = null
-        mountedSurfaceDestroyed = false
-        publish()
-    }
-
-    /** 分离当前挂载；重复调用无副作用。 */
-    fun detach() {
-        detachIfMounted()
         publish()
     }
 
@@ -87,12 +81,11 @@ class SurfaceSession(
 
     private fun attachCurrent() {
         val target = surface?.takeIf(isValid) ?: return
-        // 同一个 Surface 且没有被销毁才是幂等挂载；对象身份不能当作会话 ID。
-        if (mountedSurface === target && !mountedSurfaceDestroyed) return
+        // 同一个 Surface 才是幂等挂载；对象身份不能当作会话 ID，销毁后的重挂要先分离。
+        if (mountedSurface === target) return
         detachIfMounted()
         if (!attach(target)) return
         mountedSurface = target
-        mountedSurfaceDestroyed = false
         // 挂载顺序：先挂 Surface，再设尺寸，最后开窗口并恢复视频输出。
         if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
         startOutput()
@@ -102,13 +95,12 @@ class SurfaceSession(
         if (!mounted) return
         detachEngine()
         mountedSurface = null
-        mountedSurfaceDestroyed = false
     }
 
     private fun publish() {
         val next = when {
             !mounted -> State.Detached
-            hasSurface && !mountedSurfaceDestroyed -> State.Ready
+            hasSurface -> State.Ready
             else -> State.Attached
         }
         if (next == state) return

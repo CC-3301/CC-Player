@@ -356,7 +356,7 @@ fun PlayerScreen(
     sleepTimerState: SleepTimerState,
     sleepTimerOption: SleepTimerOption?,
     levelControls: PlayerLevelControls,
-    surfaceCallback: MpvSurfaceView.Callback,
+    surfaceCallback: MpvTextureView.Callback,
     surfacePresentation: SurfacePresentation,
     /** 纯音频目标的已缓存封面；没有时为 null，封面层显示占位图。 */
     coverFile: File?,
@@ -579,7 +579,7 @@ fun PlayerScreen(
         }
         AndroidView(
             factory = { context ->
-                MpvSurfaceView(context).also { view -> view.callback = surfaceCallback }
+                MpvTextureView(context).also { view -> view.callback = surfaceCallback }
             },
             modifier = Modifier
                 .offset { IntOffset(viewport.left.roundToInt(), viewport.top.roundToInt()) }

@@ -7,7 +7,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Surface 会话：只由 Surface 回调拆挂，挂载与分离幂等。 */
+/** Surface 会话：只由 Surface 生命周期回调拆挂，挂载与分离幂等。 */
 class SurfaceSessionTest {
 
     private val attached = mutableListOf<Surface>()
@@ -58,7 +58,6 @@ class SurfaceSessionTest {
         session.onSurfaceCreated(surface)
         session.onSurfaceChanged(1920, 1080)
         session.onSurfaceDestroyed()
-        session.detach()
         operations.clear()
 
         session.onSurfaceCreated(surface)
@@ -68,23 +67,17 @@ class SurfaceSessionTest {
     }
 
     @Test
-    fun `surface destruction keeps the mount until the caller detaches`() {
+    fun `surface destruction detaches the mount immediately`() {
         val session = session()
         val surface = testSurface()
 
         session.onSurfaceCreated(surface)
         session.onSurfaceDestroyed()
 
-        // 销毁只标记不可用：分离由 SurfaceHolder 回调路径随后调用。
-        assertEquals(1, attached.size)
-        assertEquals(0, detachCalls)
-        assertEquals(SurfaceSession.State.Attached, session.state)
-        assertFalse(session.hasSurface)
-
-        session.detach()
-
+        // Surface 真正销毁就分离：调用方没有第二处可摘挂的入口。
         assertEquals(1, detachCalls)
         assertEquals(SurfaceSession.State.Detached, session.state)
+        assertFalse(session.hasSurface)
     }
 
     @Test
@@ -125,11 +118,10 @@ class SurfaceSessionTest {
 
         session.onSurfaceCreated(surface)
         session.onSurfaceDestroyed()
-        session.detach()
         session.onSurfaceCreated(surface)
 
-        // 销毁与分离都不可渲染，各上报一次 false；恢复挂载后重新可用。
-        assertEquals(listOf(true, false, false, true), availability)
+        // 销毁即分离、即不可渲染，一次上报；重新挂载后恢复可用。
+        assertEquals(listOf(true, false, true), availability)
     }
 
     @Test
@@ -138,7 +130,6 @@ class SurfaceSessionTest {
         val surface = testSurface()
         session.onSurfaceCreated(surface)
         session.onSurfaceDestroyed()
-        session.detach()
         surfaceValid = false
 
         session.onSurfaceCreated(surface)
@@ -156,10 +147,39 @@ class SurfaceSessionTest {
         session.onSurfaceCreated(surface)
         session.onSurfaceChanged(1920, 1080)
         session.onSurfaceDestroyed()
-        session.detach()
         session.onSurfaceCreated(surface)
 
         assertEquals(listOf(1920 to 1080, 1920 to 1080), resized)
+    }
+
+    @Test
+    fun `the first available callback reports attach then size`() {
+        val session = session()
+        val surface = testSurface()
+
+        // 画面载体的可用回调自带视图尺寸：挂载后立刻下发，不必等一次额外的尺寸事件。
+        session.onSurfaceCreated(surface)
+        session.onSurfaceChanged(1280, 720)
+
+        assertEquals(listOf("attach", "output", "resize"), operations)
+        assertEquals(listOf(1280 to 720), resized)
+    }
+
+    @Test
+    fun `no detach without a surface destruction callback`() {
+        val session = session()
+        val surface = testSurface()
+        session.onSurfaceCreated(surface)
+        operations.clear()
+
+        // 窗口不可见与服务重连都不带 Surface 销毁回调：挂载与视频输出保持不动。
+        session.onEngineAvailable()
+        session.onSurfaceChanged(1920, 1080)
+
+        assertEquals(listOf("resize"), operations)
+        assertEquals(0, detachCalls)
+        assertTrue(session.available)
+        assertEquals(SurfaceSession.State.Ready, session.state)
     }
 
     @Test

@@ -88,7 +88,7 @@ import com.cc3301.ccplayer.ui.LibraryEntryAction
 import com.cc3301.ccplayer.ui.LibraryScreen
 import com.cc3301.ccplayer.ui.LibraryViewModel
 import com.cc3301.ccplayer.ui.MediaVolumeControl
-import com.cc3301.ccplayer.ui.MpvSurfaceView
+import com.cc3301.ccplayer.ui.MpvTextureView
 import com.cc3301.ccplayer.ui.NavigationViewModel
 import com.cc3301.ccplayer.ui.NotificationOpenAction
 import com.cc3301.ccplayer.ui.PendingPlayback
@@ -123,7 +123,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
+class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
     private val navigation: NavigationViewModel by viewModels {
         NavigationViewModel.factory(applicationContext, diagnostics)
@@ -167,7 +167,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 的挂载与分离由会话持有；拆挂只由 SurfaceHolder 回调触发。 */
+    /** Surface 的挂载与分离由会话持有；拆挂只由 Surface 生命周期回调触发。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
@@ -809,6 +809,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         super.onStop()
         diagnostics.log("应用退到后台")
         val binder = playback
+        // 窗口不可见不拆挂：Surface 由应用进程持有，视频输出与窗口句柄都保持原样。
+        if (binder != null && surfaceSession.hasSurface) diagnostics.log("窗口不可见但 Surface 存活，未重建视频输出")
         binder?.setAppInForeground(false)
         // 退后台立即释放常亮，不等播放状态回调。
         updateKeepScreenOn()
@@ -955,9 +957,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     }
 
     override fun onSurfaceReleased() {
-        // 分离由 SurfaceHolder 回调触发：销毁回调一到就摘掉视频输出。
+        // 只有 Surface 真正销毁才分离：窗口不可见不触发这个回调。
         surfaceSession.onSurfaceDestroyed()
-        surfaceSession.detach()
     }
 
     private fun closePlayer() {
