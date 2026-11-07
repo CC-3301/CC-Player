@@ -294,9 +294,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     binder.controller.state.collect {
                         playbackState = it
                         updateKeepScreenOn()
-                        // 片尾与失败就交还字节源：读句柄与会话引用不能等到离开播放页才放。
-                        // 只认 Ended：换目标时控制层会先发一次 Idle，那时不能关掉刚预置的探测句柄。
-                        if (it == PlaybackState.Ended) closeByteSourcesOnStop()
+                        // 片尾、失败与换目标（控制层换目标先发一次 Idle）都交还旧播放源：
+                        // 读句柄与会话引用不能等到离开播放页才放。探测预置的句柄不受这条路径影响。
+                        if (it == PlaybackState.Idle || it == PlaybackState.Ended) closeByteSourcesOnStop()
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
                         if (it != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
@@ -1107,7 +1107,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         val networkStreams = streams ?: return
         streams = null
         thread(isDaemon = true, name = "network-streams-close") {
-            runCatching { networkStreams.close() }
+            val startedAt = SystemClock.elapsedRealtime()
+            val failure = runCatching { networkStreams.close() }.exceptionOrNull()
+            val elapsedMillis = SystemClock.elapsedRealtime() - startedAt
+            // 尽力关：进程先死就交给系统断链，这里只留耗时与失败原因。
+            diagnostics.log {
+                if (failure == null) {
+                    "关闭网络流完成: $elapsedMillis ms"
+                } else {
+                    "关闭网络流失败: $elapsedMillis ms (${failure::class.java.simpleName}: ${failure.message})"
+                }
+            }
         }
     }
 

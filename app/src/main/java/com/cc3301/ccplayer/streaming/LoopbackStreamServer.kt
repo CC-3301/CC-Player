@@ -757,16 +757,20 @@ class LoopbackStreamServer(
         }
 
         /**
-         * 废弃指定的字节源：缓存里还是这一条时才关闭并清空。
-         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应。
+         * 废弃指定的字节源：缓存里还是这一条时才摘掉并关闭。
+         * 并发的迟到失败不能关掉后来重建的健康源，也不能截断它上面的响应；
+         * 关闭要发协议请求，放在锁外做，别把同一 entry 的另一条请求堵住。
          */
         fun invalidate(expired: ByteSource) {
+            var matched = false
             synchronized(lock) {
-                if (source !== expired) return
-                source = null
-                stale = false
-                runCatching { expired.close() }
+                if (source === expired) {
+                    source = null
+                    stale = false
+                    matched = true
+                }
             }
+            if (matched) runCatching { expired.close() }
         }
 
         /** 关闭这条流：只改状态并关掉当前源，不等在途建源；建好的源由建源线程自己关掉。 */

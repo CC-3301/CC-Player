@@ -131,6 +131,41 @@ class SmbSessionsTest {
     }
 
     @Test
+    fun `并发读时一条换会话不关掉另一条刚换上的句柄`() = runBlocking {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+
+        // 第二条读先拿老句柄进入，卡在读里。
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        connector.readGate = { position ->
+            if (position == 100L) {
+                entered.countDown()
+                release.await()
+            }
+        }
+        val second = thread { runCatching { source.readAt(100, ByteArray(16), 0, 16) } }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+
+        // 第一条读失败，换上新会话与新句柄。
+        connector.readFailure = MediaSourceException(MediaFailure.Unreachable, "传输中断")
+        connector.readFailureTimes = 1
+        assertTrue(source.readAt(0, ByteArray(16), 0, 16) > 0)
+        assertEquals(2, connector.allHandles.size)
+
+        // 第二条读这时才失败：只按它自己用的那条旧租约处理。
+        connector.readFailure = TransportException(TimeoutException("读超时"))
+        connector.readFailureTimes = Int.MAX_VALUE
+        release.countDown()
+        second.join(5_000)
+
+        assertEquals("刚换上的句柄不能被误关", 0, connector.allHandles[1].closeCount)
+        connector.readFailure = null
+        assertEquals("换上的句柄仍可用", 16, source.readAt(200, ByteArray(16), 0, 16))
+    }
+
+    @Test
     fun `读取的业务失败不作废会话`() = runTest {
         connector.addFile("media", "电影.mkv", payload)
         val sessions = SmbSessions(connector)
@@ -155,14 +190,24 @@ class SmbSessionsTest {
     }
 
     @Test
-    fun `列表遇停滞只作废不重发`() = runTest {
+    fun `列表遇停滞也作废会话后重连重发一次`() = runTest {
         connector.listFailure = TransportException(TimeoutException("读超时"))
         val sessions = SmbSessions(connector)
 
         runCatching { sessions.use(target) { connection -> connection.list("") } }
 
-        assertEquals("只尝试一次", 1, connector.shares.size)
-        assertEquals("这次会话已作废", 1, connector.closedShares.size)
+        assertEquals("列表没有上层重取，这里必须补一次", 2, connector.shares.size)
+        assertEquals("两条都作废", 2, connector.closedShares.size)
+    }
+
+    @Test
+    fun `会话建立失败不重发`() = runTest {
+        connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+        val sessions = SmbSessions(connector)
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("建立只尝试一次", 1, connector.connectAttempts)
     }
 
     @Test
@@ -198,6 +243,7 @@ class SmbSessionsTest {
         val failure = runCatching { sessions.probe(target) }.exceptionOrNull()
 
         assertEquals(MediaFailure.Unreachable, (failure as MediaSourceException).failure)
+        assertEquals("预算到点就放弃，不再重试一次建立", 1, connector.connectAttempts)
     }
 
     @Test

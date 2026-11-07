@@ -31,6 +31,13 @@ class FakeSmbConnector : SmbConnector {
     /** 读取句柄时抛出的异常；非空时每次读取都失败。随时可改，连接沿用最新的。 */
     var readFailure: Throwable? = null
 
+    /** 读取前按位置执行，用来把某一次读卡在中间。 */
+    var readGate: ((Long) -> Unit)? = null
+
+    /** 建连尝试次数：失败也计数。 */
+    var connectAttempts: Int = 0
+        private set
+
     /** 还要抛几次读取失败；默认一直抛，用来驱动「失败一次后重发成功」。 */
     var readFailureTimes: Int = Int.MAX_VALUE
 
@@ -97,6 +104,7 @@ class FakeSmbConnector : SmbConnector {
         username: String,
         password: String?,
     ): SmbConnection {
+        connectAttempts++
         failure?.let { throw it }
         if (connectDelayMillis > 0) delay(connectDelayMillis)
         duringConnect?.invoke()
@@ -122,6 +130,7 @@ class FakeSmbConnector : SmbConnector {
                     readFailure
                 }
             },
+            readGate = { position -> readGate?.invoke(position) },
             pingFailure = { timeoutMillis ->
                 pings++
                 lastPingTimeout = timeoutMillis
@@ -144,6 +153,7 @@ private class FakeSmbConnection(
     private val openReadFailure: () -> MediaSourceException?,
     private val listFailure: () -> Throwable?,
     private val readFailure: () -> Throwable?,
+    private val readGate: (Long) -> Unit,
     private val pingFailure: (Long) -> Throwable?,
 ) : SmbConnection {
 
@@ -164,6 +174,7 @@ private class FakeSmbConnection(
                 closeOrder += "handle"
             },
             readFailure = readFailure,
+            readGate = readGate,
         ).also {
             handles["$share/$path"] = it
             allHandles += it
@@ -186,6 +197,7 @@ class RecordingSmbHandle(
     override val maxReadSize: Int = 0,
     private val onClose: () -> Unit = {},
     private val readFailure: () -> Throwable? = { null },
+    private val readGate: (Long) -> Unit = {},
 ) : SmbReadHandle, Closeable {
 
     var closed = false
@@ -197,6 +209,7 @@ class RecordingSmbHandle(
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        readGate(position)
         readFailure()?.let { throw it }
         if (position >= bytes.size) return 0
         val count = minOf(length.toLong(), bytes.size - position).toInt()
