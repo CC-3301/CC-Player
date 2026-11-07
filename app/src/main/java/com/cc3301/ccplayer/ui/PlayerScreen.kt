@@ -171,6 +171,9 @@ private val PlayerControlBarReserve = 224.dp
 /** “更多”面板内统一的行高。 */
 private val PlayerMoreRowHeight = 48.dp
 
+/** 自定义分钟数行高：可见边框 48dp 加浮动标签悬出的 8dp。 */
+private val PlayerMoreDurationRowHeight = 56.dp
+
 /** “自动播放下一个”开关的视觉尺寸。 */
 private val PlayerMoreSwitchWidth = 44.dp
 private val PlayerMoreSwitchHeight = 26.dp
@@ -2370,7 +2373,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = PlayerMoreRowHeight)
+            .height(PlayerMoreDurationRowHeight)
             .padding(horizontal = AppSpacing.Lg),
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
         verticalAlignment = Alignment.CenterVertically,
@@ -2399,7 +2402,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
                 errorLabelColor = AppColors.Danger,
                 errorCursorColor = AppColors.Danger,
             ),
-            modifier = Modifier.size(width = 140.dp, height = PlayerMoreRowHeight),
+            modifier = Modifier.width(140.dp),
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
