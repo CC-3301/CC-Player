@@ -122,12 +122,13 @@ class LoopbackStreamServer(
     }
 
     /**
-     * 派发一次关闭。服务已关闭、线程池不接任务时当场关闭，否则句柄既不在条目里
-     * 也不在线程池里，等于漏关；这条路径不指望线程池抛异常来兜。
+     * 派发一次关闭，调用线程只派发、不做 I/O。
+     * 服务已关闭时线程池不再接任务：另起一条一次性关源线程关掉，否则句柄既不在条目里
+     * 也不在线程池里，等于漏关；这里不指望线程池抛异常来兜。
      */
     private fun dispatchClose(label: String, source: ByteSource) {
         if (closed) {
-            closeAndLog(label, source)
+            Thread({ closeAndLog(label, source) }, FINAL_CLOSE_THREAD).apply { isDaemon = true }.start()
             return
         }
         sourceCloser.execute { closeAndLog(label, source) }
@@ -832,6 +833,9 @@ class LoopbackStreamServer(
     }
 
     private companion object {
+        /** 服务已关闭后的一次性关源线程名。 */
+        const val FINAL_CLOSE_THREAD = "loopback-source-close-final"
+
         const val LOOPBACK_ADDRESS = "127.0.0.1"
         const val CONTENT_TYPE = "application/octet-stream"
         const val RANGE_HEADER = "Range"

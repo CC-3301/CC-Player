@@ -16,6 +16,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 一次准备加一次试连：测试只关心试连结果时用。 */
+private suspend fun SmbStreams.probeForTest(location: String) {
+    probe(location, prepare(location))
+}
+
 class SmbStreamsTest {
 
     private val connector = FakeSmbConnector()
@@ -71,14 +76,14 @@ class SmbStreamsTest {
         addSource(root)
         connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
 
-        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+        val exception = runCatching { streams.probeForTest(movie) }.exceptionOrNull()
 
         assertEquals(MediaFailure.Unreachable, (exception as MediaSourceException).failure)
     }
 
     @Test
     fun `起播前试连能发现不属于任何书签的位置`() = runTest {
-        val exception = runCatching { streams.probe(movie) }.exceptionOrNull()
+        val exception = runCatching { streams.probeForTest(movie) }.exceptionOrNull()
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
     }
@@ -88,7 +93,7 @@ class SmbStreamsTest {
         addSource(root)
         connector.addFile("media", "电影.mkv", payload)
 
-        streams.probe(movie)
+        streams.probeForTest(movie)
         assertArrayEquals(payload, httpRequest(streams.urlFor(movie)).body)
 
         assertEquals("会话建立只发生一次", 1, connector.shares.size)

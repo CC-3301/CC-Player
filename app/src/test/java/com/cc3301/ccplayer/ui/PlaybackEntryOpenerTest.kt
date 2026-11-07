@@ -10,6 +10,7 @@ import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.library.testVideo
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.PreparedSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -33,7 +34,13 @@ private class GatedNetworkStreams : NetworkStreams {
     /** 探测真正完成（门放行后）的时刻；用来在准备返回前插入另一次打开。 */
     var onProbed: (() -> Unit)? = null
 
-    override suspend fun probe(location: String) {
+    override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override fun discard() {
+            preparedDiscards++
+        }
+    }
+
+    override suspend fun probe(location: String, prepared: PreparedSource) {
         gate.await()
         probed += location
         failure?.let { throw it }
@@ -47,10 +54,6 @@ private class GatedNetworkStreams : NetworkStreams {
     override fun returnSource(location: String) = Unit
 
     override fun discardByteSources() = Unit
-
-    override fun discardPreparedSource() {
-        preparedDiscards++
-    }
 
     override fun close() = Unit
 }

@@ -303,6 +303,17 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
+    fun `换到同位置的另一条列表项不归还`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        val sameFile = mediaFile("ep1.mkv").copy(name = "ep1 副本.mkv")
+
+        controller.openPlaylistForTest(generation = 2, files = listOf(sameFile), current = sameFile)
+
+        assertTrue("同一位置是同一条源，不算换目标", returned.isEmpty())
+    }
+
+    @Test
     fun `本地目标不归还字节源`() = runTest {
         val returned = mutableListOf<String>()
         val controller = controller(returned)

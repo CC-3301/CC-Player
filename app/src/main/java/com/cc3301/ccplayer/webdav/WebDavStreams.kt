@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.PreparedSource
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
@@ -27,26 +28,24 @@ class WebDavStreams(
 
     private val handoff = Any()
 
-    /** 探测打开、等播放第一个请求取用的读句柄；同一时刻只有一个位置。 */
+    /** 探测打开、等播放第一个请求取用的句柄与它的所有者；同一时刻只有一个位置。 */
     private var preparedLocation: String? = null
-    private var preparedSource: ByteSource? = null
+    private var preparedSlot: Handoff? = null
 
     /** 已登记陈旧：不在这里注销句柄，等下一次探测或取用时在播放线程上关掉。 */
     private var preparedStale = false
 
-    /** 探测交接的代号：作废一次就递增，打开迟到回来时据此判断这次准备是否还作数。 */
-    private var handoffSerial = 0L
+    override fun prepare(location: String): PreparedSource = Handoff(location)
 
     /** 起播前试连一次：打开读句柄并留给播放复用；连不上或位置不属于任何书签时抛出来源失败异常。 */
-    override suspend fun probe(location: String) {
-        // 打开前就记下交接代号：入口在这里挂起期间被作废时，迟到回来的句柄不能带着新代号移交。
-        val serial = synchronized(handoff) { handoffSerial }
+    override suspend fun probe(location: String, prepared: PreparedSource) {
+        val handoff = prepared as Handoff
         val target = targetOf(location)
         urlFor(location)
         // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
         if (server.hasFreshSource(location)) return
         val handle = transport.openRead(target.url, target.username, target.password, size = 0)
-        handOff(location, handle, serial)
+        handoff.handOff(handle)
     }
 
     /** 位置对应的本机地址。 */
@@ -58,20 +57,90 @@ class WebDavStreams(
         server.discardSources()
     }
 
-    /** 归还播放源：探测预置的句柄不在这条路径上，它由 [handOff] 覆盖、[discardPreparedSource] 丢弃、[close] 收尾。 */
+    /** 归还播放源：探测预置的句柄不在这条路径上，它由 [Handoff] 的作废与 [close] 收尾。 */
     override fun returnSource(location: String) {
         server.returnSource(location)
-    }
-
-    /** 取消打开：作废这次探测交接，预置句柄派到关源线程丢掉，界面线程不碰 I/O。 */
-    override fun discardPreparedSource() {
-        synchronized(handoff) { handoffSerial++ }
-        closePrepared()
     }
 
     override fun close() {
         closePrepared()
         server.close()
+    }
+
+    /**
+     * 一次准备的所有权：登记的句柄、作废标记都归这一个对象。
+     * 作废只丢自己登记的句柄；在途打开回来时看到已作废就自己关掉；槽里换成别人那次准备的句柄不动。
+     * 关闭都派到关源线程，界面线程不碰 I/O。
+     */
+    private inner class Handoff(val location: String) : PreparedSource {
+
+        private val lock = Any()
+
+        /** 已登记、等播放取用的句柄。 */
+        private var source: ByteSource? = null
+
+        /** 本次准备已作废：之后的打开回来不再登记。 */
+        private var discarded = false
+
+        /** 播放取走这条句柄；之后这次准备不再持有它。 */
+        fun take(): ByteSource? = synchronized(lock) {
+            val current = source
+            source = null
+            discarded = true
+            current
+        }
+
+        /** 打开完成：登记到预置槽；顶替掉的旧句柄与已作废时的这条新句柄都在关源线程关闭。 */
+        fun handOff(opened: ByteSource) {
+            var superseded: ByteSource? = null
+            var replaced: Handoff? = null
+            val cancelled = synchronized(lock) {
+                if (discarded) {
+                    true
+                } else {
+                    superseded = source
+                    source = opened
+                    replaced = attach(this)
+                    false
+                }
+            }
+            if (cancelled) {
+                server.closeInBackground(opened)
+                return
+            }
+            superseded?.let { previous -> if (previous !== opened) server.closeInBackground(previous) }
+            replaced?.discard()
+        }
+
+        override fun discard() {
+            val mine = synchronized(lock) {
+                discarded = true
+                val current = source
+                source = null
+                detach(this)
+                current
+            }
+            mine?.let { current -> server.closeInBackground(current) }
+        }
+    }
+
+    /** 把这次准备登记到预置槽上，返回被顶替的那次准备；它的句柄由调用方丢弃。 */
+    private fun attach(slot: Handoff): Handoff? = synchronized(handoff) {
+        val previous = preparedSlot?.takeIf { it !== slot }
+        preparedLocation = slot.location
+        preparedSlot = slot
+        preparedStale = false
+        previous
+    }
+
+    /** 这次准备不再是槽里的那条：别人的登记不受影响。 */
+    private fun detach(slot: Handoff) {
+        synchronized(handoff) {
+            if (preparedSlot !== slot) return
+            preparedLocation = null
+            preparedSlot = null
+            preparedStale = false
+        }
     }
 
     /** 代理在自己的线程上取流，这里阻塞等打开完成；探测留好的句柄优先复用。 */
@@ -83,55 +152,32 @@ class WebDavStreams(
         NetworkReadPriority.shared.wrap(source, ReadKind.Playback)
     }
 
-    /**
-     * 交接探测打开的句柄：这次准备在打开期间被作废时，新句柄直接丢掉、不外借。
-     * 被顶替的旧句柄与新句柄的关闭都在关源线程执行。
-     */
-    private fun handOff(location: String, source: ByteSource, serial: Long) {
-        var superseded: ByteSource? = null
-        val cancelled = synchronized(handoff) {
-            if (serial != handoffSerial) {
-                true
-            } else {
-                superseded = preparedSource
-                preparedLocation = location
-                preparedSource = source
-                preparedStale = false
-                false
-            }
-        }
-        if (cancelled) {
-            server.closeInBackground(source)
-            return
-        }
-        superseded?.let { previous -> if (previous !== source) server.closeInBackground(previous) }
-    }
-
     /** 取出该位置留好的句柄；位置不符、已登记陈旧或已取过时先关掉留下的那条。 */
     private fun takePrepared(location: String): ByteSource? {
-        val matched: ByteSource?
-        val stale: ByteSource?
+        val taken: ByteSource?
+        val leftover: Handoff?
         synchronized(handoff) {
-            val usable = preparedLocation == location && !preparedStale
-            matched = if (usable) preparedSource else null
-            stale = if (usable) null else preparedSource
+            val slot = preparedSlot
+            val usable = slot != null && preparedLocation == location && !preparedStale
+            taken = if (usable) slot?.take() else null
+            leftover = if (usable) null else slot
             preparedLocation = null
-            preparedSource = null
+            preparedSlot = null
             preparedStale = false
         }
-        stale?.let { source -> server.closeInBackground(source) }
-        return matched
+        leftover?.discard()
+        return taken
     }
 
     private fun closePrepared() {
-        val source = synchronized(handoff) {
-            val previous = preparedSource
+        val slot = synchronized(handoff) {
+            val current = preparedSlot
             preparedLocation = null
-            preparedSource = null
+            preparedSlot = null
             preparedStale = false
-            previous
+            current
         }
-        source?.let { previous -> server.closeInBackground(previous) }
+        slot?.discard()
     }
 
     private suspend fun targetOf(location: String): WebDavTarget =

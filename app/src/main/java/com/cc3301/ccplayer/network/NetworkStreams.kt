@@ -12,8 +12,11 @@ import java.io.Closeable
  */
 interface NetworkStreams : Closeable {
 
-    /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
-    suspend fun probe(location: String)
+    /** 登记一次准备，返回这次准备的所有权凭证；取消打开时用它只丢弃本次准备的句柄。 */
+    fun prepare(location: String): PreparedSource
+
+    /** 起播前试连一次，结果记在 [prepared] 名下；连不上或位置不属于任何书签时抛出来源失败异常。 */
+    suspend fun probe(location: String, prepared: PreparedSource)
 
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
@@ -23,9 +26,16 @@ interface NetworkStreams : Closeable {
 
     /** 丢弃已建立的字节源；之后的请求重新建立。退到后台后底层连接可能已失效。 */
     fun discardByteSources()
+}
 
-    /** 取消打开：丢弃探测预置的读句柄，不等下一次探测或关闭。 */
-    fun discardPreparedSource()
+/**
+ * 一次探测交接的所有权凭证：由发起方在探测前登记，作废时只丢弃本次准备的句柄。
+ * 已经预置的句柄丢掉；还在途的打开回来时自己关掉；槽里换成别人那次准备的句柄就不动它。
+ */
+interface PreparedSource {
+
+    /** 本次准备作废。 */
+    fun discard()
 }
 
 /**
@@ -33,8 +43,10 @@ interface NetworkStreams : Closeable {
  */
 class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStreams>) : NetworkStreams {
 
-    override suspend fun probe(location: String) {
-        streamsFor(location).probe(location)
+    override fun prepare(location: String): PreparedSource = streamsFor(location).prepare(location)
+
+    override suspend fun probe(location: String, prepared: PreparedSource) {
+        streamsFor(location).probe(location, prepared)
     }
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
@@ -46,11 +58,6 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     /** 同一个代理登记在多个方案下时只丢弃一次。 */
     override fun discardByteSources() {
         streamsByScheme.values.toSet().forEach { streams -> streams.discardByteSources() }
-    }
-
-    /** 同一个代理登记在多个方案下时只丢一次。 */
-    override fun discardPreparedSource() {
-        streamsByScheme.values.toSet().forEach { streams -> streams.discardPreparedSource() }
     }
 
     /** 同一个代理登记在多个方案下时只关一次。 */

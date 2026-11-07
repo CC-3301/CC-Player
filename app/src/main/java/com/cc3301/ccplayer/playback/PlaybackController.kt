@@ -546,7 +546,7 @@ class PlaybackController(
         if (active) {
             beginOpenHandover()
             val decodeMode = _decodeMode.value
-            replaceSession()
+            replaceSession(current)
             _playlist.value = playlist
             this.directoryEntries = directoryEntries
             setDecodeMode(decodeMode)
@@ -623,9 +623,10 @@ class PlaybackController(
     }
 
     /** 换一个目标：落库旧进度、归还旧目标的字节源并结束旧会话状态；加载代际由 [startSession] 接着推进。 */
-    private fun replaceSession() {
+    private fun replaceSession(newTarget: MediaFile) {
         // 在发起那一刻归还：之后新目标建好的源不属于这次归还。
-        returnSourceOf(_currentIndex.value)
+        // 同一位置的另一条列表项是同一条源，不算换目标。
+        if (currentMedia()?.location != newTarget.location) returnSourceOf(_currentIndex.value)
         _playbackFailed.value = false
         active = false
         paused = false
@@ -699,8 +700,10 @@ class PlaybackController(
      * 位置相同就不归还，否则会把换上来之后仍在读的那条源摘走。
      */
     private fun returnReplacedSource(replacedIndex: Int, readingIndex: Int) {
-        val replaced = _playlist.value.getOrNull(replacedIndex) ?: return
-        val reading = _playlist.value.getOrNull(readingIndex) ?: return
+        val playlist = _playlist.value
+        val replaced = playlist.getOrNull(replacedIndex) ?: return
+        // 正在读的那条取不到时无从比较，按确实换了目标处理。
+        val reading = playlist.getOrNull(readingIndex) ?: return returnSourceOf(replacedIndex)
         if (replaced.location == reading.location) return
         returnSourceOf(replacedIndex)
     }

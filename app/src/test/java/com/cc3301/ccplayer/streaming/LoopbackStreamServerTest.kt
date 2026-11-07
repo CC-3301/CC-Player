@@ -21,6 +21,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class LoopbackStreamServerTest {
 
@@ -198,15 +199,26 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `服务关闭后归还仍把源关掉，不丢关闭`() {
-        httpRequest(url)
-        assertFalse(source.closed)
+    fun `服务关闭后仍有一条不在条目里的句柄，关闭照样落到关源线程`() {
+        val closing = CountDownLatch(1)
+        val closedOn = AtomicReference<String?>(null)
+        val prepared = object : ByteSource {
+            override val size: Long = payload.size.toLong()
 
-        // 关闭服务后线程池不再接任务：这一笔归还不能既不在条目里也不在线程池里。
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+            override fun close() {
+                closedOn.set(Thread.currentThread().name)
+                closing.countDown()
+            }
+        }
+
+        // 探测预置的句柄不在条目里，服务关闭之后才丢弃。
         server.close()
-        server.returnSource(key)
+        server.closeInBackground(prepared)
 
-        assertTrue(source.closed)
+        assertTrue("关闭没有发生", closing.await(2, TimeUnit.SECONDS))
+        assertEquals("关闭只在关源线程执行", "loopback-source-close-final", closedOn.get())
     }
 
     @Test

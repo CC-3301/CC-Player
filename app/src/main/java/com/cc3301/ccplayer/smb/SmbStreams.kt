@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.PreparedSource
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
@@ -24,8 +25,15 @@ class SmbStreams(
     private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
-    /** 起播前试连一次：会话建立或复用并做存活确认；连不上或位置不属于任何书签时抛出来源失败异常。 */
-    override suspend fun probe(location: String) {
+    /** SMB 探测只取会话，播放复用同一条会话，没有要登记的读句柄，凭证什么也不持有。 */
+    override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override fun discard() = Unit
+    }
+
+    /**
+     * 起播前试连一次：会话建立或复用并做存活确认；连不上或位置不属于任何书签时抛出来源失败异常。
+     */
+    override suspend fun probe(location: String, prepared: PreparedSource) {
         sessions.probe(targetOf(location))
     }
 
@@ -40,8 +48,6 @@ class SmbStreams(
         server.discardSources()
     }
 
-    /** SMB 探测只取会话做存活确认，不留读句柄，没有要丢的预置句柄。 */
-    override fun discardPreparedSource() = Unit
 
     override fun close() {
         server.close()

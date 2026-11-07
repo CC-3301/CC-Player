@@ -7,6 +7,7 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaSource
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
+import com.cc3301.ccplayer.network.PreparedSource
 import com.cc3301.ccplayer.network.withPlaybackLocation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -43,10 +44,10 @@ class PlaybackEntryOpener(
     /** 当前这次准备：取消时只丢它自己探测预置的读句柄，不碰后一次打开的。 */
     private var preparation: Preparation? = null
 
-    /** 一次准备用到的字节源出口；由这次准备的协程持有，避免共享槽互相覆盖。 */
+    /** 一次准备探测到的读句柄凭证；由这次准备的协程持有，作废时只丢它自己那条。 */
     private class Preparation {
         @Volatile
-        var streams: NetworkStreams? = null
+        var prepared: PreparedSource? = null
     }
 
     /**
@@ -73,7 +74,7 @@ class PlaybackEntryOpener(
             // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
             if (!entryState.isCurrent(generation)) {
                 // 这次准备作废：丢掉它自己探测预置的读句柄，不动后一次打开的。
-                current.streams?.discardPreparedSource()
+                current.prepared?.discard()
                 preparation = null
                 return@launch
             }
@@ -115,8 +116,9 @@ class PlaybackEntryOpener(
             return PreparedPlayback(entry, entries, plainEntries)
         }
         val streams = networkStreams()
-        current.streams = streams
-        streams.probe(entry.location)
+        val prepared = streams.prepare(entry.location)
+        current.prepared = prepared
+        streams.probe(entry.location, prepared)
         return PreparedPlayback(
             entry.withPlaybackLocation(streams),
             entries.map { it.withPlaybackLocation(streams) },
@@ -129,10 +131,9 @@ class PlaybackEntryOpener(
         job?.cancel()
         job = null
         val cancelled = preparation ?: return
-        cancelled.streams?.discardPreparedSource()
+        cancelled.prepared?.discard()
         preparation = null
     }
-
 
     private data class PreparedPlayback(
         val current: MediaFile,

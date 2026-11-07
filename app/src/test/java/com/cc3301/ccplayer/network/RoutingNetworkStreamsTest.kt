@@ -19,7 +19,13 @@ private class FakeNetworkStreams : NetworkStreams {
 
     var closes = 0
 
-    override suspend fun probe(location: String) {
+    override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override fun discard() {
+            preparedDiscards++
+        }
+    }
+
+    override suspend fun probe(location: String, prepared: PreparedSource) {
         probed += location
     }
 
@@ -33,13 +39,14 @@ private class FakeNetworkStreams : NetworkStreams {
         discards++
     }
 
-    override fun discardPreparedSource() {
-        preparedDiscards++
-    }
-
     override fun close() {
         closes++
     }
+}
+
+/** 一次准备加一次试连：测试只关心分派时用。 */
+private suspend fun NetworkStreams.probeForTest(location: String) {
+    probe(location, prepare(location))
 }
 
 class RoutingNetworkStreamsTest {
@@ -50,8 +57,8 @@ class RoutingNetworkStreamsTest {
 
     @Test
     fun `试连按方案分派`() = runTest {
-        streams.probe("smb://nas/media/电影.mkv")
-        streams.probe("https://dav.example.com/dav/电影.mkv")
+        streams.probeForTest("smb://nas/media/电影.mkv")
+        streams.probeForTest("https://dav.example.com/dav/电影.mkv")
 
         assertEquals(listOf("smb://nas/media/电影.mkv"), smb.probed)
         assertEquals(listOf("https://dav.example.com/dav/电影.mkv"), webDav.probed)
@@ -70,7 +77,7 @@ class RoutingNetworkStreamsTest {
 
     @Test
     fun `未知方案试连给出找不到原因`() = runTest {
-        val exception = runCatching { streams.probe("ftp://nas/media/电影.mkv") }.exceptionOrNull()
+        val exception = runCatching { streams.probeForTest("ftp://nas/media/电影.mkv") }.exceptionOrNull()
 
         assertEquals(MediaFailure.NotFound, (exception as MediaSourceException).failure)
     }
@@ -92,11 +99,12 @@ class RoutingNetworkStreamsTest {
     }
 
     @Test
-    fun `丢弃探测预置句柄时同一个代理只丢一次`() {
-        streams.discardPreparedSource()
+    fun `试连的凭证按方案分派`() {
+        val prepared = streams.prepare("smb://nas/media/电影.mkv")
+        prepared.discard()
 
-        assertEquals(1, smb.preparedDiscards)
-        assertEquals(1, webDav.preparedDiscards)
+        assertEquals("凭证只释放自己那条", 1, smb.preparedDiscards)
+        assertEquals(0, webDav.preparedDiscards)
     }
 
     @Test
