@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.library
 
+import com.cc3301.ccplayer.diagnostics.Diagnostics
+import com.cc3301.ccplayer.diagnostics.MemoryDiagnosticsSink
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
@@ -20,6 +22,7 @@ import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -1950,6 +1953,73 @@ class CachedMediaPreviewSourceTest {
         assertEquals("打开超时后下一次准备新建连", 2, late.connections)
     }
 
+    @Test
+    fun `等预打开名额超过上限按失败收尾`() = runTest {
+        val extractor = CloseHoldingExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val holders = (0 until 4).map { index ->
+            async { bounded.visiblePreview(network("占位$index.mkv"), index) }
+        }
+        runCurrent()
+        assertEquals("四个名额全部占住", 4, extractor.prepares)
+
+        val later = async { bounded.visiblePreview(network("后来.mkv"), 9) }
+        advanceTimeBy(20_000)
+        runCurrent()
+
+        assertTrue("等名额超时按失败收尾", later.await().retryable)
+        assertTrue("超时的请求没打开句柄", extractor.started.none { it.contains("后来.mkv") })
+
+        extractor.closeGate.complete(Unit)
+        runCurrent()
+        holders.forEach { it.cancel() }
+    }
+
+    @Test
+    fun `等解码许可超过上限按失败收尾`() = runTest {
+        val extractor = SlowFileExtractor(slowDelayMillis = 60_000)
+        val bounded = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        val holder = async { bounded.visiblePreview(local("慢1.mkv"), 0) }
+        runCurrent()
+        assertEquals(1, extractor.requests.size)
+
+        val waiting = async { bounded.visiblePreview(local("等许可.mkv"), 1) }
+        advanceTimeBy(20_000)
+        runCurrent()
+
+        assertTrue("等许可超时按失败收尾", waiting.await().retryable)
+        assertEquals("超时的请求没有进入抽取", 1, extractor.requests.size)
+
+        holder.cancel()
+    }
+
+    @Test
+    fun `取消原因写进日志`() = runTest {
+        val sink = MemoryDiagnosticsSink()
+        val source = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+            diagnostics = Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true },
+        )
+        extractor.imageDelayMillis = 60_000
+
+        val request = async { source.visiblePreview(network("取消.mkv"), 0) }
+        runCurrent()
+        request.cancel(CancellationException("离屏"))
+        runCurrent()
+
+        val text = sink.lines.joinToString("\n")
+        assertTrue("应记取消原因：$text", text.contains("缩略图取消: 取消.mkv | 原因: 离屏"))
+    }
+
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =
         MediaFile(name = name, location = "root/$name", size = size, lastModified = lastModified)
 
@@ -2133,7 +2203,7 @@ private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? =
         extractNetworkFrame(
-            durationMillis = 90_000,
+            positions = networkFrameCandidates(90_000L),
             decode = {
                 decodes++
                 byteArrayOf(1)
@@ -2169,6 +2239,27 @@ private class PreparedSlotExtractor : MediaPreviewExtractor {
                 byteArrayOf(1)
             },
             closeBlock = { closed += file.location },
+        )
+    }
+}
+
+/** 句柄打开并解码完成后卡在关闭上，用来占住预打开名额。 */
+private class CloseHoldingExtractor : MediaPreviewExtractor {
+
+    val closeGate = CompletableDeferred<Unit>()
+    val started = mutableListOf<String>()
+    var prepares = 0
+
+    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
+
+    override suspend fun durationMillis(file: MediaFile): Long? = null
+
+    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
+        prepares++
+        started += file.location
+        return NetworkPreviewPreparation(
+            decodeBlock = { byteArrayOf(1) },
+            closeBlock = { closeGate.await() },
         )
     }
 }

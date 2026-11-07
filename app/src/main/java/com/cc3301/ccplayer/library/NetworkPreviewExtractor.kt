@@ -17,14 +17,14 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
- * 网络预览解码接缝：真实现用 MediaMetadataRetriever 读取字节范围，测试用假实现。
+ * 网络预览解码接缝：真实现用 Media3 抽帧（视频）与系统内嵌封面（音频），测试用假实现。
  *
  * 实现不得关闭 [source]；句柄统一由 [NetworkPreviewPreparation] 关闭。
  */
 fun interface NetworkPreviewDecoder {
 
     /** 从 [source] 取图；没有可用图时返回 null。 */
-    fun imageBytes(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray?
+    suspend fun imageBytes(source: ByteSource, file: MediaFile, targetWidth: Int): ByteArray?
 }
 
 /**
@@ -107,7 +107,7 @@ class NetworkPreviewExtractor(
         var readAheadHandle: ByteSource? = null
         try {
             return withContext(Dispatchers.IO) {
-                val kind = mediaKindOf(file.name) ?: return@withContext null
+                if (mediaKindOf(file.name) == null) return@withContext null
                 val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
                     waitedMillis.addAndGet(millis)
                 }
@@ -122,11 +122,11 @@ class NetworkPreviewExtractor(
                 window = previewWindow
                 previewWindow.startMetadataReadAhead()
                 NetworkPreviewPreparation(
-                    // 系统抽帧器在调用线程上回调读字节：解码固定在 `Dispatchers.IO` 上发起，不跟随调用方所在线程。
+                    // 解码入口不跟随调用方所在线程：音频解码固定在 `Dispatchers.IO` 发起，视频抽帧由 Media3 的加载线程读字节。
                     decodeBlock = { targetWidth ->
                         withContext(Dispatchers.IO) {
                             try {
-                                decode(previewWindow, kind, targetWidth)
+                                decode(previewWindow, file, targetWidth)
                             } finally {
                                 // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
                                 diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
@@ -185,13 +185,13 @@ class NetworkPreviewExtractor(
      * 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。
      * 解码侧的异常先收在子协程里：关闭句柄会让阻塞读抛错，取消收尾时按取消上报，不当成抽取失败。
      */
-    private suspend fun decode(window: PreviewByteWindow, kind: MediaKind, targetWidth: Int): ByteArray? =
+    private suspend fun decode(window: PreviewByteWindow, file: MediaFile, targetWidth: Int): ByteArray? =
         coroutineScope {
             var image: ByteArray? = null
             var failure: Throwable? = null
             val decoding = async {
                 try {
-                    image = decoder.imageBytes(window, kind, targetWidth)
+                    image = decoder.imageBytes(window, file, targetWidth)
                 } catch (error: Throwable) {
                     failure = error
                 }

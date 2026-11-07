@@ -3,7 +3,7 @@ package com.cc3301.ccplayer.library
 import java.io.IOException
 
 /** 抽帧策略版本；策略变化时缓存键随之变化。 */
-internal const val THUMBNAIL_POLICY_VERSION = 3
+internal const val THUMBNAIL_POLICY_VERSION = 4
 
 /** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
 internal const val THUMBNAIL_TARGET_WIDTH = 512
@@ -40,6 +40,9 @@ internal const val MISSING_MODIFIED_VALIDITY_MILLIS = 24 * 60 * 60 * 1000L
 
 /** 纯色判定：采样亮度的最大值与最小值之差小于该值视为纯色。 */
 internal const val SOLID_LUMINANCE_RANGE = 16
+
+/** 近黑判定：采样亮度的平均值低于该值视为近黑帧，不算可用封面。 */
+internal const val DARK_LUMINANCE = 24
 
 /** 一帧的抽取位置；[fallback] 表示全部不合格时用这一帧兜底。 */
 internal data class FramePosition(val micros: Long, val fallback: Boolean)
@@ -93,15 +96,16 @@ internal fun networkFrameCandidates(durationMillis: Long?): List<Long> =
  * 某个位置解不出图说明这一帧抽不出来，换位置不改变结果，直接按抽取失败收尾。
  * 不合格帧在换下一个候选前由 [release] 回收。
  */
-internal fun <T> extractNetworkFrame(
-    durationMillis: Long?,
-    decode: (micros: Long) -> T?,
+internal suspend fun <T> extractNetworkFrame(
+    positions: List<Long>,
+    decode: suspend (micros: Long) -> T?,
     isSolid: (T) -> Boolean,
     release: (T) -> Unit = {},
+    isDark: (T) -> Boolean = { false },
 ): T? {
-    for (micros in networkFrameCandidates(durationMillis)) {
+    for (micros in positions) {
         val frame = decode(micros) ?: return null
-        if (!isSolid(frame)) return frame
+        if (!isSolid(frame) && !isDark(frame)) return frame
         release(frame)
     }
     return null
@@ -114,19 +118,27 @@ internal fun <T> decodedFrames(
 ): List<Pair<FramePosition, T>> =
     positions.mapNotNull { position -> decode(position)?.let { frame -> position to frame } }
 
-/** 优先返回第一帧非纯色帧；全部纯色时退回兜底帧；兜底帧缺失时用任一已解帧。 */
-internal fun <T> chooseFrame(frames: List<Pair<FramePosition, T>>, isSolid: (T) -> Boolean): T? =
-    frames.firstOrNull { (_, frame) -> !isSolid(frame) }?.second
-        ?: frames.firstOrNull { (position, _) -> position.fallback }?.second
-        ?: frames.firstOrNull()?.second
+/**
+ * 优先返回第一帧既非纯色也非近黑的帧；全部不合格时退回兜底帧，但近黑帧始终不算可用封面。
+ * 兜底帧缺失或本身近黑时，退回任一非近黑帧。
+ */
+internal fun <T> chooseFrame(
+    frames: List<Pair<FramePosition, T>>,
+    isSolid: (T) -> Boolean,
+    isDark: (T) -> Boolean = { false },
+): T? =
+    frames.firstOrNull { (_, frame) -> !isSolid(frame) && !isDark(frame) }?.second
+        ?: frames.firstOrNull { (position, frame) -> position.fallback && !isDark(frame) }?.second
+        ?: frames.firstOrNull { (_, frame) -> !isDark(frame) }?.second
 
 /** 候选帧全部解码失败属于抽取失败，不能落成“确定没有图”。 */
 internal fun <T> requireDecodedFrame(
     frames: List<Pair<FramePosition, T>>,
     isSolid: (T) -> Boolean,
+    isDark: (T) -> Boolean = { false },
 ): T {
     if (frames.isEmpty()) throw IOException("没有解出可用的视频帧")
-    return chooseFrame(frames, isSolid) ?: throw IOException("没有解出可用的视频帧")
+    return chooseFrame(frames, isSolid, isDark) ?: throw IOException("没有解出可用的视频帧")
 }
 
 /** 帧压缩失败同样属于抽取失败。 */
@@ -146,6 +158,16 @@ internal fun isSolidLuminance(luminances: IntArray): Boolean {
     if (luminances.isEmpty()) return true
     return luminances.max() - luminances.min() < SOLID_LUMINANCE_RANGE
 }
+
+/** 采样亮度判近黑：平均值低于阈值即视为近黑帧。 */
+internal fun isDarkLuminance(luminances: IntArray): Boolean {
+    if (luminances.isEmpty()) return true
+    return luminances.average() < DARK_LUMINANCE
+}
+
+/** 封面可用性：纯色与近黑帧都不算可用封面。 */
+internal fun isUnusableLuminance(luminances: IntArray): Boolean =
+    isSolidLuminance(luminances) || isDarkLuminance(luminances)
 
 /** 策略目标宽度的有效值；低于下限时按 320 输出，缓存键也必须用这个值。 */
 internal fun effectiveTargetWidth(targetWidth: Int): Int =

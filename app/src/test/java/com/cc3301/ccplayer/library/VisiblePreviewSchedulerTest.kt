@@ -87,6 +87,25 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
+    fun `离屏取消带上原因，回屏后重新下发`() = runTest {
+        val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        val request = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        assertEquals(listOf(0), source.started)
+
+        scheduler.update(entries, firstVisible = 5, lastVisible = 5, rowSize = 1)
+        runCurrent()
+        assertEquals("离屏取消要带原因", listOf("离屏"), source.cancelReasons)
+
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+        runCurrent()
+        assertEquals("回屏后重新入队", listOf(0, 0), source.started)
+        request.cancel()
+    }
+
+    @Test
     fun `切换视图重置后仍能重新下发`() = runTest {
         val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
         val scheduler = scheduler(source, backgroundScope)
@@ -647,6 +666,7 @@ private class SchedulerRecordingSource : MediaPreviewSource {
 
     val started = mutableListOf<Int>()
     val cancelled = mutableListOf<Int>()
+    val cancelReasons = mutableListOf<String>()
     val windows = ConcurrentHashMap<String, Set<String>>()
 
     var gate: CompletableDeferred<Unit>? = null
@@ -661,6 +681,10 @@ private class SchedulerRecordingSource : MediaPreviewSource {
             gate?.await()
         } catch (cancellation: CancellationException) {
             cancelled += index
+            cancelReasons += generateSequence<Throwable>(cancellation) { error -> error.cause }
+                .mapNotNull { error -> error.message }
+                .firstOrNull { message -> message == "离屏" || message == "列表重建" || message == "换源" || message == "订阅取消" }
+                ?: "取消"
             throw cancellation
         }
         // 用非空时长区分“已出结果”和占位图。

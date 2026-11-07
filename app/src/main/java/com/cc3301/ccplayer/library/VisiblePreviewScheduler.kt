@@ -119,7 +119,7 @@ class VisiblePreviewScheduler(
             closed = false
             visibleLocations = emptySet()
             windowKnown = true
-            pauseAllLocked()
+            pauseAllLocked(CANCEL_REASON_RESET)
         }
         prefetcher.cancelAll()
         wakeRetryWaiters()
@@ -145,7 +145,7 @@ class VisiblePreviewScheduler(
         }
         // 先快照并作废 attempt 与重试计时，再在锁外取消：完成回调只会校验令牌后返回。
         pending.forEach { paused ->
-            paused.attempt?.cancel()
+            paused.attempt?.cancel(CancellationException(CANCEL_REASON_SOURCE_CHANGE))
             paused.timer?.cancel()
             val request = paused.request
             if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
@@ -157,22 +157,28 @@ class VisiblePreviewScheduler(
     private fun pauseOutsideLocked(visible: Set<String>) {
         requests.values
             .filter { request -> request.file.location !in visible }
-            .forEach(::pauseLocked)
+            .forEach { request -> pauseLocked(request, CANCEL_REASON_OFFSCREEN) }
     }
 
-    private fun pauseAllLocked() {
-        requests.values.forEach(::pauseLocked)
+    private fun pauseAllLocked(reason: String) {
+        requests.values.forEach { request -> pauseLocked(request, reason) }
     }
 
     /**
      * 作废当前 attempt 并取消 Job；离屏也不再跑重试计时，但保留待重试标记。
      * 再次可见时重新按当前间隔计时，不会回到可见就 0 秒重试。
      */
-    private fun pauseLocked(request: Request) {
-        invalidateAttemptLocked(request)?.cancel()
+    private fun pauseLocked(request: Request, reason: String) {
+        cancelAttemptLocked(request, reason)
         request.retryTimer?.cancel()
         request.retryTimer = null
     }
+
+    /** 取消当前 attempt 并带上原因：原因会随取消异常传到抽取层写进日志。 */
+    private fun cancelAttemptLocked(request: Request, reason: String): Job? =
+        invalidateAttemptLocked(request)?.also { job ->
+            job.cancel(CancellationException(reason))
+        }
 
     /** 作废当前 attempt，返回被取消的 Job；回调随后会因令牌或 Job 身份不符而退出。 */
     private fun invalidateAttemptLocked(request: Request): Job? {
@@ -184,7 +190,7 @@ class VisiblePreviewScheduler(
 
     private fun removeRequestLocked(request: Request, cancelDeferred: Boolean) {
         if (requests[request.file.location] === request) requests.remove(request.file.location)
-        invalidateAttemptLocked(request)?.cancel()
+        cancelAttemptLocked(request, CANCEL_REASON_SUBSCRIPTION)
         request.retryTimer?.cancel()
         request.retryTimer = null
         request.retryPending = false
@@ -422,5 +428,11 @@ class VisiblePreviewScheduler(
 
         /** 单个条目的失败重试上限。 */
         const val VISIBLE_RETRY_MAX_ATTEMPTS = 5
+
+        /** 取消原因；离屏与重建保留订阅，再次可见时重新入队。 */
+        const val CANCEL_REASON_OFFSCREEN = "离屏"
+        const val CANCEL_REASON_RESET = "列表重建"
+        const val CANCEL_REASON_SOURCE_CHANGE = "换源"
+        const val CANCEL_REASON_SUBSCRIPTION = "订阅取消"
     }
 }

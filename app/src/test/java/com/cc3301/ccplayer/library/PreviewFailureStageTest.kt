@@ -2,7 +2,10 @@ package com.cc3301.ccplayer.library
 
 import java.io.FileNotFoundException
 import java.io.IOException
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.fail
 import org.junit.Test
 
 /** 抽取失败按阶段分类：打开数据源 / 读取 / 解码 / 超时。 */
@@ -34,6 +37,19 @@ class PreviewFailureStageTest {
         val failure = PreviewStageException(PreviewFailureStage.Timeout, "超时")
 
         assertEquals("超时", previewFailureStage(failure))
+    }
+
+    @Test
+    fun `已标记的超时阶段不被改成解码`() = runTest {
+        val timeout = PreviewStageException(PreviewFailureStage.Timeout, "视频抽帧超时")
+
+        try {
+            decodeStage<String>("视频抽帧失败") { throw timeout }
+            fail("应抛出阶段异常")
+        } catch (failure: PreviewStageException) {
+            assertSame("阶段异常应原样透传", timeout, failure)
+            assertEquals("超时", previewFailureStage(failure))
+        }
     }
 
     @Test

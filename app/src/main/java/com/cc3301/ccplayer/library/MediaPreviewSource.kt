@@ -21,7 +21,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -169,8 +168,9 @@ data class ThumbnailPolicy(
  * 媒体预览：先在 [cache] 里找图，没有就让 [extractor] 抽取并落盘。
  *
  * 缓存键包含位置、大小、修改时间、策略版本与目标宽度；修改时间缺失时退化为大小与有效期。
- * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。底层取帧是阻塞的原生调用且取消不掉，
- * 同一时刻只跑一路；许可按列表索引发给排队的可见请求，许可空闲也不让后来者越过排队者。
+ * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。视频抽帧由 Media3 执行（组件内部也串行）；
+ * 超时或取消只停止等待、不取消在途任务，同一时刻只跑一路；许可按列表索引发给排队的可见请求，
+ * 许可空闲也不让后来者越过排队者。
  * 网络读取会话名额（从开始打开占到解码结束）同样按索引优先给可见项，预取占不到全部名额；
  * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
@@ -361,39 +361,55 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): LoadedPreview {
-        val extracted = permits.withPermit(priority) {
-            if (mayExtract(file.location, priority)) {
-                extractor.imageAndDuration(file, targetWidth)
-            } else {
-                null
+        // 等解码许可有上限：前一项卡住时不能无限期停在这一段。
+        val requestedAt = monotonicClockMillis()
+        val acquired = permits.acquireOrNull(priority, DECODE_PERMIT_TIMEOUT_MILLIS)
+        val waited = monotonicClockMillis() - requestedAt
+        if (!acquired) {
+            diagnostics.log { "本地封面: ${file.name} 等解码许可超时 ${waited}ms" }
+            return LoadedPreview(image = null, durationMillis = null, failed = true)
+        }
+        diagnostics.log { "本地封面: ${file.name} 等解码许可 ${waited}ms" }
+        try {
+            if (!mayExtract(file.location, priority)) {
+                return LoadedPreview(image = null, durationMillis = null, abandoned = true)
             }
-        } ?: return LoadedPreview(image = null, durationMillis = null, abandoned = true)
-        // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
-        currentCoroutineContext().ensureActive()
-        val durationKnown = extracted.duration != PreviewDuration.Failed
-        val durationMillis = extracted.durationMillis
-        val image = extracted.imageBytes?.let { bytes ->
-            cache.save(
-                location = key,
-                bytes = bytes,
-                durationMillis = durationMillis,
-                durationKnown = durationKnown,
-            )
+            diagnostics.log { "本地封面: ${file.name} 开始抽帧" }
+            val started = monotonicClockMillis()
+            val extracted = try {
+                extractor.imageAndDuration(file, targetWidth)
+            } finally {
+                diagnostics.log { "本地封面: ${file.name} 抽帧完成 ${monotonicClockMillis() - started}ms" }
+            }
+            // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
+            currentCoroutineContext().ensureActive()
+            val durationKnown = extracted.duration != PreviewDuration.Failed
+            val durationMillis = extracted.durationMillis
+            val image = extracted.imageBytes?.let { bytes ->
+                cache.save(
+                    location = key,
+                    bytes = bytes,
+                    durationMillis = durationMillis,
+                    durationKnown = durationKnown,
+                )
+            }
+            if (image == null) {
+                // 只有解码成功但没有图才写无图缓存；抽取失败不写。
+                diagnostics.log { "封面无图: ${file.name}" }
+                // 无图条目只记时长；时长读取失败时记“未知”，下次命中再补读。
+                cache.saveWithoutImage(
+                    location = key,
+                    durationMillis = durationMillis,
+                    durationKnown = durationKnown,
+                )
+                rememberNoImage(key)
+            } else {
+                forgetNoImage(key)
+            }
+            return LoadedPreview(image, durationMillis)
+        } finally {
+            permits.release()
         }
-        if (image == null) {
-            // 只有解码成功但没有图才写无图缓存；抽取失败不写。
-            diagnostics.log { "封面无图: ${file.name}" }
-            // 无图条目只记时长；时长读取失败时记“未知”，下次命中再补读。
-            cache.saveWithoutImage(
-                location = key,
-                durationMillis = durationMillis,
-                durationKnown = durationKnown,
-            )
-            rememberNoImage(key)
-        } else {
-            forgetNoImage(key)
-        }
-        return LoadedPreview(image, durationMillis)
     }
 
     /**
@@ -408,7 +424,8 @@ class CachedMediaPreviewSource(
         val now = monotonicClockMillis()
         val previous = durationFailures[key]
         if (previous != null && now < previous.retryAtMillis) return PreviewDuration.Failed
-        val result = permits.withPermit(PreviewPriority.Duration) {
+        if (!permits.acquireOrNull(PreviewPriority.Duration, null)) return null
+        val result = (try {
             if (!mayExtract(file.location, priority)) {
                 null
             } else {
@@ -423,7 +440,9 @@ class CachedMediaPreviewSource(
                     PreviewDuration.Failed
                 }
             }
-        } ?: return null
+        } finally {
+            permits.release()
+        }) ?: return null
         if (result == PreviewDuration.Failed) {
             // 预取失败不写退避：坏文件不会因此长期占住唯一许可。
             if (priority.isVisible) {
@@ -483,7 +502,20 @@ class CachedMediaPreviewSource(
                 if (!mayExtract(file.location, priority)) {
                     LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
-                    preparedSlots.withPermit(priority) { prepareAndDecode(file, key, targetWidth, priority) }
+                    val started = monotonicClockMillis()
+                    val acquired = preparedSlots.acquireOrNull(priority, PREPARED_SLOT_TIMEOUT_MILLIS)
+                    val waited = monotonicClockMillis() - started
+                    if (!acquired) {
+                        diagnostics.log { "网络封面: ${file.name} 等预打开名额超时 ${waited}ms" }
+                        LoadedPreview(image = null, durationMillis = null, failed = true)
+                    } else {
+                        try {
+                            diagnostics.log { "网络封面: ${file.name} 等预打开名额 ${waited}ms" }
+                            prepareAndDecode(file, key, targetWidth, priority)
+                        } finally {
+                            preparedSlots.release()
+                        }
+                    }
                 }
             },
         )
@@ -518,33 +550,51 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): LoadedPreview {
-        // 没有可用的读取会话时直接按无图收尾，不再另开一条完整句柄取图。
-        val prepared = openOutsideRequest(file, priority)
-            ?: return LoadedPreview(image = null, durationMillis = null)
+        // 打开数据源有上限：打开是取消不掉的阻塞调用，超时只停止等待，名额随即归还。
+        val openStarted = monotonicClockMillis()
+        val prepared = (try {
+            openOutsideRequest(file, priority)
+        } finally {
+            diagnostics.log { "网络封面: ${file.name} 打开数据源 ${monotonicClockMillis() - openStarted}ms" }
+        }) ?: return LoadedPreview(image = null, durationMillis = null)
         var abandoned = false
         try {
-            // 排队时间不计入解码超时；阻塞中的网络读由各自的传输层超时兜底。
+            // 等解码许可有上限：许可被前一项占着时，不能无限期停在这一段。
             val requestedAt = monotonicClockMillis()
-            var queuedMillis = 0L
-            val attempt = permits.withPermit(priority) {
-                queuedMillis = monotonicClockMillis() - requestedAt
+            val acquired = permits.acquireOrNull(priority, DECODE_PERMIT_TIMEOUT_MILLIS)
+            val queuedMillis = monotonicClockMillis() - requestedAt
+            if (!acquired) {
+                diagnostics.log { "网络封面: ${file.name} 等解码许可超时 ${queuedMillis}ms" }
+                throw PreviewStageException(PreviewFailureStage.Timeout, "等解码许可超时")
+            }
+            diagnostics.log { "网络封面: ${file.name} 等解码许可 ${queuedMillis}ms" }
+            val attempt = try {
                 if (!mayExtract(file.location, priority)) {
                     null
                 } else {
+                    diagnostics.log { "网络封面: ${file.name} 开始抽帧" }
                     var decoded: ByteArray? = null
-                    val done = withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
-                        decoded = prepared.decode(targetWidth)
-                        true
-                    } ?: false
+                    val decodeStarted = monotonicClockMillis()
+                    val done = try {
+                        withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                            decoded = prepared.decode(targetWidth)
+                            true
+                        } ?: false
+                    } finally {
+                        // 取消路径也要留下完成耗时，才能和开始行成对。
+                        diagnostics.log {
+                            "网络封面: ${file.name} 抽帧完成 ${monotonicClockMillis() - decodeStarted}ms"
+                        }
+                    }
                     done to decoded
                 }
+            } finally {
+                permits.release()
             }
-            val total = monotonicClockMillis() - requestedAt
             if (attempt == null) {
                 // 已离开可见与预取范围：不抽取、不落盘、不计失败。
                 return LoadedPreview(image = null, durationMillis = null, abandoned = true)
             }
-            diagnostics.log { "网络封面: ${file.name} 取许可等待 ${queuedMillis}ms 解码 ${total - queuedMillis}ms" }
             // 解码阻塞期间无法中断；返回后若已取消，丢弃结果，避免离屏请求落盘。
             currentCoroutineContext().ensureActive()
             val (completed, bytes) = attempt
@@ -729,7 +779,7 @@ class CachedMediaPreviewSource(
     ): LoadedPreview = try {
         load()
     } catch (cancellation: CancellationException) {
-        diagnostics.log { "缩略图取消: ${file.name}" }
+        diagnostics.log { "缩略图取消: ${file.name} | 原因: ${cancellation.cancelReason()}" }
         throw cancellation
     } catch (failure: Exception) {
         val stage = previewFailureStage(failure)
@@ -789,6 +839,12 @@ class CachedMediaPreviewSource(
          * 打开超时只放弃等待并归还名额，阻塞中的原生打开留在后台，由传输层超时收尾。
          */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
+
+        /** 等预打开名额的上限；名额被占满时不能无限期排队。 */
+        private const val PREPARED_SLOT_TIMEOUT_MILLIS = 20_000L
+
+        /** 等解码许可的上限；许可被前一项占着时不能无限期排队。 */
+        private const val DECODE_PERMIT_TIMEOUT_MILLIS = 20_000L
 
         /**
          * 同时处于「开始打开到解码结束」状态的网络条目上限；一条目占两条句柄。
@@ -916,13 +972,21 @@ private class PrioritySemaphore(
     private var available = capacity
     private val waiters = ArrayDeque<Waiter>()
 
-    suspend fun <T> withPermit(priority: PreviewPriority, block: suspend () -> T): T {
-        acquire(priority)
-        try {
-            return block()
-        } finally {
-            withContext(NonCancellable) { release() }
+    /** 取得许可；[timeoutMillis] 非空时等待有上限，超时返回 false。取消会退出队列。 */
+    suspend fun acquireOrNull(priority: PreviewPriority, timeoutMillis: Long?): Boolean {
+        if (timeoutMillis == null) {
+            acquire(priority)
+            return true
         }
+        return withTimeoutOrNull(timeoutMillis) {
+            acquire(priority)
+            true
+        } ?: false
+    }
+
+    /** 归还许可；取消路径也要归还，固定走 NonCancellable。 */
+    suspend fun release() {
+        withContext(NonCancellable) { releaseLocked() }
     }
 
     private suspend fun acquire(priority: PreviewPriority) {
@@ -962,7 +1026,7 @@ private class PrioritySemaphore(
         return capacity - available < prefetchCapacity
     }
 
-    private suspend fun release() {
+    private suspend fun releaseLocked() {
         val next = lock.withLock {
             available++
             val index = waiters.indices
@@ -982,6 +1046,33 @@ private class PrioritySemaphore(
         val priority: PreviewPriority,
         val granted: CompletableDeferred<Unit>,
     )
+}
+
+/** 取消原因的通用消息；这些不是调度器写入的具体原因，继续沿原因链找。 */
+private val GENERIC_CANCEL_MESSAGES = setOf(
+    "Job was cancelled",
+    "Job was cancelled.",
+    "Parent job is Cancelling",
+    "Parent job is Cancelling.",
+)
+
+/** 调度器写入的取消原因；优先于异常链上的通用消息。 */
+private val PREVIEW_CANCEL_REASONS = setOf("离屏", "列表重建", "换源", "订阅取消", "可见请求优先")
+
+/** 取消原因：沿异常链优先找调度器写入的原因，再取第一条具体消息；都没有时按「取消」记录。 */
+internal fun Throwable.cancelReason(): String {
+    var fallback: String? = null
+    var current: Throwable? = this
+    val seen = HashSet<Throwable>()
+    while (current != null && seen.add(current)) {
+        val message = current.message
+        if (message != null && message in PREVIEW_CANCEL_REASONS) return message
+        if (fallback == null && !message.isNullOrBlank() && message !in GENERIC_CANCEL_MESSAGES) {
+            fallback = message
+        }
+        current = current.cause
+    }
+    return fallback ?: "取消"
 }
 
 /** 追异常原因的最大层数。 */
