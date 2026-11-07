@@ -171,6 +171,15 @@ private val PlayerControlBarReserve = 224.dp
 /** “更多”面板内统一的行高。 */
 private val PlayerMoreRowHeight = 48.dp
 
+/** “自动播放下一个”开关的视觉尺寸。 */
+private val PlayerMoreSwitchWidth = 44.dp
+private val PlayerMoreSwitchHeight = 26.dp
+
+/** 开关滑块的直径与落在轨道两端的偏移。 */
+private val PlayerMoreSwitchThumbSize = 20.dp
+private val PlayerMoreSwitchThumbChecked = 21.dp
+private val PlayerMoreSwitchThumbUnchecked = 3.dp
+
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
     0f to Color.Black.copy(alpha = 0.62f),
@@ -1706,8 +1715,11 @@ private fun PlayerIconBar(
     }
 }
 
+/** 播放页禁用态的统一透明度。 */
+private const val PlayerDisabledAlpha = 0.45f
+
 /** 禁用控件的画布色。 */
-private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
+private val DisabledToolColor = AppColors.Faint.copy(alpha = PlayerDisabledAlpha)
 
 /** 播放页统一按压反馈的白色涟漪：按下约 20% 白，键盘焦点约 12% 白，悬停与拖动不显示背景。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2216,7 +2228,7 @@ private fun MoreChoiceRow(
                     if (enabled) Modifier.playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
                     else Modifier,
                 )
-                .height(PlayerMoreRowHeight)
+                .heightIn(min = PlayerMoreRowHeight)
                 .semantics { stateDescription = expandedState }
                 .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
@@ -2264,7 +2276,7 @@ private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onC
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.MorePanelRow),
                 )
-                .height(PlayerMoreRowHeight)
+                .heightIn(min = PlayerMoreRowHeight)
                 .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2309,7 +2321,7 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.AutoPlayNextRow),
                 )
-                .height(PlayerMoreRowHeight)
+                .heightIn(min = PlayerMoreRowHeight)
                 .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
@@ -2325,17 +2337,17 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
     }
 }
 
-/** 自动连播开关：固定 44×26，右边界与下拉箭头共用同一条基准线。 */
+/** 开关：固定 44×26，右边界与行尾箭头共用同一基准线。 */
 @Composable
 private fun MoreSwitch(checked: Boolean, enabled: Boolean) {
     val thumbOffset by animateDpAsState(
-        targetValue = if (checked) 21.dp else 3.dp,
+        targetValue = if (checked) PlayerMoreSwitchThumbChecked else PlayerMoreSwitchThumbUnchecked,
         label = "player-switch-thumb",
     )
     Box(
         modifier = Modifier
-            .size(width = 44.dp, height = 26.dp)
-            .alpha(if (enabled) 1f else 0.38f)
+            .size(width = PlayerMoreSwitchWidth, height = PlayerMoreSwitchHeight)
+            .alpha(if (enabled) 1f else PlayerDisabledAlpha)
             .clip(CircleShape)
             .background(if (checked) AppColors.AccentDeep else AppColors.SurfaceHighest),
         contentAlignment = Alignment.CenterStart,
@@ -2343,7 +2355,7 @@ private fun MoreSwitch(checked: Boolean, enabled: Boolean) {
         Box(
             modifier = Modifier
                 .offset { IntOffset(x = thumbOffset.roundToPx(), y = 0) }
-                .size(20.dp)
+                .size(PlayerMoreSwitchThumbSize)
                 .clip(CircleShape)
                 .background(if (checked) Color.White else AppColors.SwitchThumb),
         )
@@ -2358,7 +2370,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(PlayerMoreRowHeight)
+            .heightIn(min = PlayerMoreRowHeight)
             .padding(horizontal = AppSpacing.Lg),
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
         verticalAlignment = Alignment.CenterVertically,
@@ -2371,6 +2383,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             },
             singleLine = true,
             enabled = enabled,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(textAlign = TextAlign.Center),
             label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
             isError = customRejected,
             shape = RoundedCornerShape(AppRadius.Sm),
@@ -2386,7 +2399,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
                 errorLabelColor = AppColors.Danger,
                 errorCursorColor = AppColors.Danger,
             ),
-            modifier = Modifier.size(width = 120.dp, height = PlayerMoreRowHeight),
+            modifier = Modifier.size(width = 140.dp, height = PlayerMoreRowHeight),
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
@@ -2406,7 +2419,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             text = stringResource(R.string.player_sleep_timer_custom_invalid),
             style = MaterialTheme.typography.labelMedium,
             color = AppColors.Danger,
-            modifier = Modifier.padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, bottom = AppSpacing.Sm),
+            modifier = Modifier.padding(start = AppSpacing.Lg, end = AppSpacing.Lg, bottom = AppSpacing.Sm),
         )
     }
 }
