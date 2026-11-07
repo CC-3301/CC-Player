@@ -312,7 +312,7 @@ private val initialLoadingActions = setOf(
 )
 
 /** 切集与恢复原片期间放行的操作：在首次加载的放行清单上加入上一集、下一集与播放/暂停。 */
-private val switchingActions = initialLoadingActions + setOf(
+private val switchingOrRestoringActions = initialLoadingActions + setOf(
     PlayerAction.Previous,
     PlayerAction.Next,
     PlayerAction.PlayPause,
@@ -321,7 +321,7 @@ private val switchingActions = initialLoadingActions + setOf(
 /**
  * 当前可用的播放页操作：首次加载放行返回与不依赖加载的控件；
  * 切集与恢复原片放行上一集/下一集与播放/暂停（播放/暂停只记意图，切集就绪后按意图执行）；
- * 其余操作不被加载态拦截。
+ * 不属于这两种加载阶段的操作一律可用。
  */
 fun actionAllowed(
     action: PlayerAction,
@@ -330,7 +330,7 @@ fun actionAllowed(
     restoring: Boolean,
 ): Boolean = when {
     initialLoading -> action in initialLoadingActions
-    switching || restoring -> action in switchingActions
+    switching || restoring -> action in switchingOrRestoringActions
     else -> true
 }
 

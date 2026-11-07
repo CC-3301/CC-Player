@@ -11,6 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 用 mpv-android 官方 libmpv 构建产物实现的播放引擎。
@@ -104,8 +105,23 @@ class MpvPlaybackEngine(
         Thread(runnable, "mpv-video-output").apply { isDaemon = true }
     }
 
+    /**
+     * 挂载超时的计时线程：排队挂载超时后按失败收尾。
+     * 与释放收尾一样不能占用调用线程，主线程只负责发起。
+     */
+    private val surfaceTimeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "mpv-surface-timeout").apply { isDaemon = true }
+    }
+
     /** 视频输出调用都在这一条线程上按投递顺序执行，调用线程只投递。 */
-    private val videoOutputQueue = VideoOutputQueue { task -> videoOutputExecutor.execute { task() } }
+    private val videoOutputQueue = VideoOutputQueue(
+        execute = { task -> videoOutputExecutor.execute { task() } },
+        schedule = { delayMillis, task ->
+            runCatching {
+                surfaceTimeoutExecutor.schedule({ task() }, delayMillis, TimeUnit.MILLISECONDS)
+            }
+        },
+    )
 
     /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
     private val seekTimeoutLock = Any()
@@ -137,6 +153,14 @@ class MpvPlaybackEngine(
     )
 
     fun initialize() {
+        // 上一次释放的销毁在后台线程收尾：等它结束再碰原生全局，避免销毁落在新核心上。
+        runCatching { pendingRelease.get()?.join() }
+        synchronized(nativeLifecycleLock) {
+            createNativeCore()
+        }
+    }
+
+    private fun createNativeCore() {
         MPVLib.create(context.applicationContext)
         MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
@@ -396,6 +420,7 @@ class MpvPlaybackEngine(
     /**
      * 挂载 Surface：排队中的分离可能还没跑完，摘挂载会落在刚挂上的这一块之后。
      * 队列没有在途任务时当场挂；有在途任务就把这次挂载排到分离之后，调用线程不等待。
+     * 排队的挂载超过上限还没执行时按失败收尾，迟到的任务不再挂载。
      */
     override fun attachSurface(surface: Surface) {
         if (released || attachedSurface === surface) return
@@ -411,6 +436,17 @@ class MpvPlaybackEngine(
                 }
                 diagnostics.log("挂载: 这次挂载没执行（Surface 已换、已释放或视频输出线程已关）")
             },
+            timeoutMillis = SURFACE_ATTACH_TIMEOUT_MILLIS,
+            onTimeout = {
+                // 视频输出线程卡住时挂载永远不会执行：清掉记录并留痕，避免对着没挂上的 Surface 开输出。
+                // 已经换过目标或释放时队列里的任务本来就会跳过，不再动新目标的状态。
+                if (attachedSurface === surface) {
+                    attachedSurface = null
+                    awaitingSurfaceFrame = false
+                    videoOutputStopped = true
+                    diagnostics.log("挂载: 视频输出线程 ${SURFACE_ATTACH_TIMEOUT_MILLIS}ms 内没有执行，放弃这次挂载")
+                }
+            },
         )
     }
 
@@ -424,6 +460,8 @@ class MpvPlaybackEngine(
         awaitingSurfaceFrame = true
         // 即使没有待播放的文件，也让 mpv 往这块 Surface 上画（字幕、OSD 等）
         postVideoOutput {
+            // 排队期间挂载可能已被放弃或换掉：没有挂着的 Surface 就不开输出。
+            if (attachedSurface == null) return@postVideoOutput
             val startedAtNanos = System.nanoTime()
             MPVLib.setOptionString("force-window", "yes")
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
@@ -576,15 +614,22 @@ class MpvPlaybackEngine(
         videoOutputQueue.postOutput(task)
     }
 
+    /**
+     * 尺寸与挂载投同一条队列：挂载排队时尺寸排在它之后，
+     * 保持「先挂 Surface、再设尺寸、再开窗口」的顺序，调用线程不碰原生属性。
+     */
     override fun setSurfaceSize(width: Int, height: Int) {
         if (released) return
-        MPVLib.setPropertyString("android-surface-size", "${width}x$height")
+        videoOutputQueue.postSurfaceSize(width, height) { name, value ->
+            if (!released) MPVLib.setPropertyString(name, value)
+        }
     }
 
     /**
      * 在等待上限内释放引擎持有的原生资源；闸门超时就放弃销毁，实例随进程退出回收。
      * 还挂着 Surface 时先投一条分离再排空视频输出线程：闸门跑到的分支，销毁播放核心之前一定分离过；
      * 闸门没跑到的分支放弃销毁，那条分支不承诺分离。
+     * 排空与销毁由后台线程收尾，发起释放的线程（主线程）不等待视频输出就绪。
      */
     override fun release() {
         // 重复释放：第一次已经销毁或明确放弃销毁，不再动已释放的实例。
@@ -603,6 +648,7 @@ class MpvPlaybackEngine(
         audioResumeExecutor.shutdownNow()
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
+        surfaceTimeoutExecutor.shutdownNow()
         // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
         // 闸门在 [VIDEO_OUTPUT_RELEASE_WAIT_MILLIS] 内没跑到，说明重建还没结束：
         // 此时放弃销毁，晚到的属性调用不会踩到已销毁的实例，实例随进程退出回收。
@@ -614,10 +660,23 @@ class MpvPlaybackEngine(
             postDetach()
         }
         val drained = CountDownLatch(1)
-        val queued = runCatching {
-            videoOutputExecutor.execute { drained.countDown() }
-            true
-        }.getOrDefault(false)
+        val queued = videoOutputQueue.postAlways { drained.countDown() }
+        // 后台收尾线程与原生创建串行：新引擎不能在上一次销毁落地之前创建播放核心。
+        val teardown = Thread({
+            try {
+                synchronized(nativeLifecycleLock) {
+                    finishRelease(drained, queued)
+                }
+            } finally {
+                pendingRelease.compareAndSet(Thread.currentThread(), null)
+            }
+        }, "mpv-release").apply { isDaemon = true }
+        pendingRelease.set(teardown)
+        teardown.start()
+    }
+
+    /** 等视频输出线程排空后销毁播放核心；超时则放弃销毁，实例随进程退出回收。 */
+    private fun finishRelease(drained: CountDownLatch, queued: Boolean) {
         val finished = queued &&
             runCatching {
                 drained.await(VIDEO_OUTPUT_RELEASE_WAIT_MILLIS, TimeUnit.MILLISECONDS)
@@ -934,6 +993,15 @@ class MpvPlaybackEngine(
 
         /** 释放时等视频输出线程排空队列的上限；超时即放弃销毁，不能把退出挂住。 */
         const val VIDEO_OUTPUT_RELEASE_WAIT_MILLIS = 2_000L
+
+        /** 排队挂载等视频输出线程的上限；超时按失败收尾，迟到的任务不再挂载。 */
+        const val SURFACE_ATTACH_TIMEOUT_MILLIS = 2_000L
+
+        /** 原生全局的创建与销毁互斥：销毁在后台线程收尾，不能与新建重叠。 */
+        val nativeLifecycleLock = Any()
+
+        /** 上一次释放的后台收尾线程；新引擎创建前等它结束。 */
+        val pendingRelease = AtomicReference<Thread?>(null)
 
         /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
         val nextSeekId = AtomicLong(0)

@@ -208,6 +208,45 @@ class PlayerGesturesTest {
     }
 
     @Test
+    fun `首次加载判据优先于切集判据`() {
+        listOf(PlayerAction.PlayPause, PlayerAction.Previous, PlayerAction.Next).forEach { action ->
+            assertEquals(
+                action.name,
+                false,
+                actionAllowed(action, switching = true, initialLoading = true, restoring = false),
+            )
+        }
+        listOf(PlayerAction.More, PlayerAction.Subtitles, PlayerAction.Volume, PlayerAction.Lock)
+            .forEach { action ->
+                assertEquals(
+                    action.name,
+                    true,
+                    actionAllowed(action, switching = true, initialLoading = true, restoring = false),
+                )
+            }
+    }
+
+    @Test
+    fun `恢复原片但不在切集时放行上下集与播放暂停`() {
+        val allowed = PlayerAction.entries
+            .filter { actionAllowed(it, switching = false, initialLoading = false, restoring = true) }
+            .toSet()
+        assertEquals(
+            setOf(
+                PlayerAction.Back,
+                PlayerAction.Previous,
+                PlayerAction.Next,
+                PlayerAction.PlayPause,
+                PlayerAction.More,
+                PlayerAction.Subtitles,
+                PlayerAction.Volume,
+                PlayerAction.Lock,
+            ),
+            allowed,
+        )
+    }
+
+    @Test
     fun `切集与恢复期间更多字幕音量与锁定可点且外观正常`() {
         listOf(
             PlayerAction.More,

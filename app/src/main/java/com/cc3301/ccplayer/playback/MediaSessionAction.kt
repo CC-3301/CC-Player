@@ -37,7 +37,8 @@ fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
 
 /**
  * 媒体会话动作的可用性：后台关闭时只放行暂停；首次加载全部禁用；
- * 目标加载只放行上一集/下一集，恢复原片额外放行播放/暂停。
+ * 目标加载与恢复原片与播放页同一套边界，四个动作全部放行
+ * （播放/暂停按起播暂停意图排队，上一集/下一集每击前移目标）。
  */
 fun mediaActionAllowed(
     action: MediaSessionAction,
@@ -48,10 +49,7 @@ fun mediaActionAllowed(
 ): Boolean = when {
     blocksBackgroundPlayback -> action == MediaSessionAction.Pause
     initialLoading -> false
-    restoring -> true
-    switching ->
-        action == MediaSessionAction.Previous ||
-            action == MediaSessionAction.Next
+    switching || restoring -> true
     else -> true
 }
 
