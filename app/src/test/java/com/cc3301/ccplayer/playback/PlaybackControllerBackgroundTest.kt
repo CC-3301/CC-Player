@@ -461,7 +461,7 @@ class PlaybackControllerBackgroundTest {
         runCurrent()
         assertEquals(1, engine.refreshFrameCalls)
 
-        // 同一次恢复里回前台入口不重复刷新。
+        // 同一次恢复里回前台入口不重复刷新：退后台只收掉翻转计时，重进不再补一次。
         controller.setAppInForeground(false)
         controller.setAppInForeground(true)
         runCurrent()
