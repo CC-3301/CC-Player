@@ -429,6 +429,43 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `退后台取消等新帧等待，后台不翻转视频输出`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+        // 回前台播放态撤帧，进入等新帧。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+
+        // 3 秒没到就退后台：等待取消，后台不翻转（翻转等于重建整条视频输出）。
+        controller.setAppInForeground(false)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
+        runCurrent()
+        assertEquals(0, engine.flipVideoOutputCalls)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+
+        // 回前台重新进入等待，3 秒仍无新帧才翻转一次。
+        controller.setAppInForeground(true)
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+        assertEquals(1, engine.flipVideoOutputCalls)
+    }
+
+    @Test
+    fun `后台加载按文件加载完成就绪，不等首帧`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        controller.setAppInForeground(false)
+
+        controller.next()
+        engine.reportFileLoaded()
+        runCurrent()
+
+        // 后台看不见画面：目标加载完成即就绪，不等首帧上屏（等新帧窗口在后台挂起）。
+        assertFalse(controller.switching.value)
+    }
+
+    @Test
     fun `回前台暂停态每次恢复都允许一次精确刷新`() = runTest {
         engine.refreshEmitsFrame = false
         val controller = pausedController()

@@ -38,8 +38,10 @@ class MpvTextureView(context: Context, attrs: AttributeSet? = null) :
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
         callback?.onSurfaceReleased()
+        // 分离是异步投递到视频输出线程的，这里不等它跑完：等会阻塞界面线程数百毫秒。
+        // libmpv 在 attachSurface 时自己持有窗口引用，归还这层包装不会提前释放底层窗口，
+        // 真正的窗口归还发生在 detachSurface 执行时；返回 true 表示 SurfaceTexture 由 TextureView 释放。
         releaseSurface()
-        // 由本类归还 Surface；SurfaceTexture 本身交给 TextureView 释放。
         return true
     }
 

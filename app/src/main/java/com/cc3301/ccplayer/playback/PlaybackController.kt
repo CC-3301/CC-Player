@@ -734,6 +734,7 @@ class PlaybackController(
      * 界面前后台上报：加载看护不因前后台变化挂起，切集计时照常累计。
      * 后台播放开着时 Surface 可能还在，前后台与 Surface 分开记、同一处结算。
      * 回前台时播放态一律撤掉屏上旧画面，纯黑等新帧；暂停态保留最后一帧。
+     * 退后台取消这次等新帧恢复：后台看不见画面，也不触发 3 秒无帧翻转。
      */
     fun setAppInForeground(foreground: Boolean) {
         if (this.foreground == foreground) return
@@ -741,9 +742,15 @@ class PlaybackController(
         if (foreground) {
             // 播放态撤旧画面等新帧；暂停态保留最后一帧，没有帧时补一次位置中性刷新。
             if (paused) restorePausedFrameIfNoPicture() else dropFrameOnForegroundReturn()
+        } else {
+            // 后台不再等新帧：回前台会重新进入同一条恢复等待。
+            cancelSurfaceRestore()
         }
         updateLoadTimers()
     }
+
+    /** 画面可见：前台且 Surface 可渲染。退后台与 Surface 分离都算看不见画面。 */
+    private val screenVisible: Boolean get() = foreground && _renderSurfaceAvailable.value
 
     /**
      * 回前台播放态不保留旧画面：撤掉屏上那一帧，纯黑等下一个新帧。
@@ -841,7 +848,8 @@ class PlaybackController(
             try {
                 val startedAtMillis = nowMillis()
                 delay(SURFACE_RESTORE_WAIT_MILLIS)
-                if (!active || !_renderSurfaceAvailable.value) return@launch
+                // 退后台取消等待之外再判一次前台：翻转会重建整条视频输出，后台不能做。
+                if (!active || !_renderSurfaceAvailable.value || !foreground) return@launch
                 if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
                 awaitingSurfaceFrame = false
                 engine.flipVideoOutput()
@@ -1635,11 +1643,11 @@ class PlaybackController(
         finishReady(phase)
     }
 
-    /** 后台没有可渲染画面时，任何阶段的加载都以文件加载完成作为就绪。 */
+    /** 画面不可见时，任何阶段的加载都以文件加载完成作为就绪。 */
     private fun finishLoadWithoutSurface() {
         val phase = loadPhase
         if (phase == LoadPhase.None) return
-        if (_renderSurfaceAvailable.value) return
+        if (screenVisible) return
         if (!mediaLoaded || !resumeLookupDone) return
         finishReady(phase)
     }
@@ -1909,7 +1917,7 @@ class PlaybackController(
         }
         // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
         // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
-        if (paused && _renderSurfaceAvailable.value) {
+        if (paused && screenVisible) {
             screenFrame = ScreenFrame.Target
             quietBlack = false
         }
