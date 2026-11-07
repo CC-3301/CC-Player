@@ -749,9 +749,6 @@ class PlaybackController(
         updateLoadTimers()
     }
 
-    /** 画面可见：前台且 Surface 可渲染。退后台与 Surface 分离都算看不见画面。 */
-    private val screenVisible: Boolean get() = foreground && _renderSurfaceAvailable.value
-
     /**
      * 回前台播放态不保留旧画面：撤掉屏上那一帧，纯黑等下一个新帧。
      * 暂停态保留最后一帧，由 Surface 重挂的位置中性刷新重解，两条路径互不重叠。
@@ -1643,11 +1640,11 @@ class PlaybackController(
         finishReady(phase)
     }
 
-    /** 画面不可见时，任何阶段的加载都以文件加载完成作为就绪。 */
+    /** Surface 不可渲染时，任何阶段的加载都以文件加载完成作为就绪。 */
     private fun finishLoadWithoutSurface() {
         val phase = loadPhase
         if (phase == LoadPhase.None) return
-        if (screenVisible) return
+        if (_renderSurfaceAvailable.value) return
         if (!mediaLoaded || !resumeLookupDone) return
         finishReady(phase)
     }
@@ -1916,8 +1913,8 @@ class PlaybackController(
             switchOriginEnded = false
         }
         // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
-        // Surface 分离时屏幕上没有画面可露，按分离时的判定维持黑底。
-        if (paused && screenVisible) {
+        // 只有前台且 Surface 可渲染时屏上才有画面可露；后台与 Surface 分离时维持黑底。
+        if (paused && foreground && _renderSurfaceAvailable.value) {
             screenFrame = ScreenFrame.Target
             quietBlack = false
         }

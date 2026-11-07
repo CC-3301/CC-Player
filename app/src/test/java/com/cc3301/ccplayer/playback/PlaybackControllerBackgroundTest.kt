@@ -452,20 +452,6 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `后台加载按文件加载完成就绪，不等首帧`() = runTest {
-        val controller = playingController()
-        engine.reportPositionChanged(30_000, 600_000)
-        controller.setAppInForeground(false)
-
-        controller.next()
-        engine.reportFileLoaded()
-        runCurrent()
-
-        // 后台看不见画面：目标加载完成即就绪，不等首帧上屏（等新帧窗口在后台挂起）。
-        assertFalse(controller.switching.value)
-    }
-
-    @Test
     fun `回前台暂停态每次恢复都允许一次精确刷新`() = runTest {
         engine.refreshEmitsFrame = false
         val controller = pausedController()
