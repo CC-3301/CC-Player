@@ -256,6 +256,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
     private var surfacePresentation by mutableStateOf(SurfacePresentation())
 
+    /** 浏览页重新订阅可见项的代号：回前台时递增，让封面重试用尽的条目重新给一轮。 */
+    private var libraryPreviewTick by mutableIntStateOf(0)
+
+    /** 是否已经进过前台：第一次进入不改代号，避免刚建界面就多抽一轮。 */
+    private var foregroundSeen = false
+
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -408,10 +414,10 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     currentMedia?.lastModified,
                     playerVisible,
                 ) {
-                    value = if (playerVisible && audioTarget) {
-                        currentMedia?.let { media -> mediaPreview.cachedImage(media) }
-                    } else {
-                        null
+                    // 换目标时先清空，避免音频切音频短暂留着上一张封面。
+                    value = null
+                    if (playerVisible && audioTarget) {
+                        value = currentMedia?.let { media -> mediaPreview.cachedImage(media) }
                     }
                 }
 
@@ -571,6 +577,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         LibraryScreen(
                             state = libraryState,
                             mediaPreview = mediaPreview,
+                            previewReloadTick = libraryPreviewTick,
                             onOpenEntry = { entry ->
                                 logLibraryNavigation(
                                     diagnostics = diagnostics,
@@ -839,6 +846,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         updateKeepScreenOn()
         // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
+        // 回前台让浏览页重新订阅可见项：封面重试用尽（含 SMB 会话作废）的条目重新给一轮。
+        if (foregroundSeen) libraryPreviewTick++
+        foregroundSeen = true
     }
 
     /** 仅前台且播放页在场、播放或加载时保持屏幕常亮；暂停、片尾、离开播放页与退后台立即释放。 */

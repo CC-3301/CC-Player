@@ -100,6 +100,8 @@ private val LibraryEntryRippleConfiguration = RippleConfiguration(color = Color.
 fun LibraryScreen(
     state: LibraryState,
     mediaPreview: MediaPreviewSource,
+    /** 重新订阅代号：回前台时递增，让封面重试用尽的条目重新给一轮。 */
+    previewReloadTick: Int,
     onOpenEntry: (MediaFile) -> Unit,
     onOpenSettings: () -> Unit,
     onSelectView: (ViewChoice) -> Unit,
@@ -245,6 +247,7 @@ fun LibraryScreen(
             else -> EntryArea(
                 state = state,
                 previewScheduler = previewScheduler,
+                previewReloadTick = previewReloadTick,
                 listState = listState,
                 gridState = gridState,
                 onOpenEntry = onOpenEntry,
@@ -363,6 +366,7 @@ private fun SortMenuButton(
 private fun EntryArea(
     state: LibraryState,
     previewScheduler: VisiblePreviewScheduler,
+    previewReloadTick: Int,
     listState: LazyListState,
     gridState: LazyGridState,
     onOpenEntry: (MediaFile) -> Unit,
@@ -384,6 +388,7 @@ private fun EntryArea(
                     entry = entry,
                     index = index,
                     previewScheduler = previewScheduler,
+                    previewReloadTick = previewReloadTick,
                     onOpenEntry = onOpenEntry,
                 )
             }
@@ -402,6 +407,7 @@ private fun EntryArea(
                     entry = entry,
                     index = index,
                     previewScheduler = previewScheduler,
+                    previewReloadTick = previewReloadTick,
                     onOpenEntry = onOpenEntry,
                 )
             }
@@ -415,6 +421,7 @@ private fun EntryRow(
     entry: MediaFile,
     index: Int,
     previewScheduler: VisiblePreviewScheduler,
+    previewReloadTick: Int,
     onOpenEntry: (MediaFile) -> Unit,
 ) {
     val preview by produceState<MediaPreview?>(
@@ -423,6 +430,7 @@ private fun EntryRow(
         entry.size,
         entry.lastModified,
         index,
+        previewReloadTick,
     ) {
         value = previewScheduler.preview(entry, index)
     }
@@ -469,6 +477,7 @@ private fun EntryCard(
     entry: MediaFile,
     index: Int,
     previewScheduler: VisiblePreviewScheduler,
+    previewReloadTick: Int,
     onOpenEntry: (MediaFile) -> Unit,
 ) {
     val preview by produceState<MediaPreview?>(
@@ -477,6 +486,7 @@ private fun EntryCard(
         entry.size,
         entry.lastModified,
         index,
+        previewReloadTick,
     ) {
         value = previewScheduler.preview(entry, index)
     }

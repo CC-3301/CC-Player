@@ -523,7 +523,7 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `重试用尽后条目再次可见重新给一轮`() = runTest {
+    fun `重试用尽后重新订阅再给一轮`() = runTest {
         var rounds = 0
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
@@ -555,7 +555,7 @@ class VisiblePreviewSchedulerTest {
         withTimeout(5_000) { first.await() }
         assertEquals("首发加 5 次重试", 6, rounds)
 
-        // 条目再次可见时重新订阅：调度器里已没有这一项，会重新给一轮。
+        // 重新订阅（离开可见范围再回来、回到前台都会发生）：调度器里已没有这一项，会重新给一轮。
         val second = async { scheduler.preview(entries[0], 0) }
         runCurrent()
         assertEquals("重新订阅立即再抽一次", 7, rounds)

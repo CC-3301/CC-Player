@@ -57,7 +57,7 @@ class Id3CoverReaderTest {
 
     @Test
     fun `压缩帧跳过并记为压缩封面`() {
-        val compressed = frameHeader("APIC", body = ByteArray(8), flags = 0x80, major = 3) + ByteArray(8)
+        val compressed = frameHeader("APIC", ByteArray(8), flags = 0x80, major = 3)
         val tag = tag(major = 3, frames = listOf(compressed))
 
         val result = readId3Cover(ByteSourceOf(tag))
@@ -68,7 +68,7 @@ class Id3CoverReaderTest {
     @Test
     fun `压缩帧之后仍能取到未压缩封面`() {
         val picture = byteArrayOf(5, 6)
-        val compressed = frameHeader("APIC", body = ByteArray(8), flags = 0x80, major = 3) + ByteArray(8)
+        val compressed = frameHeader("APIC", ByteArray(8), flags = 0x80, major = 3)
         val tag = tag(major = 3, frames = listOf(compressed, apicFrame(picture, type = 3)))
 
         val result = readId3Cover(ByteSourceOf(tag))
@@ -95,6 +95,17 @@ class Id3CoverReaderTest {
     }
 
     @Test
+    fun `帧长越过标签末尾按读取失败处理`() {
+        // 帧头声明 100 字节，标签体只剩 4 字节：属于截断，不能当成“确认无图”。
+        val truncated = frameHeader("APIC", ByteArray(100), flags = 0, major = 3).copyOf(14)
+        val tag = id3Header(major = 3, flags = 0, tagSize = truncated.size) + truncated
+
+        val result = readId3Cover(ByteSourceOf(tag))
+
+        assertEquals(Id3CoverFailure.ReadFailed, (result as Id3CoverResult.Failed).reason)
+    }
+
+    @Test
     fun `v2_2 的 PIC 帧可读`() {
         val picture = byteArrayOf(3, 2, 1)
         val body = byteArrayOf(0) +
@@ -102,7 +113,7 @@ class Id3CoverReaderTest {
             byteArrayOf(3) +
             byteArrayOf(0) +
             picture
-        val tag = tag(major = 2, frames = listOf(frameHeader("PIC", body.size, flags = 0, major = 2) + body))
+        val tag = tag(major = 2, frames = listOf(frameHeader("PIC", body, flags = 0, major = 2)))
 
         val result = readId3Cover(ByteSourceOf(tag))
 
@@ -121,8 +132,23 @@ class Id3CoverReaderTest {
     }
 
     @Test
+    fun `v2_4 的 data length indicator 跳过后再解析`() {
+        val picture = ByteArray(200) { index -> index.toByte() }
+        val apicBody = apicBody(picture, type = 3)
+        // data length indicator 是帧体开头的 4 字节 syncsafe，值等于去掉它之后的帧体长度。
+        val frameData = syncSafeBytes(apicBody.size) + apicBody
+        val frame = frameHeader("APIC", frameData, flags = 0x01, major = 4)
+        val tag = tag(major = 4, frames = listOf(frame))
+
+        val result = readId3Cover(ByteSourceOf(tag))
+
+        assertArrayEquals(picture, (result as Id3CoverResult.Picture).bytes)
+    }
+
+    @Test
     fun `扩展头之后仍能找到封面帧`() {
         val picture = byteArrayOf(8, 8)
+        // v2.3 扩展头：长度字段 6 已包含它自己的 4 字节，后面跟 2 字节 flag。
         val extended = byteArrayOf(0, 0, 0, 6, 0, 0) + apicFrame(picture, type = 3)
         val tag = id3Header(major = 3, flags = 0x40, tagSize = extended.size) + extended
 
@@ -164,38 +190,40 @@ class Id3CoverReaderTest {
         (value and 0x7F).toByte(),
     )
 
-    /** 拉丁编码、JPEG、空描述的标准 APIC 帧。 */
-    private fun apicFrame(picture: ByteArray, type: Int, major: Int = 3): ByteArray {
-        val body = byteArrayOf(0) +
+    /** 拉丁编码、JPEG、空描述的 APIC 帧体。 */
+    private fun apicBody(picture: ByteArray, type: Int): ByteArray =
+        byteArrayOf(0) +
             "image/jpeg".toByteArray(Charsets.ISO_8859_1) +
             byteArrayOf(0) +
             byteArrayOf(type.toByte()) +
             byteArrayOf(0) +
             picture
-        return frameHeader("APIC", body.size, flags = 0, major = major) + body
-    }
 
-    private fun frameHeader(id: String, body: Int, flags: Int, major: Int): ByteArray {
+    private fun apicFrame(picture: ByteArray, type: Int, major: Int = 3): ByteArray =
+        frameHeader("APIC", apicBody(picture, type), flags = 0, major = major)
+
+    /** 帧头加帧体；v2.2 的帧头只有 id 与 3 字节长度，没有 flag 字节。 */
+    private fun frameHeader(id: String, body: ByteArray, flags: Int, major: Int): ByteArray {
         val idBytes = id.toByteArray(Charsets.ISO_8859_1)
-        // v2.2 的帧头只有 id 与 3 字节长度，没有 flag 字节。
         if (major == 2) {
-            return idBytes + byteArrayOf(
-                ((body shr 16) and 0xFF).toByte(),
-                ((body shr 8) and 0xFF).toByte(),
-                (body and 0xFF).toByte(),
+            val size = byteArrayOf(
+                ((body.size shr 16) and 0xFF).toByte(),
+                ((body.size shr 8) and 0xFF).toByte(),
+                (body.size and 0xFF).toByte(),
             )
+            return idBytes + size + body
         }
         val size = if (major == 3) {
             byteArrayOf(
-                ((body shr 24) and 0xFF).toByte(),
-                ((body shr 16) and 0xFF).toByte(),
-                ((body shr 8) and 0xFF).toByte(),
-                (body and 0xFF).toByte(),
+                ((body.size shr 24) and 0xFF).toByte(),
+                ((body.size shr 16) and 0xFF).toByte(),
+                ((body.size shr 8) and 0xFF).toByte(),
+                (body.size and 0xFF).toByte(),
             )
         } else {
-            syncSafeBytes(body)
+            syncSafeBytes(body.size)
         }
-        return idBytes + size + byteArrayOf(0, flags.toByte())
+        return idBytes + size + byteArrayOf(0, flags.toByte()) + body
     }
 
     /** 按规范在每个 0xFF 之后插入 0x00。 */

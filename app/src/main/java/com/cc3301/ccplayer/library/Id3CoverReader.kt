@@ -29,6 +29,9 @@ private const val FRAME_FLAG_ENCRYPTED_V24 = 0x04
 /** 帧 flag（v2.4）：逐帧 unsynchronisation。 */
 private const val FRAME_FLAG_UNSYNCHRONISATION_V24 = 0x02
 
+/** 帧 flag（v2.4）：帧体开头带 4 字节 data length indicator。 */
+private const val FRAME_FLAG_DATA_LENGTH_V24 = 0x01
+
 /** 图片类型：其他；正面封面缺失时退回这一张。 */
 private const val PICTURE_TYPE_OTHER = 0x00
 
@@ -121,7 +124,9 @@ private fun readId3CoverOrThrow(source: CoverByteSource): Id3CoverResult {
     if (major <= 3 && flags and ID3_FLAG_UNSYNCHRONISATION != 0) {
         val body = source.readFully(ID3_HEADER_BYTES.toLong(), tagSize)
             ?: return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
-        return parseFrames(ByteArrayCoverSource(removeUnsynchronisation(body)), major, flags)
+        // 原地还原，不再复制一份同样大的缓冲区；标签上限 16 MB，峰值就是这一份。
+        val restored = removeUnsynchronisationInPlace(body)
+        return parseFrames(ByteArrayCoverSource(body, restored.toLong()), major, flags)
     }
     return parseFrames(SlicedCoverSource(source, ID3_HEADER_BYTES.toLong(), tagEnd), major, flags)
 }
@@ -139,7 +144,11 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
         if (!isFrameId(header, idLength)) break
         val frameId = String(header, 0, idLength, Charsets.ISO_8859_1)
         val size = frameSize(header, major)
-        if (size <= 0 || position + frameHeaderSize + size > body.size) break
+        if (size <= 0) break
+        // 帧长越过标签末尾说明标签被截断或损坏，按读取失败处理，不能当成“确认无图”。
+        if (position + frameHeaderSize + size > body.size) {
+            return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
+        }
         val flags = frameFlags(header, major)
         if (frameId == pictureFrameId(major)) {
             if (flags.compressed || flags.encrypted) {
@@ -148,7 +157,13 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
                 val frame = body.readFully(position + frameHeaderSize, size.toInt())
                     ?: return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
                 val data = if (flags.unsynchronised) removeUnsynchronisation(frame) else frame
-                parseApic(data, major)?.let { picture -> pictures += picture }
+                // data length indicator 是帧体开头的 4 字节 syncsafe，跳过它再解析 APIC。
+                val picture = if (flags.dataLengthIndicator) {
+                    if (data.size <= 4) null else data.copyOfRange(4, data.size)
+                } else {
+                    data
+                }
+                picture?.let { bytes -> parseApic(bytes, major)?.let { found -> pictures += found } }
             }
         }
         position += frameHeaderSize + size
@@ -161,7 +176,10 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
     }
 }
 
-/** 扩展头长度；v2.3 的长度字段包含自身 4 字节，v2.4 用 syncsafe 且不包含自身。 */
+/**
+ * 扩展头占用的字节数：v2.3 的长度字段已经包含它自己的 4 字节，直接按该值跳过；
+ * v2.4 的长度字段是 syncsafe 且不含自身，要再加 4 字节。
+ */
 private fun extendedHeaderSize(body: CoverByteSource, major: Int, headerFlags: Int): Long {
     if (headerFlags and ID3_FLAG_EXTENDED_HEADER == 0) return 0
     return when (major) {
@@ -181,6 +199,7 @@ private data class FrameFlags(
     val compressed: Boolean,
     val encrypted: Boolean,
     val unsynchronised: Boolean,
+    val dataLengthIndicator: Boolean = false,
 )
 
 private fun frameFlags(header: ByteArray, major: Int): FrameFlags {
@@ -198,6 +217,7 @@ private fun frameFlags(header: ByteArray, major: Int): FrameFlags {
             compressed = low and FRAME_FLAG_COMPRESSED_V24 != 0,
             encrypted = low and FRAME_FLAG_ENCRYPTED_V24 != 0,
             unsynchronised = low and FRAME_FLAG_UNSYNCHRONISATION_V24 != 0,
+            dataLengthIndicator = low and FRAME_FLAG_DATA_LENGTH_V24 != 0,
         )
     }
 }
@@ -247,22 +267,28 @@ private fun choosePicture(pictures: List<ApicPicture>): ApicPicture? =
         ?: pictures.firstOrNull { it.type == PICTURE_TYPE_OTHER }
         ?: pictures.firstOrNull()
 
-/** unsynchronisation 的还原：去掉 0xFF 后面插入的 0x00。 */
+/** unsynchronisation 的还原：返回还原后的新数组，原数组保持不变。 */
 private fun removeUnsynchronisation(bytes: ByteArray): ByteArray {
     if (bytes.isEmpty()) return bytes
-    val output = ByteArray(bytes.size)
+    val restored = bytes.copyOf()
+    val length = removeUnsynchronisationInPlace(restored)
+    return if (length == restored.size) restored else restored.copyOf(length)
+}
+
+/** 原地还原：读位置永远不落后于写位置，可以直接在同一个数组上压缩。返回还原后的长度。 */
+private fun removeUnsynchronisationInPlace(bytes: ByteArray): Int {
     var written = 0
     var index = 0
     while (index < bytes.size) {
         val value = bytes[index]
-        output[written++] = value
+        bytes[written++] = value
         if (value == 0xFF.toByte() && index + 1 < bytes.size && bytes[index + 1] == 0.toByte()) {
             index += 2
         } else {
             index++
         }
     }
-    return if (written == bytes.size) output else output.copyOf(written)
+    return written
 }
 
 private fun isId3Header(header: ByteArray): Boolean =
@@ -302,14 +328,15 @@ private fun CoverByteSource.readFully(position: Long, length: Int): ByteArray? {
     return bytes
 }
 
-/** 把字节数组包成字节源，用于已经整段读进内存的标签。 */
-private class ByteArrayCoverSource(private val bytes: ByteArray) : CoverByteSource {
-
-    override val size: Long get() = bytes.size.toLong()
+/** 把字节数组包成字节源；原地还原后数组尾部留着旧字节，用显式长度截断。 */
+private class ByteArrayCoverSource(
+    private val bytes: ByteArray,
+    override val size: Long = bytes.size.toLong(),
+) : CoverByteSource {
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
-        if (position < 0 || position >= bytes.size) return 0
-        val count = minOf(length, bytes.size - position.toInt())
+        if (position < 0 || position >= size) return 0
+        val count = minOf(length, (size - position).toInt())
         if (count <= 0) return 0
         System.arraycopy(bytes, position.toInt(), buffer, offset, count)
         return count

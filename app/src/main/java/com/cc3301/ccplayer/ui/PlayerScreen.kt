@@ -321,19 +321,19 @@ private fun PlayerCoverLayer(coverFile: File?, modifier: Modifier = Modifier) {
         modifier = modifier.background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
+        // 占位图常驻底层：封面文件被缓存淘汰或解码失败时自然露出，不会只剩纯黑。
+        Icon(
+            painter = painterResource(R.drawable.ic_media_audio),
+            contentDescription = null,
+            tint = AppColors.Muted,
+            modifier = Modifier.size(72.dp),
+        )
         if (coverFile != null) {
             AsyncImage(
                 model = coverFile,
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Icon(
-                painter = painterResource(R.drawable.ic_media_audio),
-                contentDescription = null,
-                tint = AppColors.Muted,
-                modifier = Modifier.size(72.dp),
             )
         }
     }

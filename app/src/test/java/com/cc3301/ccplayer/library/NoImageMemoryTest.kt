@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.library
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -31,12 +32,17 @@ class NoImageMemoryTest {
     }
 
     @Test
+    fun `默认有效期是十分钟`() {
+        assertEquals(TTL_MILLIS, NoImageMemory.DEFAULT_TTL_MILLIS)
+    }
+
+    @Test
     fun `记忆到有效期前仍然命中`() {
         var now = 1_000L
         val memory = NoImageMemory(clock = { now })
         memory.remember("a")
 
-        now += NoImageMemory.DEFAULT_TTL_MILLIS - 1
+        now += TTL_MILLIS - 1
 
         assertTrue(memory.contains("a"))
     }
@@ -47,7 +53,7 @@ class NoImageMemoryTest {
         val memory = NoImageMemory(clock = { now })
         memory.remember("a")
 
-        now += NoImageMemory.DEFAULT_TTL_MILLIS
+        now += TTL_MILLIS
 
         assertFalse(memory.contains("a"))
     }
@@ -58,11 +64,27 @@ class NoImageMemoryTest {
         val memory = NoImageMemory(clock = { now })
         memory.remember("a")
 
-        now += NoImageMemory.DEFAULT_TTL_MILLIS
+        now += TTL_MILLIS
         assertFalse(memory.contains("a"))
 
         memory.remember("a")
-        now += NoImageMemory.DEFAULT_TTL_MILLIS - 1
+        now += TTL_MILLIS - 1
         assertTrue(memory.contains("a"))
+    }
+
+    @Test
+    fun `没有有效期的记忆不会过期`() {
+        var now = 1_000L
+        val memory = NoImageMemory(ttlMillis = null, clock = { now })
+        memory.remember("a")
+
+        now += 10 * TTL_MILLIS
+
+        assertTrue(memory.contains("a"))
+    }
+
+    private companion object {
+        /** 「确认无图」的记忆有效期：10 分钟。 */
+        const val TTL_MILLIS = 600_000L
     }
 }
