@@ -249,7 +249,6 @@ class PlaybackService : Service() {
             action,
             controller.state.value,
             controller.switching.value,
-            controller.restoring.value,
             blocksBackgroundPlayback = backgroundPolicy.blocksBackgroundPlayback,
         ) { allowedAction ->
             backgroundPolicy.dispatch(allowedAction) { passed -> passed.applyTo(controller) }
@@ -303,9 +302,7 @@ class PlaybackService : Service() {
             state = state,
             media = media,
             progress = playbackController.progress.value,
-            switching = switching,
             initialLoading = isInitialLoading(state, switching),
-            restoring = playbackController.restoring.value,
             blocksBackgroundPlayback = backgroundPolicy.blocksBackgroundPlayback,
             coverFile = coverFile,
             fallbackTitle = getString(R.string.app_name),

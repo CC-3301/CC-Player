@@ -50,14 +50,10 @@ class BackgroundPlaybackPolicy(
      */
     fun notificationActions(
         state: PlaybackState,
-        switching: Boolean = false,
         initialLoading: Boolean = false,
-        restoring: Boolean = false,
     ): List<MediaSessionAction> = mediaNotificationActions(
         state = state,
-        switching = switching,
         initialLoading = initialLoading,
-        restoring = restoring,
         blocksBackgroundPlayback = blocksBackgroundPlayback,
     )
 

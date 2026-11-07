@@ -107,33 +107,17 @@ class MediaSessionActionTest {
     }
 
     @Test
-    fun `initial loading disables every media action`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertFalse(mediaActionAllowed(action, switching = false, initialLoading = true, restoring = false))
-        }
-    }
+    fun `media actions follow the loading stage`() {
+        val stages = listOf(
+            false to MediaSessionAction.entries.associateWith { true },
+            true to MediaSessionAction.entries.associateWith { false },
+        )
 
-    @Test
-    fun `switching allows every media action`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertTrue(
-                action.name,
-                mediaActionAllowed(action, switching = true, initialLoading = false, restoring = false),
-            )
-        }
-    }
-
-    @Test
-    fun `outside loading every media action is allowed`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = false))
-        }
-    }
-
-    @Test
-    fun `restoring allows play pause and both episode actions`() {
-        MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = true))
+        stages.forEach { (initialLoading, expected) ->
+            val actual = MediaSessionAction.entries.associateWith {
+                mediaActionAllowed(it, initialLoading = initialLoading)
+            }
+            assertEquals("initialLoading=$initialLoading", expected, actual)
         }
     }
 
@@ -145,30 +129,14 @@ class MediaSessionActionTest {
             MediaSessionAction.Play,
             state = PlaybackState.Paused,
             switching = true,
-            restoring = false,
         ) { applied += it }
         dispatchMediaAction(
             MediaSessionAction.Next,
             state = PlaybackState.Paused,
             switching = true,
-            restoring = false,
         ) { applied += it }
 
         assertEquals(listOf(MediaSessionAction.Play, MediaSessionAction.Next), applied)
-    }
-
-    @Test
-    fun `dispatch lets play through while the original is being restored`() {
-        val applied = mutableListOf<MediaSessionAction>()
-
-        dispatchMediaAction(
-            MediaSessionAction.Play,
-            state = PlaybackState.Paused,
-            switching = false,
-            restoring = true,
-        ) { applied += it }
-
-        assertEquals(listOf(MediaSessionAction.Play), applied)
     }
 
     @Test
@@ -180,7 +148,6 @@ class MediaSessionActionTest {
                 action,
                 state = PlaybackState.Loading,
                 switching = false,
-                restoring = false,
             ) { applied += it }
         }
 
@@ -196,7 +163,6 @@ class MediaSessionActionTest {
                 action,
                 state = PlaybackState.Loading,
                 switching = false,
-                restoring = false,
                 blocksBackgroundPlayback = true,
             ) { applied += it }
         }
@@ -278,34 +244,6 @@ class MediaSessionActionTest {
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                 PlaybackStateCompat.ACTION_SEEK_TO,
             playbackStateActions(actions, seekable = true),
-        )
-    }
-
-    @Test
-    fun `playback state actions follow the allowed set`() {
-        assertEquals(
-            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE,
-            playbackStateActions(
-                availableMediaActions(switching = false, initialLoading = false, restoring = true),
-            ),
-        )
-        assertEquals(
-            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE,
-            playbackStateActions(
-                availableMediaActions(switching = true, initialLoading = false, restoring = false),
-            ),
-        )
-        assertEquals(
-            0L,
-            playbackStateActions(
-                availableMediaActions(switching = false, initialLoading = true, restoring = false),
-            ),
         )
     }
 

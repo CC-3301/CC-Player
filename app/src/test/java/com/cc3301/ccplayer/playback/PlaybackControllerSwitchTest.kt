@@ -2233,7 +2233,6 @@ class PlaybackControllerSwitchTest {
             action,
             controller.state.value,
             controller.switching.value,
-            controller.restoring.value,
         ) { it.applyTo(controller) }
     }
 

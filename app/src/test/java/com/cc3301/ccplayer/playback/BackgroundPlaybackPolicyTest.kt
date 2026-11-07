@@ -156,9 +156,7 @@ class BackgroundPlaybackPolicyTest {
             listOf(MediaSessionAction.Previous, MediaSessionAction.Play, MediaSessionAction.Next),
             policy.notificationActions(
                 PlaybackState.Loading,
-                switching = true,
                 initialLoading = false,
-                restoring = false,
             ),
         )
     }
@@ -173,7 +171,6 @@ class BackgroundPlaybackPolicyTest {
                 action,
                 state = PlaybackState.Loading,
                 switching = true,
-                restoring = false,
             ) { allowedAction ->
                 policy.dispatch(allowedAction) { passed -> applied += passed }
             }
@@ -191,21 +188,6 @@ class BackgroundPlaybackPolicyTest {
     }
 
     @Test
-    fun `恢复原片期间通知栏保留上下集与播放暂停`() {
-        policy.setAppInForeground(true)
-
-        assertEquals(
-            listOf(MediaSessionAction.Previous, MediaSessionAction.Play, MediaSessionAction.Next),
-            policy.notificationActions(
-                PlaybackState.Paused,
-                switching = false,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-    }
-
-    @Test
     fun `后台关闭时加载阶段不滤掉暂停`() {
         policy.setBackgroundPlaybackEnabled(false)
         policy.setAppInForeground(false)
@@ -214,18 +196,14 @@ class BackgroundPlaybackPolicyTest {
             listOf(MediaSessionAction.Pause),
             policy.notificationActions(
                 PlaybackState.Loading,
-                switching = true,
                 initialLoading = false,
-                restoring = false,
             ),
         )
         assertEquals(
             listOf(MediaSessionAction.Pause),
             policy.notificationActions(
                 PlaybackState.Loading,
-                switching = false,
                 initialLoading = true,
-                restoring = false,
             ),
         )
     }
@@ -238,9 +216,7 @@ class BackgroundPlaybackPolicyTest {
             emptyList<MediaSessionAction>(),
             policy.notificationActions(
                 PlaybackState.Loading,
-                switching = false,
                 initialLoading = true,
-                restoring = false,
             ),
         )
     }
