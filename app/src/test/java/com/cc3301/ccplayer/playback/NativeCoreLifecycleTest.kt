@@ -2,12 +2,14 @@ package com.cc3301.ccplayer.playback
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/** 原生核心的创建/销毁接力：创建方只等有上限的收尾信号，销毁方只在没有新核心时动手。 */
+/** 原生核心的创建/销毁接力：创建方只等有上限的收尾信号，创建与销毁在原生锁上互斥。 */
 class NativeCoreLifecycleTest {
 
     @Test
@@ -15,9 +17,10 @@ class NativeCoreLifecycleTest {
         val lifecycle = NativeCoreLifecycle()
         val teardown = lifecycle.registerTeardown()
         val created = CountDownLatch(1)
-        var createGeneration = 0L
+        var createGeneration: Long? = null
         val creator = Thread {
             createGeneration = lifecycle.beginCreate(2_000) { }
+            lifecycle.finishCreate()
             created.countDown()
         }
         creator.start()
@@ -28,7 +31,7 @@ class NativeCoreLifecycleTest {
         lifecycle.finishTeardown(teardown)
         assertTrue(created.await(2_000, TimeUnit.MILLISECONDS))
         creator.join(2_000)
-        assertTrue(createGeneration > 0)
+        assertNotNull(createGeneration)
     }
 
     @Test
@@ -37,9 +40,11 @@ class NativeCoreLifecycleTest {
         lifecycle.registerTeardown()
         var timeouts = 0
         val startedNanos = System.nanoTime()
-        lifecycle.beginCreate(50) { timeouts += 1 }
+        val generation = lifecycle.beginCreate(50) { timeouts += 1 }
+        lifecycle.finishCreate()
         val elapsedMillis = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
         assertEquals(1, timeouts)
+        assertNotNull(generation)
         assertTrue(elapsedMillis >= 40)
     }
 
@@ -51,6 +56,7 @@ class NativeCoreLifecycleTest {
         val created = CountDownLatch(1)
         Thread {
             lifecycle.beginCreate(2_000) { }
+            lifecycle.finishCreate()
             created.countDown()
         }.start()
 
@@ -62,11 +68,45 @@ class NativeCoreLifecycleTest {
     }
 
     @Test
+    fun `销毁进行中时创建放弃，销毁返回后才能创建`() {
+        val lifecycle = NativeCoreLifecycle()
+        val teardown = lifecycle.registerTeardown()
+        val destroyStarted = CountDownLatch(1)
+        val destroyRelease = CountDownLatch(1)
+        val destroyFinished = CountDownLatch(1)
+        val destroyer = Thread {
+            if (lifecycle.claimDestroy(teardown)) {
+                try {
+                    destroyStarted.countDown()
+                    destroyRelease.await(2, TimeUnit.SECONDS)
+                } finally {
+                    lifecycle.finishDestroy()
+                }
+            }
+            lifecycle.finishTeardown(teardown)
+            destroyFinished.countDown()
+        }
+        destroyer.start()
+        assertTrue(destroyStarted.await(2, TimeUnit.SECONDS))
+
+        // 销毁还没返回：创建等收尾信号到上限后拿不到原生锁，放弃本次创建。
+        assertNull(lifecycle.beginCreate(100) { })
+
+        destroyRelease.countDown()
+        assertTrue(destroyFinished.await(2, TimeUnit.SECONDS))
+
+        // 销毁返回后才能创建。
+        assertNotNull(lifecycle.beginCreate(2_000) { })
+        lifecycle.finishCreate()
+    }
+
+    @Test
     fun `登记之后创建过新核心就放弃销毁`() {
         val lifecycle = NativeCoreLifecycle()
         val teardown = lifecycle.registerTeardown()
         // 等待超时后新核心仍会创建：旧收尾不能销毁它。
         lifecycle.beginCreate(50) { }
+        lifecycle.finishCreate()
 
         assertFalse(lifecycle.claimDestroy(teardown))
     }
@@ -77,6 +117,7 @@ class NativeCoreLifecycleTest {
         val teardown = lifecycle.registerTeardown()
 
         assertTrue(lifecycle.claimDestroy(teardown))
+        lifecycle.finishDestroy()
         assertFalse(lifecycle.claimDestroy(teardown))
     }
 
@@ -89,6 +130,7 @@ class NativeCoreLifecycleTest {
         val creator = Thread {
             Thread.currentThread().interrupt()
             lifecycle.beginCreate(2_000) { }
+            lifecycle.finishCreate()
             interruptedAfter = Thread.currentThread().isInterrupted
             created.countDown()
         }
