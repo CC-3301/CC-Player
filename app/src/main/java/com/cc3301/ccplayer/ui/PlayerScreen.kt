@@ -1378,11 +1378,11 @@ private fun PlayerTopBar(
     rotateAppearanceEnabled: Boolean,
     moreEnabled: Boolean,
     moreAppearanceEnabled: Boolean,
+    modifier: Modifier = Modifier,
     preparing: Boolean = false,
     onBack: () -> Unit,
     onRotate: () -> Unit,
     onToggleMore: () -> Unit,
-    modifier: Modifier = Modifier,
     onBlankTap: (() -> Unit)? = null,
 ) {
     Box(
