@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
+import android.os.ParcelFileDescriptor
+import android.system.Os
 import androidx.core.graphics.get
 import androidx.core.graphics.scale
 import androidx.core.net.toUri
@@ -12,7 +14,6 @@ import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.ByteArrayOutputStream
-import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,18 +28,18 @@ import kotlinx.coroutines.withContext
 class AndroidMediaPreviewExtractor(
     private val context: Context,
     networkReads: NetworkMediaReads? = null,
-    diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : MediaPreviewExtractor {
 
     private val networkPreview = networkReads?.let { reads ->
-        NetworkPreviewExtractor(reads, decoder = AndroidNetworkPreviewDecoder(), diagnostics = diagnostics)
+        NetworkPreviewExtractor(reads, decoder = AndroidNetworkPreviewDecoder(diagnostics), diagnostics = diagnostics)
     }
 
     override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = withContext(Dispatchers.IO) {
         withRetriever(file) { retriever ->
             when (mediaKindOf(file.name)) {
                 MediaKind.Video -> videoFrameBytes(retriever, LOCAL_FRAME_COUNT, targetWidth)
-                MediaKind.Audio -> coverBytes(retriever, targetWidth)
+                MediaKind.Audio -> audioCoverBytes(retriever, targetWidth, file)
                 null -> null
             }
         }
@@ -73,7 +74,7 @@ class AndroidMediaPreviewExtractor(
                     )
 
                     MediaKind.Audio -> MediaPreviewExtraction(
-                        imageBytes = coverBytes(retriever, targetWidth),
+                        imageBytes = audioCoverBytes(retriever, targetWidth, file),
                         duration = retriever.readDuration(),
                     )
 
@@ -85,29 +86,82 @@ class AndroidMediaPreviewExtractor(
     private fun <T> withRetriever(file: MediaFile, block: (MediaMetadataRetriever) -> T): T {
         val retriever = MediaMetadataRetriever()
         return try {
-            retriever.setDataSource(context, file.location.toUri())
+            try {
+                retriever.setDataSource(context, file.location.toUri())
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (invalid: IllegalArgumentException) {
+                // 位置解析不了交给上层按「路径解析」记，不改成打开数据源。
+                throw invalid
+            } catch (denied: SecurityException) {
+                throw denied
+            } catch (failure: Exception) {
+                throw PreviewStageException(PreviewFailureStage.OpenSource, "打开数据源失败", failure)
+            }
             block(retriever)
         } finally {
             retriever.release()
         }
     }
+
+    /** 本地音频封面：先取系统内嵌图，取不到时用 ID3v2 APIC 再取一次。 */
+    private fun audioCoverBytes(
+        retriever: MediaMetadataRetriever,
+        targetWidth: Int,
+        file: MediaFile,
+    ): ByteArray? {
+        val systemPicture = embeddedPictureOrNull(retriever)
+        if (systemPicture != null) return encodeCover(systemPicture, targetWidth)
+        val id3 = readLocalId3Cover(context, file)
+        diagnostics.log { "封面兜底: ${file.name} 系统取图无，ID3 解析 ${id3Label(id3)}" }
+        return when (id3) {
+            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
+            is Id3CoverResult.Missing -> null
+            is Id3CoverResult.Failed -> throw PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
+        }
+    }
 }
 
 /** 网络解码：把随机读句柄包成系统数据源，交给 MediaMetadataRetriever 取图。 */
-private class AndroidNetworkPreviewDecoder : NetworkPreviewDecoder {
+private class AndroidNetworkPreviewDecoder(
+    private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+) : NetworkPreviewDecoder {
 
     override fun imageBytes(source: ByteSource, kind: MediaKind, targetWidth: Int): ByteArray? {
         val retriever = MediaMetadataRetriever()
         val dataSource = RangeMediaDataSource(source)
         return try {
-            retriever.setDataSource(dataSource)
+            try {
+                retriever.setDataSource(dataSource)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                throw PreviewStageException(PreviewFailureStage.OpenSource, "打开数据源失败", failure)
+            }
             when (kind) {
                 MediaKind.Video -> networkVideoFrameBytes(retriever, targetWidth)
-                MediaKind.Audio -> coverBytes(retriever, targetWidth)
+                MediaKind.Audio -> audioCoverBytes(retriever, source, targetWidth)
             }
         } finally {
             retriever.release()
             // 句柄由调用方在 release 之后关闭。
+        }
+    }
+
+    /** 网络音频封面：先取系统内嵌图，取不到时按字节范围只读 ID3 标签段再取一次。 */
+    private fun audioCoverBytes(
+        retriever: MediaMetadataRetriever,
+        source: ByteSource,
+        targetWidth: Int,
+    ): ByteArray? {
+        val systemPicture = embeddedPictureOrNull(retriever)
+        if (systemPicture != null) return encodeCover(systemPicture, targetWidth)
+        val id3 = readId3Cover(ByteSourceCoverSource(source))
+        diagnostics.log { "网络封面: ID3 解析 ${id3Label(id3)}" }
+        return when (id3) {
+            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
+            is Id3CoverResult.Missing -> null
+            is Id3CoverResult.Failed -> throw PreviewStageException(PreviewFailureStage.Read, "封面解析失败")
         }
     }
 }
@@ -125,30 +179,44 @@ private class RangeMediaDataSource(private val source: ByteSource) : MediaDataSo
     }
 }
 
-/** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
-private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray {
-    // 时长读不到时改用固定候选位置，不因此丢弃已经能解出的帧。
-    val duration = readDurationOrNull(retriever) ?: 0
-    return frameBytes(retriever, framePositions(duration, frameCount), targetWidth)
+/** 抽帧过程中的异常统一按「解码」阶段收尾；取消原样抛出。 */
+private fun <T> decodeStage(message: String, block: () -> T): T = try {
+    block()
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (failure: PreviewStageException) {
+    throw failure
+} catch (failure: Exception) {
+    throw PreviewStageException(PreviewFailureStage.Decode, message, failure)
 }
 
-/** 网络抽帧：按候选位置取第一张非纯色帧；候选全部不合格时保持占位图。 */
-private fun networkVideoFrameBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? {
-    val frame = extractNetworkFrame(
-        durationMillis = readDurationOrNull(retriever),
-        decode = { micros ->
-            retriever.getFrameAtTime(micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                ?.let { bitmap -> scaleFrame(bitmap, targetWidth) }
-        },
-        isSolid = ::isSolidFrame,
-        release = Bitmap::recycle,
-    ) ?: return null
-    return try {
-        requireCompressedFrame(compressFrame(frame))
-    } finally {
-        frame.recycle()
+/** 按时长比例抽帧；跳过纯色帧，全部不合格时用约三分之一处的帧兜底。 */
+private fun videoFrameBytes(retriever: MediaMetadataRetriever, frameCount: Int, targetWidth: Int): ByteArray =
+    decodeStage("视频抽帧失败") {
+        // 时长读不到时改用固定候选位置，不因此丢弃已经能解出的帧。
+        val duration = readDurationOrNull(retriever) ?: 0
+        frameBytes(retriever, framePositions(duration, frameCount), targetWidth)
     }
-}
+
+/** 网络抽帧：按候选位置取第一张非纯色帧；候选全部不合格时保持占位图。 */
+private fun networkVideoFrameBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? =
+    decodeStage("视频抽帧失败") {
+        val frame = extractNetworkFrame(
+            durationMillis = readDurationOrNull(retriever),
+            decode = { micros ->
+                retriever.getFrameAtTime(micros, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    ?.let { bitmap -> scaleFrame(bitmap, targetWidth) }
+            },
+            isSolid = ::isSolidFrame,
+            release = Bitmap::recycle,
+        ) ?: return@decodeStage null
+        try {
+            compressFrame(frame)
+                ?: throw PreviewStageException(PreviewFailureStage.Decode, "视频帧压缩失败")
+        } finally {
+            frame.recycle()
+        }
+    }
 
 /** 读取时长；读不到时返回 null，由调用方决定兜底位置。 */
 private fun readDurationOrNull(retriever: MediaMetadataRetriever): Long? = try {
@@ -181,28 +249,78 @@ private fun frameBytes(
     return requireCompressedFrame(compressed)
 }
 
-/** 音频内嵌封面按与视频帧相同的宽度和 JPEG 质量处理；没有封面返回 null。 */
-private fun coverBytes(retriever: MediaMetadataRetriever, targetWidth: Int): ByteArray? {
-    val picture = retriever.embeddedPicture ?: return null
+/** 内嵌封面按与视频帧相同的宽度和 JPEG 质量处理；解码失败按「解码」阶段收尾。 */
+private fun encodeCover(picture: ByteArray, targetWidth: Int): ByteArray {
     // 先读尺寸并按 2 的幂降采样，避免超大封面先解出全尺寸位图。
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(picture, 0, picture.size, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("封面解码失败")
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+        throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败")
+    }
     val target = targetFrameWidth(bounds.outWidth, targetWidth)
     val options = BitmapFactory.Options().apply {
         inSampleSize = coverSampleSize(bounds.outWidth, target)
     }
     val bitmap = BitmapFactory.decodeByteArray(picture, 0, picture.size, options)
-        ?: throw IOException("封面解码失败")
+        ?: throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败")
     return try {
         val scaled = scaleFrame(bitmap, targetWidth)
         try {
-            requireCompressedFrame(compressFrame(scaled))
+            compressFrame(scaled)
+                ?: throw PreviewStageException(PreviewFailureStage.Decode, "封面压缩失败")
         } finally {
             if (scaled !== bitmap) scaled.recycle()
         }
     } finally {
         bitmap.recycle()
+    }
+}
+
+/** 系统内嵌图；读取失败按没有处理，交给 ID3v2 兜底。 */
+private fun embeddedPictureOrNull(retriever: MediaMetadataRetriever): ByteArray? = try {
+    retriever.embeddedPicture
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (failure: Exception) {
+    null
+}
+
+/** ID3 解析结果的日志标签。 */
+private fun id3Label(result: Id3CoverResult): String = when (result) {
+    is Id3CoverResult.Picture -> "取到封面"
+    is Id3CoverResult.Missing -> result.reason.name
+    is Id3CoverResult.Failed -> result.reason.name
+}
+
+/** 本地 SAF 文件的 ID3 标签只读头部：只读标签头与需要的帧，不整文件读。 */
+private fun readLocalId3Cover(context: Context, file: MediaFile): Id3CoverResult {
+    val descriptor = try {
+        context.contentResolver.openFileDescriptor(file.location.toUri(), "r")
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Exception) {
+        return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
+    } ?: return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
+    return descriptor.use { opened ->
+        val size = opened.statSize.takeIf { it > 0 } ?: file.size
+        if (size <= 0) {
+            Id3CoverResult.Missing(Id3CoverMiss.NotId3)
+        } else {
+            readId3Cover(ContentUriCoverSource(opened, size))
+        }
+    }
+}
+
+/** 本地 SAF 文件的随机读：按位置读标签段，不整文件读。 */
+private class ContentUriCoverSource(
+    private val descriptor: ParcelFileDescriptor,
+    override val size: Long,
+) : CoverByteSource {
+
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        if (position < 0 || position >= size || length <= 0) return 0
+        val read = Os.pread(descriptor.fileDescriptor, buffer, offset, length, position)
+        return if (read < 0) 0 else read
     }
 }
 

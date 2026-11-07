@@ -32,6 +32,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -397,6 +398,23 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     PlayerLevelControls(volume = MediaVolumeControl(this@MainActivity))
                 }
 
+                // 播放页封面只给纯音频目标：直接读列表共用的封面缓存，不在这里另做解码。
+                val currentMedia = playlist.getOrNull(currentIndex)
+                val audioTarget = currentMedia?.let { mediaKindOf(it.name) == MediaKind.Audio } == true
+                val playerCover by produceState<File?>(
+                    null,
+                    currentMedia?.location,
+                    currentMedia?.size,
+                    currentMedia?.lastModified,
+                    playerVisible,
+                ) {
+                    value = if (playerVisible && audioTarget) {
+                        currentMedia?.let { media -> mediaPreview.cachedImage(media) }
+                    } else {
+                        null
+                    }
+                }
+
                 when {
                     // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
                     coldStartPending -> {
@@ -427,6 +445,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
                             surfacePresentation = surfacePresentation,
+                            coverFile = playerCover,
+                            audioTarget = audioTarget,
                             switching = switching,
                             restoring = restoring,
                             buffering = playbackEntry.showingBuffering(buffering),

@@ -54,6 +54,13 @@ fun showPlayerBlackLayer(
     (!orientationSettled && !hasKnownVideoAspectRatio(videoAspectRatio))
 
 /**
+ * 播放页封面层显隐：目标是纯音频、且播放核心还没把画面（含内嵌封面帧）上屏时显示。
+ * 视频目标不使用封面层；没有可用封面时这一层显示占位图，不留黑屏空窗。
+ */
+fun showsPlayerCoverLayer(audioTarget: Boolean, showsPicture: Boolean): Boolean =
+    audioTarget && !showsPicture
+
+/**
  * 缓冲提示用的首次缓冲判据：被静默标记的黑屏不显示提示。
  * 打开另一个目标与后台切集、播放态回前台撤帧一样属于这类黑屏；
  * 这里只压提示本身，控制层显隐仍按「首次缓冲」原值。

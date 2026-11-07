@@ -521,6 +521,46 @@ class VisiblePreviewSchedulerTest {
         assertEquals("订阅收尾后重试计时照常启动", listOf(0L, 1_000L), times)
         assertNull(failed.await().image)
     }
+
+    @Test
+    fun `重试用尽后条目再次可见重新给一轮`() = runTest {
+        var rounds = 0
+        val source = object : MediaPreviewSource {
+            override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
+
+            override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
+                rounds++
+                return MediaPreview(image = null, durationMillis = null, retryable = true)
+            }
+
+            override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
+
+            override fun updatePreviewWindow(
+                visibleLocations: Set<String>,
+                prefetchLocations: Set<String>,
+            ) = Unit
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 0, rowSize = 1)
+
+        val first = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        // 首发 1 次加重试 5 次；递进间隔合计 15 秒，留足推进时间。
+        repeat(20) {
+            if (!first.isCompleted) {
+                advanceTimeBy(1_000)
+                runCurrent()
+            }
+        }
+        withTimeout(5_000) { first.await() }
+        assertEquals("首发加 5 次重试", 6, rounds)
+
+        // 条目再次可见时重新订阅：调度器里已没有这一项，会重新给一轮。
+        val second = async { scheduler.preview(entries[0], 0) }
+        runCurrent()
+        assertEquals("重新订阅立即再抽一次", 7, rounds)
+        second.await()
+    }
 }
 
 /** 首次抽取取消后延迟结束，用来构造旧 attempt 迟到收尾。 */

@@ -111,6 +111,7 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -131,6 +132,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import coil.compose.AsyncImage
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.playback.DecodeMode
@@ -149,6 +151,7 @@ import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.ui.theme.AppColors
 import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -311,6 +314,31 @@ private fun BufferingIndicator(modifier: Modifier = Modifier) {
     }
 }
 
+/** 播放页封面层：纯音频目标在播放核心出图前顶住画面；没有缓存封面时显示音符占位图。 */
+@Composable
+private fun PlayerCoverLayer(coverFile: File?, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.background(Color.Black),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (coverFile != null) {
+            AsyncImage(
+                model = coverFile,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Icon(
+                painter = painterResource(R.drawable.ic_media_audio),
+                contentDescription = null,
+                tint = AppColors.Muted,
+                modifier = Modifier.size(72.dp),
+            )
+        }
+    }
+}
+
 @Composable
 fun PlayerScreen(
     state: PlaybackState,
@@ -330,6 +358,10 @@ fun PlayerScreen(
     levelControls: PlayerLevelControls,
     surfaceCallback: MpvSurfaceView.Callback,
     surfacePresentation: SurfacePresentation,
+    /** 纯音频目标的已缓存封面；没有时为 null，封面层显示占位图。 */
+    coverFile: File?,
+    /** 当前目标是纯音频：只有这类目标使用封面层。 */
+    audioTarget: Boolean,
     switching: Boolean,
     restoring: Boolean,
     buffering: Boolean,
@@ -571,6 +603,10 @@ fun PlayerScreen(
                     .fillMaxSize()
                     .background(Color.Black),
             )
+        }
+        // 封面层只给纯音频：进页立即顶住画面，播放核心把封面帧上屏后让位；没有缓存封面时显示占位图。
+        if (showsPlayerCoverLayer(audioTarget = audioTarget, showsPicture = surfacePresentation.showsPicture)) {
+            PlayerCoverLayer(coverFile = coverFile, modifier = Modifier.fillMaxSize())
         }
         // 提示规则：有画面时叠在画面上；首次打开的黑屏照常显示；其余黑屏按原有规则显示。
         // 被静默标记的黑屏（后台切集、播放态回前台撤帧、打开另一个目标）不显示转圈与文字；

@@ -29,4 +29,40 @@ class NoImageMemoryTest {
 
         assertFalse(memory.contains("a"))
     }
+
+    @Test
+    fun `记忆到有效期前仍然命中`() {
+        var now = 1_000L
+        val memory = NoImageMemory(clock = { now })
+        memory.remember("a")
+
+        now += NoImageMemory.DEFAULT_TTL_MILLIS - 1
+
+        assertTrue(memory.contains("a"))
+    }
+
+    @Test
+    fun `过期后不再命中`() {
+        var now = 1_000L
+        val memory = NoImageMemory(clock = { now })
+        memory.remember("a")
+
+        now += NoImageMemory.DEFAULT_TTL_MILLIS
+
+        assertFalse(memory.contains("a"))
+    }
+
+    @Test
+    fun `过期后重新记住会重新计时`() {
+        var now = 1_000L
+        val memory = NoImageMemory(clock = { now })
+        memory.remember("a")
+
+        now += NoImageMemory.DEFAULT_TTL_MILLIS
+        assertFalse(memory.contains("a"))
+
+        memory.remember("a")
+        now += NoImageMemory.DEFAULT_TTL_MILLIS - 1
+        assertTrue(memory.contains("a"))
+    }
 }
