@@ -43,8 +43,10 @@ class PlaybackEntryOpener(
     /**
      * 点开 [entry]。[enterBeforePreparing] 为真时立即进入播放页再准备；
      * 为假时准备完成后才进入，保持原行为。
+     *
+     * 返回这次打开分配到的代际。
      */
-    fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean) {
+    fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean): Int {
         job?.cancel()
         val generation = entryState.begin(preparing = enterBeforePreparing)
         if (enterBeforePreparing) onEnterPlayer()
@@ -81,6 +83,7 @@ class PlaybackEntryOpener(
         }
         job = started
         started.start()
+        return generation
     }
 
     /** 网络媒体换成回环地址；本地媒体原样返回。 */

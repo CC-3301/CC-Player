@@ -221,20 +221,19 @@ fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
     !locked || input == PlayerInput.UnlockButton
 
 /**
- * 顶/底栏是否可见：锁定与抽屉打开时不显示，控制层隐藏时也不显示。
- * 准备期例外：顶栏保留返回与更多、其余控件隐藏，底栏隐藏。
+ * 顶/底栏是否在场：锁定与抽屉打开时不显示，控制层隐藏时也不显示。
  * 缓冲指示与错误提示不属于控制层，不受此判据影响。
  */
 fun playerBarsVisible(
     locked: Boolean,
     controlsVisible: Boolean,
     panelBarsVisible: Boolean,
-    firstBuffering: Boolean,
+    preparing: Boolean,
 ): Boolean = inputAllowed(PlayerInput.ControlBar, locked) &&
-    (controlsVisible || firstBuffering) &&
+    (controlsVisible || preparing) &&
     panelBarsVisible
 
-/** 准备期顶栏隐藏标题与转屏，保留返回与更多；接手后恢复。 */
+/** 准备期顶栏保留返回与更多、其余控件隐藏；接手后恢复。 */
 fun playerTopBarTitleAndRotateVisible(preparing: Boolean): Boolean = !preparing
 
 /** 准备期隐藏底栏；接手后按控制层显隐恢复。 */

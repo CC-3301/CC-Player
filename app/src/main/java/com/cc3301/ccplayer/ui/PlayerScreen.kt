@@ -386,7 +386,7 @@ fun PlayerScreen(
     restoring: Boolean,
     buffering: Boolean,
     initialLoading: Boolean,
-    /** 准备期：顶栏只留返回、底栏隐藏；接手后恢复。 */
+    /** 准备期：顶栏只留返回与更多、底栏隐藏；接手后恢复。 */
     preparing: Boolean,
     subtitleTracks: List<SubtitleTrack>,
     externalSubtitles: List<MediaFile>,

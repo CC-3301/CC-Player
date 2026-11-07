@@ -145,7 +145,7 @@ class PlayerNavigationPolicyTest {
         listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
             assertFalse(playerTopBarBackEndsPlayback(phase))
         }
-        listOf(null, EntryPhase.Accepted, EntryPhase.Failed).forEach { phase ->
+        listOf(null, EntryPhase.Accepted).forEach { phase ->
             assertTrue(playerTopBarBackEndsPlayback(phase))
         }
     }

@@ -107,7 +107,6 @@ import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.EntryHandoverWatchdog
 import com.cc3301.ccplayer.ui.failedEntryExit
-import com.cc3301.ccplayer.ui.handoverTimeoutMessage
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.isPreparingPhase
 import com.cc3301.ccplayer.ui.mediaFailureText
@@ -780,9 +779,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         Toast.makeText(this, getString(mediaFailureText(failure)), Toast.LENGTH_LONG).show()
     }
 
-    /** 播放失败用既有文案提示；接手兜底超时也走这一条。 */
+    /** 播放失败用既有文案提示；接手兜底超时与入口目标不在列表都走这一条。 */
     private fun showPlaybackFailure() {
-        Toast.makeText(this, getString(handoverTimeoutMessage()), Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, getString(R.string.player_playback_failed), Toast.LENGTH_SHORT).show()
     }
 
     /** 回环代理与网络会话按需建立，关播放页时一并释放。 */
@@ -834,11 +833,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                         // 兜底到点用播放失败的既有文案提示，再按现有会话回滚。
                         showPlaybackFailure()
                         diagnostics.log { "打开交接超时: 播放控制层未接手" }
-                        val controller = playback?.controller
-                        when (failedEntryExit(controller?.state?.value, controller?.atEpisodeEnd == true)) {
-                            FailedEntryExit.LeavePlayerPage -> leavePlayerPage()
-                            FailedEntryExit.StopPlayback -> closePlayer()
-                        }
+                        leaveAfterFailedEntry()
                     }
                     handoverWatchdog.reset()
                     break
@@ -865,9 +860,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
             if (!playbackEntry.isCurrent(generation)) return@start
             val accepted = binder.controller.openPlaylist(files, current, generation, entries)
             if (!accepted) {
-                // 目标不在列表或被旧代际拒绝：按失败收尾并给出既有失败提示，不静默返回。
+                // 目标不在列表：按失败收尾并给出播放失败提示，不静默返回。
                 playbackEntry.failed(generation)
-                showFailure(MediaFailure.Unknown)
+                showPlaybackFailure()
                 leaveAfterFailedEntry()
                 return@start
             }

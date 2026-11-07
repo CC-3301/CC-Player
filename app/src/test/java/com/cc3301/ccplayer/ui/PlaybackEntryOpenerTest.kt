@@ -123,7 +123,7 @@ class PlaybackEntryOpenerTest {
             streams = { streams },
         )
 
-        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        val generation = opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
 
         assertEquals(1, recorder.enterCount)
         assertEquals(EntryPhase.Preparing, entryState.phase)
@@ -139,7 +139,7 @@ class PlaybackEntryOpenerTest {
         assertEquals(listOf(networkVideo.location), streams.probed)
         val result = requireNotNull(recorder.opened)
         assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
-        assertEquals(entryState.generation, recorder.openedGeneration)
+        assertEquals(generation, recorder.openedGeneration)
         assertEquals("http://127.0.0.1:1/第1集.mkv", result.current.playbackLocation)
         assertEquals(listOf("http://127.0.0.1:1/第1集.mkv"), result.playlist.map { it.playbackLocation })
         assertEquals(listOf("http://127.0.0.1:1/第1集.srt"), result.directoryEntries.map { it.playbackLocation })
@@ -161,7 +161,7 @@ class PlaybackEntryOpenerTest {
             streams = { throw AssertionError("本地音频不应建立网络连接") },
         )
 
-        opener.open(audio, listOf(audio), enterBeforePreparing = false)
+        val generation = opener.open(audio, listOf(audio), enterBeforePreparing = false)
         runCurrent()
 
         assertTrue("音频不预先进入播放页", recorder.events.isEmpty())
@@ -171,7 +171,7 @@ class PlaybackEntryOpenerTest {
         directoryGate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(listOf("enter", "start:${entryState.generation}"), recorder.events)
+        assertEquals(listOf("enter", "start:$generation"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
         assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
         assertFalse("音频进入时不显示准备期界面", entryState.preparingUi)
@@ -195,7 +195,7 @@ class PlaybackEntryOpenerTest {
         assertNull(recorder.opened)
         assertEquals(MediaFailure.Unknown, recorder.shownFailure)
         assertEquals(0, recorder.leaveCount)
-        assertEquals(EntryPhase.Failed, entryState.phase)
+        assertNull(entryState.phase)
     }
 
     @Test
@@ -218,7 +218,7 @@ class PlaybackEntryOpenerTest {
         assertEquals(MediaFailure.Authentication, recorder.shownFailure)
         assertEquals(1, recorder.leaveCount)
         assertEquals(listOf("enter", "failure:Authentication", "leave"), recorder.events)
-        assertEquals(EntryPhase.Failed, entryState.phase)
+        assertNull(entryState.phase)
     }
 
     @Test
@@ -294,9 +294,8 @@ class PlaybackEntryOpenerTest {
             streams = { streams },
         )
 
-        opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
+        val generation = opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
         runCurrent()
-        val generation = entryState.generation
         // 取消只清入口阶段，不打断阻塞中的准备：迟到的成功必须按代际丢弃。
         entryState.cancelEntry()
         streams.gate.complete(Unit)
@@ -369,9 +368,8 @@ class PlaybackEntryOpenerTest {
             streams = { throw AssertionError("本地音频不应建立网络连接") },
         )
 
-        opener.open(audio, listOf(audio), enterBeforePreparing = false)
+        val generation = opener.open(audio, listOf(audio), enterBeforePreparing = false)
         runCurrent()
-        val generation = entryState.generation
         entryState.cancelEntry()
         directoryGate.complete(Unit)
         advanceUntilIdle()

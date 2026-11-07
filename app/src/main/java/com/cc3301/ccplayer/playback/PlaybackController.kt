@@ -143,8 +143,6 @@ class PlaybackController(
     /** 入口分配的代际号：只给失败事件标归属，界面按严格相等丢弃旧会话的失败。 */
     private var entryGeneration = 0
 
-
-
     /** 已下发给引擎的静音状态；只在推导结果变化时写一次。 */
     private var audioMuted = false
 

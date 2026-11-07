@@ -117,7 +117,7 @@ internal class LoadGeneration(
     /** 片尾黑底；直到用户操作或新加载才解除。 */
     var holdBlack: Boolean = false
 
-    /** 黑屏期间不显示缓冲提示：后台切集、播放态回前台撤帧与打开交接这三类黑屏。 */
+    /** 黑屏期间不显示缓冲提示：后台切集与播放态回前台撤帧这两类黑屏。 */
     var quietBlack: Boolean = false
 
     /** 打开交接的撤销快照；新目标一开始加载就失效。 */

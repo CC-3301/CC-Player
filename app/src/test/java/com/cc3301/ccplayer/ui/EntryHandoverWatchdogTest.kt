@@ -1,22 +1,10 @@
 package com.cc3301.ccplayer.ui
 
-import com.cc3301.ccplayer.R
-import com.cc3301.ccplayer.playback.PlaybackState
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 接手兜底：按实际时间累计、暂停不计、到点后走提示与回滚。 */
-@OptIn(ExperimentalCoroutinesApi::class)
+/** 接手兜底计时：按实际时间累计、暂停不计、重置后从头计时。 */
 class EntryHandoverWatchdogTest {
 
     private var nowMillis = 0L
@@ -63,39 +51,5 @@ class EntryHandoverWatchdogTest {
         assertFalse(watchdog.onTick())
         nowMillis = 9_000
         assertTrue(watchdog.onTick())
-    }
-
-    @Test
-    fun `到点后按会话回滚并使用播放失败文案`() = runTest {
-        val scheduler = testScheduler
-        val tickerWatchdog = EntryHandoverWatchdog(nowMillis = { scheduler.currentTime })
-        var prompted = false
-        var exit: FailedEntryExit? = null
-        var ticks = 0
-
-        tickerWatchdog.resume()
-        val ticker = backgroundScope.launch {
-            while (isActive) {
-                delay(250)
-                ticks += 1
-                if (!tickerWatchdog.onTick()) continue
-                prompted = true
-                exit = failedEntryExit(PlaybackState.Playing, atEpisodeEnd = false)
-                break
-            }
-        }
-        advanceTimeBy(4_999)
-        runCurrent()
-        assertFalse(prompted)
-
-        advanceTimeBy(250)
-        runCurrent()
-
-        assertTrue(prompted)
-        assertEquals(FailedEntryExit.LeavePlayerPage, exit)
-        assertEquals(20, ticks)
-        assertEquals(R.string.player_playback_failed, handoverTimeoutMessage())
-        assertNotEquals(R.string.library_load_failed, handoverTimeoutMessage())
-        ticker.cancel()
     }
 }

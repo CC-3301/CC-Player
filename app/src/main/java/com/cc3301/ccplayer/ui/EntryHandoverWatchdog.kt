@@ -41,6 +41,6 @@ class EntryHandoverWatchdog(
 
     companion object {
         /** 准备完成到播放控制层接手的最长前台等待。 */
-        const val DEFAULT_TIMEOUT_MILLIS = 5_000L
+        private const val DEFAULT_TIMEOUT_MILLIS = 5_000L
     }
 }

@@ -16,9 +16,6 @@ enum class EntryPhase {
 
     /** 已接手：播放控制层已接受这次打开，入口只等首个就绪、切集或终态上报。 */
     Accepted,
-
-    /** 失败：准备失败、目标不在列表或等待接手超时。 */
-    Failed,
 }
 
 /** 准备期：返回按撤回或退出处理，界面只保留返回与更多。 */
@@ -45,9 +42,6 @@ class PlaybackEntryState {
 
     /** 已接手但首次加载还没有结论：只有这个窗口内的首次加载失败才退回列表。 */
     private var initialLoadPending = false
-
-    /** 当前这次打开的代际；没有进行中的打开时为 0。 */
-    val generation: Int get() = currentGeneration ?: 0
 
     /** 准备期界面：只给在播放页里等待准备的打开，音频进入时不显示准备期。 */
     val preparingUi: Boolean get() = preparesInPage && phase.isPreparingPhase
@@ -87,7 +81,7 @@ class PlaybackEntryState {
     /** 准备失败或打开被中止；不是当前打开时返回 false，调用方据此丢弃。 */
     fun failed(generation: Int): Boolean {
         if (!isCurrent(generation)) return false
-        phase = EntryPhase.Failed
+        phase = null
         currentGeneration = null
         initialLoadPending = false
         return true
@@ -96,7 +90,7 @@ class PlaybackEntryState {
     /** 兜底到点：中止仍在等待接手的打开；已经接手或已结束时返回 false。 */
     fun failAwaitingHandover(): Boolean {
         if (phase != EntryPhase.AwaitingHandover) return false
-        phase = EntryPhase.Failed
+        phase = null
         currentGeneration = null
         initialLoadPending = false
         return true
@@ -136,7 +130,7 @@ class PlaybackEntryState {
     fun consumeInitialFailure(generation: Int, firstLoad: Boolean): Boolean {
         if (!firstLoad || !preparesInPage || !initialLoadPending || !isCurrent(generation)) return false
         initialLoadPending = false
-        phase = EntryPhase.Failed
+        phase = null
         currentGeneration = null
         return true
     }

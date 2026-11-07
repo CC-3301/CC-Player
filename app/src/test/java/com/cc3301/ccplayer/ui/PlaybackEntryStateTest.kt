@@ -120,7 +120,7 @@ class PlaybackEntryStateTest {
         state.prepared(generation)
 
         assertTrue(state.failAwaitingHandover())
-        assertEquals(EntryPhase.Failed, state.phase)
+        assertNull(state.phase)
         // 有旧会话且不在片尾：撤回打开交接；没有旧会话：结束播放。
         assertEquals(
             FailedEntryExit.LeavePlayerPage,
@@ -156,7 +156,7 @@ class PlaybackEntryStateTest {
         val generation = state.begin(preparing = false)
 
         assertTrue(state.failed(generation))
-        assertEquals(EntryPhase.Failed, state.phase)
+        assertNull(state.phase)
         assertFalse(state.isCurrent(generation))
         assertFalse(state.failed(generation))
     }
@@ -195,7 +195,7 @@ class PlaybackEntryStateTest {
         val generation = acceptedEntry()
 
         assertTrue(state.consumeInitialFailure(generation, firstLoad = true))
-        assertEquals(EntryPhase.Failed, state.phase)
+        assertNull(state.phase)
         assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
     }
 
@@ -241,7 +241,7 @@ class PlaybackEntryStateTest {
         assertNull(state.phase)
 
         assertTrue(state.consumeInitialFailure(generation, firstLoad = true))
-        assertEquals(EntryPhase.Failed, state.phase)
+        assertNull(state.phase)
     }
 
     @Test
