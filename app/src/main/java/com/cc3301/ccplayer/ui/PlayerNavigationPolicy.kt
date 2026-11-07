@@ -5,16 +5,16 @@ import com.cc3301.ccplayer.playback.PlaybackState
 
 /** 播放入口准备失败后的收尾结果。 */
 enum class FailedEntryExit {
-    /** 已有播放会话：只离开播放页，保留原会话继续播放。 */
+    /** 已有播放会话且不在片尾：只离开播放页，保留原会话继续播放。 */
     LeavePlayerPage,
 
-    /** 没有可用会话：结束播放并离开播放页。 */
+    /** 没有可用会话或旧会话停在片尾：结束播放并离开播放页。 */
     StopPlayback,
 }
 
-/** 入口准备失败时按现有播放会话决定是否结束播放。 */
-fun failedEntryExit(playbackState: PlaybackState?): FailedEntryExit =
-    if (playbackState != null && playbackState != PlaybackState.Idle) {
+/** 入口准备失败时按现有播放会话决定是否结束播放；片尾停留按普通退出处理。 */
+fun failedEntryExit(playbackState: PlaybackState?, atEpisodeEnd: Boolean): FailedEntryExit =
+    if (playbackState != null && playbackState != PlaybackState.Idle && !atEpisodeEnd) {
         FailedEntryExit.LeavePlayerPage
     } else {
         FailedEntryExit.StopPlayback
@@ -25,6 +25,9 @@ enum class PlayerBackAction {
     /** 取消进行中的切集，留在播放页。 */
     CancelSwitch,
 
+    /** 打开尚未真正开始：撤回打开交接，旧会话恢复出声与画面后离开播放页。 */
+    CancelOpening,
+
     /** 结束播放并离开播放页。 */
     StopAndLeave,
 
@@ -33,10 +36,11 @@ enum class PlayerBackAction {
 }
 
 /**
- * 播放页系统返回的判定。
+ * 播放页返回的判定。
  *
- * 切集只取消这一跳；首次加载、恢复原片与错误态退出播放页；其余播放状态
- * 按「APP 内后台播放」决定离开后是否继续播放。
+ * 准备期（准备中与等待接手）按撤回或退出处理：有旧会话且不在片尾就撤回打开交接，
+ * 没有旧会话或旧会话停在片尾就退出播放页。其余状态：切集只取消这一跳；
+ * 首次加载、恢复原片与错误态退出播放页；其余按「APP 内后台播放」决定离开后是否继续播放。
  */
 fun playerBackAction(
     state: PlaybackState,
@@ -45,15 +49,29 @@ fun playerBackAction(
     initialLoading: Boolean,
     failed: Boolean,
     inAppBackgroundPlayback: Boolean,
+    entryPhase: EntryPhase? = null,
+    atEpisodeEnd: Boolean = false,
 ): PlayerBackAction = when {
     // 恢复原片期间 switching 仍为真，必须先按恢复态退出播放页。
     restoring -> PlayerBackAction.StopAndLeave
-    initialLoading || failed -> PlayerBackAction.StopAndLeave
+    // 失败优先于准备期：已经失败时返回一律结束播放，不再撤回交接。
+    failed -> PlayerBackAction.StopAndLeave
+    // 准备期：有旧会话就撤回交接，否则按普通退出处理；片尾停留不撤回。
+    entryPhase.isPreparingPhase ->
+        if (state != PlaybackState.Idle && !atEpisodeEnd) {
+            PlayerBackAction.CancelOpening
+        } else {
+            PlayerBackAction.StopAndLeave
+        }
+    initialLoading -> PlayerBackAction.StopAndLeave
     switching -> PlayerBackAction.CancelSwitch
     state == PlaybackState.Idle || state == PlaybackState.Loading -> PlayerBackAction.StopAndLeave
     inAppBackgroundPlayback -> PlayerBackAction.LeaveAndContinue
     else -> PlayerBackAction.StopAndLeave
 }
+
+/** 顶栏返回是否按「总是结束播放」处理；准备期它与系统返回等价，交给同一套判定。 */
+fun playerTopBarBackEndsPlayback(entryPhase: EntryPhase?): Boolean = !entryPhase.isPreparingPhase
 
 /** 面板或抽屉打开时，系统返回只消费为关闭面板，不离开播放页。 */
 fun playerBackClosesPanel(anyPanelOpen: Boolean): Boolean = anyPanelOpen

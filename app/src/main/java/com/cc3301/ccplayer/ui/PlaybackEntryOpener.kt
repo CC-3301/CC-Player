@@ -18,15 +18,21 @@ import kotlinx.coroutines.launch
  * 浏览页点开媒体的入口：视频先同步切进播放页，再在后台解析外挂字幕目录与网络连接；
  * 音频等媒体准备完成后才进入播放页。
  *
- * 网络媒体需要回环地址才能交给播放核心，因此探测完成前不开始播放。
- * 准备失败时先提示原因，再由界面按现有播放会话收尾。
+ * 每次打开由入口阶段分配代际；准备的成功与失败都带同一代际才被接受，
+ * 迟到的结果一律丢弃，不得起播、不得离开播放页。
  */
 class PlaybackEntryOpener(
     private val scope: CoroutineScope,
+    private val entryState: PlaybackEntryState,
     private val directoryEntries: suspend () -> List<MediaFile>,
     private val networkStreams: () -> NetworkStreams,
-    private val onEnterPlayer: (preparing: Boolean) -> Unit,
-    private val onStartPlayback: (current: MediaFile, playlist: List<MediaFile>, directoryEntries: List<MediaFile>) -> Unit,
+    private val onEnterPlayer: () -> Unit,
+    private val onStartPlayback: (
+        current: MediaFile,
+        playlist: List<MediaFile>,
+        directoryEntries: List<MediaFile>,
+        generation: Int,
+    ) -> Unit,
     private val onShowFailure: (MediaFailure) -> Unit,
     private val onLeavePlayer: () -> Unit,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
@@ -34,41 +40,50 @@ class PlaybackEntryOpener(
 
     private var job: Job? = null
 
-    /** 本次点开是否已经进入播放页；音频准备失败时仍停在浏览页。 */
-    private var playerEntered = false
-
     /**
      * 点开 [entry]。[enterBeforePreparing] 为真时立即进入播放页再准备；
      * 为假时准备完成后才进入，保持原行为。
+     *
+     * 返回这次打开分配到的代际。
      */
-    fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean) {
+    fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean): Int {
         job?.cancel()
-        playerEntered = false
-        if (enterBeforePreparing) {
-            onEnterPlayer(true)
-            playerEntered = true
-        }
+        val generation = entryState.begin(preparing = enterBeforePreparing)
+        if (enterBeforePreparing) onEnterPlayer()
         val started = scope.launch(start = CoroutineStart.LAZY) {
-            try {
+            val prepared = try {
                 val plainEntries = directoryEntries()
-                val prepared = prepare(entry, entries, plainEntries)
-                if (!enterBeforePreparing) {
-                    onEnterPlayer(false)
-                    playerEntered = true
-                }
-                onStartPlayback(prepared.current, prepared.playlist, prepared.directoryEntries)
+                Result.success(prepare(entry, entries, plainEntries))
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (failure: MediaSourceException) {
-                diagnostics.log { "准备失败: ${entry.name} (${failure.failure})" }
-                finishWithFailure(failure.failure)
             } catch (failure: Exception) {
-                diagnostics.log { "准备失败: ${entry.name} (Unknown)" }
-                finishWithFailure(MediaFailure.Unknown)
+                Result.failure<PreparedPlayback>(failure)
             }
+            // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
+            if (!entryState.isCurrent(generation)) return@launch
+            prepared.fold(
+                onSuccess = { playback ->
+                    if (!entryState.prepared(generation)) return@launch
+                    if (!enterBeforePreparing) onEnterPlayer()
+                    onStartPlayback(
+                        playback.current,
+                        playback.playlist,
+                        playback.directoryEntries,
+                        generation,
+                    )
+                },
+                onFailure = { failure ->
+                    val mediaFailure = (failure as? MediaSourceException)?.failure ?: MediaFailure.Unknown
+                    if (!entryState.failed(generation)) return@launch
+                    diagnostics.log { "准备失败: ${entry.name} ($mediaFailure)" }
+                    onShowFailure(mediaFailure)
+                    if (enterBeforePreparing) onLeavePlayer()
+                },
+            )
         }
         job = started
         started.start()
+        return generation
     }
 
     /** 网络媒体换成回环地址；本地媒体原样返回。 */
@@ -87,13 +102,6 @@ class PlaybackEntryOpener(
             entries.map { it.withPlaybackLocation(streams) },
             plainEntries.map { it.withPlaybackLocation(streams) },
         )
-    }
-
-    /** 准备失败：先提示原因；已进入播放页才退回列表。先清任务再回调，避免回调里取消自身。 */
-    private fun finishWithFailure(failure: MediaFailure) {
-        job = null
-        onShowFailure(failure)
-        if (playerEntered) onLeavePlayer()
     }
 
     /** 离开播放页时取消尚未完成的准备。 */

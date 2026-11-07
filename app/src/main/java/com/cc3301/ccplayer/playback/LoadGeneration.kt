@@ -82,10 +82,11 @@ internal data class HandoverSnapshot(
  * 直到下一次加载意图替换它或会话结束把它作废。
  */
 internal class LoadGeneration(
-    /** 进程内只增的代际序号；异步查询据此丢弃迟到的结果。 */
-    val id: Int,
     nowMillis: () -> Long,
 ) {
+    /** 打开交接期间旧会话自然播完：这次打开返回时按片尾处理。 */
+    var handoverEndedAtEpisode: Boolean = false
+        private set
     /** 当前进入方式；打开交接会推进本代际的进入方式。 */
     var kind: LoadKind = LoadKind.First
 
@@ -116,11 +117,18 @@ internal class LoadGeneration(
     /** 片尾黑底；直到用户操作或新加载才解除。 */
     var holdBlack: Boolean = false
 
-    /** 黑屏期间不显示缓冲提示：后台切集、播放态回前台撤帧与打开交接这三类黑屏。 */
+    /** 黑屏期间不显示缓冲提示：后台切集与播放态回前台撤帧这两类黑屏。 */
     var quietBlack: Boolean = false
 
     /** 打开交接的撤销快照；新目标一开始加载就失效。 */
     var handover: HandoverSnapshot? = null
+        private set
+
+    /**
+     * 交接开始时旧会话的在途加载令牌：只在旧会话已就绪（有可恢复画面）时记录。
+     * 旧会话还在首次加载或切集时，结束事件不属于「旧会话播完」，不在这里吞掉。
+     */
+    var handoverLoadToken: Int = NO_LOAD_TOKEN
         private set
 
     /** 目标文件是否已打开、是否有视频轨。 */
@@ -175,6 +183,8 @@ internal class LoadGeneration(
      */
     fun startHandover(snapshot: HandoverSnapshot?) {
         kind = LoadKind.Open
+        handoverLoadToken = if (snapshot != null) loadToken else NO_LOAD_TOKEN
+        handoverEndedAtEpisode = false
         phase = LoadPhase.Pending
         forgetLoad()
         audioOwner = AudioOwner.Opening
@@ -192,6 +202,9 @@ internal class LoadGeneration(
 
     /** 撤销打开交接：把快照里的画面事实、出声归属与加载令牌原样放回本代际。 */
     fun restoreHandover(snapshot: HandoverSnapshot) {
+        // 交接撤销后旧会话回到当前会话：交接期间的片尾事实不再成立。
+        handoverEndedAtEpisode = false
+        handoverLoadToken = NO_LOAD_TOKEN
         kind = snapshot.kind
         phase = LoadPhase.None
         audioOwner = snapshot.audioOwner
@@ -221,6 +234,16 @@ internal class LoadGeneration(
     /** 打开交接的新目标开始加载：撤销快照到此失效。 */
     fun clearHandover() {
         handover = null
+    }
+
+    /** 交接窗口内旧会话自然播完：只记片尾事实，不触发连播。 */
+    fun noteHandoverEndedAtEpisode() {
+        handoverEndedAtEpisode = true
+    }
+
+    /** 新目标开始加载：旧会话的片尾事实不再属于本代际。 */
+    fun clearHandoverEndedAtEpisode() {
+        handoverEndedAtEpisode = false
     }
 }
 

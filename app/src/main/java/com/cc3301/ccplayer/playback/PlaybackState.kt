@@ -19,3 +19,12 @@ sealed interface PlaybackState {
 /** 首次加载缓冲：加载中且不在切集；此时只放行不依赖加载的控件。 */
 fun isInitialLoading(state: PlaybackState, switching: Boolean): Boolean =
     state == PlaybackState.Loading && !switching
+
+/**
+ * 一次播放失败：带入口代际与是否首次加载。
+ * 界面只接受当前入口代际的首次加载失败，用于退回列表；其余失败只提示。
+ */
+data class PlaybackFailure(
+    val generation: Int,
+    val firstLoad: Boolean,
+)

@@ -36,7 +36,7 @@ class PlaybackControllerProgressTest {
         progress.records[ep1.location] = MediaProgress(ep1.location, 30_000, 60_000, ep1.lastModified)
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         runCurrent()
         engine.reportMediaLoaded()
 
@@ -48,7 +48,7 @@ class PlaybackControllerProgressTest {
         progress.records[ep1.location] = MediaProgress(ep1.location, 30_000, 60_000, ep1.lastModified)
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
 
@@ -61,7 +61,7 @@ class PlaybackControllerProgressTest {
         val controller = controller()
         controller.setResumeMode(ResumeMode.FromStart)
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
 
@@ -72,7 +72,7 @@ class PlaybackControllerProgressTest {
     fun `没有记录时从头播`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
 
@@ -84,7 +84,7 @@ class PlaybackControllerProgressTest {
         progress.records[ep1.location] = MediaProgress(ep1.location, 0, 60_000, ep1.lastModified)
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
 
@@ -97,10 +97,10 @@ class PlaybackControllerProgressTest {
         progress.holdFinds()
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         runCurrent()
         controller.stop()
-        controller.openPlaylist(listOf(ep1, ep2), ep2)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep2)
         progress.releaseFinds()
         runCurrent()
         engine.reportMediaLoaded()
@@ -111,7 +111,7 @@ class PlaybackControllerProgressTest {
     @Test
     fun `切集期间原媒体的迟到位置不作用到目标`() = runTest {
         val controller = controller()
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
 
         controller.next()
@@ -133,7 +133,7 @@ class PlaybackControllerProgressTest {
     fun `位置按间隔落库`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(30_000, 60_000)
@@ -148,7 +148,7 @@ class PlaybackControllerProgressTest {
     fun `间隔内的位置更新不落库`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(1_000, 60_000)
@@ -161,7 +161,7 @@ class PlaybackControllerProgressTest {
     fun `中途退出保留最新位置`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(1_000, 60_000)
@@ -177,7 +177,7 @@ class PlaybackControllerProgressTest {
     fun `切换下一集时上一集的记录还在`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(30_000, 60_000)
@@ -193,7 +193,7 @@ class PlaybackControllerProgressTest {
         progress.records[ep2.location] = MediaProgress(ep2.location, 30_000, 60_000, ep2.lastModified)
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1, ep2), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1, ep2), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         controller.playAt(1)
@@ -208,7 +208,7 @@ class PlaybackControllerProgressTest {
         progress.records[ep1.location] = MediaProgress(ep1.location, 5_000, 60_000, ep1.lastModified)
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(60_000, 60_000)
@@ -221,7 +221,7 @@ class PlaybackControllerProgressTest {
     fun `看完后退出不重新写记录`() = runTest {
         val controller = controller()
 
-        controller.openPlaylist(listOf(ep1), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(60_000, 60_000)
@@ -238,7 +238,7 @@ class PlaybackControllerProgressTest {
         val controller = controller()
         controller.setLoopMode(LoopMode.SingleLoop)
 
-        controller.openPlaylist(listOf(ep1), ep1)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(ep1), ep1)
         engine.reportMediaLoaded()
         runCurrent()
         engine.reportPositionChanged(60_000, 60_000)

@@ -17,6 +17,8 @@ class PlayerNavigationPolicyTest {
         initialLoading: Boolean = false,
         failed: Boolean = false,
         inAppBackgroundPlayback: Boolean = false,
+        entryPhase: EntryPhase? = null,
+        atEpisodeEnd: Boolean = false,
     ): PlayerBackAction = playerBackAction(
         state = state,
         switching = switching,
@@ -24,6 +26,8 @@ class PlayerNavigationPolicyTest {
         initialLoading = initialLoading,
         failed = failed,
         inAppBackgroundPlayback = inAppBackgroundPlayback,
+        entryPhase = entryPhase,
+        atEpisodeEnd = atEpisodeEnd,
     )
 
     @Test
@@ -88,6 +92,62 @@ class PlayerNavigationPolicyTest {
                 inAppBackgroundPlayback = true,
             ),
         )
+    }
+
+    @Test
+    fun `准备期有旧会话时返回撤回打开交接`() {
+        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+            assertEquals(
+                PlayerBackAction.CancelOpening,
+                back(state = PlaybackState.Playing, entryPhase = phase, inAppBackgroundPlayback = true),
+            )
+            assertEquals(
+                PlayerBackAction.CancelOpening,
+                back(state = PlaybackState.Paused, entryPhase = phase),
+            )
+        }
+    }
+
+    @Test
+    fun `准备期已经失败时返回结束播放`() {
+        // 失败优先于准备期：不再撤回交接、也不留在播放页。
+        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+            assertEquals(
+                PlayerBackAction.StopAndLeave,
+                back(state = PlaybackState.Playing, failed = true, entryPhase = phase),
+            )
+        }
+    }
+
+    @Test
+    fun `准备期没有旧会话时返回退出播放页`() {
+        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+            assertEquals(
+                PlayerBackAction.StopAndLeave,
+                back(state = PlaybackState.Idle, entryPhase = phase, inAppBackgroundPlayback = true),
+            )
+        }
+    }
+
+    @Test
+    fun `准备期旧会话停在片尾时返回不撤回`() {
+        // 片尾包含「已结束」与「暂停在片尾位置」两种形态，都按普通退出处理。
+        listOf(PlaybackState.Ended, PlaybackState.Paused).forEach { state ->
+            assertEquals(
+                PlayerBackAction.StopAndLeave,
+                back(state = state, entryPhase = EntryPhase.AwaitingHandover, atEpisodeEnd = true),
+            )
+        }
+    }
+
+    @Test
+    fun `准备期顶栏返回与系统返回等价`() {
+        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+            assertFalse(playerTopBarBackEndsPlayback(phase))
+        }
+        listOf(null, EntryPhase.Accepted).forEach { phase ->
+            assertTrue(playerTopBarBackEndsPlayback(phase))
+        }
     }
 
     @Test
@@ -177,14 +237,27 @@ class PlayerNavigationPolicyTest {
     @Test
     fun `入口准备失败时已有播放会话只离开播放页`() {
         listOf(PlaybackState.Playing, PlaybackState.Paused, PlaybackState.Ended).forEach { state ->
-            assertEquals(FailedEntryExit.LeavePlayerPage, failedEntryExit(state))
+            assertEquals(
+                FailedEntryExit.LeavePlayerPage,
+                failedEntryExit(state, atEpisodeEnd = false),
+            )
+        }
+    }
+
+    @Test
+    fun `入口准备失败且旧会话停在片尾时结束播放`() {
+        listOf(PlaybackState.Ended, PlaybackState.Paused).forEach { state ->
+            assertEquals(
+                FailedEntryExit.StopPlayback,
+                failedEntryExit(state, atEpisodeEnd = true),
+            )
         }
     }
 
     @Test
     fun `入口准备失败且没有播放会话时结束播放`() {
-        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(null))
-        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(PlaybackState.Idle))
+        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(null, atEpisodeEnd = false))
+        assertEquals(FailedEntryExit.StopPlayback, failedEntryExit(PlaybackState.Idle, atEpisodeEnd = false))
     }
 
     @Test

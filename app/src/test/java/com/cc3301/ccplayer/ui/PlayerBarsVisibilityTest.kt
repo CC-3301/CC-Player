@@ -301,4 +301,18 @@ class PlayerBarsVisibilityTest {
         )
         assertFalse(pointer.visible)
     }
+
+    @Test
+    fun `准备期隐藏标题转屏与底栏但保留更多`() {
+        assertFalse(playerTopBarTitleAndRotateVisible(preparing = true))
+        assertTrue(actionAllowed(PlayerAction.More, switching = false, initialLoading = true, restoring = false))
+        assertFalse(playerBottomBarVisible(barsShown = true, preparing = true))
+    }
+
+    @Test
+    fun `接手后顶栏与底栏恢复`() {
+        assertTrue(playerTopBarTitleAndRotateVisible(preparing = false))
+        assertTrue(playerBottomBarVisible(barsShown = true, preparing = false))
+        assertFalse(playerBottomBarVisible(barsShown = false, preparing = false))
+    }
 }

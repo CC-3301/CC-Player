@@ -249,6 +249,6 @@ class MediaSessionActionTest {
 
     private fun open(vararg names: String, current: String) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
-        controller.openPlaylist(files, files.first { it.name == current })
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first { it.name == current })
     }
 }

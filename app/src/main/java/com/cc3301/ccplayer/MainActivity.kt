@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.SystemClock
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
@@ -80,6 +81,7 @@ import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.streaming.StaleSourceDiscardPolicy
 import com.cc3301.ccplayer.ui.AppScreen
+import com.cc3301.ccplayer.ui.EntryPhase
 import com.cc3301.ccplayer.ui.FailedEntryExit
 import com.cc3301.ccplayer.ui.HomeBackResult
 import com.cc3301.ccplayer.ui.HomeScreen
@@ -103,11 +105,14 @@ import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
+import com.cc3301.ccplayer.ui.EntryHandoverWatchdog
 import com.cc3301.ccplayer.ui.failedEntryExit
 import com.cc3301.ccplayer.ui.libraryEntryAction
+import com.cc3301.ccplayer.ui.isPreparingPhase
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.notificationOpenAction
 import com.cc3301.ccplayer.ui.playerBackAction
+import com.cc3301.ccplayer.ui.playerTopBarBackEndsPlayback
 import com.cc3301.ccplayer.ui.onPlayPauseClick
 import com.cc3301.ccplayer.ui.relativeSeekTarget
 import com.cc3301.ccplayer.ui.screenOrientationMode
@@ -119,6 +124,8 @@ import com.cc3301.ccplayer.webdav.WebDavStreams
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -239,13 +246,20 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     /** 浏览页进入播放页的准备态与首次加载门禁。 */
     private val playbackEntry = PlaybackEntryState()
 
+    /** 等待接手兜底的 ticker；只在前台运行，退后台即停。 */
+    private var entryHandoverJob: Job? = null
+
+    /** 等待接手的兜底计时：按真实时间差累计，暂停不计。 */
+    private val handoverWatchdog = EntryHandoverWatchdog(nowMillis = SystemClock::elapsedRealtime)
+
     /** 点开媒体：视频先进入播放页，音频等媒体准备完成后进入。 */
     private val playbackEntryOpener by lazy {
         PlaybackEntryOpener(
             scope = lifecycleScope,
+            entryState = playbackEntry,
             directoryEntries = { library.directoryEntries() },
             networkStreams = { networkStreams() },
-            onEnterPlayer = { preparing -> enterPlayer(preparing, newSession = true) },
+            onEnterPlayer = { enterPlayer(newSession = true) },
             onStartPlayback = ::openMedia,
             onShowFailure = ::showFailure,
             onLeavePlayer = ::leaveAfterFailedEntry,
@@ -307,15 +321,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     }
                 }
                 launch {
-                    binder.controller.playbackFailures.collect {
+                    binder.controller.playbackFailures.collect { failure ->
                         // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
                         Toast.makeText(
                             this@MainActivity,
                             getString(R.string.player_playback_failed),
                             Toast.LENGTH_SHORT,
                         ).show()
-                        // 首次起播失败时没有可停留的画面，退回浏览页。
-                        if (playbackEntry.consumeInitialFailure()) closePlayer()
+                        // 只认本次入口的首次加载失败：旧会话迟到的失败与后续播放失败都不关播放页。
+                        if (playbackEntry.consumeInitialFailure(failure.generation, failure.firstLoad)) {
+                            closePlayer()
+                        }
                     }
                 }
                 launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
@@ -377,9 +393,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                         }
                     }
                 }
-                // 缓冲指示交给播放控制层后撤掉准备态；首次加载就绪或转入切集时解除失败退回。
-                LaunchedEffect(playbackState, buffering, switching) {
-                    playbackEntry.onPlaybackUpdate(playbackState, buffering, switching)
+                // 已接手后首次就绪或转入切集，入口阶段到此结束。
+                LaunchedEffect(playbackState, switching) {
+                    playbackEntry.onPlaybackUpdate(playbackState, switching)
                 }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
                 // 比例跟着会话走：新会话作废，回到同一会话沿用，切集期间用屏上旧画面的比例。
@@ -459,8 +475,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                             audioTarget = audioTarget,
                             switching = switching,
                             restoring = restoring,
-                            buffering = playbackEntry.showingBuffering(buffering),
+                            buffering = playbackEntry.showsBuffering(buffering),
                             initialLoading = playbackEntry.initialLoading(playbackState, switching),
+                            preparing = playbackEntry.preparingUi,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
@@ -508,7 +525,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                             onToggleRotation = {
                                 sessionOrientation.toggle(currentScreenOrientation())
                             },
-                            onClose = { closePlayer() },
+                            onClose = ::handlePlayerTopBarBack,
                         )
                     }
 
@@ -730,13 +747,16 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     /**
-     * 进入播放页；[preparing] 为真时先显示黑屏与缓冲指示，准备在后台继续。
+     * 进入播放页。入口阶段由 [PlaybackEntryState] 在打开时先行建立，这里只负责界面与会话。
      *
      * [newSession] 为真表示开始新的播放会话（从浏览页点进来），比例与转屏结果作废；
      * 为假表示回到同一会话（通知栏入口等），沿用已记录的比例。
      */
-    private fun enterPlayer(preparing: Boolean, newSession: Boolean) {
+    private fun enterPlayer(newSession: Boolean) {
         if (newSession) {
+            // 新的打开开始时先收掉上一次的接手兜底 ticker，并重新起算等待。
+            stopEntryHandoverTimer()
+            handoverWatchdog.reset()
             sessionOrientation.beginPlayback()
             // 打开另一个目标：旧片立即停止出声、屏上旧画面撤掉，方向与比例按新目标判定。
             playback?.controller?.beginOpenHandover()
@@ -745,7 +765,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         }
         playerVisible = true
         updateKeepScreenOn()
-        playbackEntry.enter(preparing)
         requestNotificationPermission()
         if (!bound) {
             val intent = Intent(this, PlaybackService::class.java)
@@ -758,6 +777,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     /** 起播前连不上时用提示条告知。 */
     private fun showFailure(failure: MediaFailure) {
         Toast.makeText(this, getString(mediaFailureText(failure)), Toast.LENGTH_LONG).show()
+    }
+
+    /** 播放失败用既有文案提示；接手兜底超时与入口目标不在列表都走这一条。 */
+    private fun showPlaybackFailure() {
+        Toast.makeText(this, getString(R.string.player_playback_failed), Toast.LENGTH_SHORT).show()
     }
 
     /** 回环代理与网络会话按需建立，关播放页时一并释放。 */
@@ -778,19 +802,72 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         )
     }
 
-    /** 后台准备完成：把播放列表与字幕目录交给播放控制层。 */
-    private fun openMedia(current: MediaFile, files: List<MediaFile>, directoryEntries: List<MediaFile>) {
+    /** 后台准备完成：把播放列表、字幕目录与入口代际交给播放控制层。 */
+    private fun openMedia(
+        current: MediaFile,
+        files: List<MediaFile>,
+        directoryEntries: List<MediaFile>,
+        generation: Int,
+    ) {
         // 加载开始：目标的视频轨以加载结果为准，不再用点开时的扩展名事实。
         entryHasNoVideo = false
-        pendingPlayback.set(current, files, directoryEntries)
+        pendingPlayback.set(current, files, directoryEntries, generation)
+        startEntryHandoverTimer()
         startPendingPlayback()
+    }
+
+    /** 准备完成、等控制层接手时起表；只在播放页前台且停在等待接手阶段运行。 */
+    private fun startEntryHandoverTimer() {
+        if (entryHandoverJob != null) return
+        if (!playerVisible) return
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+        if (playbackEntry.phase != EntryPhase.AwaitingHandover) return
+        handoverWatchdog.resume()
+        entryHandoverJob = lifecycleScope.launch {
+            try {
+                while (isActive && playbackEntry.phase == EntryPhase.AwaitingHandover) {
+                    delay(ENTRY_HANDOVER_TICK_MILLIS)
+                    if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) break
+                    if (!handoverWatchdog.onTick()) continue
+                    if (playbackEntry.failAwaitingHandover()) {
+                        // 兜底到点用播放失败的既有文案提示，再按现有会话回滚。
+                        showPlaybackFailure()
+                        diagnostics.log { "打开交接超时: 播放控制层未接手" }
+                        leaveAfterFailedEntry()
+                    }
+                    handoverWatchdog.reset()
+                    break
+                }
+            } finally {
+                val runningJob = coroutineContext[Job]
+                if (entryHandoverJob === runningJob) entryHandoverJob = null
+            }
+        }
+    }
+
+    /** 停表并丢弃基线：退后台、接手、失败与离开播放页都调用；已累计时长保留。 */
+    private fun stopEntryHandoverTimer() {
+        entryHandoverJob?.cancel()
+        entryHandoverJob = null
+        handoverWatchdog.pause()
     }
 
     /** 引擎就绪且 Surface 已就位时才开始播放。 */
     private fun startPendingPlayback() {
         val binder = playback ?: return
-        pendingPlayback.start(canStart = surfaceSession.hasSurface) { current, files, directoryEntries ->
-            binder.controller.openPlaylist(files, current, directoryEntries)
+        pendingPlayback.start(canStart = surfaceSession.hasSurface) { current, files, entries, generation ->
+            // 请求等待期间已经开始另一次打开：这次请求作废，不能起播旧目标。
+            if (!playbackEntry.isCurrent(generation)) return@start
+            val accepted = binder.controller.openPlaylist(files, current, generation, entries)
+            if (!accepted) {
+                // 目标不在列表：按失败收尾并给出播放失败提示，不静默返回。
+                playbackEntry.failed(generation)
+                showPlaybackFailure()
+                leaveAfterFailedEntry()
+                return@start
+            }
+            playbackEntry.accepted(generation)
+            stopEntryHandoverTimer()
             // 播放可能在退后台之后才真正开始，开播后重新上报一次当前前后台。
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
         }
@@ -807,6 +884,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     /** 退到后台：不拆挂画面，屏幕停住的最后一帧原样保留。是否暂停由播放服务按后台播放设置决定。 */
     override fun onStop() {
         super.onStop()
+        // 退后台停止接手兜底的 ticker：暂停期间不计入前台等待。
+        stopEntryHandoverTimer()
         diagnostics.log("应用退到后台")
         val binder = playback
         // 窗口不可见不拆挂：Surface 由应用进程持有，视频输出与窗口句柄都保持原样。
@@ -855,6 +934,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         // 回前台让浏览页重新订阅可见项：封面重试用尽（含 SMB 会话作废）的条目重新给一轮。
         if (foregroundSeen) libraryPreviewTick++
         foregroundSeen = true
+        // 回前台继续等待接手的兜底计时；退后台期间已停表。
+        startEntryHandoverTimer()
     }
 
     /** 仅前台且播放页在场、播放或加载时保持屏幕常亮；暂停、片尾、离开播放页与退后台立即释放。 */
@@ -888,11 +969,23 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                 initialLoading = playbackEntry.initialLoading(playbackState, switching),
                 failed = playbackFailed,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
+                entryPhase = playbackEntry.phase,
+                atEpisodeEnd = playback?.controller?.atEpisodeEnd == true,
             )
         ) {
+            PlayerBackAction.CancelOpening -> leavePlayerPage()
             PlayerBackAction.CancelSwitch -> cancelSwitchOrReevaluate()
             PlayerBackAction.StopAndLeave -> closePlayer()
             PlayerBackAction.LeaveAndContinue -> leavePlayerPage()
+        }
+    }
+
+    /** 顶栏返回：准备期与系统返回走同一套判定；其余阶段左上角返回总是结束播放。 */
+    private fun handlePlayerTopBarBack() {
+        if (playerTopBarBackEndsPlayback(playbackEntry.phase)) {
+            closePlayer()
+        } else {
+            handlePlayerBack()
         }
     }
 
@@ -916,8 +1009,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                 initialLoading = playbackEntry.initialLoading(state, switching),
                 failed = binder.controller.playbackFailed.value,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
+                entryPhase = playbackEntry.phase,
+                atEpisodeEnd = binder.controller.atEpisodeEnd,
             )
         ) {
+            PlayerBackAction.CancelOpening -> leavePlayerPage()
             PlayerBackAction.CancelSwitch -> Unit
             PlayerBackAction.StopAndLeave -> closePlayer()
             PlayerBackAction.LeaveAndContinue -> leavePlayerPage()
@@ -929,20 +1025,23 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
      * 返回播放页时直接沿用，不重新解析目录或加载文件。
      */
     private fun leavePlayerPage() {
+        stopEntryHandoverTimer()
         playbackEntryOpener.cancel()
         // 打开没有真正开始就离开：撤回交接，旧片恢复出声与画面。
         playback?.controller?.cancelOpenHandover()
         pendingPlayback.clear()
-        playbackEntry.reset()
+        playbackEntry.cancelEntry()
         onSurfaceReleased()
         playerVisible = false
         restoreBrowserSystemUi()
         updateKeepScreenOn()
     }
 
-    /** 入口准备失败：已有播放会话时只离开播放页，不结束原会话。 */
+    /** 入口失败收尾：有旧会话且不在片尾时只离开播放页；没有会话或旧会话停在片尾则结束播放。 */
     private fun leaveAfterFailedEntry() {
-        when (failedEntryExit(playback?.controller?.state?.value)) {
+        val controller = playback?.controller
+        val state = controller?.state?.value
+        when (failedEntryExit(state, controller?.atEpisodeEnd == true)) {
             FailedEntryExit.LeavePlayerPage -> leavePlayerPage()
             FailedEntryExit.StopPlayback -> closePlayer()
         }
@@ -953,7 +1052,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         if (playerVisible) return
         val binder = playback ?: return
         if (binder.controller.state.value == PlaybackState.Idle) return
-        enterPlayer(preparing = false, newSession = false)
+        enterPlayer(newSession = false)
     }
 
     override fun onSurfaceReleased() {
@@ -962,11 +1061,12 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     private fun closePlayer() {
+        stopEntryHandoverTimer()
         playbackEntryOpener.cancel()
         playback?.controller?.stop()
         onSurfaceReleased()
         pendingPlayback.clear()
-        playbackEntry.reset()
+        playbackEntry.cancelEntry()
         playerVisible = false
         // 切回浏览页前恢复系统栏与方向，避免 insets 变化让浏览页布局跳动。
         restoreBrowserSystemUi()
@@ -1122,5 +1222,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
     private companion object {
         const val NO_MEDIA = -1
+
+        /** 等待接手兜底的推进间隔。 */
+        const val ENTRY_HANDOVER_TICK_MILLIS = 250L
     }
 }

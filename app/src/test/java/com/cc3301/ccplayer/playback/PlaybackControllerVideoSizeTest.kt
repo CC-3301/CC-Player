@@ -147,7 +147,7 @@ class PlaybackControllerVideoSizeTest {
 
     private fun open(vararg names: String) {
         val files = names.map(::mediaFile)
-        controller.openPlaylist(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
     }
 
     private fun mediaFile(name: String): MediaFile = MediaFile(name = name, location = "root/$name")

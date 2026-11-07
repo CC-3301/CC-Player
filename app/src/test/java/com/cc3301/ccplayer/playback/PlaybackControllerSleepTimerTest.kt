@@ -392,7 +392,7 @@ class PlaybackControllerSleepTimerTest {
     }
 
     private fun open(controller: PlaybackController, vararg names: String, current: String) {
-        controller.openPlaylist(names.map(::mediaFile), mediaFile(current))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, names.map(::mediaFile), mediaFile(current))
     }
 
     private fun endCurrentEpisode() {
