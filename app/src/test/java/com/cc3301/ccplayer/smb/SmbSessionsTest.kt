@@ -2,6 +2,14 @@ package com.cc3301.ccplayer.smb
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import java.net.SocketTimeoutException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -47,6 +55,7 @@ class SmbSessionsTest {
 
         sessions.probe(target)
         assertEquals(1, connector.pings)
+        assertEquals("存活确认一次往返的上限", 700L, connector.lastPingTimeout)
         assertEquals(1, connector.shares.size)
     }
 
@@ -79,6 +88,32 @@ class SmbSessionsTest {
     }
 
     @Test
+    fun `换会话先关旧句柄再开新句柄`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+        connector.readFailure = MediaSourceException(MediaFailure.Unreachable, "传输中断")
+        connector.readFailureTimes = 1
+
+        source.readAt(0, ByteArray(16), 0, 16)
+
+        assertEquals(listOf("open", "close", "open"), connector.openClose)
+    }
+
+    @Test
+    fun `读停滞不在这里重连`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+        connector.readFailure = SocketTimeoutException("读超时")
+
+        val failure = runCatching { source.readAt(0, ByteArray(16), 0, 16) }.exceptionOrNull()
+
+        assertTrue(failure is SocketTimeoutException)
+        assertEquals("停滞类交给回环层重发", 1, connector.shares.size)
+    }
+
+    @Test
     fun `读取的业务失败不作废会话`() = runTest {
         connector.addFile("media", "电影.mkv", payload)
         val sessions = SmbSessions(connector)
@@ -103,13 +138,65 @@ class SmbSessionsTest {
     }
 
     @Test
+    fun `重发再次失败同样作废会话`() = runTest {
+        connector.listFailure = MediaSourceException(MediaFailure.Unreachable, "断网")
+        val sessions = SmbSessions(connector)
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("两次尝试各建一条会话", 2, connector.shares.size)
+        assertEquals("两条都作废", 2, connector.closedShares.size)
+    }
+
+    @Test
+    fun `请求被取消时不摘掉健康会话`() = runTest {
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+
+        val request = launch { sessions.use(target) { awaitCancellation() } }
+        runCurrent()
+        request.cancelAndJoin()
+
+        assertTrue("取消不是会话失效", connector.closedShares.isEmpty())
+        sessions.probe(target)
+        assertEquals(1, connector.shares.size)
+    }
+
+    @Test
     fun `会话建立超出预算时报失败`() = runTest {
         connector.connectDelayMillis = 6_000
-        val sessions = SmbSessions(connector)
+        val sessions = SmbSessions(connector, scope = this)
 
         val failure = runCatching { sessions.probe(target) }.exceptionOrNull()
 
         assertEquals(MediaFailure.Unreachable, (failure as MediaSourceException).failure)
+    }
+
+    @Test
+    fun `重连期间关闭读源不等网络`() = runBlocking {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+        connector.readFailure = MediaSourceException(MediaFailure.Unreachable, "传输中断")
+        connector.readFailureTimes = 1
+        val connecting = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        connector.duringConnect = {
+            connecting.countDown()
+            gate.await()
+        }
+
+        val reading = thread { runCatching { source.readAt(0, ByteArray(16), 0, 16) } }
+        assertTrue("重连已开始", connecting.await(5, TimeUnit.SECONDS))
+
+        val startedAt = System.nanoTime()
+        source.close()
+        val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000
+
+        gate.countDown()
+        reading.join(5_000)
+
+        assertTrue("关闭不等重连，实际 ${elapsedMillis}ms", elapsedMillis < 1_000)
     }
 
     @Test

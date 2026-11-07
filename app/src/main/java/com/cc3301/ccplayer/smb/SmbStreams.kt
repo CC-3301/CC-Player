@@ -36,6 +36,10 @@ class SmbStreams(
         server.discardSources()
     }
 
+    override fun closeByteSources() {
+        server.closeSources()
+    }
+
     override fun close() {
         server.close()
     }

@@ -17,9 +17,11 @@ import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
+import com.hierynomus.protocol.commons.socket.ProxySocketFactory
 import com.hierynomus.smbj.share.DiskShare
 import com.hierynomus.smbj.share.File
 import com.hierynomus.smbj.share.PipeShare
+import com.hierynomus.smbj.session.Session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,10 +34,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SmbJConnector(
     config: SmbConfig = smb2OnlyConfig(),
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    clientFactory: (SmbConfig) -> SMBClient = ::newSmbClient,
 ) : SmbConnector {
 
-    private val client = clientFactory(config)
+    private val client = SMBClient(config)
 
     /** 协商结果只记一次：方言与读上限不随重连变化，重复记只是刷日志。 */
     private val negotiateLogged = AtomicBoolean(false)
@@ -74,7 +75,7 @@ class SmbJConnector(
             if (diskShare !is DiskShare) {
                 throw MediaSourceException(MediaFailure.NotFound, "共享不是目录共享：$share")
             }
-            SmbJConnection(connection, diskShare)
+            SmbJConnection(connection, session, diskShare)
         } catch (failure: Throwable) {
             runCatching { connection.close() }
             throw failure
@@ -144,14 +145,20 @@ class SmbJConnector(
         private const val IPC_SHARE = "IPC$"
         private const val SRVSVC_PIPE = "srvsvc"
 
-        /** TCP 建连上限。 */
-        private const val CONNECT_TIMEOUT_SECONDS = 3L
+        /** TCP 建连上限：由 socket 工厂给出，smbj 的 withTimeout 管不到建连。 */
+        private const val CONNECT_TIMEOUT_MILLIS = 3_000
 
-        /** socket 空闲上限：等不到数据即失败，须长于回环层的 3 秒停滞判据。 */
-        private const val SOCKET_IDLE_TIMEOUT_SECONDS = 5L
+        /**
+         * socket 空闲上限：阻塞读的等待上限，不是会话寿命。
+         * 取值大于闲置回收窗口，闲置的会话不会因这个超时被当成断线；单次读另有 8 秒上限。
+         */
+        private const val SOCKET_IDLE_TIMEOUT_SECONDS = 150L
 
         /** 单次读请求上限：防挂死兜底，不是性能预期。 */
         private const val READ_TIMEOUT_SECONDS = 8L
+
+        /** 单次写与命名管道事务上限：与单次读同一档。 */
+        private const val REQUEST_TIMEOUT_SECONDS = 8L
 
         /** 只放 SMB2/3 方言并关掉 SMB1 多协议协商；分档超时见上。 */
         fun smb2OnlyConfig(): SmbConfig = SmbConfig.builder()
@@ -163,15 +170,18 @@ class SmbJConnector(
                 SMB2Dialect.SMB_3_1_1,
             )
             .withMultiProtocolNegotiate(false)
-            .withTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withSocketFactory(ProxySocketFactory(CONNECT_TIMEOUT_MILLIS))
             .withSoTimeout(SOCKET_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .withReadTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withWriteTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withTransactTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
     }
 }
 
 private class SmbJConnection(
     private val connection: Connection,
+    private val session: Session,
     private val share: DiskShare,
 ) : SmbConnection {
 
@@ -205,9 +215,10 @@ private class SmbJConnection(
         }
     }
 
+    /** 走会话级发送：签名与加密随会话走，会话被服务器回收时这一往返会失败。 */
     override suspend fun ping(timeoutMillis: Long) {
         withContext(Dispatchers.IO) {
-            val echo: Future<SMB2Packet> = connection.send(SMB2Echo())
+            val echo: Future<SMB2Packet> = session.send(SMB2Echo())
             echo.get(timeoutMillis, TimeUnit.MILLISECONDS)
         }
     }
@@ -243,9 +254,6 @@ private class SmbJReadHandle(
 
 private fun Throwable.asSourceFailure(summary: String): MediaSourceException =
     if (this is MediaSourceException) this else MediaSourceException(smbFailureOf(this), summary, this)
-
-/** 新建客户端：默认工厂，测试可换成记录关闭的实例。 */
-private fun newSmbClient(config: SmbConfig): SMBClient = SMBClient(config)
 
 private fun FileIdBothDirectoryInformation.toSmbEntry(): SmbEntry? {
     val name = fileName

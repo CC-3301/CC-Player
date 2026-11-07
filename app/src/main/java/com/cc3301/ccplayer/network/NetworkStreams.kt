@@ -20,6 +20,9 @@ interface NetworkStreams : Closeable {
 
     /** 丢弃已建立的字节源；之后的请求重新建立。退到后台后底层连接可能已失效。 */
     fun discardByteSources()
+
+    /** 关闭已建立的字节源，地址保留：停播后当场交还句柄与会话占用，下一次请求重新建立。 */
+    fun closeByteSources()
 }
 
 /**
@@ -36,6 +39,11 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     /** 同一个代理登记在多个方案下时只丢弃一次。 */
     override fun discardByteSources() {
         streamsByScheme.values.toSet().forEach { streams -> streams.discardByteSources() }
+    }
+
+    /** 同一个代理登记在多个方案下时只关闭一次。 */
+    override fun closeByteSources() {
+        streamsByScheme.values.toSet().forEach { streams -> streams.closeByteSources() }
     }
 
     /** 同一个代理登记在多个方案下时只关一次。 */

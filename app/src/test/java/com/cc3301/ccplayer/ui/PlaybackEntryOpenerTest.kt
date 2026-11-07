@@ -40,6 +40,8 @@ private class GatedNetworkStreams : NetworkStreams {
 
     override fun discardByteSources() = Unit
 
+    override fun closeByteSources() = Unit
+
     override fun close() = Unit
 }
 

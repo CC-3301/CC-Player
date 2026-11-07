@@ -7,6 +7,8 @@ import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.streaming.httpRequest
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -90,6 +92,24 @@ class SmbStreamsTest {
         assertArrayEquals(payload, httpRequest(streams.urlFor(movie)).body)
 
         assertEquals("会话建立只发生一次", 1, connector.shares.size)
+    }
+
+    @Test
+    fun `停播关闭字节源后会话引用归零并能闲置回收`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        val stopsWithSources = SmbStreams(sessions, SmbLocator(sources))
+        val url = stopsWithSources.urlFor(movie)
+
+        httpRequest(url)
+        stopsWithSources.closeByteSources()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertTrue(connector.handles.getValue("media/电影.mkv").closed)
+        assertEquals("停播后闲置回收能关掉会话", listOf("media"), connector.closedShares)
+        stopsWithSources.close()
     }
 
     @Test

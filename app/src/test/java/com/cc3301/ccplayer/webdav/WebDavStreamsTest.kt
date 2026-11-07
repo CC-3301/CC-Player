@@ -92,6 +92,45 @@ class WebDavStreamsTest {
     }
 
     @Test
+    fun `已有可用源时探测不再另存句柄`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+        httpRequest(streams.urlFor(movie))
+
+        streams.probe(movie)
+
+        assertEquals("播放会直接复用现成的源", 1, transport.openedSizes.size)
+    }
+
+    @Test
+    fun `丢弃只打标记，句柄留到取用时才关`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+        streams.probe(movie)
+        val prepared = transport.handles.getValue(movie)
+
+        streams.discardByteSources()
+
+        assertTrue("丢弃路径不碰 I/O", !prepared.closed)
+        httpRequest(streams.urlFor(movie))
+        assertTrue("取用时关掉留下的句柄", prepared.closed)
+        assertEquals(2, transport.openedSizes.size)
+    }
+
+    @Test
+    fun `停播关闭字节源后下一次请求重新建立`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+        httpRequest(streams.urlFor(movie))
+
+        streams.closeByteSources()
+
+        assertTrue(transport.handles.getValue(movie).closed)
+        httpRequest(streams.urlFor(movie))
+        assertEquals(2, transport.openedSizes.size)
+    }
+
+    @Test
     fun `关闭后已建立的读句柄一并关闭`() = runTest {
         addSource(root)
         transport.addFile(movie, payload)

@@ -10,6 +10,9 @@ class FakeSmbConnector : SmbConnector {
 
     var failure: MediaSourceException? = null
 
+    /** 列目录时抛出的异常；非空时每次列举都失败。 */
+    var listFailure: MediaSourceException? = null
+
     /** 每次连接用到的用户名与密码。 */
     val logins = mutableListOf<Pair<String, String?>>()
 
@@ -37,9 +40,19 @@ class FakeSmbConnector : SmbConnector {
     /** 建连耗时：用来驱动会话建立预算。 */
     var connectDelayMillis: Long = 0
 
+    /** 建连期间执行；测试用它把建连卡住，观察关闭是否等重连。 */
+    var duringConnect: (() -> Unit)? = null
+
     /** 存活确认的次数。 */
     var pings: Int = 0
         private set
+
+    /** 最近一次存活确认给的上限。 */
+    var lastPingTimeout: Long = 0
+        private set
+
+    /** 句柄的打开与关闭顺序。 */
+    val openClose = mutableListOf<String>()
 
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
@@ -83,6 +96,7 @@ class FakeSmbConnector : SmbConnector {
     ): SmbConnection {
         failure?.let { throw it }
         if (connectDelayMillis > 0) delay(connectDelayMillis)
+        duringConnect?.invoke()
         logins += username to password
         shares += share
         return FakeSmbConnection(
@@ -90,10 +104,12 @@ class FakeSmbConnector : SmbConnector {
             childrenByPath = childrenByPath,
             bytesByPath = bytesByPath,
             handles = handles,
+            openClose = openClose,
             closeOrder = closeOrder,
             closedShares = closedShares,
             maxReadSize = maxReadSize,
             openReadFailure = { openReadFailure },
+            listFailure = { listFailure },
             readFailure = {
                 if (readFailureTimes <= 0) {
                     null
@@ -102,8 +118,9 @@ class FakeSmbConnector : SmbConnector {
                     readFailure
                 }
             },
-            pingFailure = {
+            pingFailure = { timeoutMillis ->
                 pings++
+                lastPingTimeout = timeoutMillis
                 pingFailure
             },
         )
@@ -115,29 +132,38 @@ private class FakeSmbConnection(
     private val childrenByPath: Map<String, List<SmbEntry>>,
     private val bytesByPath: Map<String, ByteArray>,
     private val handles: MutableMap<String, RecordingSmbHandle>,
+    private val openClose: MutableList<String>,
     private val closeOrder: MutableList<String>,
     private val closedShares: MutableList<String>,
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
+    private val listFailure: () -> MediaSourceException?,
     private val readFailure: () -> Throwable?,
-    private val pingFailure: () -> Throwable?,
+    private val pingFailure: (Long) -> Throwable?,
 ) : SmbConnection {
 
-    override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
+    override suspend fun list(path: String): List<SmbEntry> {
+        listFailure()?.let { throw it }
+        return childrenByPath["$share/$path"].orEmpty()
+    }
 
     override suspend fun openRead(path: String): SmbReadHandle {
         openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
+        openClose += "open"
         return RecordingSmbHandle(
             bytes,
             maxReadSize = maxReadSize,
-            onClose = { closeOrder += "handle" },
+            onClose = {
+                openClose += "close"
+                closeOrder += "handle"
+            },
             readFailure = readFailure,
         ).also { handles["$share/$path"] = it }
     }
 
     override suspend fun ping(timeoutMillis: Long) {
-        pingFailure()?.let { throw it }
+        pingFailure(timeoutMillis)?.let { throw it }
     }
 
     override fun close() {
@@ -167,6 +193,7 @@ class RecordingSmbHandle(
     }
 
     override fun close() {
+        if (closed) return
         closed = true
         onClose()
     }

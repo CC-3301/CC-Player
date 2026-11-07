@@ -293,6 +293,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     binder.controller.state.collect {
                         playbackState = it
                         updateKeepScreenOn()
+                        // 停播就交还字节源：读句柄与会话引用不能等到离开播放页才放。
+                        if (it == PlaybackState.Idle || it == PlaybackState.Ended) closeByteSourcesOnStop()
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
                         if (it != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
@@ -1098,6 +1100,12 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     private fun releaseNetworkStreams() {
         streams?.close()
         streams = null
+    }
+
+    /** 停播后关闭已建立的字节源：关句柄会发网络请求，不在主线程做。 */
+    private fun closeByteSourcesOnStop() {
+        val networkStreams = streams ?: return
+        lifecycleScope.launch(Dispatchers.IO) { runCatching { networkStreams.closeByteSources() } }
     }
 
     private fun stopPlaybackService() {

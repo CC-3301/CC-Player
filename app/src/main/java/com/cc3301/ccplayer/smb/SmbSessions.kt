@@ -8,16 +8,19 @@ import com.cc3301.ccplayer.streaming.ByteSource
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
-/** 会话建立总预算：在段之间生效，单段仍受 socket 超时约束。 */
+/** 会话建立总预算：等待到点即放弃，阻塞中的建连不在预算内被打断。 */
 private const val ESTABLISH_BUDGET_MILLIS = 5_000L
 
 /** 复用会话前的存活确认上限。 */
@@ -32,7 +35,7 @@ private const val MAX_SESSIONS = 8
 /**
  * 应用级 SMB 会话层：按（服务器、端口、共享、凭据）复用一条会话，目录浏览、封面与播放共用同一条。
  *
- * 取用复用的会话前做一次存活确认，失败即作废并重建一次；传输类失败作废会话后重连并重发一次，
+ * 取用复用的会话前做一次会话级存活确认，失败即作废并重建一次；传输类失败作废会话后重连并重发一次，
  * 认证失败与路径不存在不作废。会话闲置且没有引用时关闭，下次取用时懒重建。
  */
 class SmbSessions(
@@ -58,76 +61,52 @@ class SmbSessions(
         acquire(target).release()
     }
 
-    /** 借用会话完成一次请求；传输类失败作废会话、重连后重发一次。 */
-    suspend fun <T> use(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
+    /** 借用会话完成一次请求；传输类失败作废会话后重发一次，第二次失败同样作废。 */
+    suspend fun <T> use(target: SmbTarget, request: suspend (SmbConnection) -> T): T =
+        resend(target) { borrow(target, request) }
+
+    /** 打开一个随机读句柄；会话占用保持到句柄关闭。 */
+    suspend fun openRead(target: SmbTarget): ByteSource = SmbStreamSource(resend(target) { open(target) })
+
+    /** 一次操作；传输类失败作废会话后重发一次，第二次失败原样抛出（会话已作废）。 */
+    private suspend fun <T> resend(target: SmbTarget, attempt: suspend () -> T): T = try {
+        attempt()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Throwable) {
+        if (!smbConnectionLost(failure)) throw failure
+        diagnostics.log { "SMB 请求失败，作废会话后重发: ${target.share} (${failure.message})" }
+        attempt()
+    }
+
+    /** 打开一次：会话占用交给读源；失败时先按传输类作废会话再交还引用。 */
+    private suspend fun open(target: SmbTarget): ReadLease {
+        val lease = acquire(target)
+        return try {
+            ReadLease(target, lease, lease.connection.openRead(target.path))
+        } catch (cancellation: CancellationException) {
+            lease.release()
+            throw cancellation
+        } catch (failure: Throwable) {
+            if (smbConnectionLost(failure)) lease.discard()
+            lease.release()
+            throw failure
+        }
+    }
+
+    /** 借用一次：失败时先按传输类作废会话再交还引用，成功也交还。 */
+    private suspend fun <T> borrow(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
         val lease = acquire(target)
         try {
             return request(lease.connection)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
-            if (!smbConnectionLost(failure)) throw failure
-            diagnostics.log { "SMB 请求失败，作废会话后重发: ${lease.key} (${failure.message})" }
-            lease.discard()
-        } finally {
-            lease.release()
-        }
-        val retry = acquire(target)
-        try {
-            return request(retry.connection)
-        } finally {
-            retry.release()
-        }
-    }
-
-    /** 打开一个随机读句柄；会话占用保持到句柄关闭。 */
-    suspend fun openRead(target: SmbTarget): ByteSource {
-        var lease = acquire(target)
-        val handle = try {
-            lease.connection.openRead(target.path)
-        } catch (cancellation: CancellationException) {
-            lease.release()
-            throw cancellation
-        } catch (failure: Throwable) {
-            if (!smbConnectionLost(failure)) {
-                lease.release()
-                throw failure
-            }
-            diagnostics.log { "SMB 打开失败，作废会话后重试: ${lease.key} (${failure.message})" }
-            lease.discard()
-            lease.release()
-            lease = acquire(target)
-            try {
-                lease.connection.openRead(target.path)
-            } catch (second: Throwable) {
-                lease.release()
-                throw second
-            }
-        }
-        return SmbStreamSource(
-            handle = handle,
-            onClose = { lease.release() },
-            reopen = {
-                diagnostics.log { "SMB 读传输失败，作废会话后重连: ${target.host}/${target.share}" }
-                val reopened = runBlocking { reopen(target, lease) }
-                lease = reopened.first
-                reopened.second
-            },
-        )
-    }
-
-    /** 换一条会话重新打开同一文件；旧会话先作废。 */
-    private suspend fun reopen(target: SmbTarget, stale: SessionLease): Pair<SessionLease, SmbReadHandle> {
-        stale.discard()
-        stale.release()
-        val lease = acquire(target)
-        val handle = try {
-            lease.connection.openRead(target.path)
-        } catch (failure: Throwable) {
-            lease.release()
+            if (smbConnectionLost(failure)) lease.discard()
             throw failure
+        } finally {
+            lease.release()
         }
-        return lease to handle
     }
 
     /** 复用的会话先占一个引用再确认存活；存活确认失败时作废并重建一次。 */
@@ -135,12 +114,20 @@ class SmbSessions(
         val key = SessionKey.of(target)
         val reused = reuse(key)
         if (reused != null) {
-            val alive = runCatching { reused.connection.ping(ALIVE_CHECK_MILLIS) }
-            if (alive.isSuccess) {
+            val alive = try {
+                reused.connection.ping(ALIVE_CHECK_MILLIS)
+                true
+            } catch (cancellation: CancellationException) {
+                release(reused)
+                throw cancellation
+            } catch (failure: Throwable) {
+                false
+            }
+            if (alive) {
                 diagnostics.log { "SMB 会话取用: $key (在用 ${reused.inUse})" }
                 return SessionLease(reused)
             }
-            diagnostics.log { "SMB 会话存活确认失败，作废重建: $key (${alive.exceptionOrNull()?.message})" }
+            diagnostics.log { "SMB 会话存活确认失败，作废重建: $key" }
             invalidate(reused)
             release(reused)
         }
@@ -158,22 +145,7 @@ class SmbSessions(
 
     private suspend fun establish(key: SessionKey, target: SmbTarget): Session {
         val started = clock()
-        val connection = try {
-            withTimeout(ESTABLISH_BUDGET_MILLIS) {
-                connector.connect(
-                    host = target.host,
-                    port = target.port,
-                    share = target.share,
-                    username = target.username,
-                    password = target.password,
-                )
-            }
-        } catch (timeout: TimeoutCancellationException) {
-            diagnostics.log { "SMB 会话建立超时: $key" }
-            throw MediaSourceException(MediaFailure.Unreachable, "SMB 会话建立超时：${target.host}", timeout)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        }
+        val connection = connectWithinBudget(target)
         val registration = synchronized(lock) {
             val current = sessions[key]
             val adopted = if (current != null) {
@@ -196,6 +168,44 @@ class SmbSessions(
         registration.superseded.forEach(::closeQuietly)
         diagnostics.log { "SMB 会话建立: $key (${clock() - started}ms)" }
         return registration.session
+    }
+
+    /**
+     * 建连、认证与打开共享走这条：预算到点就放弃等待。
+     * 阻塞中的建连不会被打断，它建成的连接由收尾任务关掉，不留在无人认领的状态。
+     */
+    private suspend fun connectWithinBudget(target: SmbTarget): SmbConnection {
+        val connecting = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            connector.connect(
+                host = target.host,
+                port = target.port,
+                share = target.share,
+                username = target.username,
+                password = target.password,
+            )
+        }
+        return try {
+            withTimeout(ESTABLISH_BUDGET_MILLIS) { connecting.await() }
+        } catch (timeout: TimeoutCancellationException) {
+            closeWhenFinished(connecting)
+            diagnostics.log { "SMB 会话建立超时: ${target.host}/${target.share}" }
+            throw MediaSourceException(MediaFailure.Unreachable, "SMB 会话建立超时：${target.host}", timeout)
+        } catch (cancellation: CancellationException) {
+            closeWhenFinished(connecting)
+            throw cancellation
+        }
+    }
+
+    /** 预算到点时建连可能还在跑：建成后由这里关掉，晚到的连接不会没人关。 */
+    private fun closeWhenFinished(connecting: Deferred<SmbConnection>) {
+        scope.launch {
+            val connection = try {
+                connecting.await()
+            } catch (failure: Throwable) {
+                return@launch
+            }
+            closeQuietly(connection)
+        }
     }
 
     /** 句柄关闭或请求结束：计数归零时安排闲置关闭；已被摘掉的会话直接关闭连接。 */
@@ -303,6 +313,39 @@ class SmbSessions(
         }
     }
 
+    /** 交给读源的一次打开：句柄与会话占用；换会话时先关旧句柄再开新。 */
+    private inner class ReadLease(
+        private val target: SmbTarget,
+        private val lease: SessionLease,
+        override val handle: SmbReadHandle,
+    ) : SmbReadLease {
+
+        override fun close() {
+            runCatching { handle.close() }
+            lease.release()
+        }
+
+        override fun discard() {
+            lease.discard()
+            close()
+        }
+
+        override fun replace(): SmbReadLease = runBlocking {
+            lease.discard()
+            runCatching { handle.close() }
+            lease.release()
+            acquire(target).let { fresh ->
+                try {
+                    ReadLease(target, fresh, fresh.connection.openRead(target.path))
+                } catch (failure: Throwable) {
+                    if (smbConnectionLost(failure)) fresh.discard()
+                    fresh.release()
+                    throw failure
+                }
+            }
+        }
+    }
+
     private data class SessionKey(
         val host: String,
         val port: Int,
@@ -323,5 +366,4 @@ class SmbSessions(
             )
         }
     }
-
 }

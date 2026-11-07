@@ -53,6 +53,12 @@ fun smbConnectionLost(failure: Throwable): Boolean {
     }
 }
 
+/**
+ * 读停滞类失败：在途读等到超时。
+ * 这类失败不在这里重连：重连必然超过回环层的 3 秒停滞判据，重连只会在上下两层各重试一次。
+ */
+fun smbStalled(failure: Throwable): Boolean = rootCauseOf(failure) is SocketTimeoutException
+
 /** 异常链最内层的原因；成环时停在已到的那层。 */
 private fun rootCauseOf(failure: Throwable): Throwable {
     var root = failure

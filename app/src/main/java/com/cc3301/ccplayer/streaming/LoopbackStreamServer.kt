@@ -92,6 +92,20 @@ class LoopbackStreamServer(
         entries.values.forEach { it.markStale() }
     }
 
+    /**
+     * 关闭已建立的字节源，地址与条目保留：停播后当场交还句柄与会话占用，下一次请求重新建源。
+     * 与 [discardSources] 的区别是这里真的关，所以只在没有播放时要读的时候调用。
+     */
+    fun closeSources() {
+        entries.values.forEach { it.closeSource() }
+    }
+
+    /** 这条流是否已有可直接复用的字节源；没有源或已登记陈旧时为 false。 */
+    fun hasFreshSource(key: String): Boolean {
+        val id = idsByKey[key] ?: return false
+        return entries[id]?.hasFreshSource() == true
+    }
+
     /** 登记一条流并返回播放器可用的本机地址；同一个键重复登记只留第一次的 opener。 */
     fun serve(key: String, open: () -> ByteSource): String {
         val id = idsByKey.computeIfAbsent(key) {
@@ -608,6 +622,9 @@ class LoopbackStreamServer(
         @Volatile
         private var stale = false
 
+        /** 建源期间被要求关闭源：这一轮建好的源由它自己关掉，不发布。 */
+        private var cleared = false
+
         @Volatile
         private var closed = false
 
@@ -683,11 +700,12 @@ class LoopbackStreamServer(
                 }
                 var kept = false
                 synchronized(lock) {
-                    if (!closed) {
+                    if (!closed && !cleared) {
                         source = created
                         result = created
                         kept = true
                     }
+                    cleared = false
                     rebuilding = null
                 }
                 if (!kept) runCatching { created.close() }
@@ -698,6 +716,21 @@ class LoopbackStreamServer(
             round.failure = failure
             round.result = result
             round.finished.countDown()
+        }
+
+        /**
+         * 关闭缓存源并清空，条目与地址保留。
+         * 建源期间被关闭时由 [cleared] 让这一轮建好的源自己关掉，不会没人认领。
+         */
+        fun closeSource() {
+            var current: ByteSource? = null
+            synchronized(lock) {
+                current = source
+                source = null
+                stale = false
+                if (rebuilding != null) cleared = true
+            }
+            current?.let { runCatching { it.close() } }
         }
 
         /** 陈旧标记唯一的读+清除点；invalidate 与 close 会连同源一起清掉它。 */

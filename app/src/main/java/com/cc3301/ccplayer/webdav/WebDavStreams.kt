@@ -31,10 +31,15 @@ class WebDavStreams(
     private var preparedLocation: String? = null
     private var preparedSource: ByteSource? = null
 
+    /** 已登记陈旧：不在这里注销句柄，等下一次探测或取用时在播放线程上关掉。 */
+    private var preparedStale = false
+
     /** 起播前试连一次：打开读句柄并留给播放复用；连不上或位置不属于任何书签时抛出来源失败异常。 */
     override suspend fun probe(location: String) {
         val target = targetOf(location)
-        // 播放读取没有目录列表的大小，句柄打开时探测一次长度。
+        urlFor(location)
+        // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
+        if (server.hasFreshSource(location)) return
         val handle = transport.openRead(target.url, target.username, target.password, size = 0)
         handOff(location, handle)
     }
@@ -42,13 +47,19 @@ class WebDavStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
+    /** 只打标记不注销句柄：可能在被主线程调用，这里不碰 I/O。 */
     override fun discardByteSources() {
-        discardPrepared()
+        synchronized(handoff) { preparedStale = true }
         server.discardSources()
     }
 
+    override fun closeByteSources() {
+        closePrepared()
+        server.closeSources()
+    }
+
     override fun close() {
-        discardPrepared()
+        closePrepared()
         server.close()
     }
 
@@ -66,31 +77,34 @@ class WebDavStreams(
             val previous = preparedSource
             preparedLocation = location
             preparedSource = source
+            preparedStale = false
             previous
         }
         if (superseded != null && superseded !== source) runCatching { superseded.close() }
     }
 
-    /** 取出该位置留好的句柄；位置不符或已取过时关闭留下的那条并返回 null。 */
+    /** 取出该位置留好的句柄；位置不符、已登记陈旧或已取过时先关掉留下的那条。 */
     private fun takePrepared(location: String): ByteSource? {
         val matched: ByteSource?
         val stale: ByteSource?
         synchronized(handoff) {
-            val sameLocation = preparedLocation == location
-            matched = if (sameLocation) preparedSource else null
-            stale = if (sameLocation) null else preparedSource
+            val usable = preparedLocation == location && !preparedStale
+            matched = if (usable) preparedSource else null
+            stale = if (usable) null else preparedSource
             preparedLocation = null
             preparedSource = null
+            preparedStale = false
         }
         stale?.let { source -> runCatching { source.close() } }
         return matched
     }
 
-    private fun discardPrepared() {
+    private fun closePrepared() {
         val source = synchronized(handoff) {
             val previous = preparedSource
             preparedLocation = null
             preparedSource = null
+            preparedStale = false
             previous
         }
         source?.let { runCatching { it.close() } }

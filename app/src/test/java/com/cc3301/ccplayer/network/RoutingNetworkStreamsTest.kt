@@ -21,6 +21,8 @@ private class FakeNetworkStreams : NetworkStreams {
 
     override fun discardByteSources() = Unit
 
+    override fun closeByteSources() = Unit
+
     override fun close() {
         closes++
     }

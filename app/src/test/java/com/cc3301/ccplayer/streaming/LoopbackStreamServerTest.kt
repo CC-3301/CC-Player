@@ -183,6 +183,34 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `停播关闭字节源后下一次请求重新建立`() {
+        httpRequest(url)
+        assertEquals(1, opened)
+        assertFalse(source.closed)
+
+        server.closeSources()
+
+        assertTrue("停播就关，不等下一次请求", source.closed)
+        assertArrayEquals(payload, httpRequest(url).body)
+        assertEquals(2, opened)
+    }
+
+    @Test
+    fun `首次请求前关闭字节源不多建一次`() {
+        var opens = 0
+        val first = RecordingByteSource(payload)
+        val target = server.serve("smb://nas/media/未建源关闭.mkv") {
+            opens++
+            first
+        }
+
+        server.closeSources()
+
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(1, opens)
+    }
+
+    @Test
     fun `首次请求前丢弃不额外多建一次`() {
         var opens = 0
         val first = RecordingByteSource(payload)
