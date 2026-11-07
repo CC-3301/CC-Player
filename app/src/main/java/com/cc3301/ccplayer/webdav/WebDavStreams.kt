@@ -105,6 +105,12 @@ class WebDavStreams(
                 return
             }
             // 登记同样在出锁之后做：锁内不进 [handoff] 锁。
+            // 出锁到登记之间可能被作废：已作废就不再登记，免得槽里留一条空凭证。
+            val cancelledMeanwhile = synchronized(lock) { discarded }
+            if (cancelledMeanwhile) {
+                server.closeInBackground(opened)
+                return
+            }
             attach(this)?.discard()
             superseded?.let { previous -> if (previous !== opened) server.closeInBackground(previous) }
         }
