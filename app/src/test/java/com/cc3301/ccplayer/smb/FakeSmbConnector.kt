@@ -2,11 +2,8 @@ package com.cc3301.ccplayer.smb
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
-import com.hierynomus.smbj.SMBClient
-import com.hierynomus.smbj.SmbConfig
-import com.hierynomus.smbj.connection.Connection
 import java.io.Closeable
-import java.io.IOException
+import kotlinx.coroutines.delay
 
 /** 假连接器：用「共享 + 路径 → 子项」的映射代替真 SMB 服务器。 */
 class FakeSmbConnector : SmbConnector {
@@ -31,18 +28,18 @@ class FakeSmbConnector : SmbConnector {
     /** 读取句柄时抛出的异常；非空时每次读取都失败。随时可改，连接沿用最新的。 */
     var readFailure: Throwable? = null
 
-    /** 客户端代数：每次作废加一；作废前建立的连接随之失效。 */
-    override var generation: Long = 0L
+    /** 还要抛几次读取失败；默认一直抛，用来驱动「失败一次后重发成功」。 */
+    var readFailureTimes: Int = Int.MAX_VALUE
+
+    /** 存活确认抛出的异常；非空时视为会话已失效。 */
+    var pingFailure: Throwable? = null
+
+    /** 建连耗时：用来驱动会话建立预算。 */
+    var connectDelayMillis: Long = 0
+
+    /** 存活确认的次数。 */
+    var pings: Int = 0
         private set
-
-    /** 作废次数，测试按次数断言。 */
-    val resets: Int get() = generation.toInt()
-
-    /** 建连过程中执行，用来模拟建连期间客户端被作废。 */
-    var duringConnect: (() -> Unit)? = null
-
-    /** 打开读句柄过程中挂起，用来模拟打开被超时或取消放弃。 */
-    var duringOpenRead: (suspend () -> Unit)? = null
 
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
@@ -85,10 +82,9 @@ class FakeSmbConnector : SmbConnector {
         password: String?,
     ): SmbConnection {
         failure?.let { throw it }
+        if (connectDelayMillis > 0) delay(connectDelayMillis)
         logins += username to password
         shares += share
-        duringConnect?.invoke()
-        val createdGeneration = generation
         return FakeSmbConnection(
             share = share,
             childrenByPath = childrenByPath,
@@ -98,14 +94,19 @@ class FakeSmbConnector : SmbConnector {
             closedShares = closedShares,
             maxReadSize = maxReadSize,
             openReadFailure = { openReadFailure },
-            readFailure = { readFailure },
-            isStale = { generation != createdGeneration },
-            duringOpenRead = { duringOpenRead?.invoke() },
+            readFailure = {
+                if (readFailureTimes <= 0) {
+                    null
+                } else {
+                    readFailureTimes--
+                    readFailure
+                }
+            },
+            pingFailure = {
+                pings++
+                pingFailure
+            },
         )
-    }
-
-    override fun reset() {
-        generation++
     }
 }
 
@@ -119,18 +120,12 @@ private class FakeSmbConnection(
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
     private val readFailure: () -> Throwable?,
-    private val isStale: () -> Boolean,
-    private val duringOpenRead: suspend () -> Unit,
+    private val pingFailure: () -> Throwable?,
 ) : SmbConnection {
 
-    override suspend fun list(path: String): List<SmbEntry> {
-        ensureUsable()
-        return childrenByPath["$share/$path"].orEmpty()
-    }
+    override suspend fun list(path: String): List<SmbEntry> = childrenByPath["$share/$path"].orEmpty()
 
     override suspend fun openRead(path: String): SmbReadHandle {
-        ensureUsable()
-        duringOpenRead()
         openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
         return RecordingSmbHandle(
@@ -141,33 +136,13 @@ private class FakeSmbConnection(
         ).also { handles["$share/$path"] = it }
     }
 
+    override suspend fun ping(timeoutMillis: Long) {
+        pingFailure()?.let { throw it }
+    }
+
     override fun close() {
         closeOrder += "connection"
         closedShares += share
-    }
-
-    /** 旧客户端上的连接在作废后不可再用，与真实现一致。 */
-    private fun ensureUsable() {
-        if (isStale()) throw MediaSourceException(MediaFailure.Unreachable, "旧客户端的连接已作废")
-    }
-}
-
-/** 记录是否被关闭与建连次数的 SMB 客户端；建连直接失败，不连服务器。 */
-class RecordingSmbClient(config: SmbConfig) : SMBClient(config) {
-
-    var closed = false
-
-    /** 被要求建连的主机名。 */
-    val connects = mutableListOf<String>()
-
-    override fun connect(host: String, port: Int): Connection {
-        connects += host
-        throw IOException("测试用客户端不可用")
-    }
-
-    override fun close() {
-        closed = true
-        super.close()
     }
 }
 

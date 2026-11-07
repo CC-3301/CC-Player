@@ -18,7 +18,8 @@ class SmbStreamsTest {
 
     private val connector = FakeSmbConnector()
     private val sources = NetworkSourceRepository(FakeBookmarkStore(), FakeCredentialStore())
-    private val streams = SmbStreams(connector, SmbLocator(sources))
+    private val sessions = SmbSessions(connector)
+    private val streams = SmbStreams(sessions, SmbLocator(sources))
 
     private val root = "smb://nas/media"
     private val movie = "$root/电影.mkv"
@@ -81,7 +82,18 @@ class SmbStreamsTest {
     }
 
     @Test
-    fun `关闭后已建立的读句柄一并关闭`() = runTest {
+    fun `探测与播放共用一次握手`() = runTest {
+        addSource(root)
+        connector.addFile("media", "电影.mkv", payload)
+
+        streams.probe(movie)
+        assertArrayEquals(payload, httpRequest(streams.urlFor(movie)).body)
+
+        assertEquals("会话建立只发生一次", 1, connector.shares.size)
+    }
+
+    @Test
+    fun `关闭代理后读句柄关闭但会话留给下次取用`() = runTest {
         addSource(root)
         connector.addFile("media", "电影.mkv", payload)
         httpRequest(streams.urlFor(movie))
@@ -89,7 +101,6 @@ class SmbStreamsTest {
         streams.close()
 
         assertEquals(true, connector.handles.getValue("media/电影.mkv").closed)
-        // 先关连接让阻塞读退出，再尽力关句柄。
-        assertEquals(listOf("connection", "handle"), connector.closeOrder)
+        assertTrue("会话归应用级会话层管，不随代理关闭", connector.closedShares.isEmpty())
     }
 }

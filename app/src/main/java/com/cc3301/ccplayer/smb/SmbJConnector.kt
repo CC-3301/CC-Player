@@ -10,7 +10,9 @@ import com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation
 import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2Dialect
 import com.hierynomus.mssmb2.SMB2ImpersonationLevel
+import com.hierynomus.mssmb2.SMB2Packet
 import com.hierynomus.mssmb2.SMB2ShareAccess
+import com.hierynomus.mssmb2.messages.SMB2Echo
 import com.hierynomus.smbj.SMBClient
 import com.hierynomus.smbj.SmbConfig
 import com.hierynomus.smbj.auth.AuthenticationContext
@@ -22,6 +24,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.EnumSet
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -30,53 +33,51 @@ class SmbJConnector(
     config: SmbConfig = smb2OnlyConfig(),
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     clientFactory: (SmbConfig) -> SMBClient = ::newSmbClient,
-    clock: () -> Long = System::currentTimeMillis,
-    condemnedTimeoutMillis: Long = CONDEMNED_TIMEOUT_MILLIS,
 ) : SmbConnector {
 
-    private val clients = SmbClientPool(clientFactory, config, clock, condemnedTimeoutMillis)
+    private val client = clientFactory(config)
 
-    /** 协商结果只记一次：同一条连接的方言与读上限不随重连变化，重复记只是刷日志。 */
+    /** 协商结果只记一次：方言与读上限不随重连变化，重复记只是刷日志。 */
     private val negotiateLogged = AtomicBoolean(false)
 
-    override val generation: Long get() = clients.generation
-
-    override fun reset() {
-        // 先取代数再进锁比对：并发作废时只有真正换掉这条客户端的一次才动手，不误关别人刚换上的新实例。
-        if (clients.condemn(clients.generation) == null) return
-        clients.sweep()
-        diagnostics.log { "SMB 客户端作废: 换成新实例" }
-    }
-
+    /** 建连、认证与打开共享分三段：失败时日志能指出卡在哪一环，会话建立预算也在段之间生效。 */
     override suspend fun connect(
         host: String,
         port: Int,
         share: String,
         username: String,
         password: String?,
-    ): SmbConnection = withContext(Dispatchers.IO) {
-        // 先占一个连接名额：客户端在用到一半时不会被作废流程关掉。
-        val slot = clients.acquire()
-        var connection: Connection? = null
-        try {
-            val opened = slot.client.connect(host, port)
-            connection = opened
-            logNegotiated(opened)
-            val session = opened.authenticate(authenticationOf(username, password))
-            val diskShare = session.connectShare(share)
+    ): SmbConnection {
+        val connection = try {
+            withContext(Dispatchers.IO) { client.connect(host, port) }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw failure.asSourceFailure("建连/协商", "连不上 SMB 服务器 $host:$port")
+        }
+        return try {
+            logNegotiated(connection)
+            val session = try {
+                withContext(Dispatchers.IO) { connection.authenticate(authenticationOf(username, password)) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                throw failure.asSourceFailure("认证", "SMB 认证失败：$host")
+            }
+            val diskShare = try {
+                withContext(Dispatchers.IO) { session.connectShare(share) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                throw failure.asSourceFailure("打开共享", "打开 SMB 共享失败：$host/$share")
+            }
             if (diskShare !is DiskShare) {
                 throw MediaSourceException(MediaFailure.NotFound, "共享不是目录共享：$share")
             }
-            // 所有权交给调用方，关闭时归还名额。
-            SmbJConnection(connection, diskShare) { clients.release(slot) }
-        } catch (cancellation: CancellationException) {
-            runCatching { connection?.close() }
-            clients.release(slot)
-            throw cancellation
-        } catch (failure: Exception) {
-            runCatching { connection?.close() }
-            clients.release(slot)
-            throw failure.asSourceFailure("连不上 SMB 共享 $host/$share")
+            SmbJConnection(connection, diskShare)
+        } catch (failure: Throwable) {
+            runCatching { connection.close() }
+            throw failure
         }
     }
 
@@ -100,10 +101,9 @@ class SmbJConnector(
     /** 共享枚举走 IPC$ 上的 srvsvc 命名管道；SMBJ 没有现成接口，报文由 [SrvsvcShareEnum] 编解码。 */
     override suspend fun shares(host: String, port: Int, username: String, password: String?): List<String> =
         withContext(Dispatchers.IO) {
-            val slot = clients.acquire()
             var connection: Connection? = null
             try {
-                connection = slot.client.connect(host, port)
+                connection = client.connect(host, port)
                 val session = connection.authenticate(authenticationOf(username, password))
                 val ipc = session.connectShare(IPC_SHARE)
                 if (ipc !is PipeShare) {
@@ -126,18 +126,34 @@ class SmbJConnector(
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (failure: Exception) {
-                throw failure.asSourceFailure("列不出 SMB 服务器 $host 的共享")
+                throw failure.asSourceFailure("列举共享", "列不出 SMB 服务器 $host 的共享")
             } finally {
                 runCatching { connection?.close() }
-                clients.release(slot)
             }
         }
+
+    private fun Throwable.asSourceFailure(stage: String, summary: String): MediaSourceException {
+        if (this is MediaSourceException) return this
+        diagnostics.log {
+            "SMB 失败于$stage: ${this::class.java.simpleName}: ${message}"
+        }
+        return MediaSourceException(smbFailureOf(this), summary, this)
+    }
 
     companion object {
         private const val IPC_SHARE = "IPC$"
         private const val SRVSVC_PIPE = "srvsvc"
 
-        /** 只放 SMB2/3 方言并关掉 SMB1 多协议协商；超时避免连不上时长时间挂起。 */
+        /** TCP 建连上限。 */
+        private const val CONNECT_TIMEOUT_SECONDS = 3L
+
+        /** socket 空闲上限：等不到数据即失败，须长于回环层的 3 秒停滞判据。 */
+        private const val SOCKET_IDLE_TIMEOUT_SECONDS = 5L
+
+        /** 单次读请求上限：防挂死兜底，不是性能预期。 */
+        private const val READ_TIMEOUT_SECONDS = 8L
+
+        /** 只放 SMB2/3 方言并关掉 SMB1 多协议协商；分档超时见上。 */
         fun smb2OnlyConfig(): SmbConfig = SmbConfig.builder()
             .withDialects(
                 SMB2Dialect.SMB_2_0_2,
@@ -147,18 +163,16 @@ class SmbJConnector(
                 SMB2Dialect.SMB_3_1_1,
             )
             .withMultiProtocolNegotiate(false)
-            .withSoTimeout(OPERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .withTimeout(OPERATION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withSoTimeout(SOCKET_IDLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .withReadTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
-
-        private const val OPERATION_TIMEOUT_SECONDS = 30L
     }
 }
 
 private class SmbJConnection(
     private val connection: Connection,
     private val share: DiskShare,
-    private val onClosed: () -> Unit,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> = withContext(Dispatchers.IO) {
@@ -191,13 +205,19 @@ private class SmbJConnection(
         }
     }
 
+    override suspend fun ping(timeoutMillis: Long) {
+        withContext(Dispatchers.IO) {
+            val echo: Future<SMB2Packet> = connection.send(SMB2Echo())
+            echo.get(timeoutMillis, TimeUnit.MILLISECONDS)
+        }
+    }
+
     private fun negotiatedMaxReadSize(): Int =
         runCatching { connection.negotiatedProtocol.maxReadSize }.getOrDefault(0)
 
     override fun close() {
         runCatching { share.close() }
         runCatching { connection.close() }
-        onClosed()
     }
 }
 
@@ -221,108 +241,11 @@ private class SmbJReadHandle(
     }
 }
 
+private fun Throwable.asSourceFailure(summary: String): MediaSourceException =
+    if (this is MediaSourceException) this else MediaSourceException(smbFailureOf(this), summary, this)
+
 /** 新建客户端：默认工厂，测试可换成记录关闭的实例。 */
 private fun newSmbClient(config: SmbConfig): SMBClient = SMBClient(config)
-
-/** 作废的客户端兜底关闭时长：没人归还名额时也不长期留着连接。 */
-private const val CONDEMNED_TIMEOUT_MILLIS = 60 * 1000L
-
-/**
- * SMB 客户端登记：当前客户端供新连接使用，作废的客户端等在用连接归零或兜底超时再关闭。
- * 立刻关闭会掐断仍在读的句柄，所以作废只换实例、不马上关旧的。
- */
-internal class SmbClientPool(
-    private val factory: (SmbConfig) -> SMBClient,
-    private val config: SmbConfig,
-    private val clock: () -> Long,
-    private val condemnedTimeoutMillis: Long,
-) {
-
-    private val lock = Any()
-
-    /** 当前客户端，新连接都走它。 */
-    private var current = SmbClientSlot(factory(config))
-
-    /** 已作废、等在用连接归零或兜底超时的客户端。 */
-    private val condemned = ArrayList<SmbClientSlot>()
-
-    @Volatile
-    private var currentGeneration = 0L
-
-    /** 当前客户端代数：每次作废加一。 */
-    val generation: Long get() = currentGeneration
-
-    /** 取当前客户端并占一个连接名额；归还时释放。 */
-    fun acquire(): SmbClientSlot = synchronized(lock) {
-        current.liveConnections++
-        current
-    }
-
-    /**
-     * 作废代数仍为 [observed] 的当前客户端并换新实例；代数已变说明别的调用先作废过，
-     * 不再换新，避免把刚换上的客户端又作废掉。返回被作废的客户端，没作废时返回 null。
-     */
-    fun condemn(observed: Long): SmbClientSlot? {
-        val stale = synchronized(lock) {
-            if (currentGeneration != observed) return null
-            val previous = current
-            previous.condemned = true
-            previous.condemnedAt = clock()
-            condemned += previous
-            current = SmbClientSlot(factory(config))
-            currentGeneration = observed + 1
-            previous
-        }
-        closeIfUnused(stale)
-        return stale
-    }
-
-    /** 连接关闭：名额归还；作废且归零时关闭这条客户端。 */
-    fun release(slot: SmbClientSlot) {
-        synchronized(lock) { slot.liveConnections = (slot.liveConnections - 1).coerceAtLeast(0) }
-        closeIfUnused(slot)
-    }
-
-    /** 兜底：作废后长时间没人归还名额的客户端强制关闭，避免连接泄漏。 */
-    fun sweep() {
-        val now = clock()
-        val expired = synchronized(lock) {
-            val stale = condemned.filter { now - it.condemnedAt > condemnedTimeoutMillis }
-            condemned.removeAll(stale)
-            stale
-        }
-        expired.forEach(::closeClient)
-    }
-
-    private fun closeIfUnused(slot: SmbClientSlot) {
-        val closeable = synchronized(lock) {
-            if (!slot.condemned || slot.liveConnections > 0) return
-            condemned.remove(slot)
-            slot
-        }
-        closeClient(closeable)
-    }
-
-    private fun closeClient(slot: SmbClientSlot) {
-        runCatching { slot.client.close() }
-    }
-}
-
-/** 一条客户端的登记：客户端实例、在用连接数与作废时刻。 */
-internal class SmbClientSlot(val client: SMBClient) {
-
-    /** 还在用的连接数；不为 0 时不得关闭客户端。 */
-    var liveConnections = 0
-
-    /** 已作废、等名额归零或兜底超时后关闭。 */
-    var condemned = false
-
-    /** 作废时刻，用于兜底超时。 */
-    var condemnedAt = 0L
-}
-
-private fun Throwable.asSourceFailure(message: String): MediaSourceException =
-    if (this is MediaSourceException) this else MediaSourceException(smbFailureOf(this), message, this)
 
 private fun FileIdBothDirectoryInformation.toSmbEntry(): SmbEntry? {
     val name = fileName

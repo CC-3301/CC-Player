@@ -15,18 +15,18 @@ import kotlinx.coroutines.runBlocking
  * 网络媒体播放接缝：把 SMB 位置映到本机回环地址，播放核心只拿到本机地址。
  *
  * 一个位置恒得同一个地址，播放列表里的每一项都能先换成地址；字节源在播放器读到时才建立。
- * [close] 一并关掉代理与全部已建立的流。
+ * 探测与播放共用同一条会话，探测只做存活确认，播放不再完整握手一次。
  */
 class SmbStreams(
-    private val connector: SmbConnector,
+    private val sessions: SmbSessions,
     private val locator: SmbLocator,
     diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
-    /** 起播前试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
+    /** 起播前试连一次：会话建立或复用并做存活确认；连不上或位置不属于任何书签时抛出来源失败异常。 */
     override suspend fun probe(location: String) {
-        connectTo(location).second.close()
+        sessions.probe(targetOf(location))
     }
 
     /** 位置对应的本机地址。 */
@@ -40,30 +40,12 @@ class SmbStreams(
         server.close()
     }
 
-    /** 代理在自己的线程上取流，这里阻塞等连接与打开完成。 */
+    /** 代理在自己的线程上取流，这里阻塞等打开完成。 */
     private fun openBlocking(location: String): ByteSource = runBlocking {
-        val (target, connection) = connectTo(location)
-        try {
-            NetworkReadPriority.shared.wrap(
-                SmbStreamSource(connection, connection.openRead(target.path)),
-                ReadKind.Playback,
-            )
-        } catch (failure: Exception) {
-            runCatching { connection.close() }
-            throw failure
-        }
+        NetworkReadPriority.shared.wrap(sessions.openRead(targetOf(location)), ReadKind.Playback)
     }
 
-    private suspend fun connectTo(location: String): Pair<SmbTarget, SmbConnection> {
-        val target = locator.locate(location)
+    private suspend fun targetOf(location: String): SmbTarget =
+        locator.locate(location)
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有对应的网络源书签：$location")
-        val connection = connector.connect(
-            host = target.host,
-            port = target.port,
-            share = target.share,
-            username = target.username,
-            password = target.password,
-        )
-        return target to connection
-    }
 }

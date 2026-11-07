@@ -19,7 +19,8 @@ class SmbMediaFileTreeTest {
 
     private val connector = FakeSmbConnector()
     private val sources = NetworkSourceRepository(FakeBookmarkStore(), FakeCredentialStore())
-    private val tree = SmbMediaFileTree(connector, SmbLocator(sources))
+    private val sessions = SmbSessions(connector)
+    private val tree = SmbMediaFileTree(sessions, SmbLocator(sources))
     private val library = DirectoryMediaLibrary(tree)
 
     private val root = "smb://nas/media"

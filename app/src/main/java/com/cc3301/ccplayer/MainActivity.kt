@@ -75,7 +75,6 @@ import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
-import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
 import com.cc3301.ccplayer.smb.SmbStreams
@@ -147,6 +146,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     private val settings: SettingsRepository by lazy { SettingsRepository.create(applicationContext) }
 
     private val diagnostics get() = (application as CcPlayerApplication).diagnostics
+
+    /** 应用级 SMB 会话：与目录浏览、封面共用同一条。 */
+    private val smbSessions get() = (application as CcPlayerApplication).smbSessions
 
     private val diagnosticsExporter by lazy {
         DiagnosticsExporter(
@@ -795,7 +797,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         val webDavStreams = WebDavStreams(OkHttpWebDavTransport(), WebDavLocator(sources), diagnostics)
         return RoutingNetworkStreams(
             mapOf(
-                SmbLocation.SCHEME to SmbStreams(SmbJConnector(), SmbLocator(sources), diagnostics),
+                SmbLocation.SCHEME to SmbStreams(smbSessions, SmbLocator(sources), diagnostics),
                 WebDavAddress.SCHEME_HTTP to webDavStreams,
                 WebDavAddress.SCHEME_HTTPS to webDavStreams,
             ),
