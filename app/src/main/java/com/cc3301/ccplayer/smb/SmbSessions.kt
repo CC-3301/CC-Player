@@ -74,7 +74,8 @@ class SmbSessions(
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (failure: Throwable) {
-        if (!smbConnectionLost(failure)) throw failure
+        // 停滞类同样只作废不重发：重连必然超过回环层的停滞判据，列表与打开把失败交给界面。
+        if (!smbConnectionLost(failure) || smbStalled(failure)) throw failure
         diagnostics.log { "SMB 请求失败，作废会话后重发: ${target.share} (${failure.message})" }
         attempt()
     }
@@ -313,14 +314,17 @@ class SmbSessions(
         }
     }
 
-    /** 交给读源的一次打开：句柄与会话占用；换会话时先关旧句柄再开新。 */
+    /** 交给读源的一次打开：句柄与会话占用；同一条租约只关一次，换会话时先关旧句柄再开新。 */
     private inner class ReadLease(
         private val target: SmbTarget,
         private val lease: SessionLease,
         override val handle: SmbReadHandle,
     ) : SmbReadLease {
 
+        private val closed = AtomicBoolean(false)
+
         override fun close() {
+            if (!closed.compareAndSet(false, true)) return
             runCatching { handle.close() }
             lease.release()
         }
@@ -332,17 +336,8 @@ class SmbSessions(
 
         override fun replace(): SmbReadLease = runBlocking {
             lease.discard()
-            runCatching { handle.close() }
-            lease.release()
-            acquire(target).let { fresh ->
-                try {
-                    ReadLease(target, fresh, fresh.connection.openRead(target.path))
-                } catch (failure: Throwable) {
-                    if (smbConnectionLost(failure)) fresh.discard()
-                    fresh.release()
-                    throw failure
-                }
-            }
+            close()
+            open(target)
         }
     }
 

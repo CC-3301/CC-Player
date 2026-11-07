@@ -655,6 +655,8 @@ class LoopbackStreamServer(
                     consumeStale()
                     val created = Rebuild()
                     rebuilding = created
+                    // 每轮建源重新计：上一轮留下的关闭要求不跨轮生效。
+                    cleared = false
                     started = true
                     created
                 }
@@ -699,16 +701,22 @@ class LoopbackStreamServer(
                     created = open()
                 }
                 var kept = false
+                var clearedThisRound = false
                 synchronized(lock) {
                     if (!closed && !cleared) {
                         source = created
                         result = created
                         kept = true
                     }
+                    clearedThisRound = cleared
                     cleared = false
                     rebuilding = null
                 }
-                if (!kept) runCatching { created.close() }
+                if (!kept) {
+                    runCatching { created.close() }
+                    // 本轮要求关闭：按这个原因收尾，不能报成「流已关闭」。
+                    if (clearedThisRound) failure = IllegalStateException("字节源被要求关闭")
+                }
             } catch (thrown: Throwable) {
                 failure = thrown
                 synchronized(lock) { rebuilding = null }

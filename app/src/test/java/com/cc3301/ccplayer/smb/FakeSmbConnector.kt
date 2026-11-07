@@ -11,7 +11,7 @@ class FakeSmbConnector : SmbConnector {
     var failure: MediaSourceException? = null
 
     /** 列目录时抛出的异常；非空时每次列举都失败。 */
-    var listFailure: MediaSourceException? = null
+    var listFailure: Throwable? = null
 
     /** 每次连接用到的用户名与密码。 */
     val logins = mutableListOf<Pair<String, String?>>()
@@ -60,6 +60,9 @@ class FakeSmbConnector : SmbConnector {
     /** 已打开的读句柄，按路径。 */
     val handles = mutableMapOf<String, RecordingSmbHandle>()
 
+    /** 依次打开过的全部读句柄，用来断言关闭次数。 */
+    val allHandles = mutableListOf<RecordingSmbHandle>()
+
     /** 连接与句柄的关闭顺序。 */
     val closeOrder = mutableListOf<String>()
 
@@ -104,6 +107,7 @@ class FakeSmbConnector : SmbConnector {
             childrenByPath = childrenByPath,
             bytesByPath = bytesByPath,
             handles = handles,
+            allHandles = allHandles,
             openClose = openClose,
             closeOrder = closeOrder,
             closedShares = closedShares,
@@ -132,12 +136,13 @@ private class FakeSmbConnection(
     private val childrenByPath: Map<String, List<SmbEntry>>,
     private val bytesByPath: Map<String, ByteArray>,
     private val handles: MutableMap<String, RecordingSmbHandle>,
+    private val allHandles: MutableList<RecordingSmbHandle>,
     private val openClose: MutableList<String>,
     private val closeOrder: MutableList<String>,
     private val closedShares: MutableList<String>,
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
-    private val listFailure: () -> MediaSourceException?,
+    private val listFailure: () -> Throwable?,
     private val readFailure: () -> Throwable?,
     private val pingFailure: (Long) -> Throwable?,
 ) : SmbConnection {
@@ -159,7 +164,10 @@ private class FakeSmbConnection(
                 closeOrder += "handle"
             },
             readFailure = readFailure,
-        ).also { handles["$share/$path"] = it }
+        ).also {
+            handles["$share/$path"] = it
+            allHandles += it
+        }
     }
 
     override suspend fun ping(timeoutMillis: Long) {
@@ -182,6 +190,10 @@ class RecordingSmbHandle(
 
     var closed = false
 
+    /** 被关掉的次数：同一句柄只该关一次。 */
+    var closeCount = 0
+        private set
+
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
@@ -193,7 +205,7 @@ class RecordingSmbHandle(
     }
 
     override fun close() {
-        if (closed) return
+        closeCount++
         closed = true
         onClose()
     }

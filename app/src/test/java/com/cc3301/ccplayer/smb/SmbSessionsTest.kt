@@ -2,7 +2,8 @@ package com.cc3301.ccplayer.smb
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
-import java.net.SocketTimeoutException
+import com.hierynomus.protocol.transport.TransportException
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -105,12 +106,28 @@ class SmbSessionsTest {
         connector.addFile("media", "电影.mkv", payload)
         val sessions = SmbSessions(connector)
         val source = sessions.openRead(target)
-        connector.readFailure = SocketTimeoutException("读超时")
+        // smbj 把单次读的等待超时包进传输异常，根因是 java.util.concurrent.TimeoutException。
+        val stalled = TransportException(TimeoutException("读超时"))
+        connector.readFailure = stalled
 
         val failure = runCatching { source.readAt(0, ByteArray(16), 0, 16) }.exceptionOrNull()
 
-        assertTrue(failure is SocketTimeoutException)
+        assertEquals(stalled, failure)
         assertEquals("停滞类交给回环层重发", 1, connector.shares.size)
+    }
+
+    @Test
+    fun `换会话只关旧句柄一次`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+        connector.readFailure = MediaSourceException(MediaFailure.Unreachable, "传输中断")
+        connector.readFailureTimes = 1
+
+        source.readAt(0, ByteArray(16), 0, 16)
+
+        assertEquals(2, connector.allHandles.size)
+        assertEquals("旧句柄只关一次", 1, connector.allHandles[0].closeCount)
     }
 
     @Test
@@ -135,6 +152,17 @@ class SmbSessionsTest {
 
         assertEquals(MediaFailure.NotFound, (missing as MediaSourceException).failure)
         assertEquals("路径不存在不重连", 1, connector.shares.size)
+    }
+
+    @Test
+    fun `列表遇停滞只作废不重发`() = runTest {
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        val sessions = SmbSessions(connector)
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("只尝试一次", 1, connector.shares.size)
+        assertEquals("这次会话已作废", 1, connector.closedShares.size)
     }
 
     @Test

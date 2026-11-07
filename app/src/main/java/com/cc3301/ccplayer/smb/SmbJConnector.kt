@@ -5,6 +5,7 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.mserref.NtStatus
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation
 import com.hierynomus.mssmb2.SMB2CreateDisposition
@@ -215,11 +216,14 @@ private class SmbJConnection(
         }
     }
 
-    /** 走会话级发送：签名与加密随会话走，会话被服务器回收时这一往返会失败。 */
+    /** 走会话级发送：签名与加密随会话走；回包非成功或超时都算会话已失效。 */
     override suspend fun ping(timeoutMillis: Long) {
         withContext(Dispatchers.IO) {
             val echo: Future<SMB2Packet> = session.send(SMB2Echo())
-            echo.get(timeoutMillis, TimeUnit.MILLISECONDS)
+            val status = echo.get(timeoutMillis, TimeUnit.MILLISECONDS).header.statusCode
+            if (status != NtStatus.STATUS_SUCCESS.value) {
+                throw MediaSourceException(MediaFailure.Unreachable, "SMB 会话存活确认失败：0x${status.toString(16)}")
+            }
         }
     }
 

@@ -120,6 +120,7 @@ import com.cc3301.ccplayer.webdav.OkHttpWebDavTransport
 import com.cc3301.ccplayer.webdav.WebDavAddress
 import com.cc3301.ccplayer.webdav.WebDavLocator
 import com.cc3301.ccplayer.webdav.WebDavStreams
+import kotlin.concurrent.thread
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -293,8 +294,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     binder.controller.state.collect {
                         playbackState = it
                         updateKeepScreenOn()
-                        // 停播就交还字节源：读句柄与会话引用不能等到离开播放页才放。
-                        if (it == PlaybackState.Idle || it == PlaybackState.Ended) closeByteSourcesOnStop()
+                        // 片尾与失败就交还字节源：读句柄与会话引用不能等到离开播放页才放。
+                        // 只认 Ended：换目标时控制层会先发一次 Idle，那时不能关掉刚预置的探测句柄。
+                        if (it == PlaybackState.Ended) closeByteSourcesOnStop()
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
                         if (it != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
@@ -1097,9 +1099,16 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         stopPlaybackService()
     }
 
+    /**
+     * 摘掉回环代理并在 IO 上关闭：关闭要发协议层关闭请求，死会话最坏吃满单次请求上限。
+     * 退出应用时 lifecycleScope 已不可靠，用独立线程保证关完。
+     */
     private fun releaseNetworkStreams() {
-        streams?.close()
+        val networkStreams = streams ?: return
         streams = null
+        thread(isDaemon = true, name = "network-streams-close") {
+            runCatching { networkStreams.close() }
+        }
     }
 
     /** 停播后关闭已建立的字节源：关句柄会发网络请求，不在主线程做。 */

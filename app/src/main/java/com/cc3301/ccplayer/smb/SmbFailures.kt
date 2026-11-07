@@ -9,6 +9,7 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
+import java.util.concurrent.TimeoutException
 import java.net.UnknownHostException
 
 /** 把 SMBJ 抛出的异常归到界面可读的来源失败原因。 */
@@ -54,10 +55,11 @@ fun smbConnectionLost(failure: Throwable): Boolean {
 }
 
 /**
- * 读停滞类失败：在途读等到超时。
- * 这类失败不在这里重连：重连必然超过回环层的 3 秒停滞判据，重连只会在上下两层各重试一次。
+ * 读停滞类失败：smbj 等单次读的回包等到上限。
+ * smbj 把这次等待的 [java.util.concurrent.TimeoutException] 包进传输异常，按根因判。
+ * 这类失败不在这里重连：重连必然超过回环层的 3 秒停滞判据，只会在上下两层各重试一次。
  */
-fun smbStalled(failure: Throwable): Boolean = rootCauseOf(failure) is SocketTimeoutException
+fun smbStalled(failure: Throwable): Boolean = rootCauseOf(failure) is TimeoutException
 
 /** 异常链最内层的原因；成环时停在已到的那层。 */
 private fun rootCauseOf(failure: Throwable): Throwable {

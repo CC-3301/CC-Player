@@ -196,6 +196,34 @@ class LoopbackStreamServerTest {
     }
 
     @Test
+    fun `建源失败后的关闭要求不跨轮`() {
+        val entered = CountDownLatch(1)
+        val unblock = CountDownLatch(1)
+        var opens = 0
+        var failing = true
+        val target = server.serve("smb://nas/media/建源失败后关闭.mkv") {
+            opens++
+            if (failing) {
+                entered.countDown()
+                unblock.await()
+                throw IOException("建源失败")
+            }
+            source
+        }
+
+        val request = Thread { httpRequest(target) }.apply { start() }
+        assertTrue(entered.await(5, TimeUnit.SECONDS))
+        // 建源失败这一轮里来了关闭要求：不能留给下一轮，把下一轮建好的源当成已关闭丢弃。
+        server.closeSources()
+        unblock.countDown()
+        request.join(5_000)
+
+        failing = false
+        assertArrayEquals(payload, httpRequest(target).body)
+        assertEquals(2, opens)
+    }
+
+    @Test
     fun `首次请求前关闭字节源不多建一次`() {
         var opens = 0
         val first = RecordingByteSource(payload)
