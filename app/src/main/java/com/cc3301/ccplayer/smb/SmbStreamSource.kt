@@ -51,7 +51,7 @@ class SmbStreamSource(
         } catch (failure: Throwable) {
             if (!smbConnectionLost(failure)) throw failure
             if (smbStalled(failure)) {
-                // 停滞类交给回环层的陈旧标记与重发：这里重连必然超过它的 3 秒判据。
+                // 停滞类由回环层打陈旧标记后重取该段：这里重连必然超过它的 3 秒判据。
                 opened.discard()
                 throw failure
             }

@@ -81,40 +81,29 @@ class SmbSessions(
         return resendUse(target, request)
     }
 
-    /** 打开一个随机读句柄；会话占用保持到句柄关闭。会话建立失败不重发。 */
+    /**
+     * 打开一个随机读句柄；会话占用保持到句柄关闭，句柄关闭是唯一的减引用点。
+     * 建立会话不在重发范围：建立失败直接抛出。
+     * 已拿到会话后打开句柄遇传输类失败，作废会话、重连一次、重开一次。
+     */
     suspend fun openRead(target: SmbTarget): ByteSource {
-        val first = acquire(target)
+        val session = acquire(target)
         val opened = try {
-            ReadLease(target, first, first.connection.openRead(target.path))
+            ReadLease(target, session, session.connection.openRead(target.path))
         } catch (cancellation: CancellationException) {
-            first.release()
+            session.release()
             throw cancellation
         } catch (failure: Throwable) {
             if (!smbConnectionLost(failure)) {
-                first.release()
+                session.release()
                 throw failure
             }
-            diagnostics.log { "SMB 打开失败，作废会话后重发: ${target.share} (${failure.message})" }
-            first.discard()
-            first.release()
-            resendOpen(target)
+            diagnostics.log { "SMB 打开失败，作废会话后重连重发: ${target.share} (${failure.message})" }
+            session.discard()
+            session.release()
+            reopenRead(target)
         }
         return SmbStreamSource(opened)
-    }
-
-    /** 重连后重开一次；第二次失败同样作废会话。建立失败不重发。 */
-    private suspend fun resendOpen(target: SmbTarget): ReadLease {
-        val retry = acquire(target)
-        return try {
-            ReadLease(target, retry, retry.connection.openRead(target.path))
-        } catch (cancellation: CancellationException) {
-            retry.release()
-            throw cancellation
-        } catch (failure: Throwable) {
-            if (smbConnectionLost(failure)) retry.discard()
-            retry.release()
-            throw failure
-        }
     }
 
     /** 重发一次；第二次失败同样作废会话，失败原样抛出。 */
@@ -132,8 +121,8 @@ class SmbSessions(
         }
     }
 
-    /** 取一条会话打开句柄；失败时先按传输类作废会话再交还引用。 */
-    private suspend fun openLease(target: SmbTarget): ReadLease {
+    /** 重连一次后打开句柄；这次建立失败同样不重试，失败原样抛出。 */
+    private suspend fun reopenRead(target: SmbTarget): ReadLease {
         val lease = acquire(target)
         return try {
             ReadLease(target, lease, lease.connection.openRead(target.path))
@@ -384,7 +373,7 @@ class SmbSessions(
                 runCatching { handle.close() }
                 lease.release()
             }
-            openLease(target)
+            reopenRead(target)
         }
     }
 

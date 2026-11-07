@@ -113,7 +113,7 @@ class SmbSessionsTest {
         val failure = runCatching { source.readAt(0, ByteArray(16), 0, 16) }.exceptionOrNull()
 
         assertEquals(stalled, failure)
-        assertEquals("停滞类交给回环层重发", 1, connector.shares.size)
+        assertEquals("停滞类由回环层打陈旧标记后重取该段", 1, connector.shares.size)
     }
 
     @Test
@@ -198,6 +198,34 @@ class SmbSessionsTest {
 
         assertEquals("列表没有上层重取，这里必须补一次", 2, connector.shares.size)
         assertEquals("两条都作废", 2, connector.closedShares.size)
+    }
+
+    @Test
+    fun `建立失败时打开句柄只建一次会话`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        connector.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
+        val sessions = SmbSessions(connector)
+
+        val failure = runCatching { sessions.openRead(target) }.exceptionOrNull()
+
+        assertTrue("建立失败原样抛出", failure is MediaSourceException)
+        assertEquals("建立不在重发范围", 1, connector.connectAttempts)
+    }
+
+    @Test
+    fun `先关读源再收到迟到的停滞失败，会话仍被关`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        val source = sessions.openRead(target)
+        // 这次读会失败，但句柄与引用已经先一步交还。
+        connector.readFailure = TransportException(TimeoutException("读超时"))
+        source.close()
+
+        runCatching { source.readAt(0, ByteArray(16), 0, 16) }
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertEquals("迟到的作废不再把会话摘出表外", listOf("media"), connector.closedShares)
     }
 
     @Test
