@@ -134,6 +134,8 @@ private fun readId3CoverOrThrow(source: CoverByteSource): Id3CoverResult {
 private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id3CoverResult {
     val frameHeaderSize = if (major == 2) 6 else 10
     val idLength = if (major == 2) 3 else 4
+    // v2.4 规范要求标签头的 unsync 位为 0；个别编码器用它表示「所有帧都已 unsync」，按这个意思兼容。
+    val tagUnsynchronised = major == 4 && headerFlags and ID3_FLAG_UNSYNCHRONISATION != 0
     var position = extendedHeaderSize(body, major, headerFlags)
     var compressedPicture = false
     val pictures = ArrayList<ApicPicture>()
@@ -158,7 +160,11 @@ private fun parseFrames(body: CoverByteSource, major: Int, headerFlags: Int): Id
             } else {
                 val frame = body.readFully(position + frameHeaderSize, size.toInt())
                     ?: return Id3CoverResult.Failed(Id3CoverFailure.ReadFailed)
-                val data = if (flags.unsynchronised) removeUnsynchronisation(frame) else frame
+                val data = if (flags.unsynchronised || tagUnsynchronised) {
+                    removeUnsynchronisation(frame)
+                } else {
+                    frame
+                }
                 // data length indicator 是帧体开头的 4 字节 syncsafe，跳过它再解析 APIC。
                 val picture = if (flags.dataLengthIndicator) {
                     if (data.size <= 4) null else data.copyOfRange(4, data.size)

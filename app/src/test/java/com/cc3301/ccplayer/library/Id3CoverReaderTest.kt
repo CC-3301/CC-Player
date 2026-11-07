@@ -56,6 +56,18 @@ class Id3CoverReaderTest {
     }
 
     @Test
+    fun `v2_4 标签头的 unsync 位按所有帧 unsync 处理`() {
+        val picture = byteArrayOf(0xFF.toByte(), 0x00, 0x41, 0xFF.toByte(), 0x7F)
+        // 帧自己没标 unsync，只有标签头标了：帧体仍按 unsync 还原。
+        val frame = frameHeader("APIC", addUnsynchronisation(apicBody(picture, type = 3)), flags = 0, major = 4)
+        val tag = id3Header(major = 4, flags = 0x80, tagSize = frame.size) + frame
+
+        val result = readId3Cover(ByteSourceOf(tag))
+
+        assertArrayEquals(picture, (result as Id3CoverResult.Picture).bytes)
+    }
+
+    @Test
     fun `压缩帧跳过并记为压缩封面`() {
         val compressed = frameHeader("APIC", ByteArray(8), flags = 0x80, major = 3)
         val tag = tag(major = 3, frames = listOf(compressed))

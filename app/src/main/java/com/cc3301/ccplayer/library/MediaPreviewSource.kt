@@ -306,7 +306,7 @@ class CachedMediaPreviewSource(
 
     /** 记一次本地抽取失败并返回累计次数；记录数超限时整体清空，避免长期运行后无限增长。 */
     private fun recordLocalFailure(key: String): Int {
-        if (localFailures.size >= MAX_RETRY_ENTRIES && key !in localFailures) localFailures.clear()
+        if (localFailures.size >= MAX_RETRY_ENTRIES && !localFailures.containsKey(key)) localFailures.clear()
         return localFailures.merge(key, 1, Int::plus) ?: 1
     }
 
