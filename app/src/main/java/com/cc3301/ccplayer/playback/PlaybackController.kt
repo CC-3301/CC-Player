@@ -123,23 +123,56 @@ class PlaybackController(
     private val _surfacePresentation = MutableStateFlow(SurfacePresentation())
     val surfacePresentation: StateFlow<SurfacePresentation> = _surfacePresentation.asStateFlow()
 
+    /**
+     * 当前加载代际：目标、令牌、出声归属、屏上画面与就绪证据都只由它持有。
+     *
+     * 每次新的加载意图（首次、打开、切集、恢复）建立一个代际；改目标与重发沿用同一代际，
+     * 只更新代际内部的目标与次数。代际被替换或作废时，它持有的画面、静音与令牌一起失效。
+     */
+    private var generation: LoadGeneration? = null
+
+    /** 代际序号：进程内只增，迟到的续播查询据此丢弃。 */
+    private var generationSerial = 0
+
+    /** 已下发给引擎的静音状态；只在推导结果变化时写一次。 */
+    private var audioMuted = false
+
+    // 以下属性都是当前代际的投影：代际为 null 时读默认值、写忽略。
+    // 它们不再是各自独立的控制层状态，改目标、重发、取消都只作用在同一个代际上。
+
     /** 屏幕上停着的是哪一帧；撤旧帧与比例切换都只认它。 */
-    private var screenFrame = ScreenFrame.None
+    private var screenFrame: ScreenFrame
+        get() = generation?.screenFrame ?: ScreenFrame.None
+        set(value) {
+            generation?.screenFrame = value
+        }
 
     /**
      * 本次切集的目标是否已接管视频输出（收到过重配或首帧信号）。
      * 它不撤屏上的旧帧，只在无帧兜底时区分「旧帧可能已不在屏上」与「旧帧还在屏上」。
      */
-    private var switchOutputLive = false
+    private var switchOutputLive: Boolean
+        get() = generation?.outputLive ?: false
+        set(value) {
+            generation?.outputLive = value
+        }
 
     /** 片尾恢复就绪后保持黑底，直到播放/暂停、seek、新加载或 stop。 */
-    private var holdBlack = false
+    private var holdBlack: Boolean
+        get() = generation?.holdBlack ?: false
+        set(value) {
+            generation?.holdBlack = value
+        }
 
     /**
-     * 黑屏期间不显示缓冲提示：后台切集与播放态回前台撤帧这两类黑屏。
+     * 黑屏期间不显示缓冲提示：后台切集、播放态回前台撤帧与打开另一个目标这三类黑屏。
      * 出画面、回退原片、新加载与会话结束时清除。
      */
-    private var quietBlack = false
+    private var quietBlack: Boolean
+        get() = generation?.quietBlack ?: false
+        set(value) {
+            generation?.quietBlack = value
+        }
 
     /**
      * 当前是否有可渲染的 Surface。Surface 销毁后为假：
@@ -176,7 +209,11 @@ class PlaybackController(
     val videoAspectRatio: StateFlow<Double?> = _videoAspectRatio.asStateFlow()
 
     /** 切集起点屏幕上的原片比例；原片画面还在时视频区按它绘制。 */
-    private var originAspectRatio: Double? = null
+    private var originAspectRatio: Double?
+        get() = generation?.originAspectRatio
+        set(value) {
+            generation?.originAspectRatio = value
+        }
 
     /** 起播位置设置，默认播放上次位置。 */
     private val _resumeMode = MutableStateFlow(ResumeMode.LastPosition)
@@ -239,22 +276,47 @@ class PlaybackController(
     private var switchPlaybackStarted = false
 
     /** 当前媒体是否已打开完成。 */
-    private var mediaLoaded = false
+    private var mediaLoaded: Boolean
+        get() = generation?.mediaLoaded ?: false
+        set(value) {
+            generation?.mediaLoaded = value
+        }
 
     /** 当前加载目标是否有视频轨；纯音频没有可显示的画面。 */
-    private var targetHasVideo = true
+    private var targetHasVideo: Boolean
+        get() = generation?.hasVideo ?: true
+        set(value) {
+            generation?.hasVideo = value
+        }
 
     /** 本次加载所处的阶段；[LoadPhase.None] 表示没有进行中的加载。 */
-    private var loadPhase = LoadPhase.None
+    private var loadPhase: LoadPhase
+        get() = generation?.phase ?: LoadPhase.None
+        set(value) {
+            generation?.phase = value
+        }
 
     /** 正在加载的目标下标；起播与切集共用。 */
-    private var loadTargetIndex = NO_MEDIA
+    private var loadTargetIndex: Int
+        get() = generation?.targetIndex ?: NO_MEDIA
+        set(value) {
+            generation?.targetIndex = value
+        }
 
     /** 正在加载的目标位置；ready 回调据此丢弃取消/恢复后迟到的目标事件。 */
-    private var loadTargetUrl: String? = null
+    private var loadTargetUrl: String?
+        get() = generation?.targetUrl
+        set(value) {
+            generation?.targetUrl = value
+        }
 
-    /** 当前加载的代际序号；与引擎回调携带的序号不一致即视为迟到事件。 */
-    private var expectedLoadToken = 0
+    /** 当前这次引擎加载的令牌；每次下发加载都记到当前代际上。 */
+    private var expectedLoadToken: Int
+        get() = generation?.loadToken ?: NO_LOAD_TOKEN
+        set(value) {
+            val current = generation ?: return
+            if (value == NO_LOAD_TOKEN) current.forgetLoad() else current.beginAttempt(value)
+        }
 
     /** 切集前原视频的下标与位置，失败或取消时回到这里。 */
     private var switchOriginIndex = NO_MEDIA
@@ -290,41 +352,87 @@ class PlaybackController(
     /** 等新帧的计时任务；只在切集结束后排。 */
     private var pendingFrameJob: Job? = null
 
+    /** 没有加载代际时的占位计时：读 0，避免空代际时到处判空。 */
+    private val idleElapsed = RunningDuration(nowMillis)
+
     /**
-     * 首次打开、切集与恢复原片共用的累计运行时长：退后台与 Surface 分离都不挂起，
-     * 暂停也不挂起；判据与日志耗时都读它，不用墙上时钟重算。
+     * 当前代际的累计运行时长：首次打开、打开交接、切集与恢复原片共用，
+     * 退后台与 Surface 分离都不挂起，暂停也不挂起；判据与日志耗时都读它。
      */
-    private val guardElapsed = RunningDuration(nowMillis)
+    private val guardElapsed: RunningDuration
+        get() = generation?.elapsed ?: idleElapsed
 
     /** 加载看护计时：到 10 秒仍无进展就判失败；重发由读失败驱动，不按时间触发。 */
     private var guardJob: Job? = null
 
     /** 本轮是否已重发过；每个目标最多重发一次，目标前移后重新起算。 */
-    private var guardRetried = false
+    private var guardRetried: Boolean
+        get() = generation?.guardRetried ?: false
+        set(value) {
+            generation?.guardRetried = value
+        }
 
     /** 重发正在准备（丢弃字节源到真正重发之间）：重复的失败回调一律忽略。 */
-    private var retryInFlight = false
+    private var retryInFlight: Boolean
+        get() = generation?.retryInFlight ?: false
+        set(value) {
+            generation?.retryInFlight = value
+        }
 
     /** 重发准备的代际：旧协程不能清掉新目标刚置的在途标记。 */
-    private var retrySerial = 0
+    private var retrySerial: Int
+        get() = generation?.retrySerial ?: 0
+        set(value) {
+            generation?.retrySerial = value
+        }
 
     /** 重发发生时的累计运行时长；只用于日志的事件时间线。 */
-    private var loadRetriedAtMillis: Long? = null
+    private var loadRetriedAtMillis: Long?
+        get() = generation?.retriedAtMillis
+        set(value) {
+            generation?.retriedAtMillis = value
+        }
 
     /** 本次加载的目标前移记录；连点只并进事件时间线，不单独写日志。 */
-    private val loadRetargets = mutableListOf<String>()
+    private val idleLoadRetargets = mutableListOf<String>()
+    private val loadRetargets: MutableList<String>
+        get() = generation?.retargets ?: idleLoadRetargets
 
     /** 本次加载触发过的字节源重建次数，以及重试时没能执行的标记。 */
-    private var loadByteSourceRebuilds = 0
-    private var loadDiscardSkipped = false
+    private var loadByteSourceRebuilds: Int
+        get() = generation?.byteSourceRebuilds ?: 0
+        set(value) {
+            generation?.byteSourceRebuilds = value
+        }
+    private var loadDiscardSkipped: Boolean
+        get() = generation?.discardSkipped ?: false
+        set(value) {
+            generation?.discardSkipped = value
+        }
 
     /** 已观察到的事件时刻，都按累计运行时长记；只在首次出现时记一次。 */
-    private var loadCompletedAtMillis: Long? = null
-    private var loadFirstFrameAtMillis: Long? = null
-    private var loadPositionAdvancedAtMillis: Long? = null
+    private var loadCompletedAtMillis: Long?
+        get() = generation?.completedAtMillis
+        set(value) {
+            generation?.completedAtMillis = value
+        }
+    private var loadFirstFrameAtMillis: Long?
+        get() = generation?.firstFrameAtMillis
+        set(value) {
+            generation?.firstFrameAtMillis = value
+        }
+    private var loadPositionAdvancedAtMillis: Long?
+        get() = generation?.positionAdvancedAtMillis
+        set(value) {
+            generation?.positionAdvancedAtMillis = value
+        }
 
     /** 目标首次接管视频输出的时刻；用来区分「解不出帧」与「帧出了没上屏」。 */
-    private var loadOutputLiveAtMillis: Long? = null
+    private var loadOutputLiveAtMillis: Long?
+        get() = generation?.outputLiveAtMillis
+        set(value) {
+            generation?.outputLiveAtMillis = value
+        }
 
     /** 本次加载的来源；只用于诊断日志区分打开、手动、列表与片尾。 */
     private var loadSource = LoadTrigger.Open
@@ -342,25 +450,49 @@ class PlaybackController(
     private var surfaceRestoreJob: Job? = null
 
     /** 本轮加载的目标位置（续播 seek 或恢复起点）；就绪时用它初始化进度，避免界面停在 0:00。 */
-    private var loadStartPositionMillis = 0L
+    private var loadStartPositionMillis: Long
+        get() = generation?.startPositionMillis ?: 0L
+        set(value) {
+            generation?.startPositionMillis = value
+        }
 
     /** 加载期间引擎上报过的目标时长；就绪时用它初始化进度，避免拖动条被钳到最右。 */
-    private var loadDurationMillis = 0L
+    private var loadDurationMillis: Long
+        get() = generation?.durationMillis ?: 0L
+        set(value) {
+            generation?.durationMillis = value
+        }
 
     /** 加载中发出过续播 seek；ready 要等 seek 之后的画面，不能沿用 seek 前信号。 */
-    private var seekPendingForReady = false
+    private var seekPendingForReady: Boolean
+        get() = generation?.seekPendingForReady ?: false
+        set(value) {
+            generation?.seekPendingForReady = value
+        }
 
     /** 续播 seek 在本代加载内的序号；ready 带回的序号不小于它才算这一跳之后的信号。 */
-    private var requiredSeekSerial = 0
+    private var requiredSeekSerial: Int
+        get() = generation?.requiredSeekSerial ?: 0
+        set(value) {
+            generation?.requiredSeekSerial = value
+        }
 
     /** 续播位置是否已查明（或本次从开始位置播放，无需查询）；未查明前不能判定就绪。 */
-    private var resumeLookupDone = true
+    private var resumeLookupDone: Boolean
+        get() = generation?.resumeLookupDone ?: true
+        set(value) {
+            generation?.resumeLookupDone = value
+        }
 
     /**
      * 查询续播位置期间收到的首帧信号。查到位置就作废（等 seek 后的新信号）；
      * 没查到位置则补用它，避免首帧先到、查询又没有记录时白等到看护到点。
      */
-    private var deferredReadyNeedsFrame: Boolean? = null
+    private var deferredReadyNeedsFrame: Boolean?
+        get() = generation?.deferredReadyNeedsFrame
+        set(value) {
+            generation?.deferredReadyNeedsFrame = value
+        }
 
     /** 每次开始加载、恢复或清空都递增；迟到的续播查询不能作用到新一轮加载。 */
     private var loadGeneration = 0
@@ -377,19 +509,152 @@ class PlaybackController(
     fun openPlaylist(files: List<MediaFile>, current: MediaFile, directoryEntries: List<MediaFile> = emptyList()) {
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
-        if (index < 0) return
-        // 正在播放时换列表按替换当前播放处理：不把新列表套进旧列表的切集回退。
-        // 解码模式属于本次会话的临时选择，结束会话会重置成默认值，替换后要写回引擎。
+        if (index < 0) {
+            // 打开不会发生：撤回交接，旧目标照常出声与出画面。
+            cancelOpenHandover()
+            return
+        }
+        // 正在播放时换列表按「打开另一个目标」处理：旧片立停出声、旧画面撤掉，
+        // 不在新旧目标之间做切集回退。解码模式属于本次会话的临时选择，结束旧会话会重置成默认值。
         // 换片不向播放核心发停止：mpv 的 stop 紧跟 loadfile 会把新加载一并终止，
         // 旧片直接由新加载的 loadfile replace 替换。
         if (active) {
+            beginOpenHandover()
             val decodeMode = _decodeMode.value
-            discardSession()
+            replaceSession()
+            _playlist.value = playlist
+            this.directoryEntries = directoryEntries
             setDecodeMode(decodeMode)
+            startSession(index, playlist[index])
+            return
         }
         _playlist.value = playlist
         this.directoryEntries = directoryEntries
         playAt(index)
+    }
+
+    /**
+     * 打开另一个目标：旧片立即停止出声，屏上旧画面撤掉、铺黑等新帧，黑屏期间不显示缓冲提示。
+     * 从浏览界面进入播放页时调用；没有会话时什么都不做。
+     * 旧会话仍在首次加载、切集或恢复原片时同样按打开处理：旧加载的迟到回调一律丢弃。
+     * 方向按新目标判定：屏上帧与比例在交接一开始就不再属于旧目标。
+     */
+    fun beginOpenHandover() {
+        if (!active) return
+        val current = generation ?: return
+        if (current.isHandoverPending) return
+        // 旧目标已就绪才留可恢复的画面事实；旧目标还在加载时没有可恢复的屏上帧。
+        val snapshot = if (current.phase == LoadPhase.None) {
+            HandoverSnapshot(
+                kind = current.kind,
+                screenFrame = current.screenFrame,
+                originAspectRatio = current.originAspectRatio,
+                holdBlack = current.holdBlack,
+                quietBlack = current.quietBlack,
+                audioOwner = current.audioOwner,
+                loadToken = current.loadToken,
+                mediaLoaded = current.mediaLoaded,
+                hasVideo = current.hasVideo,
+            )
+        } else {
+            null
+        }
+        saveSessionPosition()
+        // 交接在同一代际上推进：旧加载令牌作废，迟到的就绪、出帧与失败都不再是当前代际。
+        current.startHandover(snapshot)
+        cancelLoadGuard()
+        endPendingFrameWatchdog()
+        endBufferingIndicator()
+        cancelSurfaceRestore()
+        _switching.value = false
+        _restoring.value = false
+        switchFramePending = false
+        switchPlaybackStarted = false
+        syncAudioMute()
+        settlePresentation()
+    }
+
+    /**
+     * 打开没有真正开始（准备失败或离开播放页）：撤回交接，旧目标恢复出声与画面。
+     * 旧目标在交接时还在加载、没有可恢复的画面事实时结束会话，不留永远加载中的会话。
+     */
+    fun cancelOpenHandover() {
+        val current = generation ?: return
+        if (!current.isHandoverPending) return
+        val snapshot = current.handover
+        if (snapshot == null) {
+            diagnostics.log { "打开取消: 旧目标没有可恢复的画面事实，结束会话" }
+            stop()
+            return
+        }
+        current.restoreHandover(snapshot)
+        syncAudioMute()
+        settlePresentation()
+        // 屏上确实没有帧时（交接前就没有画面）按播放态回前台的路径等新帧。
+        if (screenFrame == ScreenFrame.None && foreground && _renderSurfaceAvailable.value) {
+            beginSurfaceRestore(reason = "打开取消")
+        }
+    }
+
+    /** 换一个目标：落库旧进度、结束旧会话状态；加载代际由 [startSession] 接着推进。 */
+    private fun replaceSession() {
+        _playbackFailed.value = false
+        active = false
+        paused = false
+        endSeekPreview(commit = false)
+        updateState(PlaybackState.Idle)
+        _decodeMode.value = DecodeMode.Hardware
+        _loopMode.value = LoopMode.Sequential
+        _videoAspectRatio.value = null
+        _subtitleTracks.value = emptyList()
+        _externalSubtitles.value = emptyList()
+        _subtitleSelection.value = SubtitleSelection.Off
+        directoryEntries = emptyList()
+        pausedAtEpisodeEnd = false
+        watchedToEnd = false
+        switchOriginIndex = NO_MEDIA
+        restoreAtEndOfEpisode = false
+        switchOriginEnded = false
+        switchFailureReported = false
+        switchFramePending = false
+        switchPlaybackStarted = false
+        restartFromStartAfterRestore = false
+        userSeeked = false
+        resumePositionMillis = null
+        cancelSleepTimer()
+        loadGeneration++
+    }
+
+    /** 新建一个代际；序号进程内只增，迟到的续播查询据此丢弃。 */
+    private fun newGeneration(): LoadGeneration {
+        generationSerial++
+        return LoadGeneration(generationSerial, nowMillis)
+    }
+
+    /** 静音的唯一写入口：由当前代际的出声归属与预览静音推导，变化时才下发一次命令。 */
+    private fun syncAudioMute() {
+        val muted = mutedByOpening(generation, previewMuted)
+        if (audioMuted == muted) return
+        audioMuted = muted
+        engine.setAudioMuted(muted)
+    }
+
+    /**
+     * 打开交接的目标出画面或加载完成：解除交接静音，并重新下发一次淡入。
+     * 淡入不能沿用加载开始时那一次：它在静音期间已经走完，直接放开是硬切。
+     */
+    private fun releaseOpeningAudio() {
+        val current = generation ?: return
+        if (!current.releaseAudioOwnership()) return
+        syncAudioMute()
+        if (!audioMuted) engine.fadeInAudio(FADE_IN_MILLIS)
+    }
+
+    /** 旧会话的进度落库；换片开始前用，避免打开交接把旧进度丢掉。 */
+    private fun saveSessionPosition() {
+        if (!active) return
+        val indexToSave = if (loadPhase == LoadPhase.None) _currentIndex.value else switchOriginIndex
+        _playlist.value.getOrNull(indexToSave)?.let { savePosition(media = it, force = true) }
     }
 
     /** 切换到播放列表索引 [index] 的条目；超出范围、首次加载、切集或恢复期间不动作。 */
@@ -526,6 +791,8 @@ class PlaybackController(
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
             // Surface 销毁后屏幕上没有画面：回前台按黑底等首个新帧。
+            // 打开交接要恢复的画面事实随 Surface 一起消失，撤销时不能再声称还有帧。
+            if (generation?.isHandoverPending == true) generation?.clearHandover()
             screenFrame = ScreenFrame.None
             settlePresentation()
             cancelSurfaceRestore()
@@ -624,6 +891,25 @@ class PlaybackController(
         _playbackFailed.value = false
         loadSource = LoadTrigger.Open
         logLoadStart(media, index)
+        // 打开交接的代际直接推进到新目标；没有交接时建立「首次打开」的新代际。
+        val handover = generation?.takeIf { it.isHandoverPending }
+        val current = handover ?: newGeneration()
+        generation = current
+        current.kind = if (handover != null) LoadKind.Open else LoadKind.First
+        current.phase = LoadPhase.Initial
+        current.targetIndex = index
+        current.targetUrl = media.playbackLocation
+        current.clearHandover()
+        // 打开交接才静音：旧片已经停声，新目标出画面或加载完成前不放声；首次打开没有旧声可停。
+        current.audioOwner = if (current.kind == LoadKind.Open) AudioOwner.Opening else AudioOwner.Target
+        current.hasVideo = true
+        current.mediaLoaded = false
+        current.outputLive = false
+        current.screenFrame = ScreenFrame.None
+        current.originAspectRatio = null
+        current.holdBlack = false
+        // 打开交接的黑屏不显示缓冲提示；首次打开照常显示。
+        current.quietBlack = current.kind == LoadKind.Open
         _currentIndex.value = index
         _progress.value = PlaybackProgress()
         endSeekPreview(commit = false)
@@ -637,21 +923,14 @@ class PlaybackController(
         savedPositionMillis = 0
         resumePositionMillis = null
         watchedToEnd = false
-        mediaLoaded = false
         pausedAtEpisodeEnd = false
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
         switchFailureReported = false
-        holdBlack = false
-        // 新的会话从黑屏开始：没有旧画面可沿用，也没有旧比例可沿用。
-        screenFrame = ScreenFrame.None
-        quietBlack = false
-        switchOutputLive = false
-        originAspectRatio = null
-        loadTargetIndex = index
-        loadTargetUrl = media.playbackLocation
-        loadPhase = LoadPhase.Initial
+        switchFramePending = false
+        switchPlaybackStarted = false
         beginLoadTracking()
+        syncAudioMute()
         settlePresentation()
         _switching.value = false
         _restoring.value = false
@@ -693,18 +972,28 @@ class PlaybackController(
         // 后台切集不继承屏上旧画面，回前台播放态一律纯黑等新帧。
         val presentation = _surfacePresentation.value
         val inheritOrigin = foreground && presentation.showsPicture
-        screenFrame = if (inheritOrigin) ScreenFrame.Origin else ScreenFrame.None
-        originAspectRatio = if (inheritOrigin) presentation.aspectRatio else null
-        holdBlack = false
-        // 后台切集不显示缓冲提示：屏上没有可沿用的旧画面。
-        quietBlack = !foreground
+        // 打开交接中被切集接管：交接的静音属于旧代际，换到切集代际前必须先停住声音。
+        val handover = generation?.isHandoverPending == true
+        engine.pause()
+        // 切集建立新代际：旧目标的画面事实可以沿用为切集起点，旧代际的静音与令牌到此作废。
+        val current = newGeneration()
+        generation = current
+        current.kind = LoadKind.Switch
+        current.phase = LoadPhase.Switching
+        current.targetIndex = index
+        current.targetUrl = media.playbackLocation
+        current.audioOwner = AudioOwner.None
+        current.screenFrame = if (inheritOrigin) ScreenFrame.Origin else ScreenFrame.None
+        current.originAspectRatio = if (inheritOrigin) presentation.aspectRatio else null
+        current.holdBlack = false
+        // 后台切集与打开交接之后的切集都不显示缓冲提示：屏上没有可沿用的旧画面。
+        current.quietBlack = handover || !foreground
+        syncAudioMute()
         // 手动切集完成即自动播放，即使切集前处于暂停；失败恢复会重新置为暂停。
         // 只在首次切集清除，切集中再前移目标时保留用户之后的暂停意图。
         paused = false
         applySwitchTarget(index, media, newSwitch = true)
         beginBufferingIndicator()
-        // 先停住原视频再替换文件：屏幕上停住的旧帧就是切集期间的等待画面。
-        engine.pause()
         startSwitchTarget()
     }
 
@@ -841,6 +1130,8 @@ class PlaybackController(
         if (!active) return
         clearRestoreHoldOnUserAction()
         paused = false
+        // 打开交接还没有新目标：只记播放意图，等新目标加载时按它起播。
+        if (loadPhase == LoadPhase.Pending) return
         // 切集加载中的继续只记为意图；已经就绪并开始播放时补发一次 resume。
         if (loadPhase == LoadPhase.Switching) {
             if (switchPlaybackStarted) resumeEngineForSwitch()
@@ -1143,18 +1434,18 @@ class PlaybackController(
         pendingLanding = null
     }
 
-    /** 预览静音的唯一写入入口：整段拖动只静音一次，逐次 seek 各自淡入会造成断续爆音。 */
+    /** 预览静音：整段拖动只静音一次，逐次 seek 各自淡入会造成断续爆音。 */
     private fun acquirePreviewMute() {
         if (previewMuted) return
         previewMuted = true
-        engine.setAudioMuted(true)
+        syncAudioMute()
     }
 
     /** 恢复预览静音：落定执行完、预览被取消或会话结束时都只能经由这里恢复。 */
     private fun releasePreviewMute() {
         if (!previewMuted) return
         previewMuted = false
-        engine.setAudioMuted(false)
+        syncAudioMute()
     }
 
     /**
@@ -1229,9 +1520,9 @@ class PlaybackController(
 
     override fun onMediaLoaded(targetUrl: String?, loadToken: Int, hasVideo: Boolean) {
         if (!active) return
-        // 被放弃目标或恢复后迟到的 FILE_LOADED 不能作用于当前加载。
-        if (loadToken != expectedLoadToken) return
-        if (targetUrl != null && targetUrl != loadTargetUrl) return
+        // 只有当前代际的回调才算数：被放弃目标的迟到 FILE_LOADED 不改画面、不放声。
+        val current = generation ?: return
+        if (!current.accepts(loadToken, targetUrl)) return
         mediaLoaded = true
         targetHasVideo = hasVideo
         settlePresentation()
@@ -1257,7 +1548,7 @@ class PlaybackController(
                     finishLoadWithoutSurface()
                 }
             }
-            LoadPhase.None -> Unit
+            LoadPhase.Pending, LoadPhase.None -> Unit
         }
     }
 
@@ -1276,9 +1567,8 @@ class PlaybackController(
     ) {
         if (!active || !mediaLoaded) return
         // 同一 URL 重载时只有当前代际的信号有效；旧集的迟到回执不得抬高本代的 seek 回执基线。
-        if (loadToken != expectedLoadToken) return
-        // 取消或恢复之后，目标文件的迟到 ready 不能结束当前阶段。
-        if (targetUrl != null && targetUrl != loadTargetUrl) return
+        val current = generation ?: return
+        if (!current.accepts(loadToken, targetUrl)) return
         val phase = loadPhase
         if (phase == LoadPhase.None) return
         // 目标已接管视频输出，画面却可能还没上屏：这里不撤屏上的旧帧。
@@ -1320,9 +1610,7 @@ class PlaybackController(
     private fun handleReadySignal(phase: LoadPhase, needsFrameConfirmation: Boolean) {
         if (!needsFrameConfirmation) {
             // 首帧已可显示：屏上就是当前加载的画面，切集起点的旧帧到此撤掉、比例同时换新。
-            screenFrame = ScreenFrame.Target
-            quietBlack = false
-            settlePresentation()
+            adoptTargetFrame()
             // 强信号本身就是一条进展，也是「帧已上屏」的证据：不再排等新帧窗口。
             noteLoadProgress(LoadProgress.FirstFrame)
             finishReady(phase, frameConfirmed = true)
@@ -1373,12 +1661,14 @@ class PlaybackController(
             LoadPhase.Initial -> finishInitialLoad()
             LoadPhase.Switching -> finishSwitch(frameConfirmed)
             LoadPhase.Restoring -> finishRestore()
-            LoadPhase.None -> Unit
+            LoadPhase.Pending, LoadPhase.None -> Unit
         }
     }
 
     /** 加载相关事件到达。 */
     override fun onLoadActivity(activity: LoadActivity, loadToken: Int?) {
+        // 旧代际的加载事件迟到：既不算进展，也不刷新等新帧窗口。
+        if (loadToken != null && loadToken != expectedLoadToken) return
         // 控制器自身 resume 产生的 PLAYBACK_RESTART 不是新的加载：不刷新等新帧窗口。
         if (resumeActivityGate.shouldIgnore(activity, loadToken)) return
         // 加载事件不是进展、也不给看护续期：三个阶段都按同一条累计时长判。
@@ -1399,7 +1689,8 @@ class PlaybackController(
      * 迟到或旧加载的帧不能提前结束等待。
      */
     private fun confirmFrame(loadToken: Int) {
-        if (loadToken != expectedLoadToken) return
+        val current = generation ?: return
+        if (!current.accepts(loadToken, null)) return
         if (awaitingSurfaceFrame) {
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
@@ -1414,11 +1705,20 @@ class PlaybackController(
      * 切集仍在进行时这就够了，直接按就绪收尾。
      */
     private fun confirmTargetFrame() {
-        screenFrame = ScreenFrame.Target
-        quietBlack = false
-        settlePresentation()
+        adoptTargetFrame()
         if (switchFramePending) clearPendingSwitchFrame()
         if (loadPhase == LoadPhase.Switching) finishReady(LoadPhase.Switching, frameConfirmed = true)
+    }
+
+    /**
+     * 目标帧已上屏：屏上换成当前加载的画面，比例同时换新。
+     * 打开交接也在这一刻解除静音并重新下发淡入（出画面即放声）。
+     */
+    private fun adoptTargetFrame() {
+        screenFrame = ScreenFrame.Target
+        quietBlack = false
+        releaseOpeningAudio()
+        settlePresentation()
     }
 
     override fun onPauseChanged(paused: Boolean) {
@@ -1426,8 +1726,8 @@ class PlaybackController(
         when (loadPhase) {
             // 首次加载中的暂停只记意图，正式状态等首帧就绪后再定。
             LoadPhase.Initial -> this.paused = paused
-            // 切集与恢复期间的暂停由控制层自己设置，忽略引擎回声。
-            LoadPhase.Switching, LoadPhase.Restoring -> Unit
+            // 切集、恢复与打开交接期间的暂停由控制层自己设置，忽略引擎回声。
+            LoadPhase.Switching, LoadPhase.Restoring, LoadPhase.Pending -> Unit
             LoadPhase.None -> {
                 // keep-open 播完后引擎会回一条暂停：预览与预览落定期间这不是用户意图，不能压状态。
                 if (paused && previewLandingInFlight()) {
@@ -1441,8 +1741,9 @@ class PlaybackController(
     }
 
     override fun onPlaybackFailed(loadToken: Int, errorText: String?) {
-        // 取消或重定向后，旧目标迟到的失败不能改变当前阶段，也不提示。
-        if (loadToken != expectedLoadToken) return
+        // 取消、改目标或打开交接之后，旧目标迟到的失败不能改变当前阶段，也不提示。
+        val current = generation ?: return
+        if (!current.accepts(loadToken, null)) return
         if (!active || !loadGuardPhase()) {
             handleLoadFailure(errorText = errorText)
             return
@@ -1466,8 +1767,9 @@ class PlaybackController(
 
     override fun onPlaybackEnded(loadToken: Int) {
         if (!active) return
-        // 只看当前加载的自然播完标记；keep-open 自动暂停的回声不能把播完吞掉。
-        if (loadToken != expectedLoadToken || loadPhase != LoadPhase.None) return
+        // 只看当前代际的自然播完标记；旧目标的迟到结束与 keep-open 自动暂停的回声都不能把播完吞掉。
+        val current = generation ?: return
+        if (!current.accepts(loadToken, null) || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
         if (holdBlack) return
         // 预览 seek 或预览来源的落定还没执行完都不算播完：切集会打断拖动，
@@ -1573,7 +1875,9 @@ class PlaybackController(
     private fun finishInitialLoad() {
         if (loadPhase != LoadPhase.Initial) return
         logLoadSucceeded()
-        loadPhase = LoadPhase.None
+        generation?.markReady()
+        // 打开交接的新目标加载完成（没有视频轨或后台无画面时不会有出帧）：到这里才放声。
+        releaseOpeningAudio()
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
         cancelLoadGuard()
@@ -1589,7 +1893,9 @@ class PlaybackController(
     private fun finishSwitch(frameConfirmed: Boolean) {
         if (loadPhase != LoadPhase.Switching) return
         logLoadSucceeded()
-        loadPhase = LoadPhase.None
+        generation?.markReady()
+        // 切集就绪（打开交接被切集接管的路径同样到此放声）。
+        releaseOpeningAudio()
         loadTargetIndex = _currentIndex.value
         endBufferingIndicator()
         cancelLoadGuard()
@@ -1954,23 +2260,43 @@ class PlaybackController(
      * 目标已接管视频输出却等不到帧的情形由等新帧窗口先撤帧，恢复期同样按黑底等原片重新出帧。
      */
     private fun restoreOrigin() {
-        val origin = restoreOriginBaseState() ?: return
+        val originIndex = switchOriginIndex
+        val origin = _playlist.value.getOrNull(originIndex)
+        if (origin == null) {
+            resetLoadState()
+            return
+        }
         // 自然播完以显式标记为准；位置兜底覆盖手动切集恰好停在片尾的情况。
         restoreAtEndOfEpisode = switchOriginEnded ||
             (
                 switchOriginDurationMillis > 0 &&
                     switchOriginPositionMillis >= switchOriginDurationMillis - END_TOLERANCE_MILLIS
                 )
+        // 片尾自动切集失败或取消不能续播：恢复期不沿用旧帧，按黑底等原片重新出帧。
+        // 恢复一律保持暂停，所以只要这次切集来自片尾就挂黑底；无帧兜底已挂起时继续挂着。
+        val keepBlack = holdBlack || switchOriginEnded
+        val previous = generation
+        // 恢复原片建立新代际：旧切集代际（含打开交接的静音）到此作废。
+        val current = newGeneration()
+        generation = current
+        current.kind = LoadKind.Restore
+        current.phase = LoadPhase.Restoring
+        current.targetIndex = originIndex
+        current.targetUrl = origin.playbackLocation
+        current.audioOwner = AudioOwner.None
+        // 屏幕上停着的帧继续沿用：恢复期不重新铺黑，除非原来就是黑底。
+        current.screenFrame = previous?.screenFrame ?: ScreenFrame.None
+        current.originAspectRatio = previous?.originAspectRatio
+        current.holdBlack = keepBlack
+        // 恢复原片按既有提示规则处理，不再算后台切集或打开交接的黑屏。
+        current.quietBlack = false
+        syncAudioMute()
+        restoreOriginBaseState() ?: return
+        // 回退状态刚把「看过一遍」清掉：片尾恢复仍要按片尾记，退出时不再写回片尾附近的进度。
         watchedToEnd = restoreAtEndOfEpisode
         pausedAtEpisodeEnd = restoreAtEndOfEpisode
-        // 片尾自动切集失败不能续播：恢复期不沿用旧帧，按黑底等原片重新出帧。
-        // 无帧兜底已经挂起黑底时保持，恢复结束时再按用户意图收尾。
-        holdBlack = holdBlack || (switchOriginEnded && paused)
         loadGeneration++
-        loadPhase = LoadPhase.Restoring
         _restoring.value = true
-        // 恢复原片按既有提示规则处理，不再算后台切集的黑屏。
-        quietBlack = false
         // 进入恢复阶段后再派生：恢复期的黑底与沿用旧帧按这一阶段的规则判定。
         settlePresentation()
         // 恢复原片也走加载看护：读失败重发一次，10 秒无进展判失败。
@@ -1995,7 +2321,9 @@ class PlaybackController(
         // 只有自然播完触发的自动切集才按黑底等待；手动切集的失败回退沿用屏幕上的旧帧。
         // 恢复到片尾时用户按过播放就从 0 重开，黑底随之解除。
         val blackHold = switchOriginEnded && paused
-        loadPhase = LoadPhase.None
+        generation?.markReady()
+        // 恢复原片没有交接静音；这里统一出口，避免任何路径把静音留到恢复之后。
+        releaseOpeningAudio()
         loadTargetIndex = _currentIndex.value
         cancelLoadGuard()
         _switching.value = false
@@ -2071,6 +2399,8 @@ class PlaybackController(
                 // 同一次切集只提示一次“播放失败”。
                 if (reportFailure) _playbackFailures.tryEmit(Unit)
             }
+            // 打开交接没有在途加载，不会有失败；保持现状。
+            LoadPhase.Pending -> Unit
             // 播放中出错：引擎已卸载，按失败结束；播放键可重开当前文件。
             LoadPhase.None -> {
                 // 片尾恢复后的 EOF 不再重复提示；等用户下一次操作或新加载。
@@ -2169,6 +2499,7 @@ class PlaybackController(
 
     /** 阶段日志文案；测试断言文案而不是内部枚举名。 */
     private fun loadPhaseLabel(phase: LoadPhase): String = when (phase) {
+        LoadPhase.Pending -> "打开交接"
         LoadPhase.Initial -> "首次加载"
         LoadPhase.Switching -> "切集"
         LoadPhase.Restoring -> "恢复原片"
@@ -2203,10 +2534,11 @@ class PlaybackController(
         _buffering.value = false
     }
 
-    /** 清掉进行中的加载与切集状态，不改变会话本身。 */
+    /** 代际作废：进行中的加载、画面、静音与令牌一起失效；不改变会话本身。 */
     private fun resetLoadState() {
         loadGeneration++
-        loadPhase = LoadPhase.None
+        generation = null
+        syncAudioMute()
         endBufferingIndicator()
         cancelSurfaceRestore()
         switchPlaybackStarted = false
@@ -2216,23 +2548,13 @@ class PlaybackController(
         _switching.value = false
         _restoring.value = false
         restartFromStartAfterRestore = false
-        loadTargetIndex = NO_MEDIA
-        loadTargetUrl = null
-        seekPendingForReady = false
-        deferredReadyNeedsFrame = null
-        requiredSeekSerial = 0
         resetSeekForNewLoad()
-        resumeLookupDone = true
         switchOriginIndex = NO_MEDIA
         restoreAtEndOfEpisode = false
         switchOriginEnded = false
-        expectedLoadToken = 0
         switchFailureReported = false
-        holdBlack = false
-        quietBlack = false
-        screenFrame = ScreenFrame.None
-        switchOutputLive = false
-        originAspectRatio = null
+        userSeeked = false
+        resumePositionMillis = null
         settlePresentation()
     }
 
@@ -2284,10 +2606,10 @@ class PlaybackController(
      */
     private fun lookUpResumePosition(index: Int, media: MediaFile) {
         if (_resumeMode.value == ResumeMode.FromStart) return
-        val generation = loadGeneration
+        val lookupSerial = loadGeneration
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val record: MediaProgress? = progressStore.find(media.location)
-            if (!active || generation != loadGeneration) return@launch
+            if (!active || lookupSerial != loadGeneration) return@launch
             if (loadTargetIndex != index || loadTargetUrl != media.playbackLocation) return@launch
             // 用户已经自己跳转过：查询到的续播位置作废，不能再把画面拉回去。
             resumePositionMillis = if (userSeeked) null else record?.positionMillis?.takeIf { it > 0 }
@@ -2375,9 +2697,6 @@ class PlaybackController(
         _state.value = state
         diagnostics.log { "播放状态: $previous -> $state" }
     }
-
-    /** 一次加载所处的阶段；切集与首次打开共用缓冲指示，但返回行为不同。 */
-    private enum class LoadPhase { None, Initial, Switching, Restoring }
 
     /** 加载来源；只用于诊断日志区分打开、手动、列表与片尾。 */
     private enum class LoadTrigger(val label: String) {

@@ -39,6 +39,11 @@ class MpvOptionsTest {
         assertEquals("all=error", options["msg-level"])
     }
 
+    @Test
+    fun `the audio buffer tolerates a blocking video output rebuild`() {
+        assertEquals("0.5", options["audio-buffer"])
+    }
+
     private companion object {
         const val CACHE_DIR = "/data/user/0/com.cc3301.ccplayer/cache"
     }

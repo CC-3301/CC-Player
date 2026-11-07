@@ -705,7 +705,13 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
      * 为假表示回到同一会话（通知栏入口等），沿用已记录的比例。
      */
     private fun enterPlayer(preparing: Boolean, newSession: Boolean) {
-        if (newSession) sessionOrientation.beginPlayback() else sessionOrientation.clearOverride()
+        if (newSession) {
+            sessionOrientation.beginPlayback()
+            // 打开另一个目标：旧片立即停止出声、屏上旧画面撤掉，方向与比例按新目标判定。
+            playback?.controller?.beginOpenHandover()
+        } else {
+            sessionOrientation.clearOverride()
+        }
         playerVisible = true
         updateKeepScreenOn()
         playbackEntry.enter(preparing)
@@ -888,6 +894,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
      */
     private fun leavePlayerPage() {
         playbackEntryOpener.cancel()
+        // 打开没有真正开始就离开：撤回交接，旧片恢复出声与画面。
+        playback?.controller?.cancelOpenHandover()
         pendingPlayback.clear()
         playbackEntry.reset()
         onSurfaceReleased()

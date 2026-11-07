@@ -573,12 +573,13 @@ fun PlayerScreen(
             )
         }
         // 提示规则：有画面时叠在画面上；首次打开的黑屏照常显示；其余黑屏按原有规则显示。
-        // 只有被静默标记的「后台切集」与「播放态回前台撤帧」两类黑屏不显示转圈与文字。
+        // 被静默标记的黑屏（后台切集、播放态回前台撤帧、打开另一个目标）不显示转圈与文字；
+        // 打开另一个目标只压提示，不改控制层显隐判据。
         if (
             showsBufferingIndicator(
                 buffering = buffering,
                 showsPicture = surfacePresentation.showsPicture,
-                firstBuffering = firstBuffering,
+                firstBuffering = firstBufferingForIndicator(firstBuffering, surfacePresentation.quietBlack),
                 quietBlack = surfacePresentation.quietBlack,
             )
         ) {
