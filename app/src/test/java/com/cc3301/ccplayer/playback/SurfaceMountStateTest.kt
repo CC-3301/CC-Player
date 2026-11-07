@@ -18,7 +18,9 @@ class SurfaceMountStateTest {
         assertTrue(state.require(surface))
         assertTrue(state.onTimedOut(surface))
 
-        assertTrue(state.detach())
+        // 超时已经回滚在途挂载，没有真正挂上的 Surface：分离不需要投递任务，但意图仍要被清掉。
+        assertFalse(state.detach())
+        assertFalse(state.hasMount())
 
         var attached = false
         assertEquals(

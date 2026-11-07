@@ -52,7 +52,8 @@ class SurfaceRemountRecoveryTest {
         timeoutTask!!.invoke()
         while (tasks.isNotEmpty()) tasks.removeFirst()()
 
-        assertEquals(listOf("busy", "timeout", "remount", "output"), events)
+        // 超时由计时器触发，先于队列里的占位任务执行；busy 只是占位标记，随后才补跑。
+        assertEquals(listOf("timeout", "busy", "remount", "output"), events)
     }
 
     private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)
