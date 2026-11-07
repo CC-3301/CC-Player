@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -74,8 +75,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
@@ -94,6 +93,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -167,6 +167,21 @@ private val PlayerTopBarHeight = 56.dp
 
 /** “更多”面板为底部控制条预留的高度。 */
 private val PlayerControlBarReserve = 224.dp
+
+/** “更多”面板内统一的行高。 */
+private val PlayerMoreRowHeight = 48.dp
+
+/** 自定义分钟数行高：可见边框 48dp 加浮动标签悬出的 8dp。 */
+private val PlayerMoreDurationRowHeight = 56.dp
+
+/** “自动播放下一个”开关的视觉尺寸。 */
+private val PlayerMoreSwitchWidth = 44.dp
+private val PlayerMoreSwitchHeight = 26.dp
+
+/** 开关滑块的直径与落在轨道两端的偏移。 */
+private val PlayerMoreSwitchThumbSize = 20.dp
+private val PlayerMoreSwitchThumbChecked = 21.dp
+private val PlayerMoreSwitchThumbUnchecked = 3.dp
 
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
@@ -1703,8 +1718,11 @@ private fun PlayerIconBar(
     }
 }
 
+/** 播放页禁用态的统一透明度。 */
+private const val PlayerDisabledAlpha = 0.45f
+
 /** 禁用控件的画布色。 */
-private val DisabledToolColor = AppColors.Faint.copy(alpha = 0.45f)
+private val DisabledToolColor = AppColors.Faint.copy(alpha = PlayerDisabledAlpha)
 
 /** 播放页统一按压反馈的白色涟漪：按下约 20% 白，键盘焦点约 12% 白，悬停与拖动不显示背景。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2095,6 +2113,7 @@ private fun MorePanel(
             .heightIn(max = panelMaxHeight)
             .playerPanel()
             .blockPlayerGestures()
+            .padding(vertical = AppSpacing.Lg)
             .verticalScroll(rememberScrollState()),
     ) {
         MoreChoiceRow(
@@ -2212,8 +2231,9 @@ private fun MoreChoiceRow(
                     if (enabled) Modifier.playerPressClickable(PlayerPressTarget.MorePanelRow, onClick)
                     else Modifier,
                 )
+                .heightIn(min = PlayerMoreRowHeight)
                 .semantics { stateDescription = expandedState }
-                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Md),
+                .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
         ) {
@@ -2259,7 +2279,8 @@ private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onC
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.MorePanelRow),
                 )
-                .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = 10.dp, bottom = 10.dp),
+                .heightIn(min = PlayerMoreRowHeight)
+                .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -2303,7 +2324,8 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
                     interactionSource = interaction,
                     indication = playerPressIndication(PlayerPressTarget.AutoPlayNextRow),
                 )
-                .padding(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
+                .heightIn(min = PlayerMoreRowHeight)
+                .padding(horizontal = AppSpacing.Lg),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(AppSpacing.Md),
         ) {
@@ -2313,19 +2335,33 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
                 color = if (enabled) AppColors.Foreground else DisabledToolColor,
                 modifier = Modifier.weight(1f),
             )
-            Switch(
-                checked = checked,
-                enabled = enabled,
-                onCheckedChange = null,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                    checkedTrackColor = AppColors.AccentDeep,
-                    uncheckedThumbColor = AppColors.SwitchThumb,
-                    uncheckedTrackColor = AppColors.SurfaceHighest,
-                    uncheckedBorderColor = Color.Transparent,
-                ),
-            )
+            MoreSwitch(checked = checked, enabled = enabled)
         }
+    }
+}
+
+/** 开关：固定 44×26，右边界与行尾箭头共用同一基准线。 */
+@Composable
+private fun MoreSwitch(checked: Boolean, enabled: Boolean) {
+    val thumbOffset by animateDpAsState(
+        targetValue = if (checked) PlayerMoreSwitchThumbChecked else PlayerMoreSwitchThumbUnchecked,
+        label = "player-switch-thumb",
+    )
+    Box(
+        modifier = Modifier
+            .size(width = PlayerMoreSwitchWidth, height = PlayerMoreSwitchHeight)
+            .alpha(if (enabled) 1f else PlayerDisabledAlpha)
+            .clip(CircleShape)
+            .background(if (checked) AppColors.AccentDeep else AppColors.SurfaceHighest),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(x = thumbOffset.roundToPx(), y = 0) }
+                .size(PlayerMoreSwitchThumbSize)
+                .clip(CircleShape)
+                .background(if (checked) Color.White else AppColors.SwitchThumb),
+        )
     }
 }
 
@@ -2337,7 +2373,8 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, top = AppSpacing.Xs, bottom = AppSpacing.Sm),
+            .height(PlayerMoreDurationRowHeight)
+            .padding(horizontal = AppSpacing.Lg),
         horizontalArrangement = Arrangement.spacedBy(AppSpacing.Sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2349,6 +2386,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             },
             singleLine = true,
             enabled = enabled,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(textAlign = TextAlign.Center),
             label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
             isError = customRejected,
             shape = RoundedCornerShape(AppRadius.Sm),
@@ -2364,7 +2402,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
                 errorLabelColor = AppColors.Danger,
                 errorCursorColor = AppColors.Danger,
             ),
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.width(140.dp),
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
@@ -2384,7 +2422,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             text = stringResource(R.string.player_sleep_timer_custom_invalid),
             style = MaterialTheme.typography.labelMedium,
             color = AppColors.Danger,
-            modifier = Modifier.padding(start = AppSpacing.Xxl, end = AppSpacing.Lg, bottom = AppSpacing.Sm),
+            modifier = Modifier.padding(start = AppSpacing.Lg, end = AppSpacing.Lg, bottom = AppSpacing.Sm),
         )
     }
 }
