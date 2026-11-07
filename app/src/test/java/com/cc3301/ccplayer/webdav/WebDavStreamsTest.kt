@@ -81,6 +81,17 @@ class WebDavStreamsTest {
     }
 
     @Test
+    fun `探测打开的句柄交给播放的第一个请求复用`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+
+        streams.probe(movie)
+        assertArrayEquals(payload, httpRequest(streams.urlFor(movie)).body)
+
+        assertEquals("探测不再产生一次被丢弃的连接", 1, transport.openedSizes.size)
+    }
+
+    @Test
     fun `关闭后已建立的读句柄一并关闭`() = runTest {
         addSource(root)
         transport.addFile(movie, payload)
