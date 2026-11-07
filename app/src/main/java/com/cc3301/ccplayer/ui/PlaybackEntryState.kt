@@ -7,7 +7,7 @@ import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.isInitialLoading
 
 /**
- * 浏览页进入播放页的瞬时状态：准备期与首次加载期间只允许返回。
+ * 浏览页进入播放页的瞬时状态：准备期与首次加载期间只放行不依赖加载的控件。
  *
  * [enter] 为真时先显示缓冲指示；播放控制层接管缓冲或首次加载就绪后解除。
  * 首次加载失败只消费一次，供界面退回列表。
@@ -49,7 +49,7 @@ class PlaybackEntryState {
         return true
     }
 
-    /** 准备期与首次加载（非切集）只允许返回。 */
+    /** 准备期与首次加载（非切集）：除返回与不依赖加载的控件外，其余按加载态拦截。 */
     fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
         openingPlayback || isInitialLoading(playbackState, switching)
 

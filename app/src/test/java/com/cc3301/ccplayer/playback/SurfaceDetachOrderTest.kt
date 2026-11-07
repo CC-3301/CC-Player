@@ -4,7 +4,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** 分离的下发顺序，以及分离与挂载在视频输出投递队列上的先后。 */
 class SurfaceDetachOrderTest {
@@ -53,13 +55,12 @@ class SurfaceDetachOrderTest {
     }
 
     @Test
-    fun `等不到排空时挂载排到分离之后，不放行当场挂`() {
+    fun `有在途任务时挂载排到分离之后，不放行当场挂`() {
         val calls = mutableListOf<String>()
         queue.postAlways { calls += "detach" }
 
-        // 这条线程没有真执行器：闸门跑不到，排空一定等不到。
+        // 这条线程没有真执行器：分离一直算在途，挂载只能排在它后面。
         val attachedNow = queue.attach(
-            awaitMillis = 50,
             stillCurrent = { true },
             attach = { calls += "attach" },
             onSkipped = { calls += "skipped" },
@@ -78,7 +79,6 @@ class SurfaceDetachOrderTest {
         queue.postAlways { calls += "detach" }
 
         queue.attach(
-            awaitMillis = 50,
             stillCurrent = { false },
             attach = { calls += "attach" },
             onSkipped = { calls += "skipped" },
@@ -95,9 +95,8 @@ class SurfaceDetachOrderTest {
             val live = VideoOutputQueue { task -> executor.execute { task() } }
             val calls = mutableListOf<String>()
 
-            // 等排空的这段时间里已经释放：当场挂之前再校验一次，不挂。
+            // 挂载之前已经释放：当场挂之前再校验一次，不挂。
             val attachedNow = live.attach(
-                awaitMillis = 2_000,
                 stillCurrent = { false },
                 attach = { calls += "attach" },
                 onSkipped = { calls += "skipped" },
@@ -118,13 +117,51 @@ class SurfaceDetachOrderTest {
             val calls = mutableListOf<String>()
 
             val attachedNow = live.attach(
-                awaitMillis = 2_000,
                 stillCurrent = { true },
                 attach = { calls += "attach" },
                 onSkipped = { calls += "skipped" },
             )
 
             assertTrue(attachedNow)
+            assertEquals(listOf("attach"), calls)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `有在途任务时挂载立即返回，不等待队列排空`() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val live = VideoOutputQueue { task -> executor.execute { task() } }
+            val started = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val attached = CountDownLatch(1)
+            live.postAlways {
+                started.countDown()
+                release.await(2, TimeUnit.SECONDS)
+            }
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+
+            val calls = mutableListOf<String>()
+            val attachedNow = live.attach(
+                stillCurrent = { true },
+                attach = {
+                    calls += "attach"
+                    attached.countDown()
+                },
+                onSkipped = {
+                    calls += "skipped"
+                    attached.countDown()
+                },
+            )
+
+            // 视频输出线程仍被占着：调用线程拿不到当场挂的机会，先把挂载排队并立即返回。
+            assertFalse(attachedNow)
+            assertEquals(emptyList<String>(), calls)
+
+            release.countDown()
+            assertTrue(attached.await(2, TimeUnit.SECONDS))
             assertEquals(listOf("attach"), calls)
         } finally {
             executor.shutdownNow()

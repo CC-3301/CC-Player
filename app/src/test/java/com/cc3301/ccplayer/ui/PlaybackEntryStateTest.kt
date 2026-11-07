@@ -20,7 +20,7 @@ class PlaybackEntryStateTest {
     }
 
     @Test
-    fun `首次加载期间只允许返回`() {
+    fun `首次加载期间保持限制，转入切集后解除`() {
         state.enter(preparing = true)
         state.onPlaybackUpdate(PlaybackState.Loading, buffering = false, switching = false)
         assertTrue(state.initialLoading(PlaybackState.Loading, switching = false))

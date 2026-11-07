@@ -477,7 +477,7 @@ fun PlayerScreen(
     BackHandler(enabled = playerBackClosesPanel(panels.anyOpen)) { panels.close() }
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
-    // 已打开的面板保持打开，内容按不可用外观处理。
+    // 已打开的面板保持打开，仍被拦截的操作按不可用外观处理。
     LaunchedEffect(switching, initialLoading) {
         controls.onLoadingPhaseChanged()
     }

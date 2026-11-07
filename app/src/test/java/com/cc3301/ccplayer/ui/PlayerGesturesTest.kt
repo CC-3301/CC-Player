@@ -143,10 +143,19 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `切集期间放行返回、上一集、下一集与播放暂停`() {
+    fun `切集期间放行返回、上一集、下一集、播放暂停与不依赖加载的控件`() {
         val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
         assertEquals(
-            setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next, PlayerAction.PlayPause),
+            setOf(
+                PlayerAction.Back,
+                PlayerAction.Previous,
+                PlayerAction.Next,
+                PlayerAction.PlayPause,
+                PlayerAction.More,
+                PlayerAction.Subtitles,
+                PlayerAction.Volume,
+                PlayerAction.Lock,
+            ),
             allowed,
         )
     }
@@ -159,11 +168,73 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `首次加载期间只放行返回`() {
+    fun `首次加载期间放行不依赖加载的控件`() {
         val allowed = PlayerAction.entries
             .filter { actionAllowed(it, switching = false, initialLoading = true, restoring = false) }
             .toSet()
-        assertEquals(setOf(PlayerAction.Back), allowed)
+        assertEquals(
+            setOf(
+                PlayerAction.Back,
+                PlayerAction.More,
+                PlayerAction.Subtitles,
+                PlayerAction.Volume,
+                PlayerAction.Lock,
+            ),
+            allowed,
+        )
+    }
+
+    @Test
+    fun `首次加载时更多字幕音量与锁定外观正常`() {
+        listOf(
+            PlayerAction.More,
+            PlayerAction.Subtitles,
+            PlayerAction.Volume,
+            PlayerAction.Lock,
+        ).forEach { action ->
+            assertEquals(
+                action.name,
+                true,
+                actionLooksEnabled(
+                    action,
+                    canGoPrevious = true,
+                    canGoNext = true,
+                    switching = false,
+                    initialLoading = true,
+                    restoring = false,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `切集与恢复期间更多字幕音量与锁定可点且外观正常`() {
+        listOf(
+            PlayerAction.More,
+            PlayerAction.Subtitles,
+            PlayerAction.Volume,
+            PlayerAction.Lock,
+        ).forEach { action ->
+            for ((switching, restoring) in listOf(true to false, true to true)) {
+                assertEquals(
+                    action.name,
+                    true,
+                    actionAllowed(action, switching, initialLoading = false, restoring = restoring),
+                )
+                assertEquals(
+                    action.name,
+                    true,
+                    actionLooksEnabled(
+                        action,
+                        canGoPrevious = true,
+                        canGoNext = true,
+                        switching = switching,
+                        initialLoading = false,
+                        restoring = restoring,
+                    ),
+                )
+            }
+        }
     }
 
     @Test
@@ -172,7 +243,16 @@ class PlayerGesturesTest {
             .filter { actionAllowed(it, switching = true, initialLoading = false, restoring = true) }
             .toSet()
         assertEquals(
-            setOf(PlayerAction.Back, PlayerAction.Previous, PlayerAction.Next, PlayerAction.PlayPause),
+            setOf(
+                PlayerAction.Back,
+                PlayerAction.Previous,
+                PlayerAction.Next,
+                PlayerAction.PlayPause,
+                PlayerAction.More,
+                PlayerAction.Subtitles,
+                PlayerAction.Volume,
+                PlayerAction.Lock,
+            ),
             allowed,
         )
     }
@@ -200,10 +280,7 @@ class PlayerGesturesTest {
     fun `切集期间被拦截的动作按不可用外观显示`() {
         listOf(
             PlayerAction.Seek,
-            PlayerAction.Lock,
-            PlayerAction.More,
             PlayerAction.Playlist,
-            PlayerAction.Subtitles,
             PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(
@@ -268,10 +345,7 @@ class PlayerGesturesTest {
         listOf(
             PlayerAction.PlayPause,
             PlayerAction.Seek,
-            PlayerAction.Lock,
-            PlayerAction.More,
             PlayerAction.Playlist,
-            PlayerAction.Subtitles,
             PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(
@@ -304,10 +378,7 @@ class PlayerGesturesTest {
     fun `恢复期间被拦截的控件置灰`() {
         listOf(
             PlayerAction.Seek,
-            PlayerAction.Lock,
-            PlayerAction.More,
             PlayerAction.Playlist,
-            PlayerAction.Subtitles,
             PlayerAction.Rotate,
         ).forEach { action ->
             assertEquals(

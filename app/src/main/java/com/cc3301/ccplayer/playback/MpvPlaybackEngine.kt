@@ -395,13 +395,12 @@ class MpvPlaybackEngine(
 
     /**
      * 挂载 Surface：排队中的分离可能还没跑完，摘挂载会落在刚挂上的这一块之后。
-     * 队列跑空时当场挂；等不到跑空就把这次挂载排到分离之后，不抢在它前面。
+     * 队列没有在途任务时当场挂；有在途任务就把这次挂载排到分离之后，调用线程不等待。
      */
     override fun attachSurface(surface: Surface) {
         if (released || attachedSurface === surface) return
         attachedSurface = surface
         videoOutputQueue.attach(
-            awaitMillis = VIDEO_OUTPUT_DRAIN_WAIT_MILLIS,
             stillCurrent = { !released && attachedSurface === surface },
             attach = { MPVLib.attachSurface(surface) },
             onSkipped = {
@@ -935,9 +934,6 @@ class MpvPlaybackEngine(
 
         /** 释放时等视频输出线程排空队列的上限；超时即放弃销毁，不能把退出挂住。 */
         const val VIDEO_OUTPUT_RELEASE_WAIT_MILLIS = 2_000L
-
-        /** 挂载前等视频输出线程排空队列的上限；等不到就改成把挂载排到队列后面。 */
-        const val VIDEO_OUTPUT_DRAIN_WAIT_MILLIS = 2_000L
 
         /** seek 身份分配器：进程级单调，加载与停止都不重置，seekId 因此永不复用。 */
         val nextSeekId = AtomicLong(0)

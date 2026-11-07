@@ -1,7 +1,5 @@
 package com.cc3301.ccplayer.playback
 
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -19,6 +17,9 @@ internal class VideoOutputQueue(private val execute: (() -> Unit) -> Unit) {
 
     private val generation = AtomicInteger(0)
 
+    /** 已投递、尚未跑完的任务数；挂载据此决定当场执行还是排队，调用线程不等待。 */
+    private val pending = AtomicInteger(0)
+
     /** 投递一条参与代际作废的任务；队列已关时不再执行。 */
     fun postOutput(task: () -> Unit) {
         val current = generation.get()
@@ -33,29 +34,19 @@ internal class VideoOutputQueue(private val execute: (() -> Unit) -> Unit) {
         generation.incrementAndGet()
     }
 
-    /** 等已投递的任务跑完；投递被拒与等不到排空都返回 false。 */
-    fun awaitIdle(timeoutMillis: Long): Boolean {
-        val idle = CountDownLatch(1)
-        if (!submit { idle.countDown() }) return false
-        return runCatching {
-            idle.await(timeoutMillis, TimeUnit.MILLISECONDS)
-        }.getOrDefault(false)
-    }
-
     /**
-     * 挂载 Surface：队列跑空时在调用线程当场挂；等不到跑空就把挂载排到已投递任务之后，
-     * 不抢在排队中的分离之前。
+     * 挂载 Surface：队列没有在途任务时在调用线程当场挂；有在途任务就把挂载排到它们之后，
+     * 不抢在排队中的分离之前，也不等它们跑完。
      * [stillCurrent] 在真正挂载之前都要过一次：当场挂那次在调用线程过，排队那次在视频输出线程过。
      * 返回 false 有两种含义——已排到队列之后，或校验不过被跳过（[onSkipped] 在对应的那条线程执行）。
      */
     fun attach(
-        awaitMillis: Long,
         stillCurrent: () -> Boolean,
         attach: () -> Unit,
         onSkipped: () -> Unit,
     ): Boolean {
-        if (awaitIdle(awaitMillis)) {
-            // 等排空的这段时间里可能已经释放：挂之前再确认一次，别对着已销毁的核心挂载。
+        if (pending.get() == 0) {
+            // 检查与挂载之间可能已经释放：挂之前再确认一次，别对着已销毁的核心挂载。
             if (!stillCurrent()) {
                 onSkipped()
                 return false
@@ -70,9 +61,20 @@ internal class VideoOutputQueue(private val execute: (() -> Unit) -> Unit) {
         return false
     }
 
-    private fun submit(task: () -> Unit): Boolean =
-        runCatching {
-            execute { task() }
+    private fun submit(task: () -> Unit): Boolean {
+        pending.incrementAndGet()
+        return runCatching {
+            execute {
+                try {
+                    task()
+                } finally {
+                    pending.decrementAndGet()
+                }
+            }
             true
-        }.getOrDefault(false)
+        }.getOrElse {
+            pending.decrementAndGet()
+            false
+        }
+    }
 }

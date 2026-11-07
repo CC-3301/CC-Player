@@ -222,7 +222,7 @@ fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
 
 /**
  * 顶/底栏是否可见：锁定与抽屉打开时不显示，控制层隐藏时也不显示。
- * 首次缓冲期例外，此时顶/底栏保持可见但只放行返回入口。
+ * 首次缓冲期例外，此时顶/底栏保持可见，只放行不依赖加载的控件。
  * 缓冲指示与错误提示不属于控制层，不受此判据影响。
  */
 fun playerBarsVisible(
@@ -302,9 +302,26 @@ enum class PlayerAction {
     Rotate,
 }
 
+/** 首次加载期间放行的操作：不改写加载目标、不改写起播暂停意图，按下也立刻有效。 */
+private val initialLoadingActions = setOf(
+    PlayerAction.Back,
+    PlayerAction.More,
+    PlayerAction.Subtitles,
+    PlayerAction.Volume,
+    PlayerAction.Lock,
+)
+
+/** 切集与恢复原片期间放行的操作：在首次加载的放行清单上加入上一集、下一集与播放/暂停。 */
+private val switchingActions = initialLoadingActions + setOf(
+    PlayerAction.Previous,
+    PlayerAction.Next,
+    PlayerAction.PlayPause,
+)
+
 /**
- * 当前可用的播放页操作：首次加载只放行返回；目标加载放行返回、上一集/下一集与播放/暂停
- * （播放/暂停只记意图，切集就绪后按意图执行）；恢复原片期间额外放行播放/暂停。
+ * 当前可用的播放页操作：首次加载放行返回与不依赖加载的控件；
+ * 切集与恢复原片放行上一集/下一集与播放/暂停（播放/暂停只记意图，切集就绪后按意图执行）；
+ * 其余操作不被加载态拦截。
  */
 fun actionAllowed(
     action: PlayerAction,
@@ -312,17 +329,8 @@ fun actionAllowed(
     initialLoading: Boolean,
     restoring: Boolean,
 ): Boolean = when {
-    initialLoading -> action == PlayerAction.Back
-    restoring ->
-        action == PlayerAction.Back ||
-            action == PlayerAction.Previous ||
-            action == PlayerAction.Next ||
-            action == PlayerAction.PlayPause
-    switching ->
-        action == PlayerAction.Back ||
-            action == PlayerAction.Previous ||
-            action == PlayerAction.Next ||
-            action == PlayerAction.PlayPause
+    initialLoading -> action in initialLoadingActions
+    switching || restoring -> action in switchingActions
     else -> true
 }
 
@@ -338,8 +346,8 @@ private fun adjacencyAvailable(
 }
 
 /**
- * 控件外观是否可用：首次加载只保留返回入口；切集与恢复原片期间与点击判据同源，
- * 被拦截的操作一并置灰，不出现能看到却点不动的控件。上一集/下一集在列表边界始终置灰。
+ * 控件外观是否可用：与点击判据同源，被拦截的操作才置灰，可点的控件不显示为禁用外观。
+ * 上一集/下一集在列表边界始终置灰。
  */
 fun actionLooksEnabled(
     action: PlayerAction,
@@ -348,8 +356,6 @@ fun actionLooksEnabled(
     switching: Boolean,
     initialLoading: Boolean,
     restoring: Boolean,
-): Boolean {
-    if (initialLoading) return action == PlayerAction.Back
-    val adjacency = adjacencyAvailable(action, canGoPrevious, canGoNext)
-    return adjacency && actionAllowed(action, switching, initialLoading, restoring)
-}
+): Boolean =
+    adjacencyAvailable(action, canGoPrevious, canGoNext) &&
+        actionAllowed(action, switching, initialLoading, restoring)
