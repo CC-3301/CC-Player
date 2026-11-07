@@ -173,8 +173,11 @@ interface PlaybackEngine {
         /** 播放位置或时长更新，单位毫秒。 */
         fun onPositionChanged(positionMillis: Long, durationMillis: Long)
 
-        /** 画面尺寸变化：宽高比按这对像素值推算；宽或高非正表示当前没有画面。 */
-        fun onVideoSizeChanged(width: Int, height: Int)
+        /**
+         * 画面尺寸变化：宽高比按这对像素值推算；宽或高非正表示当前没有画面。
+         * [loadToken] 标识产生它的加载，控制层据此丢弃旧目标迟到的尺寸，不拿旧比例重判定方向。
+         */
+        fun onVideoSizeChanged(width: Int, height: Int, loadToken: Int)
     }
 }
 

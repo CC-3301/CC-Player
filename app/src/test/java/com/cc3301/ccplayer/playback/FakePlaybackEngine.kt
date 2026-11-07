@@ -411,5 +411,7 @@ class FakePlaybackEngine : PlaybackEngine {
     fun reportPositionChanged(positionMillis: Long, durationMillis: Long) =
         listener?.onPositionChanged(positionMillis, durationMillis)
 
-    fun reportVideoSizeChanged(width: Int, height: Int) = listener?.onVideoSizeChanged(width, height)
+    /** 上报画面尺寸；默认归属当前这次加载，可用 [loadToken] 模拟旧目标迟到的上报。 */
+    fun reportVideoSizeChanged(width: Int, height: Int, loadToken: Int = currentLoadToken) =
+        listener?.onVideoSizeChanged(width, height, loadToken)
 }

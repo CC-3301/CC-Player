@@ -2683,8 +2683,12 @@ class PlaybackController(
         scope.launch { progressStore.save(record) }
     }
 
-    override fun onVideoSizeChanged(width: Int, height: Int) {
+    override fun onVideoSizeChanged(width: Int, height: Int, loadToken: Int) {
         if (!active || width <= 0 || height <= 0) return
+        // 尺寸属于当前代际自己的目标：打开交接与换目标期间旧目标迟到的上报不采纳，
+        // 否则会在新目标上屏后拿旧比例重判一次方向。
+        val current = generation ?: return
+        if (!current.accepts(loadToken, null)) return
         _videoAspectRatio.value = width.toDouble() / height
         // 屏上仍是原片画面时比例不跟着换；目标画面接管后才用这个新比例。
         settlePresentation()
@@ -2757,8 +2761,8 @@ class PlaybackController(
             scope.launch { target.onPositionChanged(positionMillis, durationMillis) }
         }
 
-        override fun onVideoSizeChanged(width: Int, height: Int) {
-            scope.launch { target.onVideoSizeChanged(width, height) }
+        override fun onVideoSizeChanged(width: Int, height: Int, loadToken: Int) {
+            scope.launch { target.onVideoSizeChanged(width, height, loadToken) }
         }
     }
 

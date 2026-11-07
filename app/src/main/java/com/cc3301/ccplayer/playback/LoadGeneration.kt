@@ -74,10 +74,10 @@ internal data class HandoverSnapshot(
 )
 
 /**
- * 一次加载的代际：目标、引擎令牌、尝试次数、出声归属与就绪证据的唯一持有者。
+ * 一次加载的代际：目标、引擎令牌、出声归属与就绪证据的唯一持有者。
  *
  * 每次新的加载意图（首次、打开、切集、恢复）建立一个代际；改目标与重发沿用同一代际，
- * 只更新代际内部的目标与次数。所有引擎回调先按 [accepts] 校验是不是当前代际，
+ * 只更新代际内部的目标与这次引擎加载的令牌。所有引擎回调先按 [accepts] 校验是不是当前代际，
  * 旧代际的完成、出帧与失败一律丢弃。代际在目标就绪后继续持有屏上画面与比例，
  * 直到下一次加载意图替换它或会话结束把它作废。
  */
@@ -102,10 +102,6 @@ internal class LoadGeneration(
 
     /** 当前这次引擎加载的令牌；没有在途加载时为 [NO_LOAD_TOKEN]。 */
     var loadToken: Int = NO_LOAD_TOKEN
-        private set
-
-    /** 本代际发起过几次引擎加载：首个目标、改目标与重发都算。 */
-    var attempts: Int = 0
         private set
 
     /** 出声归属；静音只由它（与预览静音）推导。 */
@@ -157,10 +153,9 @@ internal class LoadGeneration(
     var discardSkipped: Boolean = false
     val retargets: MutableList<String> = mutableListOf()
 
-    /** 以本代际的目标开始一次引擎加载。 */
+    /** 以本代际的目标开始一次引擎加载：改目标与重发都只换这里的令牌。 */
     fun beginAttempt(loadToken: Int) {
         this.loadToken = loadToken
-        attempts++
     }
 
     /** 本代际当前的加载作废（打开交接接管、会话结束）。 */
@@ -173,21 +168,6 @@ internal class LoadGeneration(
         loadToken != NO_LOAD_TOKEN &&
             loadToken == this.loadToken &&
             (targetUrl == null || targetUrl == this.targetUrl)
-
-    /**
-     * 改目标或重发：沿用本代际，只更新目标与这次引擎加载的令牌。
-     * 出声归属与画面事实不动，不需要另一套令牌体系。
-     */
-    fun retarget(index: Int, url: String, loadToken: Int) {
-        targetIndex = index
-        targetUrl = url
-        this.loadToken = loadToken
-        attempts++
-        mediaLoaded = false
-        outputLive = false
-        seekPendingForReady = false
-        deferredReadyNeedsFrame = null
-    }
 
     /**
      * 进入打开交接：旧片停声、旧画面撤掉，屏上铺黑。

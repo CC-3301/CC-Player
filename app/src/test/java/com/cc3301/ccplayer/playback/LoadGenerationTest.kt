@@ -47,7 +47,10 @@ class LoadGenerationTest {
     fun `新目标出画面才解除交接静音`() {
         val generation = generation()
         generation.startHandover(readySnapshot())
-        generation.retarget(1, "root/b.mkv", 8)
+        // 新目标沿用同一代际，只更新目标与这次引擎加载的令牌。
+        generation.targetIndex = 1
+        generation.targetUrl = "root/b.mkv"
+        generation.beginAttempt(8)
 
         assertTrue(generation.accepts(8, "root/b.mkv"))
         assertEquals(AudioOwner.Opening, generation.audioOwner)
@@ -62,13 +65,14 @@ class LoadGenerationTest {
     fun `重发沿用同一代际并仍能放声`() {
         val generation = generation(id = 3)
         generation.startHandover(readySnapshot())
-        generation.retarget(1, "root/b.mkv", 8)
+        generation.targetIndex = 1
+        generation.targetUrl = "root/b.mkv"
+        generation.beginAttempt(8)
 
         // 重发只换这次引擎加载的令牌：代际、目标与出声归属都不变。
         generation.beginAttempt(9)
 
         assertEquals(3, generation.id)
-        assertEquals(2, generation.attempts)
         assertEquals("root/b.mkv", generation.targetUrl)
         assertTrue(generation.accepts(9, "root/b.mkv"))
         assertFalse(generation.accepts(8, "root/b.mkv"))
@@ -80,13 +84,15 @@ class LoadGenerationTest {
     }
 
     @Test
-    fun `改目标沿用同一代际并只更新目标与次数`() {
+    fun `改目标沿用同一代际，旧令牌作废`() {
         val generation = generation(id = 4)
         generation.beginAttempt(1)
-        generation.retarget(2, "root/c.mkv", 2)
+        // 改目标：代际不变，只更新目标与这次引擎加载的令牌。
+        generation.targetIndex = 2
+        generation.targetUrl = "root/c.mkv"
+        generation.beginAttempt(2)
 
         assertEquals(4, generation.id)
-        assertEquals(2, generation.attempts)
         assertEquals(2, generation.targetIndex)
         assertEquals("root/c.mkv", generation.targetUrl)
         assertFalse(generation.accepts(1, null))

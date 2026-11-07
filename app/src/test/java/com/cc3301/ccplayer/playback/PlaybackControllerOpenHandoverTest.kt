@@ -84,6 +84,7 @@ class PlaybackControllerOpenHandoverTest {
     @Test
     fun `旧目标迟到的尺寸上报不改新目标的方向`() = runTest {
         val controller = playingController()
+        val oldToken = engine.currentLoadToken
 
         controller.beginOpenHandover()
         engine.reportVideoSizeChanged(1920, 1080)
@@ -92,7 +93,10 @@ class PlaybackControllerOpenHandoverTest {
         controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
         engine.reportVideoSizeChanged(1080, 1920)
         engine.reportMediaLoaded()
+        assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, 0.0001)
 
+        // 旧目标迟到的尺寸在新目标上屏后才到：不采纳，方向不摆回旧比例。
+        engine.reportVideoSizeChanged(1920, 1080, loadToken = oldToken)
         assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, 0.0001)
     }
 

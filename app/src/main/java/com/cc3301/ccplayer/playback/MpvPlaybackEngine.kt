@@ -846,7 +846,10 @@ class MpvPlaybackEngine(
             HEIGHT_PROPERTY -> videoHeight = value.toInt()
             else -> return
         }
-        listener?.onVideoSizeChanged(videoWidth, videoHeight)
+        // 尺寸属于产生它的那次加载：在途加载优先，其次才是已打开的文件。
+        // 没有加载归属的尺寸不上报，旧目标迟到的尺寸不能带偏方向。
+        val token = loadCoordinator.pendingLoadToken() ?: loadCoordinator.currentLoadedToken() ?: return
+        listener?.onVideoSizeChanged(videoWidth, videoHeight, token)
     }
 
     override fun eventProperty(property: String, value: Double) {
