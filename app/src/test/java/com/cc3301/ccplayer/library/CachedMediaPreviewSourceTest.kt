@@ -1735,13 +1735,34 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `本地抽取失败不进重试队列`() = runTest {
+    fun `本地抽取失败最多重试三次`() = runTest {
         extractor.imageFailure = IOException("读取失败")
+        val file = local("坏文件.mkv")
 
-        val preview = source.preview(local("坏文件.mkv"))
+        // 首发失败 + 三次重试都交给调度器；之后按占位图收尾。
+        repeat(3) { attempt ->
+            assertTrue("第 ${attempt + 1} 次失败要重试", source.preview(file).retryable)
+        }
+        assertFalse("重试用尽后保持占位图", source.preview(file).retryable)
+        assertEquals(4, extractor.imageRequests.size)
+        assertTrue("抽取失败不写无图缓存", directory.listFiles().isNullOrEmpty())
+    }
 
-        assertNull(preview.image)
-        assertFalse("本地失败按无图处理，不交给调度器重试", preview.retryable)
+    @Test
+    fun `只读缓存取封面不触发抽取`() = runTest {
+        extractor.imageBytes = byteArrayOf(1, 2, 3)
+        val file = local("歌.mp3")
+
+        assertNull("没有缓存时返回空，且不抽取", source.cachedImage(file))
+        assertEquals(0, extractor.imageRequests.size)
+
+        source.preview(file)
+        assertEquals(1, extractor.imageRequests.size)
+
+        val cached = source.cachedImage(file)
+        assertNotNull(cached)
+        assertArrayEquals(byteArrayOf(1, 2, 3), cached!!.readBytes())
+        assertEquals("只读缓存不重新抽取", 1, extractor.imageRequests.size)
     }
 
     @Test

@@ -4,6 +4,7 @@ import android.content.Context
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -48,6 +49,12 @@ interface MediaPreviewSource {
      * 可见请求不做复查，只按优先级取得许可。
      */
     fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+
+    /**
+     * 只读缓存取封面：不触发抽取、不排队，也没有时不落「无图」。
+     * 播放页封面层用它与列表共用同一份缓存；没有缓存或已超过有效期时返回 null。
+     */
+    suspend fun cachedImage(file: MediaFile): File? = null
 }
 
 /**
@@ -66,6 +73,43 @@ sealed interface PreviewDuration {
 /** 一次读取会话取到的预览数据；图片为 null 表示没有可用图。 */
 data class MediaPreviewExtraction(val imageBytes: ByteArray?, val duration: PreviewDuration) {
     val durationMillis: Long? get() = (duration as? PreviewDuration.Known)?.millis
+}
+
+/** 抽帧失败的阶段；日志按阶段各写一类，便于判断卡在哪一环。 */
+enum class PreviewFailureStage {
+    /** 打开数据源失败。 */
+    OpenSource,
+
+    /** 读取字节失败。 */
+    Read,
+
+    /** 解码帧或封面失败。 */
+    Decode,
+
+    /** 等读取超时。 */
+    Timeout,
+}
+
+/** 带阶段的抽取失败；上层按 [stage] 记日志，重试节奏仍由调度器安排。 */
+class PreviewStageException(
+    val stage: PreviewFailureStage,
+    message: String,
+    cause: Throwable? = null,
+) : IOException(message, cause)
+
+/** 抽取失败落在哪一阶段；日志里的阶段名只有这一处映射。 */
+internal fun previewFailureStage(failure: Exception): String = when (failure) {
+    is PreviewStageException -> when (failure.stage) {
+        PreviewFailureStage.OpenSource -> "打开数据源"
+        PreviewFailureStage.Read -> "读取"
+        PreviewFailureStage.Decode -> "解码"
+        PreviewFailureStage.Timeout -> "超时"
+    }
+
+    is MediaSourceException -> if (failure.failure == MediaFailure.Unreachable) "建连" else "打开数据源"
+    is java.io.FileNotFoundException -> "打开数据源"
+    is IllegalArgumentException, is SecurityException -> "路径解析"
+    else -> "读取"
 }
 
 /**
@@ -131,10 +175,12 @@ data class ThumbnailPolicy(
  * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
- * 失败或超时保持占位图且不写缓存；可见请求的失败交给调度器按递进间隔重试，源侧不记失败；
+ * 失败或超时保持占位图且不写缓存；可见请求的失败交给调度器按递进间隔重试：
+ * 本地最多重试 3 次，网络用尽调度器的次数后条目再次可见会重新给一轮。
+ * 只有解码成功但没有图才写「无图」缓存；抽取失败不写「无图」。
  * 网络预取失败不在后台重试，也不记无图，只抑制后续预取；回到可见后清掉抑制并重新抽取。
  * 成功封面落盘复用；网络路径只有可见请求确认的无图才在本次运行内记忆，预取不记无图；
- * 本地抽取失败仍按既有规则在本次运行内记住无图。
+ * 「确认无图」的进程内记忆 10 分钟后过期，过期后重新确认。
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
@@ -166,8 +212,11 @@ class CachedMediaPreviewSource(
     /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
     private val noImage = NoImageMemory()
 
+    /** 本地抽取失败的次数；失败后最多重试 [LOCAL_RETRY_LIMIT] 次，成功后清零。 */
+    private val localFailures = ConcurrentHashMap<String, Int>()
+
     /** 预取专用抑制：预取失败或无图的条目在本次运行内不再重复预取；变为可见时清除。 */
-    private val prefetchSuppressed = NoImageMemory()
+    private val prefetchSuppressed = NoImageMemory(ttlMillis = null)
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -245,8 +294,27 @@ class CachedMediaPreviewSource(
             priority = priority,
             load = { extractLocal(file, key, targetWidth, priority) },
         )
-        // 本地失败不进重试队列：本次运行按无图处理，重进目录再确认。
-        return MediaPreview(loaded.image, loaded.durationMillis)
+        if (loaded.abandoned) return MediaPreview(image = null, durationMillis = null)
+        if (!loaded.failed) {
+            localFailures.remove(key)
+            return MediaPreview(loaded.image, loaded.durationMillis)
+        }
+        // 本地抽取失败先按失败收尾交给调度器重试，次数用尽后保持占位图。
+        val attempts = recordLocalFailure(key)
+        return MediaPreview(loaded.image, loaded.durationMillis, retryable = attempts <= LOCAL_RETRY_LIMIT)
+    }
+
+    /** 记一次本地抽取失败并返回累计次数；记录数超限时整体清空，避免长期运行后无限增长。 */
+    private fun recordLocalFailure(key: String): Int {
+        if (localFailures.size >= MAX_RETRY_ENTRIES && !localFailures.containsKey(key)) localFailures.clear()
+        return localFailures.merge(key, 1, Int::plus) ?: 1
+    }
+
+    /** 只读缓存取封面：播放页封面层与列表共用同一份缓存，不触发抽取。 */
+    override suspend fun cachedImage(file: MediaFile): File? {
+        if (file.isDirectory) return null
+        val targetWidth = previewTargetWidth(file, policy)
+        return cache.entry(thumbnailCacheKey(file, policy, targetWidth), cacheMaxAge(file))?.file
     }
 
     /** 抽取结果转成卡片预览：失败的结果带上可重试标记。 */
@@ -313,6 +381,8 @@ class CachedMediaPreviewSource(
             )
         }
         if (image == null) {
+            // 只有解码成功但没有图才写无图缓存；抽取失败不写。
+            diagnostics.log { "封面无图: ${file.name}" }
             // 无图条目只记时长；时长读取失败时记“未知”，下次命中再补读。
             cache.saveWithoutImage(
                 location = key,
@@ -481,12 +551,15 @@ class CachedMediaPreviewSource(
             if (!completed) {
                 // 超时走放弃收尾：打断了在途传输读才作废会话，下一次重试重新建连。
                 abandoned = true
-                throw IllegalStateException("网络预览超时")
+                throw PreviewStageException(PreviewFailureStage.Timeout, "网络预览超时")
             }
             return if (bytes == null) {
                 // 只有可见请求确认的无图才记住；预取结果不记，回到可见时还要再抽一次。
                 // 不写缓存，重启后重新确认。
-                if (priority.isVisible) rememberNoImage(key)
+                if (priority.isVisible) {
+                    diagnostics.log { "封面无图: ${file.name}" }
+                    rememberNoImage(key)
+                }
                 LoadedPreview(image = null, durationMillis = null)
             } else {
                 forgetNoImage(key)
@@ -538,7 +611,7 @@ class CachedMediaPreviewSource(
         }
         if (settled == null) {
             abandonOpen(opened, opening, CancellationException("网络预览打开超时"))
-            throw IllegalStateException("网络预览打开超时")
+            throw PreviewStageException(PreviewFailureStage.Timeout, "网络预览打开超时")
         }
         return settled.getOrThrow()
     }
@@ -656,14 +729,10 @@ class CachedMediaPreviewSource(
     ): LoadedPreview = try {
         load()
     } catch (cancellation: CancellationException) {
+        diagnostics.log { "缩略图取消: ${file.name}" }
         throw cancellation
     } catch (failure: Exception) {
-        val stage = when (failure) {
-            is MediaSourceException -> if (failure.failure == MediaFailure.Unreachable) "建连" else "打开句柄"
-            is java.io.FileNotFoundException -> "打开句柄"
-            is IllegalArgumentException, is SecurityException -> "路径解析"
-            else -> "读取"
-        }
+        val stage = previewFailureStage(failure)
         // 只记类名：异常消息可能含路径与服务器信息，不进日志。
         val cause = failure.causeClassNameOrNull()
         diagnostics.log {
@@ -739,6 +808,9 @@ class CachedMediaPreviewSource(
 
         /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
         private const val MAX_RETRY_ENTRIES = 512
+
+        /** 本地抽取失败后的重试次数上限；用尽后保持占位图，条目再次可见也不再重试。 */
+        private const val LOCAL_RETRY_LIMIT = 3
 
         /** [backgroundScope] 由调用方给出应用级范围：时长补读等后台任务跟随进程，不随界面重建。 */
         fun create(

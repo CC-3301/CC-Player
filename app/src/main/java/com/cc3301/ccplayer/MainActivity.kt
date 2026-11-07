@@ -32,6 +32,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -255,6 +256,12 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
     /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
     private var surfacePresentation by mutableStateOf(SurfacePresentation())
 
+    /** 浏览页重新订阅可见项的代号：回前台时递增，让封面重试用尽的条目重新给一轮。 */
+    private var libraryPreviewTick by mutableIntStateOf(0)
+
+    /** 是否已经进过前台：第一次进入不改代号，避免刚建界面就多抽一轮。 */
+    private var foregroundSeen = false
+
     private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
     private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
     private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
@@ -397,6 +404,27 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                     PlayerLevelControls(volume = MediaVolumeControl(this@MainActivity))
                 }
 
+                // 播放页封面只给纯音频目标：直接读列表共用的封面缓存，不在这里另做解码。
+                val currentMedia = playlist.getOrNull(currentIndex)
+                val audioTarget = currentMedia?.let { mediaKindOf(it.name) == MediaKind.Audio } == true
+                // 同一个目标进出播放页时不清空，避免封面闪一帧占位；只有换目标才清。
+                var producedCoverLocation by remember { mutableStateOf<String?>(null) }
+                val playerCover by produceState<File?>(
+                    null,
+                    currentMedia?.location,
+                    currentMedia?.size,
+                    currentMedia?.lastModified,
+                    playerVisible,
+                ) {
+                    val target = currentMedia?.takeIf { playerVisible && audioTarget }
+                    if (target != null && target.location != producedCoverLocation) {
+                        // 目标变了才清空，避免音频切音频短暂留着上一张封面。
+                        value = null
+                        producedCoverLocation = target.location
+                    }
+                    if (target != null) value = mediaPreview.cachedImage(target)
+                }
+
                 when {
                     // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
                     coldStartPending -> {
@@ -427,6 +455,8 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                             levelControls = levelControls,
                             surfaceCallback = this@MainActivity,
                             surfacePresentation = surfacePresentation,
+                            coverFile = playerCover,
+                            audioTarget = audioTarget,
                             switching = switching,
                             restoring = restoring,
                             buffering = playbackEntry.showingBuffering(buffering),
@@ -551,6 +581,7 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
                         LibraryScreen(
                             state = libraryState,
                             mediaPreview = mediaPreview,
+                            previewReloadTick = libraryPreviewTick,
                             onOpenEntry = { entry ->
                                 logLibraryNavigation(
                                     diagnostics = diagnostics,
@@ -819,6 +850,9 @@ class MainActivity : ComponentActivity(), MpvSurfaceView.Callback {
         updateKeepScreenOn()
         // 退后台时因加载中没丢成的字节源，回前台先补做、再让播放核心发起请求。
         staleSourceDiscardPolicy.onReturnedToForeground(discard = ::discardByteSources)
+        // 回前台让浏览页重新订阅可见项：封面重试用尽（含 SMB 会话作废）的条目重新给一轮。
+        if (foregroundSeen) libraryPreviewTick++
+        foregroundSeen = true
     }
 
     /** 仅前台且播放页在场、播放或加载时保持屏幕常亮；暂停、片尾、离开播放页与退后台立即释放。 */
