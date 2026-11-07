@@ -20,8 +20,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 
 class LoopbackStreamServerTest {
 
@@ -199,26 +199,43 @@ class LoopbackStreamServerTest {
     }
 
     @Test
-    fun `服务关闭后仍有一条不在条目里的句柄，关闭照样落到关源线程`() {
-        val closing = CountDownLatch(1)
-        val closedOn = AtomicReference<String?>(null)
-        val prepared = object : ByteSource {
-            override val size: Long = payload.size.toLong()
+    fun `关闭与派发并发时不抛异常也不丢关闭`() {
+        // 派发线程与关闭线程同时起跑：判已关闭与投递在同一临界区，不会投到已关的池上。
+        val closed = AtomicInteger()
+        val sources = (0 until 200).map {
+            object : ByteSource {
+                override val size: Long = payload.size.toLong()
 
-            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+                override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
 
-            override fun close() {
-                closedOn.set(Thread.currentThread().name)
-                closing.countDown()
+                override fun close() {
+                    closed.incrementAndGet()
+                }
             }
         }
+        val barrier = CyclicBarrier(2)
+        val failures = CopyOnWriteArrayList<Throwable>()
+        val dispatching = Thread {
+            barrier.await()
+            sources.forEach { source ->
+                runCatching { server.closeInBackground(source) }.onFailure(failures::add)
+            }
+        }
+        val closing = Thread {
+            barrier.await()
+            runCatching { server.close() }.onFailure(failures::add)
+        }
+        dispatching.start()
+        closing.start()
+        dispatching.join(5_000)
+        closing.join(5_000)
 
-        // 探测预置的句柄不在条目里，服务关闭之后才丢弃。
-        server.close()
-        server.closeInBackground(prepared)
-
-        assertTrue("关闭没有发生", closing.await(2, TimeUnit.SECONDS))
-        assertEquals("关闭只在关源线程执行", "loopback-source-close-final", closedOn.get())
+        assertTrue("并发关闭不应抛异常: ${failures.firstOrNull()}", failures.isEmpty())
+        assertFalse("派发线程没有卡住", dispatching.isAlive)
+        assertFalse("关闭线程没有卡住", closing.isAlive)
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline && closed.get() < sources.size) Thread.sleep(10)
+        assertEquals("每一条都关掉", sources.size, closed.get())
     }
 
     @Test

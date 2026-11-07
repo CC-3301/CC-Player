@@ -698,13 +698,11 @@ class PlaybackController(
     /**
      * 归还被换下的目标：回环条目按位置复用，同一个文件的两条列表项共用一条源，
      * 位置相同就不归还，否则会把换上来之后仍在读的那条源摘走。
+     * 调用约束：两个下标都在当前列表内。
      */
     private fun returnReplacedSource(replacedIndex: Int, readingIndex: Int) {
-        val playlist = _playlist.value
-        val replaced = playlist.getOrNull(replacedIndex) ?: return
-        // 正在读的那条取不到时无从比较，按确实换了目标处理。
-        val reading = playlist.getOrNull(readingIndex) ?: return returnSourceOf(replacedIndex)
-        if (replaced.location == reading.location) return
+        val replaced = _playlist.value.getOrNull(replacedIndex) ?: return
+        if (_playlist.value.getOrNull(readingIndex)?.location == replaced.location) return
         returnSourceOf(replacedIndex)
     }
 

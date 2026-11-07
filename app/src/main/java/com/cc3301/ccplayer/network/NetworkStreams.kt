@@ -15,9 +15,6 @@ interface NetworkStreams : Closeable {
     /** 登记一次准备，返回这次准备的所有权凭证；取消打开时用它只丢弃本次准备的句柄。 */
     fun prepare(location: String): PreparedSource
 
-    /** 起播前试连一次，结果记在 [prepared] 名下；连不上或位置不属于任何书签时抛出来源失败异常。 */
-    suspend fun probe(location: String, prepared: PreparedSource)
-
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
 
@@ -34,6 +31,9 @@ interface NetworkStreams : Closeable {
  */
 interface PreparedSource {
 
+    /** 在这次准备名下试连一次；连不上或位置不属于任何书签时抛出来源失败异常。 */
+    suspend fun probe(location: String)
+
     /** 本次准备作废。 */
     fun discard()
 }
@@ -44,10 +44,6 @@ interface PreparedSource {
 class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStreams>) : NetworkStreams {
 
     override fun prepare(location: String): PreparedSource = streamsFor(location).prepare(location)
-
-    override suspend fun probe(location: String, prepared: PreparedSource) {
-        streamsFor(location).probe(location, prepared)
-    }
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
 

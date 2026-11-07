@@ -18,7 +18,7 @@ import org.junit.Test
 
 /** 一次准备加一次试连：测试只关心试连结果时用。 */
 private suspend fun SmbStreams.probeForTest(location: String) {
-    probe(location, prepare(location))
+    prepare(location).probe(location)
 }
 
 class SmbStreamsTest {

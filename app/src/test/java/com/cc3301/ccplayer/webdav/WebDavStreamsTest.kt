@@ -7,8 +7,11 @@ import com.cc3301.ccplayer.network.FakeBookmarkStore
 import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
+import com.cc3301.ccplayer.streaming.ByteSource
+import com.cc3301.ccplayer.streaming.LoopbackStreamServer
 import com.cc3301.ccplayer.streaming.httpRequest
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.Flow
@@ -53,7 +56,7 @@ private class GatedBookmarkStore : BookmarkStore {
 
 /** 一次准备加一次试连：测试只关心试连结果时用。 */
 private suspend fun WebDavStreams.probeForTest(location: String) {
-    probe(location, prepare(location))
+    prepare(location).probe(location)
 }
 
 class WebDavStreamsTest {
@@ -177,13 +180,35 @@ class WebDavStreamsTest {
         addSource(root)
         transport.addFile(movie, payload)
         val owner = streams.prepare(movie)
-        streams.probe(movie, owner)
+        owner.probe(movie)
         val prepared = transport.handles.getValue(movie)
 
         owner.discard()
 
         awaitClosed(prepared)
         assertEquals("关闭只在关源线程执行", "loopback-source-close", prepared.closedOn)
+    }
+
+    @Test
+    fun `服务关闭后丢弃预置句柄，关闭落到一次性关源线程`() = runTest {
+        addSource(root)
+        transport.addFile(movie, payload)
+        val server = LoopbackStreamServer()
+        val closeable = WebDavStreams(transport, WebDavLocator(sources), server = server)
+        try {
+            val owner = closeable.prepare(movie)
+            owner.probe(movie)
+            val prepared = transport.handles.getValue(movie)
+
+            // 服务已关闭，丢弃走的是真实的派发路径。
+            server.close()
+            owner.discard()
+
+            awaitClosed(prepared)
+            assertEquals("关闭只在关源线程执行", "loopback-source-close-final", prepared.closedOn)
+        } finally {
+            closeable.close()
+        }
     }
 
     @Test
@@ -197,7 +222,7 @@ class WebDavStreamsTest {
             gate.await()
         }
         val owner = streams.prepare(movie)
-        val probing = thread { runBlocking { streams.probe(movie, owner) } }
+        val probing = thread { runBlocking { owner.probe(movie) } }
         assertTrue("打开没有开始", entered.await(5, TimeUnit.SECONDS))
         // 打开还在途：这次准备作废。
         owner.discard()
@@ -211,28 +236,65 @@ class WebDavStreamsTest {
     }
 
     @Test
+    fun `作废与播放取用并发时互不阻塞，句柄最终都被关`() = runBlocking {
+        addSource(root)
+        transport.addFile(movie, payload)
+        repeat(500) {
+            val owner = streams.prepare(movie)
+            owner.probe(movie)
+            val barrier = CyclicBarrier(2)
+            val discarding = Thread {
+                barrier.await()
+                owner.discard()
+            }.apply { isDaemon = true }
+            val taking = Thread {
+                barrier.await()
+                httpRequest(streams.urlFor(movie))
+            }.apply { isDaemon = true }
+            discarding.start()
+            taking.start()
+            // 两条线程必须在时限内各自收工：任一方等另一方持有的锁就会超时。
+            discarding.join(5_000)
+            taking.join(5_000)
+            assertFalse("作废那条线程被卡住", discarding.isAlive)
+            assertFalse("取用那条线程被卡住", taking.isAlive)
+        }
+
+        streams.returnSource(movie)
+        val deadline = System.nanoTime() + 5_000_000_000L
+        while (System.nanoTime() < deadline && transport.handles.values.any { !it.closed }) {
+            Thread.sleep(10)
+        }
+        assertTrue("句柄最终都要关掉", transport.handles.values.all { it.closed })
+    }
+
+    @Test
     fun `同一实例上前一次准备作废不关后一次探好的句柄`() = runBlocking {
         addSource(root)
         transport.addFile(movie, payload)
+        val server = LoopbackStreamServer()
+        val shared = WebDavStreams(transport, WebDavLocator(sources), server = server)
+        try {
+            val first = shared.prepare(movie)
+            first.probe(movie)
+            val firstHandle = transport.handles.getValue(movie)
+            val second = shared.prepare(movie)
+            second.probe(movie)
+            val secondHandle = transport.handles.getValue(movie)
+            awaitClosed(firstHandle)
 
-        val first = streams.prepare(movie)
-        streams.probe(movie, first)
-        val firstHandle = transport.handles.getValue(movie)
-        val second = streams.prepare(movie)
-        streams.probe(movie, second)
-        val secondHandle = transport.handles.getValue(movie)
-        awaitClosed(firstHandle)
+            first.discard()
+            // 关源串行：排在这次作废之后的探针被关掉，说明它前面的派发都已经处理完。
+            drainCloser(server)
 
-        // 前一次准备作废：预置槽里现在放的是后一次探好的句柄，不能动它。
-        first.discard()
-
-        // 关闭是派发出去的：给关源线程一个窗口，确认它没有动后一次探好的句柄。
-        awaitStillOpen(secondHandle)
-        assertFalse("后一次探好的句柄被前一次作废关掉了", secondHandle.closed)
-        httpRequest(streams.urlFor(movie))
-        assertEquals("探测结果仍交给播放复用", 2, transport.openedSizes.size)
-        streams.returnSource(movie)
-        awaitClosed(secondHandle)
+            assertFalse("后一次探好的句柄被前一次作废关掉了", secondHandle.closed)
+            httpRequest(shared.urlFor(movie))
+            assertEquals("探测结果仍交给播放复用", 2, transport.openedSizes.size)
+            shared.returnSource(movie)
+            awaitClosed(secondHandle)
+        } finally {
+            shared.close()
+        }
     }
 
     @Test
@@ -245,7 +307,7 @@ class WebDavStreamsTest {
             transport.addFile(movie, payload)
             store.gate = true
             val owner = gated.prepare(movie)
-            val probing = thread { runBlocking { gated.probe(movie, owner) } }
+            val probing = thread { runBlocking { owner.probe(movie) } }
             assertTrue("书签查询没有开始", store.entered.await(5, TimeUnit.SECONDS))
 
             // 书签还没解析出来这次准备就作废了：恢复后打开的句柄不能移交给后一次打开。
@@ -262,10 +324,23 @@ class WebDavStreamsTest {
         }
     }
 
-    /** 关闭是派发的：等一小段时间，确认这段时间里它没有被关。 */
-    private fun awaitStillOpen(handle: RecordingWebDavHandle, waitMillis: Long = 300) {
-        Thread.sleep(waitMillis)
-        assertFalse("句柄不该被关", handle.closed)
+    /**
+     * 等关源线程把发出去的关闭都处理完：关源串行，探针位置排在后面即代表前面都做完。
+     * 探针本身也要关，用一条独立的字节源。
+     */
+    private fun drainCloser(target: LoopbackStreamServer) {
+        val done = CountDownLatch(1)
+        val probe = object : ByteSource {
+            override val size: Long = 1L
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+            override fun close() {
+                done.countDown()
+            }
+        }
+        target.closeInBackground(probe)
+        assertTrue("关源线程没有处理完", done.await(5, TimeUnit.SECONDS))
     }
 
     /** 关源在关源线程上做：等到句柄真的关上再断言。 */

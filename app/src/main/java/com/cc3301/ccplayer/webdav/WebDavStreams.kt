@@ -37,17 +37,6 @@ class WebDavStreams(
 
     override fun prepare(location: String): PreparedSource = Handoff(location)
 
-    /** 起播前试连一次：打开读句柄并留给播放复用；连不上或位置不属于任何书签时抛出来源失败异常。 */
-    override suspend fun probe(location: String, prepared: PreparedSource) {
-        val handoff = prepared as Handoff
-        val target = targetOf(location)
-        urlFor(location)
-        // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
-        if (server.hasFreshSource(location)) return
-        val handle = transport.openRead(target.url, target.username, target.password, size = 0)
-        handoff.handOff(handle)
-    }
-
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
@@ -82,7 +71,7 @@ class WebDavStreams(
         /** 本次准备已作废：之后的打开回来不再登记。 */
         private var discarded = false
 
-        /** 播放取走这条句柄；之后这次准备不再持有它。 */
+        /** 播放取走这条句柄；之后这次准备不再持有它。调用方不得持 [handoff] 锁进入。 */
         fun take(): ByteSource? = synchronized(lock) {
             val current = source
             source = null
@@ -90,17 +79,24 @@ class WebDavStreams(
             current
         }
 
+        /** 在这次准备名下试连一次：打开读句柄并留给播放复用。 */
+        override suspend fun probe(location: String) {
+            val target = targetOf(location)
+            urlFor(location)
+            // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
+            if (server.hasFreshSource(location)) return
+            handOff(transport.openRead(target.url, target.username, target.password, size = 0))
+        }
+
         /** 打开完成：登记到预置槽；顶替掉的旧句柄与已作废时的这条新句柄都在关源线程关闭。 */
-        fun handOff(opened: ByteSource) {
+        private fun handOff(opened: ByteSource) {
             var superseded: ByteSource? = null
-            var replaced: Handoff? = null
             val cancelled = synchronized(lock) {
                 if (discarded) {
                     true
                 } else {
                     superseded = source
                     source = opened
-                    replaced = attach(this)
                     false
                 }
             }
@@ -108,8 +104,9 @@ class WebDavStreams(
                 server.closeInBackground(opened)
                 return
             }
+            // 登记同样在出锁之后做：锁内不进 [handoff] 锁。
+            attach(this)?.discard()
             superseded?.let { previous -> if (previous !== opened) server.closeInBackground(previous) }
-            replaced?.discard()
         }
 
         override fun discard() {
@@ -117,9 +114,10 @@ class WebDavStreams(
                 discarded = true
                 val current = source
                 source = null
-                detach(this)
                 current
             }
+            // 摘槽在出锁之后：锁序恒为「先 handoff，后 lock」，任何一把锁内都不进另一把。
+            detach(this)
             mine?.let { current -> server.closeInBackground(current) }
         }
     }
@@ -152,21 +150,23 @@ class WebDavStreams(
         NetworkReadPriority.shared.wrap(source, ReadKind.Playback)
     }
 
-    /** 取出该位置留好的句柄；位置不符、已登记陈旧或已取过时先关掉留下的那条。 */
+    /**
+     * 取出该位置留好的句柄；位置不符、已登记陈旧或已取过时先关掉留下的那条。
+     * 槽引用在 [handoff] 锁内取出，句柄在出锁之后交给 [Handoff.take]，两把锁不嵌套。
+     */
     private fun takePrepared(location: String): ByteSource? {
-        val taken: ByteSource?
+        val usable: Handoff?
         val leftover: Handoff?
         synchronized(handoff) {
             val slot = preparedSlot
-            val usable = slot != null && preparedLocation == location && !preparedStale
-            taken = if (usable) slot?.take() else null
-            leftover = if (usable) null else slot
+            usable = slot?.takeIf { preparedLocation == location && !preparedStale }
+            leftover = slot?.takeIf { usable == null }
             preparedLocation = null
             preparedSlot = null
             preparedStale = false
         }
         leftover?.discard()
-        return taken
+        return usable?.take()
     }
 
     private fun closePrepared() {

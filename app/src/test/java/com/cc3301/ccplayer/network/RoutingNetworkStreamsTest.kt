@@ -20,13 +20,13 @@ private class FakeNetworkStreams : NetworkStreams {
     var closes = 0
 
     override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override suspend fun probe(location: String) {
+            probed += location
+        }
+
         override fun discard() {
             preparedDiscards++
         }
-    }
-
-    override suspend fun probe(location: String, prepared: PreparedSource) {
-        probed += location
     }
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
@@ -46,7 +46,7 @@ private class FakeNetworkStreams : NetworkStreams {
 
 /** 一次准备加一次试连：测试只关心分派时用。 */
 private suspend fun NetworkStreams.probeForTest(location: String) {
-    probe(location, prepare(location))
+    prepare(location).probe(location)
 }
 
 class RoutingNetworkStreamsTest {

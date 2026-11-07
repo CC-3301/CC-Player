@@ -25,16 +25,17 @@ class SmbStreams(
     private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
-    /** SMB 探测只取会话，播放复用同一条会话，没有要登记的读句柄，凭证什么也不持有。 */
-    override fun prepare(location: String): PreparedSource = object : PreparedSource {
-        override fun discard() = Unit
-    }
-
     /**
-     * 起播前试连一次：会话建立或复用并做存活确认；连不上或位置不属于任何书签时抛出来源失败异常。
+     * 登记一次准备。SMB 探测只取会话、播放复用同一条会话，没有要登记的读句柄，
+     * 凭证只承载这一次试连。
      */
-    override suspend fun probe(location: String, prepared: PreparedSource) {
-        sessions.probe(targetOf(location))
+    override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        /** 起播前试连一次：会话建立或复用并做存活确认。 */
+        override suspend fun probe(location: String) {
+            sessions.probe(targetOf(location))
+        }
+
+        override fun discard() = Unit
     }
 
     /** 位置对应的本机地址。 */

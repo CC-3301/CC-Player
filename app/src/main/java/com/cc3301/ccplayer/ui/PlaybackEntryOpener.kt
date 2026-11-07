@@ -118,7 +118,7 @@ class PlaybackEntryOpener(
         val streams = networkStreams()
         val prepared = streams.prepare(entry.location)
         current.prepared = prepared
-        streams.probe(entry.location, prepared)
+        prepared.probe(entry.location)
         return PreparedPlayback(
             entry.withPlaybackLocation(streams),
             entries.map { it.withPlaybackLocation(streams) },

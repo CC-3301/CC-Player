@@ -57,8 +57,8 @@ class LoopbackStreamServer(
     private val sourceOpener: ExecutorService = Executors.newCachedThreadPool { runnable ->
         Thread(runnable, "loopback-source-open").apply { isDaemon = true }
     },
-    /** 关源线程：归还只摘走，关闭要发协议请求，不留在界面线程上做。 */
-    private val sourceCloser: ExecutorService = Executors.newCachedThreadPool { runnable ->
+    /** 关源线程：归还只摘走，关闭要发协议请求，不留在界面线程上做；关闭串行，避免同时开多条协议关闭。 */
+    private val sourceCloser: ExecutorService = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "loopback-source-close").apply { isDaemon = true }
     },
     /** 诊断日志出口：连接级打点跟随设置开关，不逐读、不逐帧。 */
@@ -79,6 +79,9 @@ class LoopbackStreamServer(
     /** 服务已关闭：关闭后的关源派发不再进线程池。 */
     @Volatile
     private var closed = false
+
+    /** 关闭状态与关源线程池的收尾共用这把锁：判已关闭与投递不会交叉。 */
+    private val closeLock = Any()
 
     private val serverSocket = ServerSocket(port, BACKLOG, InetAddress.getByName(LOOPBACK_ADDRESS))
     private val acceptor = Thread({ acceptLoop() }, "loopback-stream-accept").apply {
@@ -123,15 +126,17 @@ class LoopbackStreamServer(
 
     /**
      * 派发一次关闭，调用线程只派发、不做 I/O。
-     * 服务已关闭时线程池不再接任务：另起一条一次性关源线程关掉，否则句柄既不在条目里
-     * 也不在线程池里，等于漏关；这里不指望线程池抛异常来兜。
+     * 「判已关闭」与「投递」在同一临界区，[close] 也在这把锁里关池，
+     * 所以不会出现判完未关闭却投递到已关池的情况。已关闭时另起一条一次性关源线程关掉，
+     * 否则句柄既不在条目里也不在线程池里，等于漏关。
      */
     private fun dispatchClose(label: String, source: ByteSource) {
-        if (closed) {
-            Thread({ closeAndLog(label, source) }, FINAL_CLOSE_THREAD).apply { isDaemon = true }.start()
-            return
+        val task = Runnable { closeAndLog(label, source) }
+        val startStandalone = synchronized(closeLock) {
+            if (!closed) sourceCloser.execute(task)
+            closed
         }
-        sourceCloser.execute { closeAndLog(label, source) }
+        if (startStandalone) Thread(task, FINAL_CLOSE_THREAD).apply { isDaemon = true }.start()
     }
 
     private fun closeAndLog(label: String, source: ByteSource) {
@@ -169,8 +174,11 @@ class LoopbackStreamServer(
 
     /** 关闭监听、断开已建立的连接并关闭全部字节源；关源要发协议请求，必须在非界面线程调用。 */
     override fun close() {
-        // 先置已关闭：之后到达的关闭派发当场做，不再进线程池。
-        closed = true
+        // 先置已关闭并关池：之后的关源派发改走一次性线程，不会再投递到这个池。
+        synchronized(closeLock) {
+            closed = true
+            sourceCloser.shutdown()
+        }
         runCatching { serverSocket.close() }
         stallWatchdog.interrupt()
         // 监听关掉不影响已建立的连接：逐个断开，处理线程不会残留在读上。
@@ -184,8 +192,6 @@ class LoopbackStreamServer(
         idsByKey.clear()
         // 在途建源不在这里等、也不打断：建好后由建源线程自己关掉。
         sourceOpener.shutdown()
-        // 已派发的关源照常跑完，不打断；之后不再接新任务。
-        sourceCloser.shutdown()
     }
 
     private fun acceptLoop() {

@@ -35,15 +35,15 @@ private class GatedNetworkStreams : NetworkStreams {
     var onProbed: (() -> Unit)? = null
 
     override fun prepare(location: String): PreparedSource = object : PreparedSource {
+        override suspend fun probe(location: String) {
+            gate.await()
+            probed += location
+            failure?.let { throw it }
+        }
+
         override fun discard() {
             preparedDiscards++
         }
-    }
-
-    override suspend fun probe(location: String, prepared: PreparedSource) {
-        gate.await()
-        probed += location
-        failure?.let { throw it }
     }
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
