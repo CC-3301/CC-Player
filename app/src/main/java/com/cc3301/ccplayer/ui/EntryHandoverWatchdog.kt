@@ -39,9 +39,6 @@ class EntryHandoverWatchdog(
         return elapsedMillis >= timeoutMillis
     }
 
-    /** 已累计的前台等待时长。 */
-    fun elapsedMillis(): Long = elapsedMillis
-
     companion object {
         /** 准备完成到播放控制层接手的最长前台等待。 */
         const val DEFAULT_TIMEOUT_MILLIS = 5_000L

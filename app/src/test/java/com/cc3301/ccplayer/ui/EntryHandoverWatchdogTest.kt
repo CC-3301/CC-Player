@@ -61,7 +61,8 @@ class EntryHandoverWatchdogTest {
         watchdog.resume()
         nowMillis = 8_000
         assertFalse(watchdog.onTick())
-        assertEquals(4_000, watchdog.elapsedMillis())
+        nowMillis = 9_000
+        assertTrue(watchdog.onTick())
     }
 
     @Test
