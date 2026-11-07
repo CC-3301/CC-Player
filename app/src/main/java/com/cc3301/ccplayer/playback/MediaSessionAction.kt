@@ -39,13 +39,10 @@ fun mediaSessionActionFor(state: PlaybackState): MediaSessionAction =
  * 媒体会话动作的可用性：后台关闭时只放行暂停；首次加载全部禁用；
  * 目标加载与恢复原片与播放页同一套边界，四个动作全部放行
  * （播放/暂停按起播暂停意图排队，上一集/下一集每击前移目标），这两段加载态不再收窄动作集。
- * [switching] 与 [restoring] 只为调用方与用例按阶段传参保留，当前不参与判定。
  */
 fun mediaActionAllowed(
     action: MediaSessionAction,
-    switching: Boolean,
     initialLoading: Boolean,
-    restoring: Boolean,
     blocksBackgroundPlayback: Boolean = false,
 ): Boolean = when {
     blocksBackgroundPlayback -> action == MediaSessionAction.Pause
@@ -59,11 +56,11 @@ fun availableMediaActions(
     initialLoading: Boolean,
     restoring: Boolean,
 ): List<MediaSessionAction> =
-    MediaSessionAction.entries.filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
+    MediaSessionAction.entries.filter { mediaActionAllowed(it, initialLoading) }
 
 /**
  * 通知栏与系统媒体控制的统一下发入口：动作在当前加载阶段不可用时不下发。
- * [state] 来自播放控制层；[switching] 与 [restoring] 区分目标加载与恢复原片。
+ * [state] 来自播放控制层；[switching] 决定当前是否仍算首次加载。
  */
 fun dispatchMediaAction(
     action: MediaSessionAction,
@@ -74,7 +71,7 @@ fun dispatchMediaAction(
     apply: (MediaSessionAction) -> Unit,
 ) {
     val initialLoading = isInitialLoading(state, switching)
-    if (mediaActionAllowed(action, switching, initialLoading, restoring, blocksBackgroundPlayback)) {
+    if (mediaActionAllowed(action, initialLoading, blocksBackgroundPlayback)) {
         apply(action)
     }
 }
@@ -91,7 +88,7 @@ fun mediaNotificationActions(
         listOf(MediaSessionAction.Pause)
     } else {
         listOf(MediaSessionAction.Previous, mediaSessionActionFor(state), MediaSessionAction.Next)
-            .filter { mediaActionAllowed(it, switching, initialLoading, restoring) }
+            .filter { mediaActionAllowed(it, initialLoading) }
     }
 
 /** 拖动定位只在正常播放或暂停且未被加载阶段、后台策略限制时可用。 */

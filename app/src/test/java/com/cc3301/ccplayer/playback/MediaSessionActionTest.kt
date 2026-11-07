@@ -109,7 +109,7 @@ class MediaSessionActionTest {
     @Test
     fun `initial loading disables every media action`() {
         MediaSessionAction.entries.forEach { action ->
-            assertFalse(mediaActionAllowed(action, switching = false, initialLoading = true, restoring = false))
+            assertFalse(mediaActionAllowed(action, initialLoading = true))
         }
     }
 
@@ -118,7 +118,7 @@ class MediaSessionActionTest {
         MediaSessionAction.entries.forEach { action ->
             assertTrue(
                 action.name,
-                mediaActionAllowed(action, switching = true, initialLoading = false, restoring = false),
+                mediaActionAllowed(action, initialLoading = false),
             )
         }
     }
@@ -126,14 +126,14 @@ class MediaSessionActionTest {
     @Test
     fun `outside loading every media action is allowed`() {
         MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = false))
+            assertTrue(mediaActionAllowed(action, initialLoading = false))
         }
     }
 
     @Test
     fun `restoring allows play pause and both episode actions`() {
         MediaSessionAction.entries.forEach { action ->
-            assertTrue(mediaActionAllowed(action, switching = false, initialLoading = false, restoring = true))
+            assertTrue(mediaActionAllowed(action, initialLoading = false))
         }
     }
 

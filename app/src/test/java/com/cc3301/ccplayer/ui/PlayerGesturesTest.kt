@@ -116,7 +116,6 @@ class PlayerGesturesTest {
         assertNull(dragGesture(GestureZone.RightVolume, -20f, 0f, threshold))
     }
 
-
     @Test
     fun `未锁定且无面板时手势放行`() {
         assertTrue(gesturesAllowed(locked = false, panelOpen = false))
@@ -143,412 +142,56 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `切集期间放行返回、上一集、下一集、播放暂停与不依赖加载的控件`() {
-        val allowed = PlayerAction.entries.filter { actionAllowed(it, switching = true, initialLoading = false, restoring = false) }.toSet()
-        assertEquals(
-            setOf(
-                PlayerAction.Back,
-                PlayerAction.Previous,
-                PlayerAction.Next,
-                PlayerAction.PlayPause,
-                PlayerAction.More,
-                PlayerAction.Subtitles,
-                PlayerAction.Volume,
-                PlayerAction.Lock,
-            ),
-            allowed,
-        )
-    }
-
-    @Test
-    fun `未切集时所有操作放行`() {
-        PlayerAction.entries.forEach { action ->
-            assertEquals(action.name, true, actionAllowed(action, switching = false, initialLoading = false, restoring = false))
-        }
-    }
-
-    @Test
-    fun `首次加载期间放行不依赖加载的控件`() {
-        val allowed = PlayerAction.entries
-            .filter { actionAllowed(it, switching = false, initialLoading = true, restoring = false) }
-            .toSet()
-        assertEquals(
-            setOf(
-                PlayerAction.Back,
-                PlayerAction.More,
-                PlayerAction.Subtitles,
-                PlayerAction.Volume,
-                PlayerAction.Lock,
-            ),
-            allowed,
-        )
-    }
-
-    @Test
-    fun `首次加载时更多字幕音量与锁定外观正常`() {
-        listOf(
+    fun `加载阶段按表格放行操作与外观`() {
+        val initialLoading = setOf(
+            PlayerAction.Back,
             PlayerAction.More,
             PlayerAction.Subtitles,
             PlayerAction.Volume,
             PlayerAction.Lock,
-        ).forEach { action ->
-            assertEquals(
-                action.name,
-                true,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = false,
-                    initialLoading = true,
-                    restoring = false,
-                ),
-            )
-        }
-    }
-
-    @Test
-    fun `首次加载判据优先于切集判据`() {
-        listOf(PlayerAction.PlayPause, PlayerAction.Previous, PlayerAction.Next).forEach { action ->
-            assertEquals(
-                action.name,
-                false,
-                actionAllowed(action, switching = true, initialLoading = true, restoring = false),
-            )
-        }
-        listOf(PlayerAction.More, PlayerAction.Subtitles, PlayerAction.Volume, PlayerAction.Lock)
-            .forEach { action ->
-                assertEquals(
-                    action.name,
-                    true,
-                    actionAllowed(action, switching = true, initialLoading = true, restoring = false),
-                )
-            }
-    }
-
-    @Test
-    fun `恢复原片但不在切集时放行上下集与播放暂停`() {
-        val allowed = PlayerAction.entries
-            .filter { actionAllowed(it, switching = false, initialLoading = false, restoring = true) }
-            .toSet()
-        assertEquals(
-            setOf(
-                PlayerAction.Back,
-                PlayerAction.Previous,
-                PlayerAction.Next,
-                PlayerAction.PlayPause,
-                PlayerAction.More,
-                PlayerAction.Subtitles,
-                PlayerAction.Volume,
-                PlayerAction.Lock,
-            ),
-            allowed,
         )
-    }
-
-    @Test
-    fun `切集与恢复期间更多字幕音量与锁定可点且外观正常`() {
-        listOf(
-            PlayerAction.More,
-            PlayerAction.Subtitles,
-            PlayerAction.Volume,
-            PlayerAction.Lock,
-        ).forEach { action ->
-            for ((switching, restoring) in listOf(true to false, true to true)) {
-                assertEquals(
-                    action.name,
-                    true,
-                    actionAllowed(action, switching, initialLoading = false, restoring = restoring),
-                )
-                assertEquals(
-                    action.name,
-                    true,
-                    actionLooksEnabled(
-                        action,
-                        canGoPrevious = true,
-                        canGoNext = true,
-                        switching = switching,
-                        initialLoading = false,
-                        restoring = restoring,
-                    ),
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `恢复原片期间额外放行播放暂停`() {
-        val allowed = PlayerAction.entries
-            .filter { actionAllowed(it, switching = true, initialLoading = false, restoring = true) }
-            .toSet()
-        assertEquals(
-            setOf(
-                PlayerAction.Back,
-                PlayerAction.Previous,
-                PlayerAction.Next,
-                PlayerAction.PlayPause,
-                PlayerAction.More,
-                PlayerAction.Subtitles,
-                PlayerAction.Volume,
-                PlayerAction.Lock,
-            ),
-            allowed,
-        )
-    }
-
-    @Test
-    fun `切集期间上下一集可点且外观正常`() {
-        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
-            assertEquals(action.name, true, actionAllowed(action, switching = true, initialLoading = false, restoring = false))
-            assertEquals(
-                action.name,
-                true,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = true,
-                    initialLoading = false,
-                    restoring = false,
-                ),
-            )
-        }
-    }
-
-    @Test
-    fun `切集期间被拦截的动作按不可用外观显示`() {
-        listOf(
-            PlayerAction.Seek,
-            PlayerAction.Playlist,
-            PlayerAction.Rotate,
-        ).forEach { action ->
-            assertEquals(
-                action.name,
-                false,
-                actionAllowed(action, switching = true, initialLoading = false, restoring = false),
-            )
-            assertEquals(
-                action.name,
-                false,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = true,
-                    initialLoading = false,
-                    restoring = false,
-                ),
-            )
-        }
-    }
-
-    @Test
-    fun `切集期间播放暂停可点且外观正常`() {
-        assertEquals(
-            true,
-            actionAllowed(PlayerAction.PlayPause, switching = true, initialLoading = false, restoring = false),
-        )
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.PlayPause,
-                canGoPrevious = false,
-                canGoNext = false,
-                switching = true,
-                initialLoading = false,
-                restoring = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `首次加载时上下一集显示为不可用`() {
-        listOf(PlayerAction.Previous, PlayerAction.Next).forEach { action ->
-            assertEquals(
-                action.name,
-                false,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = false,
-                    initialLoading = true,
-                    restoring = false,
-                ),
-            )
-        }
-    }
-
-    @Test
-    fun `首次加载时其余控件也按不可用外观显示`() {
-        listOf(
+        val switchingOrRestoring = initialLoading + setOf(
+            PlayerAction.Previous,
+            PlayerAction.Next,
             PlayerAction.PlayPause,
-            PlayerAction.Seek,
-            PlayerAction.Playlist,
-            PlayerAction.Rotate,
-        ).forEach { action ->
-            assertEquals(
-                action.name,
-                false,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = false,
-                    initialLoading = true,
-                    restoring = false,
-                ),
-            )
+        )
+        data class LoadingCase(
+            val name: String,
+            val switching: Boolean,
+            val initial: Boolean,
+            val restoring: Boolean,
+            val allowed: Set<PlayerAction>,
+        )
+        val cases = listOf(
+            LoadingCase("未加载", switching = false, initial = false, restoring = false, allowed = PlayerAction.entries.toSet()),
+            LoadingCase("首次加载", switching = false, initial = true, restoring = false, allowed = initialLoading),
+            LoadingCase("切集", switching = true, initial = false, restoring = false, allowed = switchingOrRestoring),
+            LoadingCase("恢复原片", switching = false, initial = false, restoring = true, allowed = switchingOrRestoring),
+            LoadingCase("切集并恢复", switching = true, initial = false, restoring = true, allowed = switchingOrRestoring),
+            LoadingCase("首次加载优先", switching = true, initial = true, restoring = false, allowed = initialLoading),
+        )
+
+        cases.forEach { case ->
+            PlayerAction.entries.forEach { action ->
+                val expected = action in case.allowed
+                assertEquals(
+                    "${case.name}/${action.name}",
+                    expected,
+                    actionAllowed(action, case.switching, case.initial, case.restoring),
+                )
+                assertEquals(
+                    "${case.name}/${action.name} 外观",
+                    expected,
+                    actionLooksEnabled(action, true, true, case.switching, case.initial, case.restoring),
+                )
+            }
         }
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.Back,
-                canGoPrevious = true,
-                canGoNext = true,
-                switching = false,
-                initialLoading = true,
-                restoring = false,
-            ),
-        )
-    }
 
-    @Test
-    fun `恢复期间被拦截的控件置灰`() {
-        listOf(
-            PlayerAction.Seek,
-            PlayerAction.Playlist,
-            PlayerAction.Rotate,
-        ).forEach { action ->
-            assertEquals(
-                action.name,
-                false,
-                actionAllowed(action, switching = true, initialLoading = false, restoring = true),
-            )
-            assertEquals(
-                action.name,
-                false,
-                actionLooksEnabled(
-                    action,
-                    canGoPrevious = true,
-                    canGoNext = true,
-                    switching = true,
-                    initialLoading = false,
-                    restoring = true,
-                ),
-            )
-        }
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.PlayPause,
-                canGoPrevious = true,
-                canGoNext = true,
-                switching = true,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `恢复期停在首集时上一集不可用`() {
-        assertEquals(
-            false,
-            actionLooksEnabled(
-                PlayerAction.Previous,
-                canGoPrevious = false,
-                canGoNext = true,
-                switching = false,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.Next,
-                canGoPrevious = false,
-                canGoNext = true,
-                switching = false,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `恢复期停在末集时下一集不可用`() {
-        assertEquals(
-            false,
-            actionLooksEnabled(
-                PlayerAction.Next,
-                canGoPrevious = true,
-                canGoNext = false,
-                switching = false,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.Previous,
-                canGoPrevious = true,
-                canGoNext = false,
-                switching = false,
-                initialLoading = false,
-                restoring = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `上下一集不可用时外观禁用`() {
-        assertEquals(
-            false,
-            actionLooksEnabled(
-                PlayerAction.Previous,
-                canGoPrevious = false,
-                canGoNext = true,
-                switching = false,
-                initialLoading = false,
-                restoring = false,
-            ),
-        )
-        assertEquals(
-            false,
-            actionLooksEnabled(
-                PlayerAction.Next,
-                canGoPrevious = true,
-                canGoNext = false,
-                switching = false,
-                initialLoading = false,
-                restoring = false,
-            ),
-        )
-        assertEquals(
-            true,
-            actionLooksEnabled(
-                PlayerAction.Previous,
-                canGoPrevious = true,
-                canGoNext = false,
-                switching = false,
-                initialLoading = false,
-                restoring = false,
-            ),
-        )
-    }
-
-    @Test
-    fun `首次加载完成后所有操作恢复`() {
-        PlayerAction.entries.forEach { action ->
-            assertEquals(
-                action.name,
-                true,
-                actionAllowed(action, switching = false, initialLoading = false, restoring = false),
-            )
-        }
+        // 上一集/下一集在列表边界始终置灰，与加载阶段无关。
+        assertFalse(actionLooksEnabled(PlayerAction.Previous, false, true, false, false, false))
+        assertFalse(actionLooksEnabled(PlayerAction.Next, true, false, false, false, false))
+        assertTrue(actionLooksEnabled(PlayerAction.Previous, true, false, false, false, false))
+        assertTrue(actionLooksEnabled(PlayerAction.Next, false, true, false, false, false))
     }
 
     @Test
