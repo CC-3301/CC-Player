@@ -7,6 +7,10 @@ import com.cc3301.ccplayer.network.FakeCredentialStore
 import com.cc3301.ccplayer.network.NetworkBookmark
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.streaming.httpRequest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -139,7 +143,31 @@ class WebDavStreamsTest {
 
         streams.discardPreparedSource()
 
-        assertTrue("不等下一次探测或关闭，当场丢", prepared.closed)
+        awaitClosed(prepared)
+        assertEquals("关闭只在关源线程执行", "loopback-source-close", prepared.closedOn)
+    }
+
+    @Test
+    fun `探测回来时这次准备已作废，句柄直接丢掉不外借`() = runBlocking {
+        addSource(root)
+        transport.addFile(movie, payload)
+        val entered = CountDownLatch(1)
+        val gate = CountDownLatch(1)
+        transport.openGate = {
+            entered.countDown()
+            gate.await()
+        }
+        val probing = thread { runBlocking { streams.probe(movie) } }
+        assertTrue("打开没有开始", entered.await(5, TimeUnit.SECONDS))
+        // 打开还在途：这次准备作废。
+        streams.discardPreparedSource()
+        gate.countDown()
+        probing.join(5_000)
+
+        val returned = transport.handles.values.single()
+        awaitClosed(returned)
+        httpRequest(streams.urlFor(movie))
+        assertEquals("作废的句柄不外借，播放重新打开", 2, transport.openedSizes.size)
     }
 
     /** 关源在关源线程上做：等到句柄真的关上再断言。 */

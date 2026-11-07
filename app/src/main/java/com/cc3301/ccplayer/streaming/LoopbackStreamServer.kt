@@ -101,25 +101,36 @@ class LoopbackStreamServer(
 
     /**
      * 归还当前目标不再需要的字节源：当场摘走当时已就绪的那一条，再在关源线程上关闭。
-     * 摘走之后才建好的源不属于这次归还，在途建源不受影响；返回是否真的摘走了源。
+     * 摘走之后才建好的源不属于这次归还，在途建源不受影响；没有就绪源时不动手。
      */
-    fun returnSource(key: String): Boolean {
-        val id = idsByKey[key] ?: return false
-        val source = entries[id]?.takeReadySource() ?: return false
+    fun returnSource(key: String) {
+        val id = idsByKey[key] ?: return
+        val source = entries[id]?.takeReadySource() ?: return
         sourceCloser.execute { closeTakenSource(id, source) }
-        return true
     }
 
-    /** 关闭一条已摘走的源，记一条耗时：关闭失败只留原因，不回调请求线程。 */
+    /**
+     * 在关源线程关闭一条已摘走的字节源：调用线程只派发、不等网络动作。
+     * 探测预置句柄不走归还路径，但关闭同样只在关源线程执行。
+     */
+    fun closeInBackground(source: ByteSource) {
+        sourceCloser.execute { closeAndLog("关闭字节源", source) }
+    }
+
+    /** 关闭一条已摘走的源并记一条耗时：关闭失败只留原因，不回调请求线程。 */
     private fun closeTakenSource(id: String, source: ByteSource) {
+        closeAndLog("归还字节源: $id", source)
+    }
+
+    private fun closeAndLog(label: String, source: ByteSource) {
         val startedAtNanos = System.nanoTime()
         val failure = runCatching { source.close() }.exceptionOrNull()
         val elapsedMillis = elapsedMillis(startedAtNanos)
         diagnostics.log {
             if (failure == null) {
-                "归还字节源: $id | 耗时: ${elapsedMillis}ms"
+                "$label | 耗时: ${elapsedMillis}ms"
             } else {
-                "归还字节源: $id | 耗时: ${elapsedMillis}ms | 失败: ${failure.javaClass.simpleName}"
+                "$label | 耗时: ${elapsedMillis}ms | 失败: ${failure.javaClass.simpleName}"
             }
         }
     }
@@ -144,6 +155,7 @@ class LoopbackStreamServer(
         return "http://$LOOPBACK_ADDRESS:$port/$id"
     }
 
+    /** 关闭监听、断开已建立的连接并关闭全部字节源；关源要发协议请求，必须在非界面线程调用。 */
     override fun close() {
         runCatching { serverSocket.close() }
         stallWatchdog.interrupt()

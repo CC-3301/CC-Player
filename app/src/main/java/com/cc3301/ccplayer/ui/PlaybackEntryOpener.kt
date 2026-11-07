@@ -62,10 +62,10 @@ class PlaybackEntryOpener(
             } catch (failure: Exception) {
                 Result.failure<PreparedPlayback>(failure)
             }
-            // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
-            if (!entryState.isCurrent(generation)) return@launch
             // 准备已结束：预置句柄交给播放或随失败丢掉，不再挂在入口上。
             preparedStreams = null
+            // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
+            if (!entryState.isCurrent(generation)) return@launch
             prepared.fold(
                 onSuccess = { playback ->
                     if (!entryState.prepared(generation)) return@launch

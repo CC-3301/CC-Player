@@ -34,14 +34,18 @@ class WebDavStreams(
     /** 已登记陈旧：不在这里注销句柄，等下一次探测或取用时在播放线程上关掉。 */
     private var preparedStale = false
 
+    /** 探测交接的代号：作废一次就递增，打开迟到回来时据此判断这次准备是否还作数。 */
+    private var handoffSerial = 0L
+
     /** 起播前试连一次：打开读句柄并留给播放复用；连不上或位置不属于任何书签时抛出来源失败异常。 */
     override suspend fun probe(location: String) {
         val target = targetOf(location)
         urlFor(location)
         // 这条流已经有可用的源：播放会直接复用它，再存一条没人取的句柄只会等过期。
         if (server.hasFreshSource(location)) return
+        val serial = synchronized(handoff) { handoffSerial }
         val handle = transport.openRead(target.url, target.username, target.password, size = 0)
-        handOff(location, handle)
+        handOff(location, handle, serial)
     }
 
     /** 位置对应的本机地址。 */
@@ -58,8 +62,9 @@ class WebDavStreams(
         server.returnSource(location)
     }
 
-    /** 取消打开：探测预置的句柄当场丢掉，不等下一次探测或关闭。 */
+    /** 取消打开：作废这次探测交接，预置句柄派到关源线程丢掉，界面线程不碰 I/O。 */
     override fun discardPreparedSource() {
+        synchronized(handoff) { handoffSerial++ }
         closePrepared()
     }
 
@@ -77,15 +82,28 @@ class WebDavStreams(
         NetworkReadPriority.shared.wrap(source, ReadKind.Playback)
     }
 
-    private fun handOff(location: String, source: ByteSource) {
-        val superseded = synchronized(handoff) {
-            val previous = preparedSource
-            preparedLocation = location
-            preparedSource = source
-            preparedStale = false
-            previous
+    /**
+     * 交接探测打开的句柄：这次准备在打开期间被作废时，新句柄直接丢掉、不外借。
+     * 被顶替的旧句柄与新句柄的关闭都在关源线程执行。
+     */
+    private fun handOff(location: String, source: ByteSource, serial: Long) {
+        var superseded: ByteSource? = null
+        val cancelled = synchronized(handoff) {
+            if (serial != handoffSerial) {
+                true
+            } else {
+                superseded = preparedSource
+                preparedLocation = location
+                preparedSource = source
+                preparedStale = false
+                false
+            }
         }
-        if (superseded != null && superseded !== source) runCatching { superseded.close() }
+        if (cancelled) {
+            server.closeInBackground(source)
+            return
+        }
+        superseded?.let { previous -> if (previous !== source) server.closeInBackground(previous) }
     }
 
     /** 取出该位置留好的句柄；位置不符、已登记陈旧或已取过时先关掉留下的那条。 */
@@ -100,7 +118,7 @@ class WebDavStreams(
             preparedSource = null
             preparedStale = false
         }
-        stale?.let { source -> runCatching { source.close() } }
+        stale?.let { source -> server.closeInBackground(source) }
         return matched
     }
 
@@ -112,7 +130,7 @@ class WebDavStreams(
             preparedStale = false
             previous
         }
-        source?.let { runCatching { it.close() } }
+        source?.let { previous -> server.closeInBackground(previous) }
     }
 
     private suspend fun targetOf(location: String): WebDavTarget =
