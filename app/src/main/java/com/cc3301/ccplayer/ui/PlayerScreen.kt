@@ -168,20 +168,25 @@ private val PlayerTopBarHeight = 56.dp
 /** “更多”面板为底部控制条预留的高度。 */
 private val PlayerControlBarReserve = 224.dp
 
-/** “更多”面板内统一的行高。 */
+/** “更多”面板内选择行、选项行与开关行的最小行高；首页同类行为 52dp，此处更紧凑。 */
 private val PlayerMoreRowHeight = 48.dp
 
-/** 自定义分钟数行高：可见边框 48dp 加浮动标签悬出的 8dp。 */
-private val PlayerMoreDurationRowHeight = 56.dp
+/** 自定义分钟数行高：取文本字段默认最小高度，可见边框因此为 48dp。 */
+private val PlayerMoreDurationRowHeight = OutlinedTextFieldDefaults.MinHeight
+
+/** 自定义分钟数输入框宽度：容纳六字标签并留出余量。 */
+private val PlayerMoreDurationFieldWidth = 140.dp
 
 /** “自动播放下一个”开关的视觉尺寸。 */
 private val PlayerMoreSwitchWidth = 44.dp
 private val PlayerMoreSwitchHeight = 26.dp
 
-/** 开关滑块的直径与落在轨道两端的偏移。 */
+/** 开关滑块直径、与轨道边缘的内缩，以及落在两端的偏移。 */
 private val PlayerMoreSwitchThumbSize = 20.dp
-private val PlayerMoreSwitchThumbChecked = 21.dp
-private val PlayerMoreSwitchThumbUnchecked = 3.dp
+private val PlayerMoreSwitchThumbInset = 3.dp
+private val PlayerMoreSwitchThumbOffsetChecked =
+    PlayerMoreSwitchWidth - PlayerMoreSwitchThumbSize - PlayerMoreSwitchThumbInset
+private val PlayerMoreSwitchThumbOffsetUnchecked = PlayerMoreSwitchThumbInset
 
 /** 顶栏边缘渐变：无实色底，只在屏幕顶部保留极淡的黑色过渡。 */
 private val PlayerTopBarGradient = Brush.verticalGradient(
@@ -287,7 +292,7 @@ private fun PlayerTextButton(
             modifier = modifier,
             colors = ButtonDefaults.textButtonColors(
                 contentColor = color,
-                disabledContentColor = AppColors.Faint.copy(alpha = 0.45f),
+                disabledContentColor = DisabledToolColor,
             ),
             contentPadding = PaddingValues(horizontal = AppSpacing.Sm, vertical = AppSpacing.Xs),
         ) {
@@ -2113,6 +2118,7 @@ private fun MorePanel(
             .heightIn(max = panelMaxHeight)
             .playerPanel()
             .blockPlayerGestures()
+            // 上下留白落在滚动区之外：滚动内容不会盖住面板的上下边缘。
             .padding(vertical = AppSpacing.Lg)
             .verticalScroll(rememberScrollState()),
     ) {
@@ -2340,11 +2346,11 @@ private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onT
     }
 }
 
-/** 开关：固定 44×26，右边界与行尾箭头共用同一基准线。 */
+/** 开关：固定 44×26，右缘与上方选择行行尾图标的右缘对齐。 */
 @Composable
 private fun MoreSwitch(checked: Boolean, enabled: Boolean) {
     val thumbOffset by animateDpAsState(
-        targetValue = if (checked) PlayerMoreSwitchThumbChecked else PlayerMoreSwitchThumbUnchecked,
+        targetValue = if (checked) PlayerMoreSwitchThumbOffsetChecked else PlayerMoreSwitchThumbOffsetUnchecked,
         label = "player-switch-thumb",
     )
     Box(
@@ -2386,6 +2392,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             },
             singleLine = true,
             enabled = enabled,
+            // 只把输入内容居中；浮动标签受 Material3 1.3.2 限制只能行首对齐。
             textStyle = MaterialTheme.typography.bodyLarge.copy(textAlign = TextAlign.Center),
             label = { Text(text = stringResource(R.string.player_sleep_timer_custom_hint)) },
             isError = customRejected,
@@ -2402,7 +2409,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
                 errorLabelColor = AppColors.Danger,
                 errorCursorColor = AppColors.Danger,
             ),
-            modifier = Modifier.width(140.dp),
+            modifier = Modifier.width(PlayerMoreDurationFieldWidth),
         )
         PlayerTextButton(
             text = stringResource(R.string.player_sleep_timer_custom_confirm),
