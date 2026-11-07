@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -223,7 +224,10 @@ class SurfaceDetachOrderTest {
         var timeoutTask: (() -> Unit)? = null
         val timedQueue = VideoOutputQueue(
             execute = { task -> pendingTasks.addLast(task) },
-            schedule = { _, task -> timeoutTask = task },
+            schedule = { _, task ->
+                timeoutTask = task
+                true
+            },
         )
         val calls = mutableListOf<String>()
         timedQueue.postAlways { calls += "detach" }
@@ -249,7 +253,10 @@ class SurfaceDetachOrderTest {
         var timeoutTask: (() -> Unit)? = null
         val timedQueue = VideoOutputQueue(
             execute = { task -> pendingTasks.addLast(task) },
-            schedule = { _, task -> timeoutTask = task },
+            schedule = { _, task ->
+                timeoutTask = task
+                true
+            },
         )
         val calls = mutableListOf<String>()
         timedQueue.postAlways { calls += "detach" }
@@ -265,6 +272,124 @@ class SurfaceDetachOrderTest {
         timeoutTask!!.invoke()
 
         assertEquals(listOf("detach", "attach"), calls)
+    }
+
+    @Test
+    fun `超时立即结算排队任务，不等迟到的任务执行`() {
+        val tasks = ArrayDeque<() -> Unit>()
+        var timeoutTask: (() -> Unit)? = null
+        val queue = VideoOutputQueue(
+            execute = { task -> tasks.addLast(task) },
+            schedule = { _, task ->
+                timeoutTask = task
+                true
+            },
+        )
+        queue.postAlways { }
+        queue.postAlways { }
+        queue.attach(
+            stillCurrent = { true },
+            attach = { },
+            onSkipped = { },
+            timeoutMillis = 2_000,
+            onTimeout = { },
+        )
+        timeoutTask!!.invoke()
+
+        // 只跑掉两条占位任务；迟到的挂载任务仍留在队列里，但计数已在超时时结算。
+        tasks.removeFirst()()
+        tasks.removeFirst()()
+
+        val calls = mutableListOf<String>()
+        queue.attach(
+            stillCurrent = { true },
+            attach = { calls += "attach" },
+            onSkipped = { calls += "skipped" },
+        )
+        assertEquals(listOf("attach"), calls)
+    }
+
+    @Test
+    fun `超时与排队挂载并发时只产生一个结果`() {
+        val tasks = ArrayDeque<() -> Unit>()
+        var timeoutTask: (() -> Unit)? = null
+        val queue = VideoOutputQueue(
+            execute = { task -> tasks.addLast(task) },
+            schedule = { _, task ->
+                timeoutTask = task
+                true
+            },
+        )
+        queue.postAlways { }
+        val calls = Collections.synchronizedList(mutableListOf<String>())
+        queue.attach(
+            stillCurrent = { true },
+            attach = { calls += "attach" },
+            onSkipped = { calls += "skipped" },
+            timeoutMillis = 2_000,
+            onTimeout = { calls += "timeout" },
+        )
+        tasks.removeFirst() // 占位任务
+        val queuedAttach = tasks.removeFirst()
+        val start = CountDownLatch(1)
+
+        val worker = Thread {
+            start.await()
+            queuedAttach()
+        }
+        val timer = Thread {
+            start.await()
+            timeoutTask!!.invoke()
+        }
+        worker.start()
+        timer.start()
+        start.countDown()
+        worker.join(2_000)
+        timer.join(2_000)
+
+        // 挂载与超时互斥：要么真的挂上，要么按超时收尾。
+        assertEquals(1, calls.size)
+        assertTrue(calls.single() == "attach" || calls.single() == "timeout")
+        // 迟到任务跑完也不会把计数扣成负数。
+        queue.postAlways { calls += "after" }
+        tasks.removeFirst()()
+        assertEquals("after", calls.last())
+    }
+
+    @Test
+    fun `尺寸投递被拒时留诊断`() {
+        val messages = mutableListOf<String>()
+        val closed = VideoOutputQueue(
+            execute = { throw RejectedExecutionException("已关闭") },
+            onDiagnostic = { messages += it },
+        )
+
+        closed.postSurfaceSize(1920, 1080) { _, _ -> }
+
+        assertEquals(1, messages.size)
+        assertTrue(messages.single().contains("尺寸"))
+    }
+
+    @Test
+    fun `超时计时没排上时留诊断`() {
+        val tasks = ArrayDeque<() -> Unit>()
+        val messages = mutableListOf<String>()
+        val queue = VideoOutputQueue(
+            execute = { task -> tasks.addLast(task) },
+            schedule = { _, _ -> false },
+            onDiagnostic = { messages += it },
+        )
+        queue.postAlways { }
+
+        queue.attach(
+            stillCurrent = { true },
+            attach = { },
+            onSkipped = { },
+            timeoutMillis = 2_000,
+        )
+
+        assertEquals(1, messages.size)
+        assertTrue(messages.single().contains("超时"))
     }
 
     @Test
