@@ -2429,7 +2429,7 @@ private fun CustomSleepTimerRow(onSelect: (SleepTimerOption) -> Unit, enabled: B
             text = stringResource(R.string.player_sleep_timer_custom_invalid),
             style = MaterialTheme.typography.labelMedium,
             color = AppColors.Danger,
-            modifier = Modifier.padding(start = AppSpacing.Lg, end = AppSpacing.Lg, bottom = AppSpacing.Sm),
+            modifier = Modifier.padding(horizontal = AppSpacing.Lg),
         )
     }
 }
