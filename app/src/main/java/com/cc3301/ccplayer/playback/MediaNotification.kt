@@ -28,9 +28,7 @@ fun mediaNotificationContent(
     state: PlaybackState,
     media: MediaFile?,
     progress: PlaybackProgress,
-    switching: Boolean,
     initialLoading: Boolean,
-    restoring: Boolean,
     blocksBackgroundPlayback: Boolean,
     coverFile: File?,
     fallbackTitle: String,
@@ -41,9 +39,7 @@ fun mediaNotificationContent(
     coverFile = coverFile,
     actions = mediaNotificationActions(
         state = state,
-        switching = switching,
         initialLoading = initialLoading,
-        restoring = restoring,
         blocksBackgroundPlayback = blocksBackgroundPlayback,
     ),
 )

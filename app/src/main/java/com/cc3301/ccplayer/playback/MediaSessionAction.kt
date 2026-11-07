@@ -50,14 +50,6 @@ fun mediaActionAllowed(
     else -> true
 }
 
-/** 当前加载阶段下可用的媒体动作，通知栏与 MediaSession 的动作集合据此收窄。 */
-fun availableMediaActions(
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
-): List<MediaSessionAction> =
-    MediaSessionAction.entries.filter { mediaActionAllowed(it, initialLoading) }
-
 /**
  * 通知栏与系统媒体控制的统一下发入口：动作在当前加载阶段不可用时不下发。
  * [state] 来自播放控制层；[switching] 决定当前是否仍算首次加载。
@@ -66,7 +58,6 @@ fun dispatchMediaAction(
     action: MediaSessionAction,
     state: PlaybackState,
     switching: Boolean,
-    restoring: Boolean,
     blocksBackgroundPlayback: Boolean = false,
     apply: (MediaSessionAction) -> Unit,
 ) {
@@ -79,9 +70,7 @@ fun dispatchMediaAction(
 /** 通知栏动作集合：后台关闭时只保留暂停，其余情况按加载阶段收窄。 */
 fun mediaNotificationActions(
     state: PlaybackState,
-    switching: Boolean,
     initialLoading: Boolean,
-    restoring: Boolean,
     blocksBackgroundPlayback: Boolean,
 ): List<MediaSessionAction> =
     if (blocksBackgroundPlayback) {

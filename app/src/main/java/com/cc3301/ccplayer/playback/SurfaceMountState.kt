@@ -5,7 +5,8 @@ import android.view.Surface
 /**
  * 挂载两态：会话要求挂载的意图（attached）与真正挂上的 Surface（mounted）。
  *
- * 所有迁移都在同一把锁里；分离或换 Surface 不会插在「检查意图」与「真正挂载」之间。
+ * 所有迁移都在同一把锁里；在途意图的检查与实际挂载不在同一临界区，
+ * 分离可能插在两者之间：此后完成的挂载不再记入已挂。
  */
 internal class SurfaceMountState {
 
@@ -55,7 +56,4 @@ internal class SurfaceMountState {
 
     /** 是否有在途或已挂载的 Surface。 */
     fun hasMount(): Boolean = synchronized(lock) { attached != null || mounted != null }
-
-    /** 当前在途意图；开输出调用方据此确定目标。 */
-    fun intended(): Surface? = synchronized(lock) { attached }
 }

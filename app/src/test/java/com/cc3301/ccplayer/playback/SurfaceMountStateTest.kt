@@ -1,9 +1,7 @@
 package com.cc3301.ccplayer.playback
 
 import android.view.Surface
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,12 +18,12 @@ class SurfaceMountStateTest {
         assertTrue(state.isIntended(surface))
 
         state.onMounted(surface)
-        assertEquals(surface, state.intended())
+        assertTrue(state.isIntended(surface))
+        assertTrue(state.hasMount())
         assertTrue(state.detach())
         assertFalse(state.hasMount())
-        assertNull(state.intended())
 
-        // 超时只回滚在途意图，不回滚已挂；重复回滚不再动状态。
+        // 超时只回滚在途意图；重复回滚不再动状态。
         assertTrue(state.require(surface))
         assertTrue(state.onTimedOut(surface))
         assertFalse(state.hasMount())

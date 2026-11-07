@@ -681,7 +681,7 @@ class MpvPlaybackEngine(
     }
 
     /**
-     * 等视频输出线程排空后销毁播放核心；超时或期间已创建新核心时放弃销毁，实例随进程退出回收。
+     * 等视频输出线程排空后销毁播放核心；排空超时则放弃销毁，实例随进程退出回收。
      */
     private fun finishRelease(
         drained: CountDownLatch,
