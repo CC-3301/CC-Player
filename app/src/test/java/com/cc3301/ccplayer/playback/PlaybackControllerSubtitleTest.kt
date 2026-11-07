@@ -96,7 +96,7 @@ class PlaybackControllerSubtitleTest {
     @Test
     fun `换集后回到起播默认，并按新一集的候选重算`() {
         engine.embeddedTracks = listOf(chinese)
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("ep01.mkv"), mediaFile("ep02.mkv")),
             mediaFile("ep01.mkv"),
             listOf(document("ep01.srt"), document("ep02.chs.ass")),
@@ -113,7 +113,7 @@ class PlaybackControllerSubtitleTest {
 
     @Test
     fun `换集回到内嵌优先并重新加载外挂`() {
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("ep01.mkv"), mediaFile("ep02.mkv")),
             mediaFile("ep01.mkv"),
             listOf(document("ep01.srt"), document("ep02.srt")),
@@ -153,7 +153,7 @@ class PlaybackControllerSubtitleTest {
     }
 
     private fun openEpisode(mediaName: String, vararg directoryNames: String) {
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile(mediaName)),
             mediaFile(mediaName),
             directoryNames.map(::document),

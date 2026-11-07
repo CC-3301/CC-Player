@@ -26,10 +26,10 @@ class PlaybackControllerPlayerExitTest {
 
     @Test
     fun `正在播放时点开另一条视频只发 loadfile 替换，不先停`() {
-        controller.openPlaylistForTest(listOf(mediaFile("a.mkv"), mediaFile("b.mkv")), mediaFile("a.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("a.mkv"), mediaFile("b.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()
 
-        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
 
         // 旧片在播时直接以 loadfile replace 替换：先发 stop 会把新加载一并终止。
         assertEquals(listOf("root/a.mkv", "root/c.mkv"), engine.startedUrls)
@@ -40,13 +40,13 @@ class PlaybackControllerPlayerExitTest {
 
     @Test
     fun `换片后解码模式保持不变`() {
-        controller.openPlaylistForTest(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()
         controller.setDecodeMode(DecodeMode.Software)
         engine.actions.clear()
         engine.decodeModes.clear()
 
-        controller.openPlaylistForTest(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
 
         // 换片必须先补写解码模式，再开始加载新文件；不能只剩一次 start。
         assertEquals(listOf("decode:Software", "start"), engine.actions)
@@ -58,7 +58,7 @@ class PlaybackControllerPlayerExitTest {
     fun `离开播放页后自动下一集开启时播完继续`() {
         // 离开播放页等同于 Surface 不可用：音频仍继续，播完按开关决定连播。
         controller.setRenderSurfaceAvailable(false)
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
             mediaFile("a.mkv"),
         )
@@ -74,7 +74,7 @@ class PlaybackControllerPlayerExitTest {
     fun `离开播放页后自动下一集关闭时播完停止`() {
         controller.setAutoPlayNext(false)
         controller.setRenderSurfaceAvailable(false)
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
             mediaFile("a.mkv"),
         )
@@ -88,7 +88,7 @@ class PlaybackControllerPlayerExitTest {
 
     @Test
     fun `播放失败进入错误态并可由新的加载清除`() {
-        controller.openPlaylistForTest(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
         engine.reportMediaLoaded()
 
         engine.reportPlaybackFailed("解码失败")
@@ -96,14 +96,14 @@ class PlaybackControllerPlayerExitTest {
         assertTrue(controller.playbackFailed.value)
         assertEquals(PlaybackState.Ended, controller.state.value)
 
-        controller.openPlaylistForTest(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
 
         assertFalse(controller.playbackFailed.value)
     }
 
     @Test
     fun `首次加载失败重发后仍失败进入错误态`() {
-        controller.openPlaylistForTest(listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(mediaFile("a.mkv")), mediaFile("a.mkv"))
 
         // 首次失败先按加载看护重发一次，第二次失败才收尾为错误态。
         engine.reportPlaybackFailed("无法打开文件")

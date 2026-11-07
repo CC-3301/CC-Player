@@ -2291,7 +2291,7 @@ class PlaybackControllerSwitchTest {
         current: String = names.first(),
     ) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
-        controller.openPlaylistForTest(files, files.first { it.name == current })
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first { it.name == current })
     }
 
 }

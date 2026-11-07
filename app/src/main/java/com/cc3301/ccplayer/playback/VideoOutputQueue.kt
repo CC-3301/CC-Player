@@ -1,7 +1,6 @@
 package com.cc3301.ccplayer.playback
 
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -14,65 +13,114 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * 作废只对尚未开始的任务有意义：单线程执行器下已经开始执行的任务必然排在分离之前，
  * 所以 [invalidate] 只做一次原子递增，不等任何人。
+ *
+ * 顺序承诺只覆盖同一线程内的投递：队列按投递顺序执行，但队列空闲时的当场挂载会与
+ * 其它线程同时投递的任务并发，这部分先后不由本类保证。
  */
-internal class VideoOutputQueue(private val execute: (() -> Unit) -> Unit) {
+internal class VideoOutputQueue(
+    private val execute: (() -> Unit) -> Unit,
+    /** 排队任务超过时限仍未执行的计时器；返回是否排上。不注入时按没有超时处理。 */
+    private val schedule: (delayMillis: Long, task: () -> Unit) -> Boolean = { _, _ -> false },
+    /** 静默丢弃时的留痕出口：投递被拒、超时计时没排上都从这里记一行。 */
+    private val onDiagnostic: (String) -> Unit = {},
+) {
 
     private val generation = AtomicInteger(0)
+
+    /**
+     * 已投递、尚未结算的任务数；[attach] 只看它判断队列是否空闲，不等待。
+     * 超时的排队任务在超时那一刻就结算，不等迟到的任务真正跑完。
+     */
+    private val pending = AtomicInteger(0)
+
+    /** 一次投递的结算令牌：任务执行与超时先到先得，只扣一次计数。 */
+    private class Ticket {
+        private val settled = AtomicBoolean(false)
+
+        fun settleOnce(): Boolean = settled.compareAndSet(false, true)
+    }
 
     /** 投递一条参与代际作废的任务；队列已关时不再执行。 */
     fun postOutput(task: () -> Unit) {
         val current = generation.get()
-        submit { if (current == generation.get()) task() }
+        submit(Ticket()) { if (current == generation.get()) task() }
     }
 
     /** 投递一条不参与作废的任务；投递被拒时返回 false。 */
-    fun postAlways(task: () -> Unit): Boolean = submit { task() }
+    fun postAlways(task: () -> Unit): Boolean = submit(Ticket()) { task() }
 
     /** 作废已投递、尚未开始的开输出；正在执行的开输出本来就排在分离之前，不受影响。 */
     fun invalidate() {
         generation.incrementAndGet()
     }
 
-    /** 等已投递的任务跑完；投递被拒与等不到排空都返回 false。 */
-    fun awaitIdle(timeoutMillis: Long): Boolean {
-        val idle = CountDownLatch(1)
-        if (!submit { idle.countDown() }) return false
-        return runCatching {
-            idle.await(timeoutMillis, TimeUnit.MILLISECONDS)
-        }.getOrDefault(false)
-    }
-
     /**
-     * 挂载 Surface：队列跑空时在调用线程当场挂；等不到跑空就把挂载排到已投递任务之后，
-     * 不抢在排队中的分离之前。
+     * 挂载 Surface：队列没有在途任务时在调用线程当场挂；有在途任务就把挂载排到它们之后，
+     * 不抢在排队中的分离之前，也不等它们跑完。
+     * 排队超过 [timeoutMillis] 仍未执行时按失败收尾：当场结算排队计数、调用 [onTimeout]，
+     * 迟到的任务不再挂载。
      * [stillCurrent] 在真正挂载之前都要过一次：当场挂那次在调用线程过，排队那次在视频输出线程过。
-     * 返回 false 有两种含义——已排到队列之后，或校验不过被跳过（[onSkipped] 在对应的那条线程执行）。
+     * [onSkipped] 在跳过时对应的那条线程执行一次。
      */
     fun attach(
-        awaitMillis: Long,
         stillCurrent: () -> Boolean,
         attach: () -> Unit,
         onSkipped: () -> Unit,
-    ): Boolean {
-        if (awaitIdle(awaitMillis)) {
-            // 等排空的这段时间里可能已经释放：挂之前再确认一次，别对着已销毁的核心挂载。
-            if (!stillCurrent()) {
-                onSkipped()
-                return false
-            }
-            attach()
-            return true
+        timeoutMillis: Long = 0L,
+        onTimeout: () -> Unit = {},
+    ) {
+        if (pending.get() == 0) {
+            if (stillCurrent()) attach() else onSkipped()
+            return
         }
-        val accepted = postAlways {
+        // 任务与超时只允许一个收尾：先抢到的赢，另一个不再动状态。
+        val claimed = AtomicBoolean(false)
+        val ticket = Ticket()
+        val accepted = submit(ticket) {
+            if (!claimed.compareAndSet(false, true)) return@submit
             if (stillCurrent()) attach() else onSkipped()
         }
-        if (!accepted) onSkipped()
-        return false
+        if (!accepted) {
+            onSkipped()
+            return
+        }
+        if (timeoutMillis > 0) {
+            val armed = schedule(timeoutMillis) {
+                if (claimed.compareAndSet(false, true)) {
+                    settle(ticket)
+                    onTimeout()
+                }
+            }
+            if (!armed) onDiagnostic("挂载: 超时计时没有排上，这次排队挂载没有超时保护")
+        }
     }
 
-    private fun submit(task: () -> Unit): Boolean =
-        runCatching {
-            execute { task() }
+    /** 下发 Surface 尺寸：与挂载投同一条队列，同一线程内保持「先挂载、再下尺寸、再开输出」。 */
+    fun postSurfaceSize(width: Int, height: Int, setProperty: (String, String) -> Unit) {
+        val accepted = postAlways {
+            setProperty("android-surface-size", "${width}x$height")
+        }
+        if (!accepted) onDiagnostic("尺寸: 视频输出线程不再受理，尺寸没有下发")
+    }
+
+    private fun submit(ticket: Ticket, task: () -> Unit): Boolean {
+        pending.incrementAndGet()
+        return runCatching {
+            execute {
+                try {
+                    task()
+                } finally {
+                    settle(ticket)
+                }
+            }
             true
-        }.getOrDefault(false)
+        }.getOrElse {
+            settle(ticket)
+            false
+        }
+    }
+
+    private fun settle(ticket: Ticket) {
+        if (ticket.settleOnce()) pending.decrementAndGet()
+    }
 }

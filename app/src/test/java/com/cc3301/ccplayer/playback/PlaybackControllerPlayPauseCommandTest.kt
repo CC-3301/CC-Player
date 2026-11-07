@@ -114,7 +114,7 @@ class PlaybackControllerPlayPauseCommandTest {
     }
 
     private fun openPlaying() {
-        controller.openPlaylistForTest(listOf(media), media)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(media), media)
         engine.reportMediaLoaded()
         assertEquals(PlaybackState.Playing, controller.state.value)
     }
@@ -122,7 +122,7 @@ class PlaybackControllerPlayPauseCommandTest {
     private fun openSwitching() {
         val first = mediaFile("ep1.mkv")
         val second = mediaFile("ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
         controller.next()
 

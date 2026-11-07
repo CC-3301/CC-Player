@@ -66,9 +66,6 @@ class PlaybackController(
             stoppedAtEndOfEpisode() ||
             generation?.handoverEndedAtEpisode == true
 
-    /** 当前加载代际号；测试用来验证控制层沿用入口分配的号。 */
-    internal val currentLoadGenerationId: Int get() = generation?.id ?: 0
-
     /**
      * 播放意图：暂停为真。切集窗口状态是 Loading，播放键按这份意图解析显式命令。
      * 与 [state] 分开：状态由加载阶段决定，意图只记用户与切集起点要的播放结果。
@@ -143,11 +140,10 @@ class PlaybackController(
      */
     private var generation: LoadGeneration? = null
 
-    /** 入口分配的代际号：同一会话的每个加载代际都沿用它，控制层不另发一套序列。 */
+    /** 入口分配的代际号：只给失败事件标归属，界面按严格相等丢弃旧会话的失败。 */
     private var entryGeneration = 0
 
-    /** 入口声明的当前打开代际；openPlaylist 只接受与它相同的代际。 */
-    private var pendingOpenGeneration = 0
+
 
     /** 已下发给引擎的静音状态；只在推导结果变化时写一次。 */
     private var audioMuted = false
@@ -522,8 +518,8 @@ class PlaybackController(
     /**
      * 以 [files] 为播放列表起播 [current]；列表只收媒体文件，按名称自然排序。
      * [directoryEntries] 是当前目录的原始条目（含被媒体列表过滤掉的外挂字幕），用于外挂字幕匹配。
-     * [generation] 是入口分配的代际号，本次会话的加载代际沿用它。
-     * 代际与入口声明的当前打开严格相等才接受；[current] 不在列表里时不动作并返回 false。
+     * [generation] 是入口分配的代际号，随失败事件回报给界面做归属判定。
+     * [current] 不在列表里时不动作并返回 false。
      */
     fun openPlaylist(
         files: List<MediaFile>,
@@ -531,15 +527,6 @@ class PlaybackController(
         generation: Int,
         directoryEntries: List<MediaFile> = emptyList(),
     ): Boolean {
-        if (generation <= 0) {
-            diagnostics.log { "打开被拒绝: 缺少入口代际" }
-            return false
-        }
-        if (pendingOpenGeneration != 0 && generation != pendingOpenGeneration) {
-            diagnostics.log { "打开被拒绝: 代际 $generation 不是当前打开 $pendingOpenGeneration" }
-            return false
-        }
-        pendingOpenGeneration = generation
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) {
@@ -553,7 +540,7 @@ class PlaybackController(
         // 换片不向播放核心发停止：mpv 的 stop 紧跟 loadfile 会把新加载一并终止，
         // 旧片直接由新加载的 loadfile replace 替换。
         if (active) {
-            beginOpenHandover(generation)
+            beginOpenHandover()
             val decodeMode = _decodeMode.value
             replaceSession()
             _playlist.value = playlist
@@ -574,11 +561,9 @@ class PlaybackController(
      * 旧会话仍在首次加载、切集或恢复原片时同样按打开处理：旧加载的迟到回调一律丢弃。
      * 方向按新目标判定：屏上帧与比例在交接一开始就不再属于旧目标。
      */
-    fun beginOpenHandover(generation: Int) {
-        if (generation <= 0) return
-        pendingOpenGeneration = generation
+    fun beginOpenHandover() {
         if (!active) return
-        val current = this.generation ?: return
+        val current = generation ?: return
         if (current.isHandoverPending) return
         // 旧目标已就绪才留可恢复的画面事实；旧目标还在加载时没有可恢复的屏上帧。
         val snapshot = if (current.phase == LoadPhase.None) {
@@ -662,8 +647,8 @@ class PlaybackController(
         loadGeneration++
     }
 
-    /** 新建一个代际：沿用入口分配的代际号，不另发一套序列。 */
-    private fun newGeneration(): LoadGeneration = LoadGeneration(entryGeneration, nowMillis)
+    /** 新建一个代际。 */
+    private fun newGeneration(): LoadGeneration = LoadGeneration(nowMillis)
 
     /** 静音的唯一写入口：由当前代际的出声归属与预览静音推导，变化时才下发一次命令。 */
     private fun syncAudioMute() {
@@ -693,7 +678,7 @@ class PlaybackController(
 
     /** 切换到播放列表索引 [index] 的条目；超出范围、首次加载、切集或恢复期间不动作。 */
     fun playAt(index: Int) {
-        // 切集缓冲期间只允许上一集/下一集；首次加载期间只允许返回。
+        // 加载期间播放列表条目不可用：切集时目标只能按上一集/下一集前移，首次加载时不动作。
         if (loadPhase != LoadPhase.None) {
             diagnostics.log { "播放列表选择未执行: ${loadPhaseLabel(loadPhase)}阶段（索引 $index）" }
             return
@@ -948,8 +933,6 @@ class PlaybackController(
         val handover = generation?.takeIf { it.isHandoverPending }
         val current = handover ?: newGeneration()
         generation = current
-        // 复用的交接代际换成新入口的号；同一会话内每次打开都保留自己的代际号。
-        if (handover != null) current.adoptGeneration(entryGeneration)
         current.kind = if (handover != null) LoadKind.Open else LoadKind.First
         current.phase = LoadPhase.Initial
         current.targetIndex = index

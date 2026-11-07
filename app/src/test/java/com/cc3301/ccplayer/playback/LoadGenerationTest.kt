@@ -13,7 +13,7 @@ class LoadGenerationTest {
 
     private var nowMillis = 0L
 
-    private fun generation(id: Int = 1): LoadGeneration = LoadGeneration(id) { nowMillis }
+    private fun generation(): LoadGeneration = LoadGeneration { nowMillis }
 
     private fun readySnapshot(): HandoverSnapshot = HandoverSnapshot(
         kind = LoadKind.First,
@@ -63,7 +63,7 @@ class LoadGenerationTest {
 
     @Test
     fun `重发沿用同一代际并仍能放声`() {
-        val generation = generation(id = 3)
+        val generation = generation()
         generation.startHandover(readySnapshot())
         generation.targetIndex = 1
         generation.targetUrl = "root/b.mkv"
@@ -72,7 +72,6 @@ class LoadGenerationTest {
         // 重发只换这次引擎加载的令牌：代际、目标与出声归属都不变。
         generation.beginAttempt(9)
 
-        assertEquals(3, generation.id)
         assertEquals("root/b.mkv", generation.targetUrl)
         assertTrue(generation.accepts(9, "root/b.mkv"))
         assertFalse(generation.accepts(8, "root/b.mkv"))
@@ -85,14 +84,13 @@ class LoadGenerationTest {
 
     @Test
     fun `改目标沿用同一代际，旧令牌作废`() {
-        val generation = generation(id = 4)
+        val generation = generation()
         generation.beginAttempt(1)
         // 改目标：代际不变，只更新目标与这次引擎加载的令牌。
         generation.targetIndex = 2
         generation.targetUrl = "root/c.mkv"
         generation.beginAttempt(2)
 
-        assertEquals(4, generation.id)
         assertEquals(2, generation.targetIndex)
         assertEquals("root/c.mkv", generation.targetUrl)
         assertFalse(generation.accepts(1, null))

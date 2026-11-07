@@ -82,14 +82,8 @@ internal data class HandoverSnapshot(
  * 直到下一次加载意图替换它或会话结束把它作废。
  */
 internal class LoadGeneration(
-    /** 入口分配的代际号；同一会话的每个加载代际都沿用它。 */
-    id: Int,
     nowMillis: () -> Long,
 ) {
-    /** 入口代际号；打开交接复用本代际时由新入口的号替换。 */
-    var id: Int = id
-        private set
-
     /** 打开交接期间旧会话自然播完：这次打开返回时按片尾处理。 */
     var handoverEndedAtEpisode: Boolean = false
         private set
@@ -130,7 +124,10 @@ internal class LoadGeneration(
     var handover: HandoverSnapshot? = null
         private set
 
-    /** 交接开始时旧会话的在途加载令牌：用于识别交接窗口内旧会话的播完事件。 */
+    /**
+     * 交接开始时旧会话的在途加载令牌：只在旧会话已就绪（有可恢复画面）时记录。
+     * 旧会话还在首次加载或切集时，结束事件不属于「旧会话播完」，不在这里吞掉。
+     */
     var handoverLoadToken: Int = NO_LOAD_TOKEN
         private set
 
@@ -186,7 +183,7 @@ internal class LoadGeneration(
      */
     fun startHandover(snapshot: HandoverSnapshot?) {
         kind = LoadKind.Open
-        handoverLoadToken = loadToken
+        handoverLoadToken = if (snapshot != null) loadToken else NO_LOAD_TOKEN
         handoverEndedAtEpisode = false
         phase = LoadPhase.Pending
         forgetLoad()
@@ -205,6 +202,9 @@ internal class LoadGeneration(
 
     /** 撤销打开交接：把快照里的画面事实、出声归属与加载令牌原样放回本代际。 */
     fun restoreHandover(snapshot: HandoverSnapshot) {
+        // 交接撤销后旧会话回到当前会话：交接期间的片尾事实不再成立。
+        handoverEndedAtEpisode = false
+        handoverLoadToken = NO_LOAD_TOKEN
         kind = snapshot.kind
         phase = LoadPhase.None
         audioOwner = snapshot.audioOwner
@@ -234,11 +234,6 @@ internal class LoadGeneration(
     /** 打开交接的新目标开始加载：撤销快照到此失效。 */
     fun clearHandover() {
         handover = null
-    }
-
-    /** 打开交接复用本代际：换成新入口分配到的号。 */
-    fun adoptGeneration(id: Int) {
-        this.id = id
     }
 
     /** 交接窗口内旧会话自然播完：只记片尾事实，不触发连播。 */

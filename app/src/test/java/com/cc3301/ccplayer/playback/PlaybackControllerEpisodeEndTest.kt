@@ -30,7 +30,7 @@ class PlaybackControllerEpisodeEndTest {
     private fun TestScope.playingController(): PlaybackController {
         val controller = controller()
         val files = listOf(mediaFile("a.mkv"), mediaFile("b.mkv"))
-        controller.openPlaylistForTest(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
         engine.reportMediaLoaded()
         return controller
     }
@@ -78,7 +78,7 @@ class PlaybackControllerEpisodeEndTest {
         val controller = playingController()
         val oldToken = engine.currentLoadToken
 
-        controller.beginOpenHandover(generation = 2)
+        controller.beginOpenHandover()
         engine.reportPlaybackEnded(loadToken = oldToken)
 
         // 状态仍是 Playing，但控制层提供片尾事实；返回与失败收尾据此按片尾处理。
@@ -89,7 +89,7 @@ class PlaybackControllerEpisodeEndTest {
     fun `新目标开始加载后旧会话片尾事实失效`() = runTest {
         val controller = playingController()
         val oldToken = engine.currentLoadToken
-        controller.beginOpenHandover(generation = 2)
+        controller.beginOpenHandover()
         engine.reportPlaybackEnded(loadToken = oldToken)
         assertTrue(controller.atEpisodeEnd)
 

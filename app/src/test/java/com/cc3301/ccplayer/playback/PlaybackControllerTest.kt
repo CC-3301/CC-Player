@@ -131,7 +131,7 @@ class PlaybackControllerTest {
     @Test
     fun `next episode is the adjacent file in natural name order`() {
         val files = listOf(mediaFile("ep10.mkv"), mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
-        controller.openPlaylistForTest(files, mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep1.mkv"))
         engine.reportMediaLoaded()
 
         controller.next()
@@ -142,7 +142,7 @@ class PlaybackControllerTest {
     @Test
     fun `previous episode is the adjacent file in natural name order`() {
         val files = listOf(mediaFile("ep2.mkv"), mediaFile("ep10.mkv"), mediaFile("ep1.mkv"))
-        controller.openPlaylistForTest(files, mediaFile("ep2.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep2.mkv"))
         engine.reportMediaLoaded()
 
         controller.previous()
@@ -157,7 +157,7 @@ class PlaybackControllerTest {
             mediaFile("ep2.mkv", lastModified = 200),
             mediaFile("ep1.mkv", lastModified = 100),
         )
-        controller.openPlaylistForTest(byModifiedTime, mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, byModifiedTime, mediaFile("ep1.mkv"))
         engine.reportMediaLoaded()
 
         controller.next()
@@ -168,7 +168,7 @@ class PlaybackControllerTest {
     @Test
     fun `next episode at the end of the playlist does nothing`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
-        controller.openPlaylistForTest(files, mediaFile("ep2.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep2.mkv"))
 
         controller.next()
 
@@ -178,7 +178,7 @@ class PlaybackControllerTest {
     @Test
     fun `previous episode at the start of the playlist does nothing`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
-        controller.openPlaylistForTest(files, mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep1.mkv"))
 
         controller.previous()
 
@@ -189,7 +189,7 @@ class PlaybackControllerTest {
     fun `next episode still works after the current media ended`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
         controller.setAutoPlayNext(false)
-        controller.openPlaylistForTest(files, mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep1.mkv"))
         engine.reportMediaLoaded()
         engine.reportPlaybackEnded()
 
@@ -205,7 +205,7 @@ class PlaybackControllerTest {
     @Test
     fun `selecting a playlist entry plays that file and reports loading`() {
         val files = listOf(mediaFile("ep1.mkv"), mediaFile("ep2.mkv"))
-        controller.openPlaylistForTest(files, mediaFile("ep1.mkv"))
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, mediaFile("ep1.mkv"))
         engine.reportMediaLoaded()
 
         controller.playAt(1)
@@ -289,7 +289,7 @@ class PlaybackControllerTest {
     }
 
     private fun open(vararg files: MediaFile) {
-        controller.openPlaylistForTest(files.toList(), files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files.toList(), files.first())
     }
 
     private fun mediaFile(name: String, lastModified: Long = 0): MediaFile =

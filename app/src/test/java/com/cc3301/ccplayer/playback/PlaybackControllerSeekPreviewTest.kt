@@ -1203,6 +1203,6 @@ class PlaybackControllerSeekPreviewTest {
             MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
             MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"),
         )
-        controller.openPlaylistForTest(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
     }
 }

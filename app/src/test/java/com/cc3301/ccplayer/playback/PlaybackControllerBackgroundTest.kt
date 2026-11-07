@@ -230,7 +230,7 @@ class PlaybackControllerBackgroundTest {
     fun `首次加载中重挂不触发 3 秒翻转`() = runTest {
         val controller = controller()
         val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
-        controller.openPlaylistForTest(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
 
         reattach(controller)
         advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
@@ -503,7 +503,7 @@ class PlaybackControllerBackgroundTest {
     fun `首次加载中回前台不留下黑屏无提示标记`() = runTest {
         val controller = controller()
         val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))
-        controller.openPlaylistForTest(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
 
         controller.setAppInForeground(false)
         controller.setAppInForeground(true)
@@ -537,7 +537,7 @@ class PlaybackControllerBackgroundTest {
             MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"),
             MediaFile(name = "ep2.mkv", location = "root/ep2.mkv"),
         )
-        controller.openPlaylistForTest(files, files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
         engine.reportMediaLoaded()
         return controller
     }

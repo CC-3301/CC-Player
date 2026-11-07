@@ -34,7 +34,7 @@ class PlaybackControllerDiagnosticsTest {
             nowMillis = { 0L },
         )
 
-        controller.openPlaylistForTest(listOf(media), media)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(media), media)
         engine.reportMediaLoaded()
 
         val text = sink.lines.joinToString("\n")
@@ -63,7 +63,7 @@ class PlaybackControllerDiagnosticsTest {
         val sink = MemoryDiagnosticsSink()
         val diagnostics = diagnostics(sink, enabled = true)
         val controller = controller(diagnostics)
-        controller.openPlaylistForTest(
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(MediaFile(name = "", location = "root/ep0.mkv")),
             MediaFile(name = "", location = "root/ep0.mkv"),
         )
@@ -153,7 +153,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
         val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
 
         controller.next()
@@ -253,7 +253,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
         val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
 
         controller.next()
@@ -288,7 +288,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
         val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
 
         controller.next()
@@ -304,7 +304,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
         val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
         assertEquals(PlaybackState.Playing, controller.state.value)
 
@@ -353,7 +353,7 @@ class PlaybackControllerDiagnosticsTest {
         val controller = controller(diagnostics)
         val first = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
         val second = MediaFile(name = "ep2.mkv", location = "root/ep2.mkv")
-        controller.openPlaylistForTest(listOf(first, second), first)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(first, second), first)
         engine.reportMediaLoaded()
 
         controller.next()
@@ -388,7 +388,7 @@ class PlaybackControllerDiagnosticsTest {
 
     private fun open(controller: PlaybackController) {
         val media = MediaFile(name = "ep1.mkv", location = "root/ep1.mkv")
-        controller.openPlaylistForTest(listOf(media), media)
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(media), media)
     }
 
     private fun TestScope.playingController(diagnostics: Diagnostics): PlaybackController {

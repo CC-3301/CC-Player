@@ -115,65 +115,20 @@ class PlaybackEntryStateTest {
     }
 
     @Test
-    fun `准备期不计等待接手兜底`() {
-        state.begin(preparing = true)
-
-        state.onHandoverTick(nowMillis = 1_000, foreground = true)
-        assertFalse(state.onHandoverTick(nowMillis = 60_000, foreground = true))
-    }
-
-    @Test
-    fun `已接手后不再按等待接手兜底`() {
-        acceptedEntry()
-
-        state.onHandoverTick(nowMillis = 1_000, foreground = true)
-        assertFalse(state.onHandoverTick(nowMillis = 60_000, foreground = true))
-        assertFalse(state.failAwaitingHandover())
-    }
-
-    @Test
-    fun `等待接手按实际时间差累计且只算前台`() {
-        val generation = state.begin(preparing = true)
-        state.prepared(generation)
-
-        // 第一次 tick 只建立基线。
-        state.onHandoverTick(nowMillis = 1_000, foreground = true)
-        // 退后台：基线清掉，后台这段不算。
-        state.onHandoverTick(nowMillis = 2_000, foreground = false)
-        state.onHandoverTick(nowMillis = 30_000, foreground = true)
-        assertFalse("回前台首 tick 只重建基线", state.onHandoverTick(nowMillis = 31_000, foreground = true))
-        assertFalse(state.onHandoverTick(nowMillis = 34_500, foreground = true))
-        assertTrue(state.onHandoverTick(nowMillis = 36_000, foreground = true))
-    }
-
-    @Test
-    fun `暂停计时后不把暂停期间算进前台时长`() {
-        val generation = state.begin(preparing = true)
-        state.prepared(generation)
-        state.onHandoverTick(nowMillis = 1_000, foreground = true)
-
-        state.pauseHandoverTimer()
-        state.onHandoverTick(nowMillis = 40_000, foreground = true)
-
-        assertFalse(state.onHandoverTick(nowMillis = 42_000, foreground = true))
-    }
-
-    @Test
     fun `兜底到点按失败收尾并回滚`() {
         val generation = state.begin(preparing = true)
         state.prepared(generation)
-        state.onHandoverTick(nowMillis = 1_000, foreground = true)
-        assertTrue(state.onHandoverTick(nowMillis = 6_000, foreground = true))
 
         assertTrue(state.failAwaitingHandover())
         assertEquals(EntryPhase.Failed, state.phase)
-        // 兜底到点：既有失败提示 + 有旧会话且不在片尾时撤回；没有旧会话时结束播放。
-        val rollback = handoverTimeoutOutcome(PlaybackState.Playing, atEpisodeEnd = false)
-        assertEquals(HANDOVER_TIMEOUT_FAILURE, rollback.failure)
-        assertEquals(FailedEntryExit.LeavePlayerPage, rollback.exit)
+        // 有旧会话且不在片尾：撤回打开交接；没有旧会话：结束播放。
+        assertEquals(
+            FailedEntryExit.LeavePlayerPage,
+            failedEntryExit(PlaybackState.Playing, atEpisodeEnd = false),
+        )
         assertEquals(
             FailedEntryExit.StopPlayback,
-            handoverTimeoutOutcome(PlaybackState.Idle, atEpisodeEnd = false).exit,
+            failedEntryExit(PlaybackState.Idle, atEpisodeEnd = false),
         )
     }
 
@@ -241,6 +196,23 @@ class PlaybackEntryStateTest {
 
         assertTrue(state.consumeInitialFailure(generation, firstLoad = true))
         assertEquals(EntryPhase.Failed, state.phase)
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
+    }
+
+    @Test
+    fun `首次就绪后的后续失败不关播放页`() {
+        val generation = acceptedEntry()
+        state.onPlaybackUpdate(PlaybackState.Playing, switching = false)
+
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
+        assertNull(state.phase)
+    }
+
+    @Test
+    fun `切集后的后续失败不关播放页`() {
+        val generation = acceptedEntry()
+        state.onPlaybackUpdate(PlaybackState.Loading, switching = true)
+
         assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
     }
 

@@ -43,8 +43,8 @@ class PlaybackEntryState {
     /** 这次打开是在播放页里继续准备（视频）；音频的准备在浏览页完成。 */
     private var preparesInPage = false
 
-    private var handoverElapsedMillis = 0L
-    private var lastHandoverTickMillis: Long? = null
+    /** 已接手但首次加载还没有结论：只有这个窗口内的首次加载失败才退回列表。 */
+    private var initialLoadPending = false
 
     /** 当前这次打开的代际；没有进行中的打开时为 0。 */
     val generation: Int get() = currentGeneration ?: 0
@@ -61,8 +61,7 @@ class PlaybackEntryState {
         generationSerial++
         currentGeneration = generationSerial
         preparesInPage = preparing
-        handoverElapsedMillis = 0L
-        lastHandoverTickMillis = null
+        initialLoadPending = false
         phase = EntryPhase.Preparing
         return generationSerial
     }
@@ -77,10 +76,11 @@ class PlaybackEntryState {
         return true
     }
 
-    /** 播放控制层接受了这次打开。 */
+    /** 播放控制层接受了这次打开：首次加载窗口从此开始。 */
     fun accepted(generation: Int): Boolean {
         if (!isCurrent(generation)) return false
         if (phase == EntryPhase.AwaitingHandover) phase = EntryPhase.Accepted
+        initialLoadPending = true
         return true
     }
 
@@ -89,29 +89,8 @@ class PlaybackEntryState {
         if (!isCurrent(generation)) return false
         phase = EntryPhase.Failed
         currentGeneration = null
-        lastHandoverTickMillis = null
+        initialLoadPending = false
         return true
-    }
-
-    /**
-     * 等待接手阶段的计时：只累计两次 tick 之间的实际前台时长。
-     * 不在该阶段或已退后台时只清基线，不累计。
-     */
-    fun onHandoverTick(nowMillis: Long, foreground: Boolean): Boolean {
-        if (phase != EntryPhase.AwaitingHandover || !foreground) {
-            lastHandoverTickMillis = null
-            return false
-        }
-        val last = lastHandoverTickMillis
-        lastHandoverTickMillis = nowMillis
-        if (last == null) return false
-        handoverElapsedMillis += (nowMillis - last).coerceAtLeast(0L)
-        return handoverElapsedMillis >= HANDOVER_TIMEOUT_MILLIS
-    }
-
-    /** 退后台或停止 ticker 时丢弃基线，避免把暂停期间算进前台时长。 */
-    fun pauseHandoverTimer() {
-        lastHandoverTickMillis = null
     }
 
     /** 兜底到点：中止仍在等待接手的打开；已经接手或已结束时返回 false。 */
@@ -119,21 +98,23 @@ class PlaybackEntryState {
         if (phase != EntryPhase.AwaitingHandover) return false
         phase = EntryPhase.Failed
         currentGeneration = null
-        lastHandoverTickMillis = null
+        initialLoadPending = false
         return true
     }
 
-    /** 播放控制层上报状态：已接手后首个就绪、切集或终态上报即结束入口阶段。 */
+    /**
+     * 播放控制层上报状态：已接手后首个就绪或切集即结束入口阶段，首次加载窗口同时关闭。
+     * 已结束与空闲也结束入口阶段，但保留首次加载窗口：加载失败事件随后到达时仍要退回列表。
+     */
     fun onPlaybackUpdate(playbackState: PlaybackState, switching: Boolean) {
         if (phase != EntryPhase.Accepted) return
-        if (
-            switching ||
-            playbackState.isReady ||
-            playbackState == PlaybackState.Ended ||
-            playbackState == PlaybackState.Idle
-        ) {
+        if (switching || playbackState.isReady) {
             phase = null
-            lastHandoverTickMillis = null
+            initialLoadPending = false
+            return
+        }
+        if (playbackState == PlaybackState.Ended || playbackState == PlaybackState.Idle) {
+            phase = null
         }
     }
 
@@ -144,36 +125,28 @@ class PlaybackEntryState {
                 (phase == EntryPhase.Preparing || phase == EntryPhase.AwaitingHandover || phase == EntryPhase.Accepted)
             )
 
-    /** 准备期与首次加载（非切集）只允许返回。 */
+    /** 准备期与首次加载（非切集）只允许返回与不依赖加载的控件。 */
     fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
         phase.isPreparingPhase || isInitialLoading(playbackState, switching)
 
     /**
-     * 首次加载失败：只接受带当前代际的首次加载失败，并且只对在播放页里准备的打开生效。
-     * 音频首播失败留在播放页。
+     * 首次加载失败：只接受当前代际、首次加载窗口内、且是在播放页里准备的打开。
+     * 窗口外的后续播放失败与音频首播失败都不关播放页。
      */
     fun consumeInitialFailure(generation: Int, firstLoad: Boolean): Boolean {
-        if (!firstLoad || !preparesInPage || !isCurrent(generation)) return false
-        // 准备中还没有交给控制层，不可能有本次加载的失败；此时只可能是上一会话的迟到上报。
-        if (phase == EntryPhase.Preparing) return false
+        if (!firstLoad || !preparesInPage || !initialLoadPending || !isCurrent(generation)) return false
+        initialLoadPending = false
         phase = EntryPhase.Failed
         currentGeneration = null
-        lastHandoverTickMillis = null
         return true
     }
 
-    /** 离开播放页或开始另一次打开：作废当前代际与阶段，迟到的准备结果一律丢弃。 */
+    /** 离开播放页或开始另一次打开：作废当前代际、阶段与首次加载窗口，迟到的结果一律丢弃。 */
     fun cancelEntry() {
         phase = null
         currentGeneration = null
         preparesInPage = false
-        handoverElapsedMillis = 0L
-        lastHandoverTickMillis = null
-    }
-
-    companion object {
-        /** 准备完成到播放控制层接手的最长前台等待；到点中止本次打开并回滚。 */
-        const val HANDOVER_TIMEOUT_MILLIS = 5_000L
+        initialLoadPending = false
     }
 }
 

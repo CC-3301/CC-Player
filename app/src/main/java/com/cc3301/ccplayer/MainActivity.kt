@@ -105,8 +105,9 @@ import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
+import com.cc3301.ccplayer.ui.EntryHandoverWatchdog
 import com.cc3301.ccplayer.ui.failedEntryExit
-import com.cc3301.ccplayer.ui.handoverTimeoutOutcome
+import com.cc3301.ccplayer.ui.handoverTimeoutMessage
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.isPreparingPhase
 import com.cc3301.ccplayer.ui.mediaFailureText
@@ -248,6 +249,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
     /** 等待接手兜底的 ticker；只在前台运行，退后台即停。 */
     private var entryHandoverJob: Job? = null
+
+    /** 等待接手的兜底计时：按真实时间差累计，暂停不计。 */
+    private val handoverWatchdog = EntryHandoverWatchdog(nowMillis = SystemClock::elapsedRealtime)
 
     /** 点开媒体：视频先进入播放页，音频等媒体准备完成后进入。 */
     private val playbackEntryOpener by lazy {
@@ -751,11 +755,12 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
      */
     private fun enterPlayer(newSession: Boolean) {
         if (newSession) {
-            // 新的打开开始时先收掉上一次的接手兜底 ticker。
+            // 新的打开开始时先收掉上一次的接手兜底 ticker，并重新起算等待。
             stopEntryHandoverTimer()
+            handoverWatchdog.reset()
             sessionOrientation.beginPlayback()
             // 打开另一个目标：旧片立即停止出声、屏上旧画面撤掉，方向与比例按新目标判定。
-            playback?.controller?.beginOpenHandover(playbackEntry.generation)
+            playback?.controller?.beginOpenHandover()
         } else {
             sessionOrientation.clearOverride()
         }
@@ -773,6 +778,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     /** 起播前连不上时用提示条告知。 */
     private fun showFailure(failure: MediaFailure) {
         Toast.makeText(this, getString(mediaFailureText(failure)), Toast.LENGTH_LONG).show()
+    }
+
+    /** 播放失败用既有文案提示；接手兜底超时也走这一条。 */
+    private fun showPlaybackFailure() {
+        Toast.makeText(this, getString(handoverTimeoutMessage()), Toast.LENGTH_SHORT).show()
     }
 
     /** 回环代理与网络会话按需建立，关播放页时一并释放。 */
@@ -813,30 +823,24 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         if (!playerVisible) return
         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
         if (playbackEntry.phase != EntryPhase.AwaitingHandover) return
+        handoverWatchdog.resume()
         entryHandoverJob = lifecycleScope.launch {
             try {
                 while (isActive && playbackEntry.phase == EntryPhase.AwaitingHandover) {
                     delay(ENTRY_HANDOVER_TICK_MILLIS)
                     if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) break
-                    val timedOut = playbackEntry.onHandoverTick(
-                        nowMillis = SystemClock.elapsedRealtime(),
-                        foreground = true,
-                    )
-                    if (!timedOut) continue
+                    if (!handoverWatchdog.onTick()) continue
                     if (playbackEntry.failAwaitingHandover()) {
-                        // 兜底到点也要给既有失败提示，再按现有会话回滚。
-                        val controller = playback?.controller
-                        val outcome = handoverTimeoutOutcome(
-                            playbackState = controller?.state?.value,
-                            atEpisodeEnd = controller?.atEpisodeEnd == true,
-                        )
-                        showFailure(outcome.failure)
+                        // 兜底到点用播放失败的既有文案提示，再按现有会话回滚。
+                        showPlaybackFailure()
                         diagnostics.log { "打开交接超时: 播放控制层未接手" }
-                        when (outcome.exit) {
+                        val controller = playback?.controller
+                        when (failedEntryExit(controller?.state?.value, controller?.atEpisodeEnd == true)) {
                             FailedEntryExit.LeavePlayerPage -> leavePlayerPage()
                             FailedEntryExit.StopPlayback -> closePlayer()
                         }
                     }
+                    handoverWatchdog.reset()
                     break
                 }
             } finally {
@@ -846,11 +850,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         }
     }
 
-    /** 停表并丢弃基线：退后台、接手、失败与离开播放页都调用。 */
+    /** 停表并丢弃基线：退后台、接手、失败与离开播放页都调用；已累计时长保留。 */
     private fun stopEntryHandoverTimer() {
         entryHandoverJob?.cancel()
         entryHandoverJob = null
-        playbackEntry.pauseHandoverTimer()
+        handoverWatchdog.pause()
     }
 
     /** 引擎就绪且 Surface 已就位时才开始播放。 */

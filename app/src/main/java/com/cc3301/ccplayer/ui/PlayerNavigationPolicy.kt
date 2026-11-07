@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.ui
 
-import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackState
 
@@ -20,21 +19,6 @@ fun failedEntryExit(playbackState: PlaybackState?, atEpisodeEnd: Boolean): Faile
     } else {
         FailedEntryExit.StopPlayback
     }
-
-/** 接手兜底到点使用的既有失败提示。 */
-val HANDOVER_TIMEOUT_FAILURE: MediaFailure = MediaFailure.Unknown
-
-/** 接手兜底到点的收尾：先给既有失败提示，再按现有会话撤回或退出。 */
-data class EntryFailureOutcome(
-    val failure: MediaFailure,
-    val exit: FailedEntryExit,
-)
-
-fun handoverTimeoutOutcome(playbackState: PlaybackState?, atEpisodeEnd: Boolean): EntryFailureOutcome =
-    EntryFailureOutcome(
-        failure = HANDOVER_TIMEOUT_FAILURE,
-        exit = failedEntryExit(playbackState, atEpisodeEnd),
-    )
 
 /** 播放页系统返回的处理结果。 */
 enum class PlayerBackAction {

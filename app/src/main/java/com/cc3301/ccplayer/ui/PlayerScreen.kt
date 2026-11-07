@@ -484,7 +484,7 @@ fun PlayerScreen(
     BackHandler(enabled = playerBackClosesPanel(panels.anyOpen)) { panels.close() }
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
-    // 已打开的面板保持打开，内容按不可用外观处理。
+    // 已打开的面板保持打开，仍被拦截的操作按不可用外观处理。
     LaunchedEffect(switching, initialLoading) {
         controls.onLoadingPhaseChanged()
     }
@@ -778,10 +778,7 @@ fun PlayerScreen(
                         onCancelSleepTimer()
                         panels.close()
                     },
-                    enabled = playerTopBarMoreEnabled(
-                        preparing = preparing,
-                        allowed = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
-                    ),
+                    enabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
                     panelWidth = morePanelWidth,
                     panelMaxHeight = morePanelMaxHeight,
                     modifier = Modifier
@@ -816,20 +813,14 @@ fun PlayerScreen(
                     initialLoading = initialLoading,
                     restoring = restoring,
                 ),
-                moreEnabled = playerTopBarMoreEnabled(
-                    preparing = preparing,
-                    allowed = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
-                ),
-                moreAppearanceEnabled = playerTopBarMoreEnabled(
-                    preparing = preparing,
-                    allowed = actionLooksEnabled(
-                        PlayerAction.More,
-                        canGoPrevious = canGoPrevious,
-                        canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
-                    ),
+                moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
+                moreAppearanceEnabled = actionLooksEnabled(
+                    PlayerAction.More,
+                    canGoPrevious = canGoPrevious,
+                    canGoNext = canGoNext,
+                    switching = switching,
+                    initialLoading = initialLoading,
+                    restoring = restoring,
                 ),
                 preparing = preparing,
                 onBack = onClose,

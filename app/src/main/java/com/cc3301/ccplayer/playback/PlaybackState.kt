@@ -16,7 +16,7 @@ sealed interface PlaybackState {
     data object Ended : PlaybackState
 }
 
-/** 首次加载缓冲：加载中且不在切集；此时只允许返回。 */
+/** 首次加载缓冲：加载中且不在切集；此时只放行不依赖加载的控件。 */
 fun isInitialLoading(state: PlaybackState, switching: Boolean): Boolean =
     state == PlaybackState.Loading && !switching
 

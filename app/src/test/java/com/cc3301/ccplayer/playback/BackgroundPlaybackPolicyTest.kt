@@ -149,11 +149,11 @@ class BackgroundPlaybackPolicyTest {
     }
 
     @Test
-    fun `目标加载期间通知栏只保留上下集`() {
+    fun `目标加载期间通知栏保留上下集与播放暂停`() {
         policy.setAppInForeground(true)
 
         assertEquals(
-            listOf(MediaSessionAction.Previous, MediaSessionAction.Next),
+            listOf(MediaSessionAction.Previous, MediaSessionAction.Play, MediaSessionAction.Next),
             policy.notificationActions(
                 PlaybackState.Loading,
                 switching = true,
@@ -179,7 +179,15 @@ class BackgroundPlaybackPolicyTest {
             }
         }
 
-        assertEquals(listOf(MediaSessionAction.Previous, MediaSessionAction.Next), applied)
+        assertEquals(
+            listOf(
+                MediaSessionAction.Play,
+                MediaSessionAction.Pause,
+                MediaSessionAction.Previous,
+                MediaSessionAction.Next,
+            ),
+            applied,
+        )
     }
 
     @Test

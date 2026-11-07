@@ -125,7 +125,7 @@ class PlaybackControllerAudioTest {
     }
 
     private fun open(vararg files: MediaFile) {
-        controller.openPlaylistForTest(files.toList(), files.first())
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files.toList(), files.first())
     }
 
     private companion object {

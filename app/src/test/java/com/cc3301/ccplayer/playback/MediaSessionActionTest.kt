@@ -114,11 +114,10 @@ class MediaSessionActionTest {
     }
 
     @Test
-    fun `switching allows only previous and next media actions`() {
+    fun `switching allows every media action`() {
         MediaSessionAction.entries.forEach { action ->
-            assertEquals(
+            assertTrue(
                 action.name,
-                action == MediaSessionAction.Previous || action == MediaSessionAction.Next,
                 mediaActionAllowed(action, switching = true, initialLoading = false, restoring = false),
             )
         }
@@ -139,7 +138,7 @@ class MediaSessionActionTest {
     }
 
     @Test
-    fun `dispatch blocks play while the target is loading`() {
+    fun `dispatch lets play and next through while the target is loading`() {
         val applied = mutableListOf<MediaSessionAction>()
 
         dispatchMediaAction(
@@ -155,7 +154,7 @@ class MediaSessionActionTest {
             restoring = false,
         ) { applied += it }
 
-        assertEquals(listOf(MediaSessionAction.Next), applied)
+        assertEquals(listOf(MediaSessionAction.Play, MediaSessionAction.Next), applied)
     }
 
     @Test
@@ -294,7 +293,10 @@ class MediaSessionActionTest {
             ),
         )
         assertEquals(
-            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or PlaybackStateCompat.ACTION_SKIP_TO_NEXT,
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE,
             playbackStateActions(
                 availableMediaActions(switching = true, initialLoading = false, restoring = false),
             ),
@@ -309,6 +311,6 @@ class MediaSessionActionTest {
 
     private fun open(vararg names: String, current: String) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
-        controller.openPlaylistForTest(files, files.first { it.name == current })
+        controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first { it.name == current })
     }
 }
