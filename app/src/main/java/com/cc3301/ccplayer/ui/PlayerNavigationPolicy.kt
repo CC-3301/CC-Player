@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackState
 
@@ -19,6 +20,21 @@ fun failedEntryExit(playbackState: PlaybackState?, atEpisodeEnd: Boolean): Faile
     } else {
         FailedEntryExit.StopPlayback
     }
+
+/** 接手兜底到点使用的既有失败提示。 */
+val HANDOVER_TIMEOUT_FAILURE: MediaFailure = MediaFailure.Unknown
+
+/** 接手兜底到点的收尾：先给既有失败提示，再按现有会话撤回或退出。 */
+data class EntryFailureOutcome(
+    val failure: MediaFailure,
+    val exit: FailedEntryExit,
+)
+
+fun handoverTimeoutOutcome(playbackState: PlaybackState?, atEpisodeEnd: Boolean): EntryFailureOutcome =
+    EntryFailureOutcome(
+        failure = HANDOVER_TIMEOUT_FAILURE,
+        exit = failedEntryExit(playbackState, atEpisodeEnd),
+    )
 
 /** 播放页系统返回的处理结果。 */
 enum class PlayerBackAction {
@@ -54,6 +70,8 @@ fun playerBackAction(
 ): PlayerBackAction = when {
     // 恢复原片期间 switching 仍为真，必须先按恢复态退出播放页。
     restoring -> PlayerBackAction.StopAndLeave
+    // 失败优先于准备期：已经失败时返回一律结束播放，不再撤回交接。
+    failed -> PlayerBackAction.StopAndLeave
     // 准备期：有旧会话就撤回交接，否则按普通退出处理；片尾停留不撤回。
     entryPhase.isPreparingPhase ->
         if (state != PlaybackState.Idle && !atEpisodeEnd) {
@@ -61,7 +79,7 @@ fun playerBackAction(
         } else {
             PlayerBackAction.StopAndLeave
         }
-    initialLoading || failed -> PlayerBackAction.StopAndLeave
+    initialLoading -> PlayerBackAction.StopAndLeave
     switching -> PlayerBackAction.CancelSwitch
     state == PlaybackState.Idle || state == PlaybackState.Loading -> PlayerBackAction.StopAndLeave
     inAppBackgroundPlayback -> PlayerBackAction.LeaveAndContinue

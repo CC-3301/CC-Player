@@ -62,7 +62,7 @@ class SettlementSequenceTest {
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
         )
-        controller.openPlaylist(files, files.first())
+        controller.openPlaylistForTest(files, files.first())
         engine.reportMediaLoaded()
         engine.reportPositionChanged(60_000, 600_000)
         return controller

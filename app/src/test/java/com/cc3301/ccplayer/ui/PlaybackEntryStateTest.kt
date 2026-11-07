@@ -25,8 +25,17 @@ class PlaybackEntryStateTest {
         state.begin(preparing = true)
 
         assertEquals(EntryPhase.Preparing, state.phase)
-        assertTrue(state.isPreparing)
+        assertTrue(state.preparingUi)
         assertTrue(state.initialLoading(PlaybackState.Idle, switching = false))
+    }
+
+    @Test
+    fun `音频打开同样从准备中开始但不显示准备期界面`() {
+        val generation = state.begin(preparing = false)
+
+        assertEquals(EntryPhase.Preparing, state.phase)
+        assertFalse(state.preparingUi)
+        assertTrue(state.isCurrent(generation))
     }
 
     @Test
@@ -36,15 +45,15 @@ class PlaybackEntryStateTest {
         assertTrue(state.prepared(generation))
 
         assertEquals(EntryPhase.AwaitingHandover, state.phase)
-        assertTrue(state.isPreparing)
+        assertTrue(state.preparingUi)
     }
 
     @Test
     fun `接手后恢复界面`() {
-        val generation = acceptedEntry()
+        acceptedEntry()
 
         assertEquals(EntryPhase.Accepted, state.phase)
-        assertFalse(state.isPreparing)
+        assertFalse(state.preparingUi)
         assertTrue(state.initialLoading(PlaybackState.Loading, switching = false))
     }
 
@@ -59,13 +68,40 @@ class PlaybackEntryStateTest {
     }
 
     @Test
+    fun `接手后转入切集结束入口阶段`() {
+        acceptedEntry()
+
+        state.onPlaybackUpdate(PlaybackState.Loading, switching = true)
+
+        assertNull(state.phase)
+    }
+
+    @Test
+    fun `接手的打开在已结束时报终态出口`() {
+        acceptedEntry()
+
+        state.onPlaybackUpdate(PlaybackState.Ended, switching = false)
+
+        assertNull(state.phase)
+    }
+
+    @Test
+    fun `接手的打开在空闲时报终态出口`() {
+        acceptedEntry()
+
+        state.onPlaybackUpdate(PlaybackState.Idle, switching = false)
+
+        assertNull(state.phase)
+    }
+
+    @Test
     fun `准备期不受上一会话的就绪上报影响`() {
         state.begin(preparing = true)
 
         state.onPlaybackUpdate(PlaybackState.Playing, switching = false)
 
         assertEquals(EntryPhase.Preparing, state.phase)
-        assertTrue(state.isPreparing)
+        assertTrue(state.preparingUi)
     }
 
     @Test
@@ -79,48 +115,66 @@ class PlaybackEntryStateTest {
     }
 
     @Test
-    fun `接手后转入切集结束入口阶段`() {
-        acceptedEntry()
-
-        state.onPlaybackUpdate(PlaybackState.Loading, switching = true)
-
-        assertNull(state.phase)
-    }
-
-    @Test
     fun `准备期不计等待接手兜底`() {
         state.begin(preparing = true)
 
-        assertFalse(state.onHandoverTick(deltaMillis = 10_000, foreground = true))
+        state.onHandoverTick(nowMillis = 1_000, foreground = true)
+        assertFalse(state.onHandoverTick(nowMillis = 60_000, foreground = true))
     }
 
     @Test
     fun `已接手后不再按等待接手兜底`() {
         acceptedEntry()
 
-        assertFalse(state.onHandoverTick(deltaMillis = 10_000, foreground = true))
-        assertFalse(state.abortAwaitingHandover())
+        state.onHandoverTick(nowMillis = 1_000, foreground = true)
+        assertFalse(state.onHandoverTick(nowMillis = 60_000, foreground = true))
+        assertFalse(state.failAwaitingHandover())
     }
 
     @Test
-    fun `等待接手只在前台累计`() {
+    fun `等待接手按实际时间差累计且只算前台`() {
         val generation = state.begin(preparing = true)
         state.prepared(generation)
 
-        assertFalse(state.onHandoverTick(deltaMillis = 4_000, foreground = false))
-        assertFalse(state.onHandoverTick(deltaMillis = 4_000, foreground = true))
-        assertTrue(state.onHandoverTick(deltaMillis = 1_000, foreground = true))
+        // 第一次 tick 只建立基线。
+        state.onHandoverTick(nowMillis = 1_000, foreground = true)
+        // 退后台：基线清掉，后台这段不算。
+        state.onHandoverTick(nowMillis = 2_000, foreground = false)
+        state.onHandoverTick(nowMillis = 30_000, foreground = true)
+        assertFalse("回前台首 tick 只重建基线", state.onHandoverTick(nowMillis = 31_000, foreground = true))
+        assertFalse(state.onHandoverTick(nowMillis = 34_500, foreground = true))
+        assertTrue(state.onHandoverTick(nowMillis = 36_000, foreground = true))
     }
 
     @Test
-    fun `兜底到点中止仍在等待接手的打开`() {
+    fun `暂停计时后不把暂停期间算进前台时长`() {
         val generation = state.begin(preparing = true)
         state.prepared(generation)
-        state.onHandoverTick(deltaMillis = 5_000, foreground = true)
+        state.onHandoverTick(nowMillis = 1_000, foreground = true)
 
-        assertTrue(state.abortAwaitingHandover())
+        state.pauseHandoverTimer()
+        state.onHandoverTick(nowMillis = 40_000, foreground = true)
+
+        assertFalse(state.onHandoverTick(nowMillis = 42_000, foreground = true))
+    }
+
+    @Test
+    fun `兜底到点按失败收尾并回滚`() {
+        val generation = state.begin(preparing = true)
+        state.prepared(generation)
+        state.onHandoverTick(nowMillis = 1_000, foreground = true)
+        assertTrue(state.onHandoverTick(nowMillis = 6_000, foreground = true))
+
+        assertTrue(state.failAwaitingHandover())
         assertEquals(EntryPhase.Failed, state.phase)
-        assertFalse(state.abortAwaitingHandover())
+        // 兜底到点：既有失败提示 + 有旧会话且不在片尾时撤回；没有旧会话时结束播放。
+        val rollback = handoverTimeoutOutcome(PlaybackState.Playing, atEpisodeEnd = false)
+        assertEquals(HANDOVER_TIMEOUT_FAILURE, rollback.failure)
+        assertEquals(FailedEntryExit.LeavePlayerPage, rollback.exit)
+        assertEquals(
+            FailedEntryExit.StopPlayback,
+            handoverTimeoutOutcome(PlaybackState.Idle, atEpisodeEnd = false).exit,
+        )
     }
 
     @Test
@@ -143,40 +197,79 @@ class PlaybackEntryStateTest {
     }
 
     @Test
-    fun `取消后旧代际的结果被丢弃`() {
+    fun `失败后立即作废代际`() {
+        val generation = state.begin(preparing = false)
+
+        assertTrue(state.failed(generation))
+        assertEquals(EntryPhase.Failed, state.phase)
+        assertFalse(state.isCurrent(generation))
+        assertFalse(state.failed(generation))
+    }
+
+    @Test
+    fun `取消打开后阶段与代际都清空`() {
         val generation = state.begin(preparing = true)
         state.cancelEntry()
 
-        assertEquals(EntryPhase.Cancelled, state.phase)
+        assertNull(state.phase)
+        assertFalse(state.preparingUi)
+        assertFalse(state.isCurrent(generation))
         assertFalse(state.prepared(generation))
         assertFalse(state.failed(generation))
-        assertFalse(state.isCurrent(generation))
     }
 
     @Test
     fun `准备期的加载失败不算首次加载失败`() {
-        state.begin(preparing = true)
+        val generation = state.begin(preparing = true)
 
-        assertFalse(state.consumeInitialFailure())
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
         assertEquals(EntryPhase.Preparing, state.phase)
     }
 
     @Test
-    fun `等待接手的加载失败不算首次加载失败`() {
-        val generation = state.begin(preparing = true)
-        state.prepared(generation)
+    fun `接手前旧代际的首次加载失败被丢弃`() {
+        val generation = acceptedEntry()
+        val stale = generation - 1
 
-        assertFalse(state.consumeInitialFailure())
-        assertEquals(EntryPhase.AwaitingHandover, state.phase)
+        assertFalse(state.consumeInitialFailure(stale, firstLoad = true))
+        assertEquals(EntryPhase.Accepted, state.phase)
     }
 
     @Test
-    fun `接手后的首次加载失败只消费一次`() {
-        acceptedEntry()
+    fun `接手的首次加载失败只消费一次`() {
+        val generation = acceptedEntry()
 
-        assertTrue(state.consumeInitialFailure())
+        assertTrue(state.consumeInitialFailure(generation, firstLoad = true))
         assertEquals(EntryPhase.Failed, state.phase)
-        assertFalse(state.consumeInitialFailure())
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
+    }
+
+    @Test
+    fun `非首次加载失败不关播放页`() {
+        val generation = acceptedEntry()
+
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = false))
+        assertEquals(EntryPhase.Accepted, state.phase)
+    }
+
+    @Test
+    fun `音频首播失败留在播放页`() {
+        val generation = state.begin(preparing = false)
+        state.prepared(generation)
+        state.accepted(generation)
+
+        assertFalse(state.consumeInitialFailure(generation, firstLoad = true))
+    }
+
+    @Test
+    fun `首次加载失败在入口阶段已结束后仍按代际收尾`() {
+        val generation = acceptedEntry()
+        // 控制层先上报 Ended（终态出口清掉阶段），失败事件随后到达。
+        state.onPlaybackUpdate(PlaybackState.Ended, switching = false)
+        assertNull(state.phase)
+
+        assertTrue(state.consumeInitialFailure(generation, firstLoad = true))
+        assertEquals(EntryPhase.Failed, state.phase)
     }
 
     @Test
@@ -202,24 +295,14 @@ class PlaybackEntryStateTest {
     }
 
     @Test
-    fun `音频准备完成后进入不显示准备缓冲`() {
-        val generation = state.begin(preparing = false)
-
-        assertNull(state.phase)
-        assertTrue(state.prepared(generation))
-        assertNull(state.phase)
-        assertFalse(state.showsBuffering(controllerBuffering = false))
-        assertFalse(state.isPreparing)
-    }
-
-    @Test
-    fun `音频首播失败留在播放页`() {
+    fun `音频进入时不显示入口缓冲`() {
         val generation = state.begin(preparing = false)
         state.prepared(generation)
         state.accepted(generation)
 
-        assertFalse(state.consumeInitialFailure())
-        assertNull(state.phase)
+        assertFalse(state.showsBuffering(controllerBuffering = false))
+        assertTrue(state.showsBuffering(controllerBuffering = true))
+        assertEquals(EntryPhase.Accepted, state.phase)
     }
 
     @Test
@@ -231,14 +314,5 @@ class PlaybackEntryStateTest {
         assertTrue(second > first)
         assertTrue(state.isCurrent(second))
         assertFalse(state.isCurrent(first))
-    }
-
-    @Test
-    fun `清空后不再属于当前打开`() {
-        val generation = state.begin(preparing = true)
-        state.reset()
-
-        assertNull(state.phase)
-        assertFalse(state.isCurrent(generation))
     }
 }

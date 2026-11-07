@@ -155,7 +155,7 @@ class NetworkPlaybackProgressTest {
             scope,
             nowMillis = { 0L },
         ).also { controller ->
-            controller.openPlaylist(listOf(entry), entry)
+            controller.openPlaylistForTest(listOf(entry), entry)
             engine.reportMediaLoaded()
         }
 

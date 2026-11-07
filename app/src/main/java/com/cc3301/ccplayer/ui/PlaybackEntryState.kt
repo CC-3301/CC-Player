@@ -14,17 +14,14 @@ enum class EntryPhase {
     /** 等待接手：已经准备好，但还没交给播放控制层。 */
     AwaitingHandover,
 
-    /** 已接手：播放控制层已接受这次打开，入口只等首个就绪或切集上报。 */
+    /** 已接手：播放控制层已接受这次打开，入口只等首个就绪、切集或终态上报。 */
     Accepted,
 
     /** 失败：准备失败、目标不在列表或等待接手超时。 */
     Failed,
-
-    /** 已取消：用户离开播放页或开始另一次打开。 */
-    Cancelled,
 }
 
-/** 准备期：界面只留返回、底栏隐藏，返回按撤回或退出处理。 */
+/** 准备期：返回按撤回或退出处理，界面只保留返回与更多。 */
 val EntryPhase?.isPreparingPhase: Boolean
     get() = this == EntryPhase.Preparing || this == EntryPhase.AwaitingHandover
 
@@ -42,25 +39,31 @@ class PlaybackEntryState {
 
     private var generationSerial = 0
     private var currentGeneration: Int? = null
-    private var awaitingHandoverMillis = 0L
+
+    /** 这次打开是在播放页里继续准备（视频）；音频的准备在浏览页完成。 */
+    private var preparesInPage = false
+
+    private var handoverElapsedMillis = 0L
+    private var lastHandoverTickMillis: Long? = null
 
     /** 当前这次打开的代际；没有进行中的打开时为 0。 */
     val generation: Int get() = currentGeneration ?: 0
 
-    /** 准备期：界面只留返回、底栏隐藏。 */
-    val isPreparing: Boolean get() = phase.isPreparingPhase
+    /** 准备期界面：只给在播放页里等待准备的打开，音频进入时不显示准备期。 */
+    val preparingUi: Boolean get() = preparesInPage && phase.isPreparingPhase
 
     /**
      * 开始一次新的打开并分配代际。
      *
-     * [preparing] 为真表示准备在播放页内继续（视频），进入准备中；
-     * 为假表示准备已经在浏览页完成（音频），进入时不显示准备期界面。
+     * [preparing] 只决定准备期界面是否显示；准备本身总是在当前页面进行。
      */
     fun begin(preparing: Boolean): Int {
         generationSerial++
         currentGeneration = generationSerial
-        awaitingHandoverMillis = 0L
-        phase = if (preparing) EntryPhase.Preparing else null
+        preparesInPage = preparing
+        handoverElapsedMillis = 0L
+        lastHandoverTickMillis = null
+        phase = EntryPhase.Preparing
         return generationSerial
     }
 
@@ -81,67 +84,91 @@ class PlaybackEntryState {
         return true
     }
 
-    /** 准备失败或打开被中止；不是当前打开、已经结束时返回 false，调用方据此丢弃。 */
+    /** 准备失败或打开被中止；不是当前打开时返回 false，调用方据此丢弃。 */
     fun failed(generation: Int): Boolean {
         if (!isCurrent(generation)) return false
-        if (phase == EntryPhase.Failed || phase == EntryPhase.Cancelled) return false
         phase = EntryPhase.Failed
+        currentGeneration = null
+        lastHandoverTickMillis = null
         return true
     }
 
-    /** 等待接手阶段的前台计时；累计到时限返回 true。其余阶段不计时。 */
-    fun onHandoverTick(deltaMillis: Long, foreground: Boolean): Boolean {
-        if (phase != EntryPhase.AwaitingHandover || !foreground) return false
-        awaitingHandoverMillis += deltaMillis.coerceAtLeast(0L)
-        return awaitingHandoverMillis >= HANDOVER_TIMEOUT_MILLIS
+    /**
+     * 等待接手阶段的计时：只累计两次 tick 之间的实际前台时长。
+     * 不在该阶段或已退后台时只清基线，不累计。
+     */
+    fun onHandoverTick(nowMillis: Long, foreground: Boolean): Boolean {
+        if (phase != EntryPhase.AwaitingHandover || !foreground) {
+            lastHandoverTickMillis = null
+            return false
+        }
+        val last = lastHandoverTickMillis
+        lastHandoverTickMillis = nowMillis
+        if (last == null) return false
+        handoverElapsedMillis += (nowMillis - last).coerceAtLeast(0L)
+        return handoverElapsedMillis >= HANDOVER_TIMEOUT_MILLIS
+    }
+
+    /** 退后台或停止 ticker 时丢弃基线，避免把暂停期间算进前台时长。 */
+    fun pauseHandoverTimer() {
+        lastHandoverTickMillis = null
     }
 
     /** 兜底到点：中止仍在等待接手的打开；已经接手或已结束时返回 false。 */
-    fun abortAwaitingHandover(): Boolean {
+    fun failAwaitingHandover(): Boolean {
         if (phase != EntryPhase.AwaitingHandover) return false
         phase = EntryPhase.Failed
+        currentGeneration = null
+        lastHandoverTickMillis = null
         return true
     }
 
-    /** 播放控制层上报状态：已接手后首次就绪或转入切集，入口阶段到此结束。 */
+    /** 播放控制层上报状态：已接手后首个就绪、切集或终态上报即结束入口阶段。 */
     fun onPlaybackUpdate(playbackState: PlaybackState, switching: Boolean) {
         if (phase != EntryPhase.Accepted) return
-        if (switching || playbackState.isReady) {
+        if (
+            switching ||
+            playbackState.isReady ||
+            playbackState == PlaybackState.Ended ||
+            playbackState == PlaybackState.Idle
+        ) {
             phase = null
-            awaitingHandoverMillis = 0L
+            lastHandoverTickMillis = null
         }
     }
 
     /** 入口阶段未结束时立即显示缓冲指示；首个就绪后与控制层的缓冲状态交接。 */
     fun showsBuffering(controllerBuffering: Boolean): Boolean =
-        controllerBuffering || phase != null && phase != EntryPhase.Failed && phase != EntryPhase.Cancelled
+        controllerBuffering || (
+            preparesInPage &&
+                (phase == EntryPhase.Preparing || phase == EntryPhase.AwaitingHandover || phase == EntryPhase.Accepted)
+            )
 
     /** 准备期与首次加载（非切集）只允许返回。 */
     fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
         phase.isPreparingPhase || isInitialLoading(playbackState, switching)
 
-    /** 首次播放加载失败：返回是否应退回列表，并清除入口阶段。 */
-    fun consumeInitialFailure(): Boolean {
-        if (phase != EntryPhase.Accepted) return false
+    /**
+     * 首次加载失败：只接受带当前代际的首次加载失败，并且只对在播放页里准备的打开生效。
+     * 音频首播失败留在播放页。
+     */
+    fun consumeInitialFailure(generation: Int, firstLoad: Boolean): Boolean {
+        if (!firstLoad || !preparesInPage || !isCurrent(generation)) return false
+        // 准备中还没有交给控制层，不可能有本次加载的失败；此时只可能是上一会话的迟到上报。
+        if (phase == EntryPhase.Preparing) return false
         phase = EntryPhase.Failed
+        currentGeneration = null
+        lastHandoverTickMillis = null
         return true
     }
 
-    /** 离开播放页或开始另一次打开：作废当前代际，迟到的准备结果一律丢弃。 */
+    /** 离开播放页或开始另一次打开：作废当前代际与阶段，迟到的准备结果一律丢弃。 */
     fun cancelEntry() {
-        phase = when (phase) {
-            EntryPhase.Preparing, EntryPhase.AwaitingHandover -> EntryPhase.Cancelled
-            else -> null
-        }
-        currentGeneration = null
-        awaitingHandoverMillis = 0L
-    }
-
-    /** 清空入口阶段与代际。 */
-    fun reset() {
         phase = null
         currentGeneration = null
-        awaitingHandoverMillis = 0L
+        preparesInPage = false
+        handoverElapsedMillis = 0L
+        lastHandoverTickMillis = null
     }
 
     companion object {

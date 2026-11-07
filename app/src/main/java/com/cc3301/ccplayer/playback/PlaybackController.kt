@@ -58,6 +58,18 @@ class PlaybackController(
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
     /**
+     * 片尾事实：已结束、暂停在片尾位置，或打开交接窗口内旧会话自然播完。
+     * 返回与入口失败收尾都只认这一处，界面不再自行用状态与进度推算。
+     */
+    val atEpisodeEnd: Boolean
+        get() = _state.value == PlaybackState.Ended ||
+            stoppedAtEndOfEpisode() ||
+            generation?.handoverEndedAtEpisode == true
+
+    /** 当前加载代际号；测试用来验证控制层沿用入口分配的号。 */
+    internal val currentLoadGenerationId: Int get() = generation?.id ?: 0
+
+    /**
      * 播放意图：暂停为真。切集窗口状态是 Loading，播放键按这份意图解析显式命令。
      * 与 [state] 分开：状态由加载阶段决定，意图只记用户与切集起点要的播放结果。
      */
@@ -134,6 +146,9 @@ class PlaybackController(
     /** 入口分配的代际号：同一会话的每个加载代际都沿用它，控制层不另发一套序列。 */
     private var entryGeneration = 0
 
+    /** 入口声明的当前打开代际；openPlaylist 只接受与它相同的代际。 */
+    private var pendingOpenGeneration = 0
+
     /** 已下发给引擎的静音状态；只在推导结果变化时写一次。 */
     private var audioMuted = false
 
@@ -182,8 +197,8 @@ class PlaybackController(
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
 
     /** 播放失败事件，供界面提示“播放失败”。 */
-    private val _playbackFailures = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val playbackFailures: SharedFlow<Unit> = _playbackFailures.asSharedFlow()
+    private val _playbackFailures = MutableSharedFlow<PlaybackFailure>(extraBufferCapacity = 1)
+    val playbackFailures: SharedFlow<PlaybackFailure> = _playbackFailures.asSharedFlow()
 
     /** 播放失败收尾后为真：播放页返回据此退出播放页，而不是按片尾停留处理。 */
     private val _playbackFailed = MutableStateFlow(false)
@@ -508,14 +523,23 @@ class PlaybackController(
      * 以 [files] 为播放列表起播 [current]；列表只收媒体文件，按名称自然排序。
      * [directoryEntries] 是当前目录的原始条目（含被媒体列表过滤掉的外挂字幕），用于外挂字幕匹配。
      * [generation] 是入口分配的代际号，本次会话的加载代际沿用它。
-     * [current] 不在列表里时不动作并返回 false。
+     * 代际与入口声明的当前打开严格相等才接受；[current] 不在列表里时不动作并返回 false。
      */
     fun openPlaylist(
         files: List<MediaFile>,
         current: MediaFile,
+        generation: Int,
         directoryEntries: List<MediaFile> = emptyList(),
-        generation: Int = 0,
     ): Boolean {
+        if (generation <= 0) {
+            diagnostics.log { "打开被拒绝: 缺少入口代际" }
+            return false
+        }
+        if (pendingOpenGeneration != 0 && generation != pendingOpenGeneration) {
+            diagnostics.log { "打开被拒绝: 代际 $generation 不是当前打开 $pendingOpenGeneration" }
+            return false
+        }
+        pendingOpenGeneration = generation
         val playlist = files.filterNot { it.isDirectory }.sortedWith(byNaturalName)
         val index = playlist.indexOfFirst { it.location == current.location }
         if (index < 0) {
@@ -529,7 +553,7 @@ class PlaybackController(
         // 换片不向播放核心发停止：mpv 的 stop 紧跟 loadfile 会把新加载一并终止，
         // 旧片直接由新加载的 loadfile replace 替换。
         if (active) {
-            beginOpenHandover()
+            beginOpenHandover(generation)
             val decodeMode = _decodeMode.value
             replaceSession()
             _playlist.value = playlist
@@ -550,9 +574,11 @@ class PlaybackController(
      * 旧会话仍在首次加载、切集或恢复原片时同样按打开处理：旧加载的迟到回调一律丢弃。
      * 方向按新目标判定：屏上帧与比例在交接一开始就不再属于旧目标。
      */
-    fun beginOpenHandover() {
+    fun beginOpenHandover(generation: Int) {
+        if (generation <= 0) return
+        pendingOpenGeneration = generation
         if (!active) return
-        val current = generation ?: return
+        val current = this.generation ?: return
         if (current.isHandoverPending) return
         // 旧目标已就绪才留可恢复的画面事实；旧目标还在加载时没有可恢复的屏上帧。
         val snapshot = if (current.phase == LoadPhase.None) {
@@ -922,11 +948,14 @@ class PlaybackController(
         val handover = generation?.takeIf { it.isHandoverPending }
         val current = handover ?: newGeneration()
         generation = current
+        // 复用的交接代际换成新入口的号；同一会话内每次打开都保留自己的代际号。
+        if (handover != null) current.adoptGeneration(entryGeneration)
         current.kind = if (handover != null) LoadKind.Open else LoadKind.First
         current.phase = LoadPhase.Initial
         current.targetIndex = index
         current.targetUrl = media.playbackLocation
         current.clearHandover()
+        current.clearHandoverEndedAtEpisode()
         // 打开交接才静音：旧片已经停声，新目标出画面或加载完成前不放声；首次打开没有旧声可停。
         current.audioOwner = if (current.kind == LoadKind.Open) AudioOwner.Opening else AudioOwner.Target
         current.hasVideo = true
@@ -1794,8 +1823,18 @@ class PlaybackController(
 
     override fun onPlaybackEnded(loadToken: Int) {
         if (!active) return
-        // 只看当前代际的自然播完标记；旧目标的迟到结束与 keep-open 自动暂停的回声都不能把播完吞掉。
         val current = generation ?: return
+        // 打开交接窗口内旧会话自然播完：只记片尾事实，退出时按片尾处理；不触发连播。
+        if (
+            current.isHandoverPending &&
+            current.handoverLoadToken == loadToken &&
+            loadToken != NO_LOAD_TOKEN
+        ) {
+            current.noteHandoverEndedAtEpisode()
+            diagnostics.log { "播放结束: 打开交接期间旧会话播完" }
+            return
+        }
+        // 只看当前代际的自然播完标记；旧目标的迟到结束与 keep-open 自动暂停的回声都不能把播完吞掉。
         if (!current.accepts(loadToken, null) || loadPhase != LoadPhase.None) return
         // 片尾恢复的黑底不重复触发连播，等用户操作或新加载。
         if (holdBlack) return
@@ -2270,7 +2309,7 @@ class PlaybackController(
         // 完全没有接管信号时，原片画面还停在屏上，继续沿用、不铺黑底。
         abandonFrameOnFailure()
         restoreOrigin()
-        _playbackFailures.tryEmit(Unit)
+        _playbackFailures.tryEmit(PlaybackFailure(entryGeneration, firstLoad = false))
     }
 
     /** 真正出帧或目标没有视频轨：无帧失败窗口结束。 */
@@ -2401,7 +2440,7 @@ class PlaybackController(
                 if (source == LoadFailureSource.NoProgress) abandonFrameOnFailure()
                 if (source != LoadFailureSource.Core) engine.discardInFlightLoads()
                 restoreOrigin()
-                _playbackFailures.tryEmit(Unit)
+                _playbackFailures.tryEmit(PlaybackFailure(entryGeneration, firstLoad = false))
             }
             LoadPhase.Initial -> {
                 logLoadFailure(source, errorText)
@@ -2412,7 +2451,7 @@ class PlaybackController(
                 updateState(PlaybackState.Ended)
                 // 清掉引擎里的失败残留，再次打开时不会撞上旧的 END_FILE。
                 engine.stop()
-                _playbackFailures.tryEmit(Unit)
+                _playbackFailures.tryEmit(PlaybackFailure(entryGeneration, firstLoad = true))
             }
             LoadPhase.Restoring -> {
                 logLoadFailure(source, errorText)
@@ -2424,7 +2463,7 @@ class PlaybackController(
                 updateState(PlaybackState.Ended)
                 engine.stop()
                 // 同一次切集只提示一次“播放失败”。
-                if (reportFailure) _playbackFailures.tryEmit(Unit)
+                if (reportFailure) _playbackFailures.tryEmit(PlaybackFailure(entryGeneration, firstLoad = false))
             }
             // 打开交接没有在途加载，不会有失败；保持现状。
             LoadPhase.Pending -> Unit
@@ -2442,7 +2481,7 @@ class PlaybackController(
                 paused = true
                 settleIgnoredPauseEcho()
                 updateState(PlaybackState.Ended)
-                _playbackFailures.tryEmit(Unit)
+                _playbackFailures.tryEmit(PlaybackFailure(entryGeneration, firstLoad = false))
             }
         }
     }

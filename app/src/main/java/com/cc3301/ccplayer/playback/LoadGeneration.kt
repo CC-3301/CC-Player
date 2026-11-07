@@ -83,9 +83,16 @@ internal data class HandoverSnapshot(
  */
 internal class LoadGeneration(
     /** 入口分配的代际号；同一会话的每个加载代际都沿用它。 */
-    val id: Int,
+    id: Int,
     nowMillis: () -> Long,
 ) {
+    /** 入口代际号；打开交接复用本代际时由新入口的号替换。 */
+    var id: Int = id
+        private set
+
+    /** 打开交接期间旧会话自然播完：这次打开返回时按片尾处理。 */
+    var handoverEndedAtEpisode: Boolean = false
+        private set
     /** 当前进入方式；打开交接会推进本代际的进入方式。 */
     var kind: LoadKind = LoadKind.First
 
@@ -121,6 +128,10 @@ internal class LoadGeneration(
 
     /** 打开交接的撤销快照；新目标一开始加载就失效。 */
     var handover: HandoverSnapshot? = null
+        private set
+
+    /** 交接开始时旧会话的在途加载令牌：用于识别交接窗口内旧会话的播完事件。 */
+    var handoverLoadToken: Int = NO_LOAD_TOKEN
         private set
 
     /** 目标文件是否已打开、是否有视频轨。 */
@@ -175,6 +186,8 @@ internal class LoadGeneration(
      */
     fun startHandover(snapshot: HandoverSnapshot?) {
         kind = LoadKind.Open
+        handoverLoadToken = loadToken
+        handoverEndedAtEpisode = false
         phase = LoadPhase.Pending
         forgetLoad()
         audioOwner = AudioOwner.Opening
@@ -221,6 +234,21 @@ internal class LoadGeneration(
     /** 打开交接的新目标开始加载：撤销快照到此失效。 */
     fun clearHandover() {
         handover = null
+    }
+
+    /** 打开交接复用本代际：换成新入口分配到的号。 */
+    fun adoptGeneration(id: Int) {
+        this.id = id
+    }
+
+    /** 交接窗口内旧会话自然播完：只记片尾事实，不触发连播。 */
+    fun noteHandoverEndedAtEpisode() {
+        handoverEndedAtEpisode = true
+    }
+
+    /** 新目标开始加载：旧会话的片尾事实不再属于本代际。 */
+    fun clearHandoverEndedAtEpisode() {
+        handoverEndedAtEpisode = false
     }
 }
 

@@ -46,7 +46,7 @@ class PlaybackControllerOpenHandoverTest {
     fun `打开另一个目标先让旧片停止出声`() = runTest {
         val controller = playingController()
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
 
         // 旧片立即静音，不等新目标就绪，也不动播放列表与加载阶段。
         assertEquals(listOf(true), engine.muteCalls)
@@ -58,7 +58,7 @@ class PlaybackControllerOpenHandoverTest {
         val controller = playingController()
         assertTrue(controller.surfacePresentation.value.showsPicture)
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
 
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertTrue(controller.surfacePresentation.value.quietBlack)
@@ -71,7 +71,7 @@ class PlaybackControllerOpenHandoverTest {
         val controller = playingController()
         val oldToken = engine.currentLoadToken
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         // 旧片还在静音播放，迟到的完成与出帧都不属于新目标。
         engine.reportMediaLoaded(loadToken = oldToken)
         engine.reportFramePresented(loadToken = oldToken)
@@ -86,11 +86,11 @@ class PlaybackControllerOpenHandoverTest {
         val controller = playingController()
         val oldToken = engine.currentLoadToken
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         engine.reportVideoSizeChanged(1920, 1080)
         assertNull(controller.surfacePresentation.value.aspectRatio)
 
-        controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
         engine.reportVideoSizeChanged(1080, 1920)
         engine.reportMediaLoaded()
         assertEquals(1080.0 / 1920.0, controller.surfacePresentation.value.aspectRatio!!, 0.0001)
@@ -104,8 +104,8 @@ class PlaybackControllerOpenHandoverTest {
     fun `新目标加载期间保持静默黑屏，出画面后才放声`() = runTest {
         val controller = playingController()
 
-        controller.beginOpenHandover()
-        controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
+        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
 
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertTrue(controller.surfacePresentation.value.quietBlack)
@@ -128,7 +128,7 @@ class PlaybackControllerOpenHandoverTest {
         val controller = controller()
         open(controller, "a.mkv")
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         assertEquals(listOf(true), engine.muteCalls)
 
         // 旧目标迟到的完成既不上屏也不放声。
@@ -136,7 +136,7 @@ class PlaybackControllerOpenHandoverTest {
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertEquals(listOf(true), engine.muteCalls)
 
-        controller.openPlaylist(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
+        controller.openPlaylistForTest(listOf(mediaFile("b.mkv")), mediaFile("b.mkv"))
         engine.reportMediaLoaded()
 
         assertEquals(listOf(true, false), engine.muteCalls)
@@ -149,12 +149,12 @@ class PlaybackControllerOpenHandoverTest {
         controller.next()
         val switchToken = engine.currentLoadToken
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         engine.reportMediaLoaded(loadToken = switchToken)
         assertFalse(controller.surfacePresentation.value.showsPicture)
         assertEquals(listOf(true), engine.muteCalls)
 
-        controller.openPlaylist(listOf(mediaFile("d.mkv")), mediaFile("d.mkv"))
+        controller.openPlaylistForTest(listOf(mediaFile("d.mkv")), mediaFile("d.mkv"))
         engine.reportMediaLoaded()
 
         assertEquals(listOf(true, false), engine.muteCalls)
@@ -170,10 +170,10 @@ class PlaybackControllerOpenHandoverTest {
         engine.reportPlaybackFailed()
         assertEquals(PlaybackState.Paused, controller.state.value)
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         assertEquals(listOf(true), engine.muteCalls)
 
-        controller.openPlaylist(listOf(mediaFile("e.mkv")), mediaFile("e.mkv"))
+        controller.openPlaylistForTest(listOf(mediaFile("e.mkv")), mediaFile("e.mkv"))
         engine.reportMediaLoaded()
 
         assertEquals(listOf(true, false), engine.muteCalls)
@@ -183,8 +183,8 @@ class PlaybackControllerOpenHandoverTest {
     @Test
     fun `打开后首次加载失败，重发成功仍能放声`() = runTest {
         val controller = playingController()
-        controller.beginOpenHandover()
-        controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
+        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
         val firstToken = engine.currentLoadToken
 
         engine.reportPlaybackFailed()
@@ -205,7 +205,7 @@ class PlaybackControllerOpenHandoverTest {
     fun `打开交接期间改目标不留静音与黑屏`() = runTest {
         val controller = playingController()
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         // 交接还没落地就选下一集：切集接管，交接的静音随旧代际作废。
         controller.next()
 
@@ -234,7 +234,7 @@ class PlaybackControllerOpenHandoverTest {
     fun `交接期间停止会话不留静音`() = runTest {
         val controller = playingController()
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         controller.stop()
 
         assertEquals(listOf(true, false), engine.muteCalls)
@@ -244,8 +244,8 @@ class PlaybackControllerOpenHandoverTest {
     @Test
     fun `交接期间播完且不连播时结束会话并撤回静音`() = runTest {
         val controller = playingController()
-        controller.beginOpenHandover()
-        controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
+        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
         engine.reportMediaLoaded()
         controller.setAutoPlayNext(false)
 
@@ -258,8 +258,8 @@ class PlaybackControllerOpenHandoverTest {
     @Test
     fun `打开的目标两次失败后结束会话并撤回静音`() = runTest {
         val controller = playingController()
-        controller.beginOpenHandover()
-        controller.openPlaylist(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
+        controller.openPlaylistForTest(listOf(mediaFile("c.mkv")), mediaFile("c.mkv"))
 
         engine.reportPlaybackFailed()
         engine.reportPlaybackFailed()
@@ -273,7 +273,7 @@ class PlaybackControllerOpenHandoverTest {
     fun `取消打开交接后回到交接前的画面与出声`() = runTest {
         val controller = playingController()
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         controller.cancelOpenHandover()
 
         assertEquals(listOf(true, false), engine.muteCalls)
@@ -303,7 +303,7 @@ class PlaybackControllerOpenHandoverTest {
 
         // 预览先静音，随后打开另一个目标：两条来源叠加，命令仍只有一次。
         controller.updateSeekPreview(requestSeek = true, positionMillis = 70_000)
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = TEST_ENTRY_GENERATION)
         assertEquals(listOf(true), engine.muteCalls)
 
         // 预览收尾只撤自己那一份，不能替交接给旧片放声。
@@ -320,7 +320,7 @@ class PlaybackControllerOpenHandoverTest {
         val controller = playingController()
         val oldToken = engine.currentLoadToken
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = 9)
         val accepted = controller.openPlaylist(
             files = listOf(mediaFile("a.mkv")),
             current = mediaFile("b.mkv"),
@@ -335,24 +335,58 @@ class PlaybackControllerOpenHandoverTest {
     }
 
     @Test
-    fun `打开被接受时沿用入口代际开始加载`() = runTest {
-        val controller = playingController()
+    fun `打开被接受时代际等于入口分配的号`() = runTest {
+        val controller = controller()
 
-        controller.beginOpenHandover()
+        controller.beginOpenHandover(generation = 7)
         val accepted = controller.openPlaylist(
             files = listOf(mediaFile("c.mkv")),
             current = mediaFile("c.mkv"),
-            generation = 9,
+            generation = 7,
         )
 
         assertTrue(accepted)
+        assertEquals(7, controller.currentLoadGenerationId)
         assertEquals("root/c.mkv", engine.startedUrls.last())
+    }
+
+    @Test
+    fun `交接复用代际对象时换成新入口的号`() = runTest {
+        val controller = playingController()
+        assertEquals(TEST_ENTRY_GENERATION, controller.currentLoadGenerationId)
+
+        controller.beginOpenHandover(generation = 2)
+        val accepted = controller.openPlaylist(
+            files = listOf(mediaFile("c.mkv")),
+            current = mediaFile("c.mkv"),
+            generation = 2,
+        )
+
+        assertTrue(accepted)
+        // 交接复用同一代际对象：号必须换成新入口的，同一会话内仍然唯一。
+        assertEquals(2, controller.currentLoadGenerationId)
+    }
+
+    @Test
+    fun `代际不匹配的旧打开被拒绝`() = runTest {
+        val controller = playingController()
+
+        controller.beginOpenHandover(generation = 2)
+        val accepted = controller.openPlaylist(
+            files = listOf(mediaFile("c.mkv")),
+            current = mediaFile("c.mkv"),
+            generation = TEST_ENTRY_GENERATION,
+        )
+
+        assertFalse(accepted)
+        assertEquals(TEST_ENTRY_GENERATION, controller.currentLoadGenerationId)
+        assertEquals(listOf("root/a.mkv"), engine.startedUrls)
     }
 
     private fun mediaFile(name: String): MediaFile = MediaFile(name = name, location = "root/${name}")
 
     private fun open(controller: PlaybackController, vararg names: String) {
         val files = names.map { mediaFile(it) }
-        controller.openPlaylist(files, files.first())
+        controller.openPlaylistForTest(files, files.first())
     }
 }

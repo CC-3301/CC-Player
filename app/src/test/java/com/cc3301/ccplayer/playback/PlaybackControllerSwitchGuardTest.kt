@@ -591,8 +591,8 @@ class PlaybackControllerSwitchGuardTest {
         return controller
     }
 
-    private fun TestScope.collectFailures(controller: PlaybackController): List<Unit> {
-        val failures = mutableListOf<Unit>()
+    private fun TestScope.collectFailures(controller: PlaybackController): List<PlaybackFailure> {
+        val failures = mutableListOf<PlaybackFailure>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             controller.playbackFailures.collect { failures += it }
         }
@@ -605,6 +605,6 @@ class PlaybackControllerSwitchGuardTest {
         current: String = names.first(),
     ) {
         val files = names.map { MediaFile(name = it, location = "root/$it") }
-        controller.openPlaylist(files, files.first { it.name == current })
+        controller.openPlaylistForTest(files, files.first { it.name == current })
     }
 }

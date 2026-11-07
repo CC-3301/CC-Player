@@ -303,14 +303,17 @@ class PlayerBarsVisibilityTest {
     }
 
     @Test
-    fun `准备期顶栏只留返回且底栏隐藏`() {
-        assertFalse(playerTopBarExtrasVisible(preparing = true))
+    fun `准备期保留返回与更多并隐藏标题转屏与底栏`() {
+        assertFalse(playerTopBarTitleAndRotateVisible(preparing = true))
+        assertTrue(playerTopBarMoreEnabled(preparing = true, allowed = false))
         assertFalse(playerBottomBarVisible(barsShown = true, preparing = true))
     }
 
     @Test
     fun `接手后顶栏与底栏恢复`() {
-        assertTrue(playerTopBarExtrasVisible(preparing = false))
+        assertTrue(playerTopBarTitleAndRotateVisible(preparing = false))
+        assertTrue(playerTopBarMoreEnabled(preparing = false, allowed = true))
+        assertFalse(playerTopBarMoreEnabled(preparing = false, allowed = false))
         assertTrue(playerBottomBarVisible(barsShown = true, preparing = false))
         assertFalse(playerBottomBarVisible(barsShown = false, preparing = false))
     }

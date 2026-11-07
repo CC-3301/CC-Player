@@ -165,14 +165,16 @@ class PlaybackEntryOpenerTest {
         runCurrent()
 
         assertTrue("音频不预先进入播放页", recorder.events.isEmpty())
-        assertNull(entryState.phase)
+        assertEquals(EntryPhase.Preparing, entryState.phase)
+        assertFalse("音频准备在浏览页完成，不显示准备期界面", entryState.preparingUi)
 
         directoryGate.complete(Unit)
         advanceUntilIdle()
 
         assertEquals(listOf("enter", "start:${entryState.generation}"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
-        assertNull("音频进入时不显示准备期界面", entryState.phase)
+        assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
+        assertFalse("音频进入时不显示准备期界面", entryState.preparingUi)
     }
 
     @Test
@@ -350,5 +352,33 @@ class PlaybackEntryOpenerTest {
 
         assertEquals(second.location, recorder.opened?.current?.location)
         assertEquals(listOf(second.location), streams.probed)
+    }
+
+    @Test
+    fun `音频取消打开后迟到的准备成功不进入播放页`() = runTest {
+        val audio = testVideo("片头曲.mp3", "content://root/片头曲.mp3")
+        val directoryGate = CompletableDeferred<Unit>()
+        val recorder = EntryRecorder()
+        val opener = opener(
+            scope = this,
+            recorder = recorder,
+            directoryEntries = {
+                directoryGate.await()
+                listOf(audio)
+            },
+            streams = { throw AssertionError("本地音频不应建立网络连接") },
+        )
+
+        opener.open(audio, listOf(audio), enterBeforePreparing = false)
+        runCurrent()
+        val generation = entryState.generation
+        entryState.cancelEntry()
+        directoryGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(0, recorder.enterCount)
+        assertNull(recorder.opened)
+        assertNull(recorder.shownFailure)
+        assertFalse(entryState.isCurrent(generation))
     }
 }

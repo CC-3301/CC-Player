@@ -109,6 +109,17 @@ class PlayerNavigationPolicyTest {
     }
 
     @Test
+    fun `准备期已经失败时返回结束播放`() {
+        // 失败优先于准备期：不再撤回交接、也不留在播放页。
+        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+            assertEquals(
+                PlayerBackAction.StopAndLeave,
+                back(state = PlaybackState.Playing, failed = true, entryPhase = phase),
+            )
+        }
+    }
+
+    @Test
     fun `准备期没有旧会话时返回退出播放页`() {
         listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
             assertEquals(
@@ -134,7 +145,7 @@ class PlayerNavigationPolicyTest {
         listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
             assertFalse(playerTopBarBackEndsPlayback(phase))
         }
-        listOf(null, EntryPhase.Accepted, EntryPhase.Failed, EntryPhase.Cancelled).forEach { phase ->
+        listOf(null, EntryPhase.Accepted, EntryPhase.Failed).forEach { phase ->
             assertTrue(playerTopBarBackEndsPlayback(phase))
         }
     }

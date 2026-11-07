@@ -20,14 +20,11 @@ sealed interface PlaybackState {
 fun isInitialLoading(state: PlaybackState, switching: Boolean): Boolean =
     state == PlaybackState.Loading && !switching
 
-/** 位置距片尾多近仍算片尾。 */
-const val EPISODE_END_TOLERANCE_MILLIS = 1_000L
-
-/** 片尾的统一判据：已结束，或暂停在片尾位置。 */
-fun isAtEpisodeEnd(state: PlaybackState, positionMillis: Long, durationMillis: Long): Boolean =
-    state == PlaybackState.Ended ||
-        (
-            state == PlaybackState.Paused &&
-                durationMillis > 0 &&
-                positionMillis >= durationMillis - EPISODE_END_TOLERANCE_MILLIS
-            )
+/**
+ * 一次播放失败：带入口代际与是否首次加载。
+ * 界面只接受当前入口代际的首次加载失败，用于退回列表；其余失败只提示。
+ */
+data class PlaybackFailure(
+    val generation: Int,
+    val firstLoad: Boolean,
+)

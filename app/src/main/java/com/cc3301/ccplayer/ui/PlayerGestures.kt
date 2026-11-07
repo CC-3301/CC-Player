@@ -234,8 +234,11 @@ fun playerBarsVisible(
     (controlsVisible || firstBuffering) &&
     panelBarsVisible
 
-/** 准备期顶栏只保留返回：标题、转屏与更多都不显示；接手后恢复。 */
-fun playerTopBarExtrasVisible(preparing: Boolean): Boolean = !preparing
+/** 准备期顶栏隐藏标题与转屏，保留返回与更多；接手后恢复。 */
+fun playerTopBarTitleAndRotateVisible(preparing: Boolean): Boolean = !preparing
+
+/** 准备期「更多」照常可点；其余阶段沿用加载期判据。 */
+fun playerTopBarMoreEnabled(preparing: Boolean, allowed: Boolean): Boolean = preparing || allowed
 
 /** 准备期隐藏底栏；接手后按控制层显隐恢复。 */
 fun playerBottomBarVisible(barsShown: Boolean, preparing: Boolean): Boolean = barsShown && !preparing

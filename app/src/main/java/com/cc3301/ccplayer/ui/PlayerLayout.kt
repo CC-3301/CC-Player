@@ -68,12 +68,6 @@ enum class BufferingLoadKind {
     Idle,
 }
 
-/** 一次缓冲提示的最终形态：是否显示，以及是否带文字。 */
-data class BufferingHint(
-    val visible: Boolean,
-    val showText: Boolean,
-)
-
 /** 按加载触发类型归类缓冲提示：恢复先于切集，切集先于首次打开。 */
 fun bufferingLoadKind(
     switching: Boolean,
@@ -95,23 +89,14 @@ fun bufferingHint(
     buffering: Boolean,
     showsPicture: Boolean,
     quietBlack: Boolean,
-): BufferingHint = when (kind) {
+): Boolean = when (kind) {
     BufferingLoadKind.Open,
     BufferingLoadKind.Restore,
-    -> if (buffering) {
-        BufferingHint(visible = true, showText = true)
-    } else {
-        BufferingHint(visible = false, showText = false)
-    }
+    -> buffering
 
-    BufferingLoadKind.Switch -> BufferingHint(visible = false, showText = false)
+    BufferingLoadKind.Switch -> false
 
-    BufferingLoadKind.Idle ->
-        if (buffering && (showsPicture || !quietBlack)) {
-            BufferingHint(visible = true, showText = true)
-        } else {
-            BufferingHint(visible = false, showText = false)
-        }
+    BufferingLoadKind.Idle -> buffering && (showsPicture || !quietBlack)
 }
 
 /** 播放页次级按钮与上一集/下一集的触控边长；视觉图标小于该尺寸。 */

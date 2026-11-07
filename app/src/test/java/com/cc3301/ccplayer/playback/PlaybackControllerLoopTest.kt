@@ -183,7 +183,7 @@ class PlaybackControllerLoopTest {
             "ep2.mkv" to 200L,
             "ep1.mkv" to 100L,
         )
-        controller.openPlaylist(
+        controller.openPlaylistForTest(
             byModifiedTime.map { (name, modified) -> mediaFile(name, modified) },
             mediaFile("ep1.mkv", 100),
         )
@@ -205,7 +205,7 @@ class PlaybackControllerLoopTest {
             "ep2.mkv" to 200L,
             "ep1.mkv" to 100L,
         )
-        controller.openPlaylist(
+        controller.openPlaylistForTest(
             byModifiedTime.map { (name, modified) -> mediaFile(name, modified) },
             mediaFile("ep1.mkv", 100),
         )
@@ -264,7 +264,7 @@ class PlaybackControllerLoopTest {
     }
 
     private fun open(vararg names: String, current: String) {
-        controller.openPlaylist(names.map(::mediaFile), mediaFile(current))
+        controller.openPlaylistForTest(names.map(::mediaFile), mediaFile(current))
     }
 
     private fun endCurrentEpisode() {
