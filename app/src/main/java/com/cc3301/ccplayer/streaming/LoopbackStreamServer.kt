@@ -152,7 +152,10 @@ class LoopbackStreamServer(
         }
     }
 
-    /** 这条流是否已有可直接复用的字节源；没有源或已登记陈旧时为 false。 */
+    /**
+     * 流是否已有可直接复用的源；没有源或已登记陈旧时为 false。
+     * 请求打点与探测预置共用：WebDAV 探测靠它决定「已有可用源就不再预置句柄」。
+     */
     fun hasFreshSource(key: String): Boolean {
         val id = idsByKey[key] ?: return false
         return entries[id]?.hasFreshSource() == true
