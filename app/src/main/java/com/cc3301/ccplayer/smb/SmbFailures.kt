@@ -9,7 +9,6 @@ import java.io.IOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
-import java.util.concurrent.TimeoutException
 import java.net.UnknownHostException
 
 /** 把 SMBJ 抛出的异常归到界面可读的来源失败原因。 */
@@ -35,8 +34,9 @@ private val CONNECTION_LOST_STATUSES = setOf(
 
 /**
  * 该失败是否说明连接或会话已失效、值得重建客户端。
- * 计入：传输层断开（Unreachable）、服务器报会话或连接失效、以及根因不是服务器状态码的失败。
- * 不计入：文件不存在、权限不足、路径非法这类业务失败，重建客户端解决不了。
+ * 计入：传输层断开（Unreachable）、SMBJ 的运行时异常家族，以及服务器报会话或连接失效的状态码。
+ * 不计入：文件不存在、权限不足、路径非法这类业务失败，以及未归类的运行时异常——
+ * 重建客户端解决不了它们，却会作废一条可能正被别的消费者共用的健康会话。
  */
 fun smbConnectionLost(failure: Throwable): Boolean {
     if (failure is MediaSourceException) {
@@ -46,31 +46,17 @@ fun smbConnectionLost(failure: Throwable): Boolean {
             MediaFailure.Unknown -> Unit
         }
     }
-    val root = rootCauseOf(failure)
-    return when {
-        root is SMBApiException -> root.status in CONNECTION_LOST_STATUSES
-        root is IllegalArgumentException || root is SecurityException -> false
-        else -> true
-    }
-}
-
-/**
- * 读停滞类失败：smbj 等单次读的回包等到上限。
- * smbj 把这次等待的 [java.util.concurrent.TimeoutException] 包进传输异常，按根因判。
- * 这类失败不在这里重连：重连必然超过回环层的 3 秒停滞判据，只会在上下两层各重试一次。
- */
-fun smbStalled(failure: Throwable): Boolean = rootCauseOf(failure) is TimeoutException
-
-/** 异常链最内层的原因；成环时停在已到的那层。 */
-private fun rootCauseOf(failure: Throwable): Throwable {
-    var root = failure
+    // 按整条异常链判：smbj 把等待超时包进传输异常，只看最内层会漏掉它。
+    var current: Throwable? = failure
     val seen = HashSet<Throwable>()
-    seen += root
-    while (true) {
-        val next = root.cause ?: return root
-        if (!seen.add(next)) return root
-        root = next
+    while (current != null && seen.add(current)) {
+        when (current) {
+            is SMBApiException -> return current.status in CONNECTION_LOST_STATUSES
+            is SMBRuntimeException, is IOException -> return true
+        }
+        current = current.cause
     }
+    return false
 }
 
 private fun statusFailure(status: NtStatus?): MediaFailure = when (status) {

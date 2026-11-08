@@ -7,6 +7,8 @@ import com.hierynomus.mssmb2.SMBApiException
 import com.hierynomus.smbj.common.SMBRuntimeException
 import com.hierynomus.protocol.transport.TransportException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
 import java.net.ConnectException
@@ -55,6 +57,21 @@ class SmbFailuresTest {
     @Test
     fun `包一层的运行时异常按原因归类`() {
         assertEquals(MediaFailure.Unreachable, smbFailureOf(SMBRuntimeException(ConnectException("拒绝连接"))))
+    }
+
+    @Test
+    fun `只有传输失败与 SMBJ 运行时异常算连接丢失`() {
+        assertTrue(smbConnectionLost(IOException("读写失败")))
+        assertTrue(smbConnectionLost(TransportException("链路断了")))
+        assertTrue(smbConnectionLost(SMBRuntimeException("会话已失效")))
+        assertTrue(smbConnectionLost(apiException(NtStatus.STATUS_USER_SESSION_DELETED)))
+    }
+
+    @Test
+    fun `未归类的运行时异常不当成连接丢失`() {
+        assertFalse(smbConnectionLost(IllegalStateException("别的错")))
+        assertFalse(smbConnectionLost(IllegalArgumentException("参数不对")))
+        assertFalse(smbConnectionLost(apiException(NtStatus.STATUS_NOT_SUPPORTED)))
     }
 
     @Test
