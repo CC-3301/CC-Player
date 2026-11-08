@@ -17,7 +17,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /** 会话建立总预算：等待到点即放弃，阻塞中的建连不在预算内被打断。 */
@@ -35,8 +34,12 @@ private const val MAX_SESSIONS = 8
 /**
  * 应用级 SMB 会话层：按（服务器、端口、共享、凭据）复用一条会话，目录浏览、封面与播放共用同一条。
  *
- * 取用复用的会话前做一次会话级存活确认，失败即作废并重建一次；传输类失败作废会话后重连并重发一次，
- * 认证失败与路径不存在不作废。会话闲置且没有引用时关闭，下次取用时懒重建。
+ * 取用复用的会话前做一次会话级存活确认，失败即作废并重建一次；列表与打开的传输类失败作废会话后
+ * 重连并重发一次，认证失败与路径不存在不作废。播放读不走重发：读源只作废并把原失败抛给调用方，
+ * 由回环层在下一次请求重建源后重取该段。会话闲置且没有引用时关闭，下次取用时懒重建。
+ *
+ * 并发建连：两个消费者同时发现会话已死会各自建立，先登记进表的留下、后到的 adopt 它并关掉自己刚建的连接，
+ * 因此建连期间同一个键上允许短暂存在两条会话，最终收敛到一条；不为此加运行期检查。
  */
 class SmbSessions(
     private val connector: SmbConnector,
@@ -89,7 +92,7 @@ class SmbSessions(
     suspend fun openRead(target: SmbTarget): ByteSource {
         val session = acquire(target)
         val opened = try {
-            ReadLease(target, session, session.connection.openRead(target.path))
+            ReadLease(session, session.connection.openRead(target.path))
         } catch (cancellation: CancellationException) {
             session.release()
             throw cancellation
@@ -125,7 +128,7 @@ class SmbSessions(
     private suspend fun reopenRead(target: SmbTarget): ReadLease {
         val lease = acquire(target)
         return try {
-            ReadLease(target, lease, lease.connection.openRead(target.path))
+            ReadLease(lease, lease.connection.openRead(target.path))
         } catch (cancellation: CancellationException) {
             lease.release()
             throw cancellation
@@ -238,7 +241,7 @@ class SmbSessions(
     /** 句柄关闭或请求结束：计数归零时安排闲置关闭；已被摘掉的会话直接关闭连接。 */
     private fun release(session: Session) {
         val closeable = synchronized(lock) {
-            session.inUse = (session.inUse - 1).coerceAtLeast(0)
+            session.inUse -= 1
             if (session.inUse != 0) return
             if (sessions[session.key] !== session) {
                 takeConnectionLocked(session)
@@ -340,9 +343,8 @@ class SmbSessions(
         }
     }
 
-    /** 交给读源的一次打开：句柄与会话占用；同一条租约只关一次，换会话时先关旧句柄再开新。 */
+    /** 交给读源的一次打开：句柄与会话占用；同一条租约只关一次。 */
     private inner class ReadLease(
-        private val target: SmbTarget,
         private val lease: SessionLease,
         override val handle: SmbReadHandle,
     ) : SmbReadLease {
@@ -361,19 +363,6 @@ class SmbSessions(
             lease.discard()
             runCatching { handle.close() }
             lease.release()
-        }
-
-        /**
-         * 换会话：先按与 close 同一个开关判定；已经关过就只开新租约，不再作废旧会话，
-         * 否则会话被摘出表、闲置任务被取消，而引用已经交还，连接没人关。
-         */
-        override fun replace(): SmbReadLease = runBlocking {
-            if (closed.compareAndSet(false, true)) {
-                lease.discard()
-                runCatching { handle.close() }
-                lease.release()
-            }
-            reopenRead(target)
         }
     }
 

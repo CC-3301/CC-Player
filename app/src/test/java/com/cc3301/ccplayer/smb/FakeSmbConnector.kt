@@ -31,9 +31,6 @@ class FakeSmbConnector : SmbConnector {
     /** 读取句柄时抛出的异常；非空时每次读取都失败。随时可改，连接沿用最新的。 */
     var readFailure: Throwable? = null
 
-    /** 读取前按位置执行，用来把某一次读卡在中间。 */
-    var readGate: ((Long) -> Unit)? = null
-
     /** 建连尝试次数：失败也计数。 */
     var connectAttempts: Int = 0
         private set
@@ -57,9 +54,6 @@ class FakeSmbConnector : SmbConnector {
     /** 最近一次存活确认给的上限。 */
     var lastPingTimeout: Long = 0
         private set
-
-    /** 句柄的打开与关闭顺序。 */
-    val openClose = mutableListOf<String>()
 
     private val childrenByPath = mutableMapOf<String, List<SmbEntry>>()
     private val bytesByPath = mutableMapOf<String, ByteArray>()
@@ -116,7 +110,6 @@ class FakeSmbConnector : SmbConnector {
             bytesByPath = bytesByPath,
             handles = handles,
             allHandles = allHandles,
-            openClose = openClose,
             closeOrder = closeOrder,
             closedShares = closedShares,
             maxReadSize = maxReadSize,
@@ -130,7 +123,6 @@ class FakeSmbConnector : SmbConnector {
                     readFailure
                 }
             },
-            readGate = { position -> readGate?.invoke(position) },
             pingFailure = { timeoutMillis ->
                 pings++
                 lastPingTimeout = timeoutMillis
@@ -146,14 +138,12 @@ private class FakeSmbConnection(
     private val bytesByPath: Map<String, ByteArray>,
     private val handles: MutableMap<String, RecordingSmbHandle>,
     private val allHandles: MutableList<RecordingSmbHandle>,
-    private val openClose: MutableList<String>,
     private val closeOrder: MutableList<String>,
     private val closedShares: MutableList<String>,
     private val maxReadSize: Int,
     private val openReadFailure: () -> MediaSourceException?,
     private val listFailure: () -> Throwable?,
     private val readFailure: () -> Throwable?,
-    private val readGate: (Long) -> Unit,
     private val pingFailure: (Long) -> Throwable?,
 ) : SmbConnection {
 
@@ -165,16 +155,11 @@ private class FakeSmbConnection(
     override suspend fun openRead(path: String): SmbReadHandle {
         openReadFailure()?.let { throw it }
         val bytes = bytesByPath["$share/$path"] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")
-        openClose += "open"
         return RecordingSmbHandle(
             bytes,
             maxReadSize = maxReadSize,
-            onClose = {
-                openClose += "close"
-                closeOrder += "handle"
-            },
+            onClose = { closeOrder += "handle" },
             readFailure = readFailure,
-            readGate = readGate,
         ).also {
             handles["$share/$path"] = it
             allHandles += it
@@ -197,7 +182,6 @@ class RecordingSmbHandle(
     override val maxReadSize: Int = 0,
     private val onClose: () -> Unit = {},
     private val readFailure: () -> Throwable? = { null },
-    private val readGate: (Long) -> Unit = {},
 ) : SmbReadHandle, Closeable {
 
     var closed = false
@@ -209,7 +193,6 @@ class RecordingSmbHandle(
     override val size: Long get() = bytes.size.toLong()
 
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
-        readGate(position)
         readFailure()?.let { throw it }
         if (position >= bytes.size) return 0
         val count = minOf(length.toLong(), bytes.size - position).toInt()
