@@ -26,6 +26,9 @@ class FakeWebDavTransport : WebDavTransport {
     /** 已打开的读句柄，按地址。 */
     val handles = mutableMapOf<String, RecordingWebDavHandle>()
 
+    /** 依次打开过的全部读句柄，用来断言关闭次数。 */
+    val allHandles = mutableListOf<RecordingWebDavHandle>()
+
     fun addDirectory(url: String, vararg children: WebDavEntry): FakeWebDavTransport {
         childrenByUrl[url] = children.toList()
         return this
@@ -52,7 +55,10 @@ class FakeWebDavTransport : WebDavTransport {
         logins += username to password
         openedSizes += size
         val bytes = bytesByUrl[url] ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$url")
-        return RecordingWebDavHandle(bytes, ignoreRange).also { handles[url] = it }
+        return RecordingWebDavHandle(bytes, ignoreRange).also {
+            handles[url] = it
+            allHandles += it
+        }
     }
 }
 
@@ -63,6 +69,10 @@ class RecordingWebDavHandle(
 ) : WebDavReadHandle {
 
     var closed = false
+
+    /** 被关掉的次数：同一个句柄只该关一次。 */
+    var closeCount = 0
+        private set
 
     /** 关闭发生在哪条线程上：关闭只该在关源线程执行。 */
     var closedOn: String? = null
@@ -78,6 +88,7 @@ class RecordingWebDavHandle(
     }
 
     override fun close() {
+        closeCount++
         closed = true
         closedOn = Thread.currentThread().name
     }

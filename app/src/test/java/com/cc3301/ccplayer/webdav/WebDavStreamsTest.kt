@@ -269,6 +269,50 @@ class WebDavStreamsTest {
     }
 
     @Test
+    fun `打开回来与作废并发时每条句柄恰好关一次`() = runBlocking {
+        addSource(root)
+        transport.addFile(movie, payload)
+        val server = LoopbackStreamServer()
+        val racy = WebDavStreams(transport, WebDavLocator(sources), server = server)
+        val rounds = 4_000
+        try {
+            // 两条常驻线程逐轮对齐起跑：作废与探测打开回来交错，覆盖「登记前后被作废」的窗口。
+            val start = CyclicBarrier(2)
+            val probed = CyclicBarrier(2)
+            val owners = Array(rounds) { racy.prepare(movie) }
+            val probing = Thread {
+                for (owner in owners) {
+                    start.await()
+                    runBlocking { owner.probe(movie) }
+                    probed.await()
+                }
+            }.apply { isDaemon = true }
+            val discarding = Thread {
+                for (owner in owners) {
+                    start.await()
+                    owner.discard()
+                    probed.await()
+                }
+            }.apply { isDaemon = true }
+            probing.start()
+            discarding.start()
+            probing.join(60_000)
+            discarding.join(60_000)
+            assertFalse("探测那条线程被卡住", probing.isAlive)
+            assertFalse("作废那条线程被卡住", discarding.isAlive)
+
+            // 关源串行：探针排在后面处理完，说明之前派发的关闭都已经执行。
+            drainCloser(server)
+            assertTrue(
+                "每条句柄恰好关一次",
+                transport.allHandles.all { it.closeCount == 1 },
+            )
+        } finally {
+            racy.close()
+        }
+    }
+
+    @Test
     fun `同一实例上前一次准备作废不关后一次探好的句柄`() = runBlocking {
         addSource(root)
         transport.addFile(movie, payload)

@@ -88,31 +88,39 @@ class WebDavStreams(
             handOff(transport.openRead(target.url, target.username, target.password, size = 0))
         }
 
-        /** 打开完成：登记到预置槽；顶替掉的旧句柄与已作废时的这条新句柄都在关源线程关闭。 */
+        /**
+         * 打开完成：登记到预置槽。
+         * 关哪条句柄只看登记结果：打开期间已被作废的那条从没进过本次准备，由这里关一次；
+         * 登记成功的那条归本次准备，之后作废或播放取用会把它摘走并关闭，这里不再关第二次。
+         * 顶替掉的旧句柄同样在关源线程关闭。
+         */
+        /**
+         * 打开完成：登记到预置槽。
+         * 关哪条句柄只看登记结果：打开期间已被作废的那条从没进过本次准备，由这里关一次；
+         * 登记成功的那条归本次准备，之后作废或播放取用会把它摘走并关闭，这里不再关第二次。
+         * 顶替掉的旧句柄同样在关源线程关闭。
+         */
         private fun handOff(opened: ByteSource) {
             var superseded: ByteSource? = null
-            val cancelled = synchronized(lock) {
+            val registered = synchronized(lock) {
                 if (discarded) {
-                    true
+                    false
                 } else {
                     superseded = source
                     source = opened
-                    false
+                    true
                 }
             }
-            if (cancelled) {
+            if (!registered) {
                 server.closeInBackground(opened)
                 return
             }
-            // 登记同样在出锁之后做：锁内不进 [handoff] 锁。
-            // 出锁到登记之间可能被作废：已作废就不再登记，免得槽里留一条空凭证。
-            val cancelledMeanwhile = synchronized(lock) { discarded }
-            if (cancelledMeanwhile) {
-                server.closeInBackground(opened)
-                return
-            }
-            attach(this)?.discard()
             superseded?.let { previous -> if (previous !== opened) server.closeInBackground(previous) }
+            // 登记同样在出锁之后做：锁内不进 [handoff] 锁。
+            // 出锁到登记之间可能被作废或取走：那条路径已经认领这条句柄，这里只撤掉空槽，不再关第二次。
+            val replaced = attach(this)
+            replaced?.discard()
+            if (synchronized(lock) { discarded }) detach(this)
         }
 
         override fun discard() {
