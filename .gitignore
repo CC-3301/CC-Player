@@ -22,9 +22,6 @@ local.properties
 HANDOFF.md
 DECISIONS.md
 
-# pi Agent
-.pi/
-
 #备份
 backups/
 # Kotlin 编译会话目录
