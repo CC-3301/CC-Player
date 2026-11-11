@@ -31,6 +31,13 @@ private class FakeNetworkStreams : NetworkStreams {
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
 
+    /** 单个协议自己持有的保留集合：与路由层同一判据。 */
+    private val retention = RetainedLocations()
+
+    override fun retain(locations: Set<String>) {
+        retention.droppedBy(locations).forEach { returned += it }
+    }
+
     override fun returnSource(location: String) {
         returned += location
     }
@@ -96,6 +103,40 @@ class RoutingNetworkStreamsTest {
 
         assertEquals(listOf("smb://nas/media/电影.mkv"), smb.returned)
         assertEquals(listOf("https://dav.example.com/dav/电影.mkv"), webDav.returned)
+    }
+
+    @Test
+    fun `保留集合只归还被移出的位置`() {
+        val kept = "smb://nas/media/第一部.mkv"
+        val removed = "smb://nas/media/第二部.mkv"
+
+        streams.retain(setOf(kept, removed))
+        streams.retain(setOf(kept))
+
+        assertEquals(listOf(removed), smb.returned)
+    }
+
+    @Test
+    fun `保留集合未变化时不动作`() {
+        val first = "smb://nas/media/第一部.mkv"
+        val second = "smb://nas/media/第二部.mkv"
+
+        streams.retain(setOf(first, second))
+        streams.retain(setOf(first, second))
+
+        assertEquals(emptyList<String>(), smb.returned)
+    }
+
+    @Test
+    fun `保留集合按方案分派`() {
+        val smbMovie = "smb://nas/media/电影.mkv"
+        val davMovie = "https://dav.example.com/dav/电影.mkv"
+
+        streams.retain(setOf(smbMovie, davMovie))
+        streams.retain(emptySet())
+
+        assertEquals(listOf(smbMovie), smb.returned)
+        assertEquals(listOf(davMovie), webDav.returned)
     }
 
     @Test

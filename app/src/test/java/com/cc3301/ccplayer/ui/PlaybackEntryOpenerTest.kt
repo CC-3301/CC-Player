@@ -51,6 +51,8 @@ private class GatedNetworkStreams : NetworkStreams {
     /** 探测预置句柄被取消打开丢掉的次数。 */
     var preparedDiscards = 0
 
+    override fun retain(locations: Set<String>) = Unit
+
     override fun returnSource(location: String) = Unit
 
     override fun discardByteSources() = Unit
