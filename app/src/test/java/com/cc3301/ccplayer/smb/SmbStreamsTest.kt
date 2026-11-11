@@ -108,7 +108,7 @@ class SmbStreamsTest {
         val url = stopsWithSources.urlFor(movie)
 
         httpRequest(url)
-        stopsWithSources.returnSource(movie)
+        stopsWithSources.retain(emptySet())
         awaitClosed(connector.handles.getValue("media/电影.mkv"))
         advanceTimeBy(1_001)
         runCurrent()

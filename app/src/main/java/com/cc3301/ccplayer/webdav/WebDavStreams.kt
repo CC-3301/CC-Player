@@ -6,7 +6,6 @@ import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.network.PreparedSource
-import com.cc3301.ccplayer.network.RetainedLocations
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
@@ -26,9 +25,6 @@ class WebDavStreams(
     diagnostics: DiagnosticsLog = NoDiagnosticsLog,
     private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
-
-    /** 上一版保留集合：只摘走被移出集合的位置。 */
-    private val retention = RetainedLocations()
 
     private val handoff = Any()
 
@@ -50,14 +46,9 @@ class WebDavStreams(
         server.discardSources()
     }
 
-    /** 声明保留集合：只摘走被移出集合的位置；探测预置的句柄不在这条路径上。 */
+    /** 声明保留集合：本代理名下不在集合里的已就绪源当场摘走；探测预置的句柄不在这条路径上。 */
     override fun retain(locations: Set<String>) {
-        retention.droppedBy(locations).forEach(::returnSource)
-    }
-
-    /** 归还播放源：探测预置的句柄不在这条路径上，它由 [Handoff] 的作废与 [close] 收尾。 */
-    override fun returnSource(location: String) {
-        server.returnSource(location)
+        server.retain(locations)
     }
 
     override fun close() {

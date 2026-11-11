@@ -47,7 +47,7 @@ private const val STALL_CHECK_INTERVAL_MILLIS = 100L
  * [close] 关闭全部已建立的字节源。
  *
  * 条目是字节源的唯一持有者：创建与关闭都在 IO 线程，界面线程只发命令、不等网络动作；
- * [returnSource] 当场摘走当时已就绪的源，关闭交给关源线程。
+ * [retain] 把不在保留集合里的已就绪源当场摘走，关闭交给关源线程。
  */
 class LoopbackStreamServer(
     port: Int = 0,
@@ -107,10 +107,18 @@ class LoopbackStreamServer(
     }
 
     /**
-     * 归还当前目标不再需要的字节源：当场摘走当时已就绪的那一条，再在关源线程上关闭。
+     * 声明保留哪些位置：不在集合里的已就绪源当场摘走，再在关源线程上关闭。
+     * 只动已就绪的源；在途建源、地址与陈旧标记都不受影响。
+     */
+    fun retain(locations: Set<String>) {
+        idsByKey.keys.filterNot { it in locations }.forEach(::returnSource)
+    }
+
+    /**
+     * 关掉一条不再需要的字节源：当场摘走当时已就绪的那一条，再在关源线程上关闭。
      * 摘走之后才建好的源不属于这次归还，在途建源不受影响；没有就绪源时不动手。
      */
-    fun returnSource(key: String) {
+    private fun returnSource(key: String) {
         val id = idsByKey[key] ?: return
         val source = entries[id]?.takeReadySource() ?: return
         dispatchClose("归还字节源: $id", source)
