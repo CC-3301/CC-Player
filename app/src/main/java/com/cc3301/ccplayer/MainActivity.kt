@@ -365,10 +365,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         }
                     }
                 }
-                // 已接手后首次就绪或转入切集，入口阶段到此结束。
-                LaunchedEffect(playerScreen.playbackState, playerScreen.switching) {
-                    openingHandover.onPlaybackUpdate(playerScreen.playbackState, playerScreen.switching)
-                }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
                 // 比例跟着会话走：新会话作废，回到同一会话沿用，切集期间用屏上旧画面的比例。
                 LaunchedEffect(
@@ -426,7 +422,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
                             preparesInPage = openingHandover.preparesInPage,
-                            bufferingShown = openingHandover.showsBuffering(playerScreen.controllerBuffering),
+                            bufferingShown = openingHandover.showsBuffering(
+                                controllerBuffering = playerScreen.controllerBuffering,
+                                playbackState = playerScreen.playbackState,
+                                switching = playerScreen.switching,
+                            ),
                             environment = PlayerScreenEnvironment(
                                 orientationMode = orientationMode,
                                 orientationOverride = sessionOrientation.override,
