@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.library
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -388,15 +389,18 @@ class VisiblePreviewSchedulerTest {
     @Test
     fun `失败项的重试排在可见项全部出图之后`() = runTest {
         val order = mutableListOf<Int>()
-        var firstAttempts = 0
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
                 order += index
-                val fails = index == 0 && firstAttempts++ < 2
+                val fails = index == 0 && states.stateOf(file).attempts < 2
+                if (fails) states.fail(file)
                 return MediaPreview(image = null, durationMillis = null, retryable = fails)
             }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
@@ -412,17 +416,23 @@ class VisiblePreviewSchedulerTest {
     fun `失败项不越过仍在出图的可见项`() = runTest {
         val order = mutableListOf<Int>()
         val gate = CompletableDeferred<Unit>()
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
                 order += index
                 when (index) {
-                    0 -> return MediaPreview(image = null, durationMillis = null, retryable = true)
+                    0 -> {
+                        states.fail(file)
+                        return MediaPreview(image = null, durationMillis = null, retryable = true)
+                    }
                     1 -> gate.await()
                 }
                 return MediaPreview(null, null)
             }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
@@ -443,15 +453,17 @@ class VisiblePreviewSchedulerTest {
     @Test
     fun `失败先跳过，可见项出完后按 1 到 5 秒递进重试且最多 5 次`() = runTest {
         val times = mutableListOf<Long>()
-        var attempts = 0
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
-                attempts++
+                states.fail(file)
                 times += testScheduler.currentTime
                 return MediaPreview(image = null, durationMillis = null, retryable = true)
             }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(listOf(entries[0]), firstVisible = 0, lastVisible = 0, rowSize = 1)
@@ -460,7 +472,7 @@ class VisiblePreviewSchedulerTest {
         advanceUntilIdle()
         assertNull(request.await().image)
 
-        assertEquals("首次一次加 5 次重试", 6, attempts)
+        assertEquals("首次一次加 5 次重试", 6, times.size)
         assertEquals(
             "递进间隔为 1s、2s、3s、4s、5s",
             listOf(1_000L, 2_000L, 3_000L, 4_000L, 5_000L),
@@ -471,22 +483,23 @@ class VisiblePreviewSchedulerTest {
     @Test
     fun `失败项离屏后重按当前间隔计时，回屏不 0 秒重试`() = runTest {
         val times = mutableListOf<Long>()
-        val attempts = mutableMapOf<Int, Int>()
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
                 times += testScheduler.currentTime
-                val attempt = (attempts[index] ?: 0) + 1
-                attempts[index] = attempt
                 // 0 首次失败、重试成功；1 一次就出图。
-                val fails = index == 0 && attempt == 1
+                val fails = index == 0 && states.stateOf(file).attempts == 0
+                if (fails) states.fail(file)
                 return MediaPreview(
                     image = null,
                     durationMillis = if (fails) null else index + 1L,
                     retryable = fails,
                 )
             }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
@@ -509,19 +522,22 @@ class VisiblePreviewSchedulerTest {
     fun `最后一个订阅者取消后失败项的重试计时仍会启动`() = runTest {
         val times = mutableListOf<Long>()
         val gate = CompletableDeferred<Unit>()
-        var attempts = 0
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(null, null)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
                 if (index == 0) {
-                    attempts++
                     times += testScheduler.currentTime
-                    return MediaPreview(null, null, retryable = attempts == 1)
+                    val first = states.stateOf(file).attempts == 0
+                    if (first) states.fail(file)
+                    return MediaPreview(null, null, retryable = first)
                 }
                 gate.await()
                 return MediaPreview(null, 1L)
             }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
@@ -545,13 +561,22 @@ class VisiblePreviewSchedulerTest {
     fun `重试用尽后重新订阅再给一轮`() = runTest {
         var rounds = 0
         val target = entries[0]
+        val states = RetryStates()
         val source = object : MediaPreviewSource {
             override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
 
             override suspend fun visiblePreview(file: MediaFile, index: Int): MediaPreview {
                 // 只数这一条：前后一行的预取窗口里还有相邻条目，不能把它们的请求算进来。
                 if (file.location == target.location) rounds++
+                states.fail(file)
                 return MediaPreview(image = null, durationMillis = null, retryable = true)
+            }
+
+            override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            // 新一轮订阅从零计：重试用尽后重新订阅仍会重抽。
+            override fun beginVisiblePreview(file: MediaFile) {
+                states.beginVisible(file)
             }
 
             // 预取不参与这条用例的计数，也不改变调度状态。
@@ -584,6 +609,62 @@ class VisiblePreviewSchedulerTest {
         assertEquals("重新订阅立即再抽一次", 7, rounds)
         // 这一轮还在重试中：断言完直接取消，不等它跑完。
         second.cancel()
+    }
+
+    @Test
+    fun `本地失败次数从抽帧状态读，重新订阅后只剩一次机会`() = runTest {
+        val directory = Files.createTempDirectory("preview-scheduler").toFile()
+        try {
+            val extractor = FakeMediaPreviewExtractor().apply { imageFailure = IOException("读取失败") }
+            val source = CachedMediaPreviewSource(
+                extractor = extractor,
+                cache = ThumbnailCache(
+                    directory = directory,
+                    maxBytes = 1 shl 20,
+                    ioDispatcher = Dispatchers.Unconfined,
+                ),
+                backgroundScope = backgroundScope,
+            )
+            val target = MediaFile(
+                name = "坏文件.mkv",
+                location = "root/坏文件.mkv",
+                source = MediaSource.Local,
+            )
+            val scheduler = scheduler(source, backgroundScope)
+            scheduler.update(listOf(target), firstVisible = 0, lastVisible = 0, rowSize = 1)
+
+            val first = async { scheduler.preview(target, 0) }
+            advanceUntilIdle()
+            first.await()
+
+            assertEquals("首发加三次重试，次数由抽帧状态给出", 4, extractor.imageRequests.size)
+
+            val second = async { scheduler.preview(target, 0) }
+            advanceUntilIdle()
+            second.await()
+
+            assertEquals("重新订阅后本地只剩一次机会", 5, extractor.imageRequests.size)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+}
+
+/** 假源里的抽帧状态：按位置各记一份，调度器读同一份决定重试节奏。 */
+private class RetryStates {
+
+    private val states = mutableMapOf<String, PreviewEntryState>()
+
+    fun stateOf(file: MediaFile): PreviewEntryState = states.getOrPut(file.location) { PreviewEntryState() }
+
+    /** 记一次失败。 */
+    fun fail(file: MediaFile) {
+        stateOf(file).fail(PreviewFailureStage.Read)
+    }
+
+    /** 新一轮可见订阅：已试次数从零计。 */
+    fun beginVisible(file: MediaFile) {
+        stateOf(file).resetAttempts()
     }
 }
 

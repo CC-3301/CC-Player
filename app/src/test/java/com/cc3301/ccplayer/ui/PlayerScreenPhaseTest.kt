@@ -94,14 +94,23 @@ class PlayerScreenPhaseTest {
     }
 
     @Test
-    fun `接手后的首次加载是加载中`() {
+    fun `接手后以控制层的加载事实为准`() {
         assertEquals(
             PlayerScreenPhase.Loading,
-            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Idle),
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Loading),
         )
         assertEquals(
             PlayerScreenPhase.Loading,
             phaseOf(entryPhase = null, playbackState = PlaybackState.Loading),
+        )
+        // 已接手会保留到这次打开被替换：就绪与终态都不再算加载中。
+        assertEquals(
+            PlayerScreenPhase.Ready,
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Playing),
+        )
+        assertEquals(
+            PlayerScreenPhase.Ready,
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Ended),
         )
     }
 

@@ -46,7 +46,8 @@ fun playerScreenPhase(facts: PlayerScreenLoadFacts): PlayerScreenPhase = when {
     facts.preparesInPage && facts.entryPhase == EntryPhase.AwaitingHandover -> PlayerScreenPhase.AwaitingHandover
     facts.restoring -> PlayerScreenPhase.Restoring
     facts.switching -> PlayerScreenPhase.Switching
-    facts.entryPhase == EntryPhase.Accepted || facts.playbackState == PlaybackState.Loading -> PlayerScreenPhase.Loading
+    // 「已接手」保留到这次打开被替换，不能当作首次加载的标志；加载中以控制层事实为准。
+    facts.playbackState == PlaybackState.Loading -> PlayerScreenPhase.Loading
     else -> PlayerScreenPhase.Ready
 }
 

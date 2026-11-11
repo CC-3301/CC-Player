@@ -332,10 +332,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         }
                     }
                 }
-                // 已接手后首次就绪或转入切集，入口阶段到此结束。
-                LaunchedEffect(playerScreen.playbackState, playerScreen.switching) {
-                    openingHandover.onPlaybackUpdate(playerScreen.playbackState, playerScreen.switching)
-                }
                 // 播放状态结论来自播放页 ViewModel：常亮与退后台丢弃按它收尾。
                 LaunchedEffect(playerScreen.playbackState) {
                     updateKeepScreenOn()
@@ -422,7 +418,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
                             preparesInPage = openingHandover.preparesInPage,
-                            bufferingShown = openingHandover.showsBuffering(playerScreen.controllerBuffering),
+                            bufferingShown = openingHandover.showsBuffering(
+                                controllerBuffering = playerScreen.controllerBuffering,
+                                playbackState = playerScreen.playbackState,
+                                switching = playerScreen.switching,
+                            ),
                             orientationMode = orientationMode,
                             orientationOverride = sessionOrientation.override,
                             screenOrientation = screenOrientation,

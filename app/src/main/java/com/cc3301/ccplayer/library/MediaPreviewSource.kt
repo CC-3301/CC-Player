@@ -54,6 +54,18 @@ interface MediaPreviewSource {
      * 播放页封面层用它与列表共用同一份缓存；没有缓存或已超过有效期时返回 null。
      */
     suspend fun cachedImage(file: MediaFile): File? = null
+
+    /**
+     * 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。
+     * 可见请求调度器为每一项新订阅调用一次。
+     */
+    fun beginVisiblePreview(file: MediaFile) = Unit
+
+    /**
+     * 该条目本次运行内的抽帧状态；没有记录时返回 null。
+     * 可见请求调度器读同一份决定失败重试的间隔与次数。
+     */
+    fun previewEntryState(file: MediaFile): PreviewEntryState? = null
 }
 
 /**
@@ -74,7 +86,7 @@ data class MediaPreviewExtraction(val imageBytes: ByteArray?, val duration: Prev
     val durationMillis: Long? get() = (duration as? PreviewDuration.Known)?.millis
 }
 
-/** 抽帧失败的阶段；日志按阶段各写一类，便于判断卡在哪一环。 */
+/** 抽帧失败的阶段；日志与抽帧状态共用这一套分类，便于判断卡在哪一环。 */
 enum class PreviewFailureStage {
     /** 打开数据源失败。 */
     OpenSource,
@@ -109,6 +121,15 @@ internal fun previewFailureStage(failure: Exception): String = when (failure) {
     is java.io.FileNotFoundException -> "打开数据源"
     is IllegalArgumentException, is SecurityException -> "路径解析"
     else -> "读取"
+}
+
+/** 异常归到哪个失败阶段，记进抽帧状态；日志另有更细的叫法，见 [previewFailureStage]。 */
+internal fun previewFailureStageOf(failure: Exception): PreviewFailureStage = when (failure) {
+    is PreviewStageException -> failure.stage
+    is MediaSourceException -> PreviewFailureStage.OpenSource
+    is java.io.FileNotFoundException -> PreviewFailureStage.OpenSource
+    is IllegalArgumentException, is SecurityException -> PreviewFailureStage.OpenSource
+    else -> PreviewFailureStage.Read
 }
 
 /**
@@ -175,6 +196,8 @@ data class ThumbnailPolicy(
  * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
+ * 上次结果、已试次数、无图记忆、预取抑制与时长退避都在同一份抽帧状态里；
+ * 可见请求调度器读同一份决定失败重试的间隔与次数。
  * 失败或超时保持占位图且不写缓存；可见请求的失败交给调度器按递进间隔重试：
  * 本地最多重试 3 次，网络用尽调度器的次数后条目再次可见会重新给一轮。
  * 只有解码成功但没有图才写「无图」缓存；抽取失败不写「无图」。
@@ -209,14 +232,11 @@ class CachedMediaPreviewSource(
         prefetchCapacity = MAX_PREPARED_PREVIEWS - VISIBLE_RESERVED_PREPARED_SLOTS,
     )
 
-    /** 本次运行已确认无图的缓存键；按最近使用顺序保留有限条数。 */
-    private val noImage = NoImageMemory()
-
-    /** 本地抽取失败的次数；失败后最多重试 [LOCAL_RETRY_LIMIT] 次，成功后清零。 */
-    private val localFailures = ConcurrentHashMap<String, Int>()
-
-    /** 预取专用抑制：预取失败或无图的条目在本次运行内不再重复预取；变为可见时清除。 */
-    private val prefetchSuppressed = NoImageMemory(ttlMillis = null)
+    /**
+     * 本次运行的抽帧状态：一个条目一份，上次结果、已试次数、退避与预取抑制都在这里。
+     * 无图记忆的有效期按进程内真实时钟计时，与缓存有效期用的注入时钟分开。
+     */
+    private val entries = PreviewEntryStates()
 
     /** 当前可见与预取范围；列表页滚动时更新，排队请求据此放弃离屏任务。 */
     @Volatile
@@ -224,9 +244,6 @@ class CachedMediaPreviewSource(
 
     /** 同一缓存键正在进行的抽取；等待者共享同一次结果。 */
     private val inFlight = ConcurrentHashMap<String, InFlight>()
-
-    /** 命中后补读时长失败后的退避记录。 */
-    private val durationFailures = ConcurrentHashMap<String, RetryState>()
 
     /** 正在后台补读时长的缓存键与那一次的 Job；同键只补读一次。 */
     private val durationRefills = ConcurrentHashMap<String, Job>()
@@ -239,6 +256,15 @@ class CachedMediaPreviewSource(
 
     override suspend fun prefetch(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.Prefetch)
+
+    /** 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。 */
+    override fun beginVisiblePreview(file: MediaFile) {
+        if (file.source != MediaSource.Network) return
+        entryState(previewKey(file))?.resetAttempts()
+    }
+
+    /** 该条目本次运行的抽帧状态；没有记录时返回 null。 */
+    override fun previewEntryState(file: MediaFile): PreviewEntryState? = entryState(previewKey(file))
 
     /**
      * 更新当前可见与预取范围。
@@ -295,19 +321,11 @@ class CachedMediaPreviewSource(
             load = { extractLocal(file, key, targetWidth, priority) },
         )
         if (loaded.abandoned) return MediaPreview(image = null, durationMillis = null)
-        if (!loaded.failed) {
-            localFailures.remove(key)
-            return MediaPreview(loaded.image, loaded.durationMillis)
-        }
+        val stage = loaded.failureStage
+        if (stage == null) return MediaPreview(loaded.image, loaded.durationMillis)
         // 本地抽取失败先按失败收尾交给调度器重试，次数用尽后保持占位图。
-        val attempts = recordLocalFailure(key)
+        val attempts = stateFor(key).fail(stage)
         return MediaPreview(loaded.image, loaded.durationMillis, retryable = attempts <= LOCAL_RETRY_LIMIT)
-    }
-
-    /** 记一次本地抽取失败并返回累计次数；记录数超限时整体清空，避免长期运行后无限增长。 */
-    private fun recordLocalFailure(key: String): Int {
-        if (localFailures.size >= MAX_RETRY_ENTRIES && !localFailures.containsKey(key)) localFailures.clear()
-        return localFailures.merge(key, 1, Int::plus) ?: 1
     }
 
     /** 只读缓存取封面：播放页封面层与列表共用同一份缓存，不触发抽取。 */
@@ -367,7 +385,7 @@ class CachedMediaPreviewSource(
         val waited = monotonicClockMillis() - requestedAt
         if (!acquired) {
             diagnostics.log { "本地封面: ${file.name} 等解码许可超时 ${waited}ms" }
-            return LoadedPreview(image = null, durationMillis = null, failed = true)
+            return LoadedPreview(image = null, durationMillis = null, failureStage = PreviewFailureStage.Timeout)
         }
         diagnostics.log { "本地封面: ${file.name} 等解码许可 ${waited}ms" }
         try {
@@ -404,7 +422,7 @@ class CachedMediaPreviewSource(
                 )
                 rememberNoImage(key)
             } else {
-                forgetNoImage(key)
+                stateFor(key).succeed()
             }
             return LoadedPreview(image, durationMillis)
         } finally {
@@ -422,8 +440,8 @@ class CachedMediaPreviewSource(
         priority: PreviewPriority,
     ): PreviewDuration? {
         val now = monotonicClockMillis()
-        val previous = durationFailures[key]
-        if (previous != null && now < previous.retryAtMillis) return PreviewDuration.Failed
+        val recorded = entryState(key)
+        if (recorded != null && now < recorded.retryAtMillis) return PreviewDuration.Failed
         if (!permits.acquireOrNull(PreviewPriority.Duration, null)) return null
         val result = (try {
             if (!mayExtract(file.location, priority)) {
@@ -446,17 +464,12 @@ class CachedMediaPreviewSource(
         if (result == PreviewDuration.Failed) {
             // 预取失败不写退避：坏文件不会因此长期占住唯一许可。
             if (priority.isVisible) {
-                val attempts = (previous?.attempts ?: 0) + 1
-                val failedAt = monotonicClockMillis()
-                recordRetry(
-                    failures = durationFailures,
-                    key = key,
-                    state = RetryState(attempts, failedAt + durationRetryDelay(attempts)),
-                    now = failedAt,
-                )
+                val state = stateFor(key)
+                val attempts = state.failDuration()
+                state.deferUntil(monotonicClockMillis() + durationRetryDelay(attempts))
             }
         } else {
-            durationFailures.remove(key)
+            entryState(key)?.clearDurationFailure()
         }
         return result
     }
@@ -507,7 +520,7 @@ class CachedMediaPreviewSource(
                     val waited = monotonicClockMillis() - started
                     if (!acquired) {
                         diagnostics.log { "网络封面: ${file.name} 等预打开名额超时 ${waited}ms" }
-                        LoadedPreview(image = null, durationMillis = null, failed = true)
+                        LoadedPreview(image = null, durationMillis = null, failureStage = PreviewFailureStage.Timeout)
                     } else {
                         try {
                             diagnostics.log { "网络封面: ${file.name} 等预打开名额 ${waited}ms" }
@@ -519,25 +532,17 @@ class CachedMediaPreviewSource(
                 }
             },
         )
+        // 失败次数记进抽帧状态：调度器读同一份决定重试间隔与次数。
+        val stage = loaded.failureStage
+        if (stage != null) stateFor(key).fail(stage)
         notePrefetchOutcome(key, priority, loaded)
         return loaded
     }
 
-    /** 预取专用抑制：预取失败或无图时记下，避免每次窗口变化重新入队都重开会话。 */
-    private fun isPrefetchSuppressed(key: String): Boolean = prefetchSuppressed.contains(key)
-
-    private fun clearPrefetchSuppression(key: String) {
-        prefetchSuppressed.forget(key)
-    }
-
-    /** 预取失败或无图时记下；放弃与取消不记，出图成功时清掉旧记录。 */
+    /** 预取失败或无图时记下；放弃与取消不记，出图时由状态一起清掉。 */
     private fun notePrefetchOutcome(key: String, priority: PreviewPriority, loaded: LoadedPreview) {
         if (priority.isVisible || loaded.abandoned) return
-        if (loaded.failed || loaded.image == null) {
-            prefetchSuppressed.remember(key)
-        } else {
-            prefetchSuppressed.forget(key)
-        }
+        if (loaded.failed || loaded.image == null) stateFor(key).suppressPrefetch()
     }
 
     /**
@@ -612,7 +617,7 @@ class CachedMediaPreviewSource(
                 }
                 LoadedPreview(image = null, durationMillis = null)
             } else {
-                forgetNoImage(key)
+                stateFor(key).succeed()
                 // 网络不读取时长：缓存条目记录为时长未知，而不是“确定没有时长”。
                 LoadedPreview(cache.save(key, bytes, durationKnown = false), durationMillis = null)
             }
@@ -737,7 +742,7 @@ class CachedMediaPreviewSource(
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
-                    LoadedPreview(image = null, durationMillis = null, failed = true)
+                    LoadedPreview(image = null, durationMillis = null, failureStage = previewFailureStageOf(failure))
                 }
                 if (loaded.abandoned) {
                     // 先移出再取消：等待者不会取到已取消的 Deferred 空转。
@@ -759,14 +764,30 @@ class CachedMediaPreviewSource(
         }
     }
 
-    private fun isNoImageRemembered(key: String): Boolean = noImage.contains(key)
+    /** 条目在缓存与抽帧状态里用的键。 */
+    private fun previewKey(file: MediaFile): String =
+        thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
+
+    /** 条目本次运行的抽帧状态；没有记录时返回 null。 */
+    private fun entryState(key: String): PreviewEntryState? = entries.state(key)
+
+    /** 取条目本次运行的抽帧状态，没有记录时新建。 */
+    private fun stateFor(key: String): PreviewEntryState = entries.stateFor(key)
+
+    private fun isNoImageRemembered(key: String): Boolean = entries.isNoImageRemembered(key)
 
     private fun rememberNoImage(key: String) {
-        noImage.remember(key)
+        entries.rememberNoImage(key)
     }
 
     private fun forgetNoImage(key: String) {
-        noImage.forget(key)
+        entryState(key)?.forgetNoImage()
+    }
+
+    private fun isPrefetchSuppressed(key: String): Boolean = entryState(key)?.prefetchSuppressed == true
+
+    private fun clearPrefetchSuppression(key: String) {
+        entryState(key)?.clearPrefetchSuppression()
     }
 
     /**
@@ -789,36 +810,20 @@ class CachedMediaPreviewSource(
             "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage" +
                 (cause?.let { " | 原因: $it" } ?: "")
         }
-        LoadedPreview(image = null, durationMillis = null, failed = true)
+        LoadedPreview(image = null, durationMillis = null, failureStage = previewFailureStageOf(failure))
     }
 
-    /** 记录失败退避；记录数达到上限时先清掉已过期的，再淘汰最早到期的键。 */
-    private fun <K> recordRetry(
-        failures: ConcurrentHashMap<K, RetryState>,
-        key: K,
-        state: RetryState,
-        now: Long,
-    ) {
-        if (failures.size >= MAX_RETRY_ENTRIES) {
-            failures.entries.removeAll { it.value.retryAtMillis <= now }
-            if (failures.size >= MAX_RETRY_ENTRIES) {
-                failures.entries.minByOrNull { it.value.retryAtMillis }
-                    ?.let { failures.remove(it.key) }
-            }
-        }
-        failures[key] = state
-    }
-
-    private data class RetryState(val attempts: Int, val retryAtMillis: Long)
-
-    private data class LoadedPreview(
+    private class LoadedPreview(
         val image: File?,
         val durationMillis: Long?,
         /** 本次结果只给本次调用者，不作为成功结果共享给同键等待者（离屏放弃或时长补读放弃）。 */
         val abandoned: Boolean = false,
+        /** 失败阶段；null 表示不是失败收尾，落到缓存或占位图。 */
+        val failureStage: PreviewFailureStage? = null,
+    ) {
         /** 这一次是失败收尾：不落缓存，交给调度器递进重试。 */
-        val failed: Boolean = false,
-    )
+        val failed: Boolean get() = failureStage != null
+    }
 
     /** 同键在途请求：等待者共享同一次抽取结果；可见请求可取消预取 owner。 */
     private data class InFlight(
@@ -861,9 +866,6 @@ class CachedMediaPreviewSource(
 
         /** 时长读取失败后的最大重试间隔。 */
         private const val DURATION_RETRY_MAX_MILLIS = 10 * 60 * 1000L
-
-        /** 退避记录上限；超出时清理过期项，避免长期运行后无限增长。 */
-        private const val MAX_RETRY_ENTRIES = 512
 
         /** 本地抽取失败后的重试次数上限；用尽后保持占位图，条目再次可见也不再重试。 */
         private const val LOCAL_RETRY_LIMIT = 3

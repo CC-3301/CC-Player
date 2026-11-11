@@ -6,7 +6,6 @@ import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.network.NetworkStreams
 import com.cc3301.ccplayer.network.PreparedSource
-import com.cc3301.ccplayer.network.RetainedLocations
 import com.cc3301.ccplayer.streaming.ByteSource
 import com.cc3301.ccplayer.streaming.LoopbackStreamServer
 import com.cc3301.ccplayer.streaming.NetworkReadPriority
@@ -26,9 +25,6 @@ class SmbStreams(
     private val server: LoopbackStreamServer = LoopbackStreamServer(diagnostics = diagnostics),
 ) : NetworkStreams {
 
-    /** 上一版保留集合：只摘走被移出集合的位置。 */
-    private val retention = RetainedLocations()
-
     /**
      * 登记一次准备。SMB 探测只取会话、播放复用同一条会话，没有要登记的读句柄，
      * 凭证只承载这一次试连。
@@ -45,12 +41,9 @@ class SmbStreams(
     /** 位置对应的本机地址。 */
     override fun urlFor(location: String): String = server.serve(location) { openBlocking(location) }
 
+    /** 声明保留集合：本代理名下不在集合里的已就绪源当场摘走，关闭在关源线程上做。 */
     override fun retain(locations: Set<String>) {
-        retention.droppedBy(locations).forEach(::returnSource)
-    }
-
-    override fun returnSource(location: String) {
-        server.returnSource(location)
+        server.retain(locations)
     }
 
     override fun discardByteSources() {
