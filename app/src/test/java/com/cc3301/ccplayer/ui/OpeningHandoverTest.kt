@@ -56,7 +56,7 @@ class OpeningHandoverTest {
         handover.begin(preparing = true)
 
         assertEquals(EntryPhase.Preparing, handover.phase)
-        assertTrue(handover.preparingUi)
+        assertTrue(handover.preparesInPage)
         assertTrue(handover.initialLoading(PlaybackState.Idle, switching = false))
     }
 
@@ -65,7 +65,7 @@ class OpeningHandoverTest {
         val generation = handover.begin(preparing = false)
 
         assertEquals(EntryPhase.Preparing, handover.phase)
-        assertFalse(handover.preparingUi)
+        assertFalse(handover.preparesInPage)
         assertTrue(handover.isCurrent(generation))
     }
 
@@ -76,7 +76,8 @@ class OpeningHandoverTest {
         assertTrue(handover.prepared(generation, playlist, current, directoryEntries))
 
         assertEquals(EntryPhase.AwaitingHandover, handover.phase)
-        assertTrue(handover.preparingUi)
+        assertTrue(handover.preparesInPage)
+        assertTrue(handover.phase.isPreparingPhase)
         assertTrue(handover.isAwaitingHandover)
     }
 
@@ -85,7 +86,7 @@ class OpeningHandoverTest {
         acceptedEntry()
 
         assertEquals(EntryPhase.Accepted, handover.phase)
-        assertFalse(handover.preparingUi)
+        assertFalse(handover.phase.isPreparingPhase)
         assertTrue(handover.initialLoading(PlaybackState.Loading, switching = false))
     }
 
@@ -133,7 +134,7 @@ class OpeningHandoverTest {
         handover.onPlaybackUpdate(PlaybackState.Playing, switching = false)
 
         assertEquals(EntryPhase.Preparing, handover.phase)
-        assertTrue(handover.preparingUi)
+        assertTrue(handover.preparesInPage)
     }
 
     @Test
@@ -180,7 +181,7 @@ class OpeningHandoverTest {
         handover.onLeftPlayerPage()
 
         assertNull(handover.phase)
-        assertFalse(handover.preparingUi)
+        assertFalse(handover.preparesInPage)
         assertFalse(handover.isCurrent(generation))
         assertFalse(handover.prepared(generation, playlist, current, directoryEntries))
         assertFalse(handover.cancel(generation))

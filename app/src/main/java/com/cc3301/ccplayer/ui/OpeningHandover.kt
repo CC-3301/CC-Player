@@ -75,9 +75,6 @@ class OpeningHandover(
     private var timingSince: Long? = null
     private var foreground = true
 
-    /** 准备期界面：只给在播放页里等待准备的打开，音频进入时不显示准备期。 */
-    val preparingUi: Boolean get() = preparesInPage && phase.isPreparingPhase
-
     /** 是否停在等待接手：界面据此决定要不要推进时间。 */
     val isAwaitingHandover: Boolean get() = phase == EntryPhase.AwaitingHandover
 

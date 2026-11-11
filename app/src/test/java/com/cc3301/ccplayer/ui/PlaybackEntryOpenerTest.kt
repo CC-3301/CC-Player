@@ -271,7 +271,7 @@ class PlaybackEntryOpenerTest {
 
         assertTrue("音频不预先进入播放页", recorder.events.isEmpty())
         assertEquals(EntryPhase.Preparing, handover.phase)
-        assertFalse("音频准备在浏览页完成，不显示准备期界面", handover.preparingUi)
+        assertFalse("音频准备在浏览页完成，不在播放页里准备", handover.preparesInPage)
 
         directoryGate.complete(Unit)
         advanceUntilIdle()
@@ -279,7 +279,7 @@ class PlaybackEntryOpenerTest {
         assertEquals(listOf("enter", "start:$generation"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
         assertEquals(EntryPhase.Accepted, handover.phase)
-        assertFalse("音频进入时不显示准备期界面", handover.preparingUi)
+        assertFalse("音频进入时不在播放页里准备", handover.preparesInPage)
     }
 
     @Test
