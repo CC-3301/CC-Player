@@ -43,7 +43,7 @@ class PlayerBarsVisibilityTest {
     fun `首次缓冲期顶底栏保持可见`() {
         controls.toggle()
         val firstBuffering = isFirstBuffering(
-            initialLoading = true,
+            phase = PlayerScreenPhase.Loading,
             switchedSinceOpen = switchedSinceOpen(switching = false, alreadySwitched = false),
         )
 
@@ -60,7 +60,7 @@ class PlayerBarsVisibilityTest {
     fun `首次缓冲切过集后不再显示顶底栏`() {
         controls.toggle()
         val switched = switchedSinceOpen(switching = true, alreadySwitched = false)
-        val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
+        val firstBuffering = isFirstBuffering(phase = PlayerScreenPhase.Loading, switchedSinceOpen = switched)
 
         assertFalse(firstBuffering)
         assertFalse(presence(firstBuffering = firstBuffering).shown)
@@ -72,7 +72,7 @@ class PlayerBarsVisibilityTest {
         val switched = switchedSinceOpen(switching = false, alreadySwitched = true)
         assertTrue(switched)
 
-        val firstBuffering = isFirstBuffering(initialLoading = true, switchedSinceOpen = switched)
+        val firstBuffering = isFirstBuffering(phase = PlayerScreenPhase.Loading, switchedSinceOpen = switched)
         assertFalse(firstBuffering)
         assertFalse(presence(firstBuffering = firstBuffering).shown)
     }
@@ -305,7 +305,7 @@ class PlayerBarsVisibilityTest {
     @Test
     fun `准备期隐藏标题转屏与底栏但保留更多`() {
         assertFalse(playerTopBarTitleAndRotateVisible(preparing = true))
-        assertTrue(actionAllowed(PlayerAction.More, switching = false, initialLoading = true, restoring = false))
+        assertTrue(actionAllowed(PlayerAction.More, PlayerScreenPhase.Loading))
         assertFalse(playerBottomBarVisible(barsShown = true, preparing = true))
     }
 

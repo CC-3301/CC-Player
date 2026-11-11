@@ -63,15 +63,9 @@ import com.cc3301.ccplayer.network.SourceProtocol
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
-import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
-import com.cc3301.ccplayer.playback.SeekSettlement
 import com.cc3301.ccplayer.playback.SleepTimerOption
-import com.cc3301.ccplayer.playback.SleepTimerState
-import com.cc3301.ccplayer.playback.SubtitleSelection
-import com.cc3301.ccplayer.playback.SubtitleTrack
-import com.cc3301.ccplayer.playback.SurfacePresentation
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
@@ -94,9 +88,13 @@ import com.cc3301.ccplayer.ui.NavigationViewModel
 import com.cc3301.ccplayer.ui.NotificationOpenAction
 import com.cc3301.ccplayer.ui.OpeningHandover
 import com.cc3301.ccplayer.ui.PlaybackEntryOpener
+import com.cc3301.ccplayer.ui.PlayerActions
 import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
+import com.cc3301.ccplayer.ui.PlayerScreenAccess
+import com.cc3301.ccplayer.ui.PlayerScreenEnvironment
+import com.cc3301.ccplayer.ui.PlayerScreenViewModel
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.SettingsScreen
@@ -122,12 +120,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-class MainActivity : ComponentActivity(), MpvTextureView.Callback {
+class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions {
 
     private val navigation: NavigationViewModel by viewModels {
         NavigationViewModel.factory(applicationContext, diagnostics)
@@ -138,6 +137,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
+
+    /** 播放页状态持有者：收下会话事实，派生出播放页阶段。 */
+    private val playerScreen: PlayerScreenViewModel by viewModels()
+
+    /** 播放页接入口：画面载体回调与系统音量控制。 */
+    private val playerAccess by lazy {
+        PlayerScreenAccess(
+            surfaceCallback = this,
+            levelControls = PlayerLevelControls(volume = MediaVolumeControl(this)),
+        )
+    }
 
     private val mediaPreview: MediaPreviewSource get() = (application as CcPlayerApplication).mediaPreview
 
@@ -209,9 +219,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
     private var playerVisible by mutableStateOf(false)
 
-    /** 最近一次播放是否以失败收尾；返回时长按错误态处理。 */
-    private var playbackFailed = false
-
     /** 「APP 内后台播放」当前取值：离开播放页时决定是否停止播放。 */
     private var inAppBackgroundPlayback = SettingsRepository.DEFAULT_IN_APP_BACKGROUND_PLAYBACK
 
@@ -226,19 +233,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
     /** 屏幕当前的四向方向；只在系统配置真正变化时更新，请求的方向本身不算到位。 */
     private var screenOrientation by mutableStateOf(ScreenOrientation.Portrait)
-    private var playbackState by mutableStateOf<PlaybackState>(PlaybackState.Idle)
-    private var progress by mutableStateOf(PlaybackProgress())
-    private var seekPreviewMillis by mutableStateOf<Long?>(null)
-    private var seekSettlement by mutableStateOf<SeekSettlement?>(null)
-    private var playlist by mutableStateOf<List<MediaFile>>(emptyList())
-    private var currentIndex by mutableIntStateOf(NO_MEDIA)
-    private var decodeMode by mutableStateOf(DecodeMode.Hardware)
-    private var loopMode by mutableStateOf(LoopMode.Sequential)
-    private var sleepTimerState by mutableStateOf(SleepTimerState.Off)
-    private var sleepTimerOption by mutableStateOf<SleepTimerOption?>(null)
-    private var switching by mutableStateOf(false)
-    private var restoring by mutableStateOf(false)
-    private var buffering by mutableStateOf(false)
 
     /** 打开交接：入口阶段、代际、兜底计时与待起播请求都由它持有。 */
     private val openingHandover = OpeningHandover(
@@ -264,18 +258,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         )
     }
 
-    /** 屏幕上现在该显示什么：由控制层派生，界面只读。 */
-    private var surfacePresentation by mutableStateOf(SurfacePresentation())
-
     /** 浏览页重新订阅可见项的代号：回前台时递增，让封面重试用尽的条目重新给一轮。 */
     private var libraryPreviewTick by mutableIntStateOf(0)
 
     /** 是否已经进过前台：第一次进入不改代号，避免刚建界面就多抽一轮。 */
     private var foregroundSeen = false
-
-    private var subtitleTracks by mutableStateOf<List<SubtitleTrack>>(emptyList())
-    private var externalSubtitles by mutableStateOf<List<MediaFile>>(emptyList())
-    private var subtitleSelection by mutableStateOf<SubtitleSelection>(SubtitleSelection.Off)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
@@ -286,13 +273,14 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                 discardByteSources = ::discardByteSourcesForSwitch,
                 retain = { locations -> streams?.retain(locations) },
             )
+            // 播放页事实由播放页 ViewModel 收集；界面只留生命周期与资源管理的副作用。
+            playerScreen.attach(binder.controller)
             stateCollection = lifecycleScope.launch {
                 launch {
-                    binder.controller.state.collect {
-                        playbackState = it
-                        updateKeepScreenOn()
+                    binder.controller.state.collect { state ->
+                        updateKeepScreenOn(state)
                         // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
-                        if (it != PlaybackState.Loading) {
+                        if (state != PlaybackState.Loading) {
                             staleSourceDiscardPolicy.onLoadingFinished(
                                 inBackground = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
                                 discard = ::discardByteSources,
@@ -300,22 +288,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                         }
                     }
                 }
-                launch { binder.controller.progress.collect { progress = it } }
-                launch { binder.controller.seekPreviewMillis.collect { seekPreviewMillis = it } }
-                launch { binder.controller.seekSettlement.collect { seekSettlement = it } }
-                launch { binder.controller.playlist.collect { playlist = it } }
-                launch { binder.controller.currentIndex.collect { currentIndex = it } }
-                launch { binder.controller.decodeMode.collect { decodeMode = it } }
-                launch { binder.controller.loopMode.collect { loopMode = it } }
-                launch { binder.controller.sleepTimerState.collect { sleepTimerState = it } }
-                launch { binder.controller.sleepTimerOption.collect { sleepTimerOption = it } }
-                launch { binder.controller.switching.collect { switching = it } }
-                launch { binder.controller.restoring.collect { restoring = it } }
-                launch { binder.controller.playbackFailed.collect { playbackFailed = it } }
-                launch { binder.controller.buffering.collect { buffering = it } }
                 launch {
                     binder.controller.surfacePresentation.collect {
-                        surfacePresentation = it
                         // 屏上那一帧的比例；有效就更新，离页或新会话时由会话对象作废。
                         sessionOrientation.onVideoAspectRatio(it.aspectRatio)
                     }
@@ -334,9 +308,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                         }
                     }
                 }
-                launch { binder.controller.subtitleTracks.collect { subtitleTracks = it } }
-                launch { binder.controller.externalSubtitles.collect { externalSubtitles = it } }
-                launch { binder.controller.subtitleSelection.collect { subtitleSelection = it } }
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
@@ -350,6 +321,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
         override fun onServiceDisconnected(name: ComponentName) {
             playback = null
+            playerScreen.detach()
             surfaceSession.onEngineLost()
         }
     }
@@ -394,8 +366,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     }
                 }
                 // 已接手后首次就绪或转入切集，入口阶段到此结束。
-                LaunchedEffect(playbackState, switching) {
-                    openingHandover.onPlaybackUpdate(playbackState, switching)
+                LaunchedEffect(playerScreen.playbackState, playerScreen.switching) {
+                    openingHandover.onPlaybackUpdate(playerScreen.playbackState, playerScreen.switching)
                 }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
                 // 比例跟着会话走：新会话作废，回到同一会话沿用，切集期间用屏上旧画面的比例。
@@ -405,9 +377,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     sessionOrientation.videoAspectRatio,
                     sessionOrientation.override,
                     // 进页时播放列表还没落地；媒介身份与视频轨变化后要重算一次「有无视频方向」。
-                    playlist,
-                    currentIndex,
-                    surfacePresentation.targetHasVideo,
+                    playerScreen.currentMedia?.location,
+                    playerScreen.targetSurface.targetHasVideo,
                 ) {
                     // 不在播放页时传空：方向交回系统。
                     dispatchPlayerOrientation(if (playerVisible) orientationMode else null)
@@ -416,12 +387,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     if (uri != null) addRoot(uri)
                 }
 
-                val levelControls = remember {
-                    PlayerLevelControls(volume = MediaVolumeControl(this@MainActivity))
-                }
-
                 // 播放页封面只给纯音频目标：直接读列表共用的封面缓存，不在这里另做解码。
-                val currentMedia = playlist.getOrNull(currentIndex)
+                val currentMedia = playerScreen.currentMedia
                 val audioTarget = currentMedia?.let { mediaKindOf(it.name) == MediaKind.Audio } == true
                 // 同一个目标进出播放页时不清空，避免封面闪一帧占位；只有换目标才清。
                 var producedCoverLocation by remember { mutableStateOf<String?>(null) }
@@ -455,77 +422,24 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
 
                     playerVisible -> {
                         BackHandler { handlePlayerBack() }
+                        // 会话事实由播放页 ViewModel 收集与组装；入口与界面环境事实在这一帧同步合入。
+                        val playerSession = playerScreen.session(
+                            entryPhase = openingHandover.phase,
+                            preparesInPage = openingHandover.preparesInPage,
+                            bufferingShown = openingHandover.showsBuffering(playerScreen.controllerBuffering),
+                            environment = PlayerScreenEnvironment(
+                                orientationMode = orientationMode,
+                                orientationOverride = sessionOrientation.override,
+                                screenOrientation = screenOrientation,
+                                autoPlayNext = autoPlayNext,
+                            ),
+                        )
+                        val playerContent = playerScreen.content(coverFile = playerCover)
                         PlayerScreen(
-                            state = playbackState,
-                            progress = progress,
-                            seekPreviewMillis = seekPreviewMillis,
-                            seekSettlement = seekSettlement,
-                            playlist = playlist,
-                            currentIndex = currentIndex,
-                            decodeMode = decodeMode,
-                            loopMode = loopMode,
-                            orientationMode = orientationMode,
-                            orientationOverride = sessionOrientation.override,
-                            screenOrientation = screenOrientation,
-                            autoPlayNext = autoPlayNext,
-                            levelControls = levelControls,
-                            surfaceCallback = this@MainActivity,
-                            surfacePresentation = surfacePresentation,
-                            coverFile = playerCover,
-                            audioTarget = audioTarget,
-                            switching = switching,
-                            restoring = restoring,
-                            buffering = openingHandover.showsBuffering(buffering),
-                            initialLoading = openingHandover.initialLoading(playbackState, switching),
-                            preparing = openingHandover.preparingUi,
-                            subtitleTracks = subtitleTracks,
-                            externalSubtitles = externalSubtitles,
-                            subtitleSelection = subtitleSelection,
-                            onPlayPause = {
-                                playback?.controller?.onPlayPauseClick()
-                                    ?: diagnostics.log { "播放键未执行: 播放会话已断开" }
-                            },
-                            onPrevious = {
-                                playback?.controller?.previous()
-                                    ?: diagnostics.log { "上一集未执行: 播放会话已断开" }
-                            },
-                            onNext = {
-                                playback?.controller?.next()
-                                    ?: diagnostics.log { "下一集未执行: 播放会话已断开" }
-                            },
-                            onSeekPreview = { position, requestSeek ->
-                                playback?.controller?.updateSeekPreview(position, requestSeek)
-                            },
-                            onSeekCommit = { playback?.controller?.commitSeekPreview() },
-                            onSeekBy = { seekBy(it) },
-                            onSeekStep = { playback?.controller?.updateSeekPreviewBy(it) },
-                            onSeekHeartbeat = { playback?.controller?.seekPreviewHeartbeat() },
-                            onPlaylistSelect = { media -> playback?.controller?.play(media) },
-                            onSelectDecodeMode = { playback?.controller?.setDecodeMode(it) },
-                            onSelectLoopMode = { playback?.controller?.setLoopMode(it) },
-                            onSelectOrientationMode = { mode ->
-                                sessionOrientation.clearOverride()
-                                lifecycleScope.launch { settings.setOrientationMode(mode) }
-                            },
-                            onToggleAutoPlayNext = {
-                                lifecycleScope.launch { settings.setAutoPlayNext(!autoPlayNext) }
-                            },
-                            onSelectSleepTimer = { playback?.controller?.startSleepTimer(it) },
-                            onCancelSleepTimer = { playback?.controller?.cancelSleepTimer() },
-                            sleepTimerState = sleepTimerState,
-                            sleepTimerOption = sleepTimerOption,
-                            onSelectSubtitle = { item ->
-                                val controller = playback?.controller
-                                when (item) {
-                                    is SubtitleMenuItem.Embedded -> controller?.selectEmbeddedSubtitle(item.trackId)
-                                    is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
-                                    is SubtitleMenuItem.Off -> controller?.disableSubtitles()
-                                }
-                            },
-                            onToggleRotation = {
-                                sessionOrientation.toggle(currentScreenOrientation())
-                            },
-                            onClose = ::handlePlayerTopBarBack,
+                            session = playerSession,
+                            actions = this@MainActivity,
+                            content = playerContent,
+                            access = playerAccess,
                         )
                     }
 
@@ -612,11 +526,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                                 if (entry.isDirectory) {
                                     library.enter(entry)
                                 } else {
-                                    val current = playlist.getOrNull(currentIndex)
+                                    val current = playerScreen.currentMedia
                                     val reopen = libraryEntryAction(
                                         entryLocation = entry.location,
                                         currentLocation = current?.location,
-                                        playbackActive = playbackState != PlaybackState.Idle,
+                                        playbackActive = playerScreen.playbackState != PlaybackState.Idle,
                                     ) == LibraryEntryAction.ReopenPlayerPage
                                     if (reopen) {
                                         showPlayerPage()
@@ -680,15 +594,91 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     /** 双击三分区的快退/快进：返回夹取后的实际位移，时长未知时不动作。 */
-    private fun seekBy(deltaMillis: Long): Long {
+    override fun seekBy(deltaMillis: Long): Long {
         val controller = playback?.controller ?: return 0L
         val target = relativeSeekTarget(
-            positionMillis = progress.positionMillis,
-            durationMillis = progress.durationMillis,
+            positionMillis = playerScreen.progress.positionMillis,
+            durationMillis = playerScreen.progress.durationMillis,
             deltaMillis = deltaMillis,
         ) ?: return 0L
         controller.seekTo(target.targetMillis)
         return target.deltaMillis
+    }
+
+    override fun playPause() {
+        playback?.controller?.onPlayPauseClick()
+            ?: diagnostics.log { "播放键未执行: 播放会话已断开" }
+    }
+
+    override fun previous() {
+        playback?.controller?.previous()
+            ?: diagnostics.log { "上一集未执行: 播放会话已断开" }
+    }
+
+    override fun next() {
+        playback?.controller?.next()
+            ?: diagnostics.log { "下一集未执行: 播放会话已断开" }
+    }
+
+    override fun seekPreview(positionMillis: Long, requestSeek: Boolean) {
+        playback?.controller?.updateSeekPreview(positionMillis, requestSeek)
+    }
+
+    override fun seekCommit() {
+        playback?.controller?.commitSeekPreview()
+    }
+
+    override fun seekStep(deltaMillis: Long): Long? =
+        playback?.controller?.updateSeekPreviewBy(deltaMillis)
+
+    override fun seekHeartbeat() {
+        playback?.controller?.seekPreviewHeartbeat()
+    }
+
+    override fun selectPlaylistItem(media: MediaFile) {
+        playback?.controller?.play(media)
+    }
+
+    override fun selectDecodeMode(mode: DecodeMode) {
+        playback?.controller?.setDecodeMode(mode)
+    }
+
+    override fun selectLoopMode(mode: LoopMode) {
+        playback?.controller?.setLoopMode(mode)
+    }
+
+    override fun selectOrientationMode(mode: OrientationMode) {
+        sessionOrientation.clearOverride()
+        lifecycleScope.launch { settings.setOrientationMode(mode) }
+    }
+
+    override fun toggleAutoPlayNext() {
+        lifecycleScope.launch { settings.setAutoPlayNext(!settings.autoPlayNext.first()) }
+    }
+
+    override fun selectSleepTimer(option: SleepTimerOption) {
+        playback?.controller?.startSleepTimer(option)
+    }
+
+    override fun cancelSleepTimer() {
+        playback?.controller?.cancelSleepTimer()
+    }
+
+    override fun selectSubtitle(item: SubtitleMenuItem) {
+        val controller = playback?.controller
+        when (item) {
+            is SubtitleMenuItem.Embedded -> controller?.selectEmbeddedSubtitle(item.trackId)
+            is SubtitleMenuItem.External -> controller?.selectExternalSubtitle(item.location)
+            is SubtitleMenuItem.Off -> controller?.disableSubtitles()
+        }
+    }
+
+    override fun toggleRotation() {
+        sessionOrientation.toggle(currentScreenOrientation())
+    }
+
+    override fun back() {
+        handlePlayerTopBarBack()
     }
 
     /** 汇总轮转日志为一个纯文本文件，交给系统分享面板。 */
@@ -763,6 +753,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
             sessionOrientation.clearOverride()
         }
         playerVisible = true
+        playback?.let { playerScreen.attach(it.controller) }
         updateKeepScreenOn()
         requestNotificationPermission()
         if (!bound) {
@@ -933,11 +924,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     /** 仅前台且播放页在场、播放或加载时保持屏幕常亮；暂停、片尾、离开播放页与退后台立即释放。 */
-    private fun updateKeepScreenOn() {
+    private fun updateKeepScreenOn(state: PlaybackState = playerScreen.playbackState) {
         screenOn.update(
             foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
             playerVisible = playerVisible,
-            state = playbackState,
+            state = state,
         )
     }
 
@@ -955,13 +946,15 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
      * 其余播放状态按「APP 内后台播放」决定离开后是否继续播放。
      */
     private fun handlePlayerBack() {
+        val state = playerScreen.playbackState
+        val switching = playerScreen.switching
         when (
             playerBackAction(
-                state = playbackState,
+                state = state,
                 switching = switching,
-                restoring = restoring,
-                initialLoading = openingHandover.initialLoading(playbackState, switching),
-                failed = playbackFailed,
+                restoring = playerScreen.restoring,
+                initialLoading = openingHandover.initialLoading(state, switching),
+                failed = playerScreen.playbackFailed,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
                 entryPhase = openingHandover.phase,
                 atEpisodeEnd = playback?.controller?.atEpisodeEnd == true,
@@ -1026,6 +1019,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         openingHandover.onLeftPlayerPage()
         onSurfaceReleased()
         playerVisible = false
+        playerScreen.detach()
         restoreBrowserSystemUi()
         updateKeepScreenOn()
     }
@@ -1060,27 +1054,10 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         onSurfaceReleased()
         openingHandover.onLeftPlayerPage()
         playerVisible = false
+        playerScreen.detach()
         // 切回浏览页前恢复系统栏与方向，避免 insets 变化让浏览页布局跳动。
         restoreBrowserSystemUi()
-        playbackState = PlaybackState.Idle
-        playbackFailed = false
         updateKeepScreenOn()
-        progress = PlaybackProgress()
-        seekPreviewMillis = null
-        seekSettlement = null
-        playlist = emptyList()
-        currentIndex = NO_MEDIA
-        decodeMode = DecodeMode.Hardware
-        loopMode = LoopMode.Sequential
-        sleepTimerState = SleepTimerState.Off
-        sleepTimerOption = null
-        switching = false
-        restoring = false
-        buffering = false
-        surfacePresentation = SurfacePresentation()
-        subtitleTracks = emptyList()
-        externalSubtitles = emptyList()
-        subtitleSelection = SubtitleSelection.Off
         releaseNetworkStreams()
         stopPlaybackService()
     }
@@ -1112,6 +1089,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         playback?.controller?.attachNetworkSources(discardByteSources = { false }, retain = { })
         stateCollection?.cancel()
         stateCollection = null
+        playerScreen.detach()
         playback = null
         if (bound) {
             unbindService(connection)
@@ -1129,7 +1107,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     private fun restoreBrowserSystemUi() {
         applyImmersive(false)
         sessionOrientation.clearOverride()
-        surfacePresentation = surfacePresentation.copy(targetHasVideo = true)
         // 不在播放页：模式传空，方向交回系统；比例留到下一次回到同一会话。
         dispatchPlayerOrientation(null)
     }
@@ -1171,8 +1148,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
      * 没有视频方向的条目按屏幕方向档处理，不进入方向等待。列表未就绪时按有视频算。
      */
     private fun currentTargetHasNoVideo(): Boolean =
-        playlist.getOrNull(currentIndex)?.let { mediaKindOf(it.name) == MediaKind.Audio } == true ||
-            !surfacePresentation.targetHasVideo
+        playerScreen.currentMedia?.let { mediaKindOf(it.name) == MediaKind.Audio } == true ||
+            !playerScreen.targetSurface.targetHasVideo
 
     /**
      * 每次方向真正切换都写一条日志。
@@ -1230,8 +1207,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     private companion object {
-        const val NO_MEDIA = -1
-
         /** 等待接手兜底的推进间隔。 */
         const val ENTRY_HANDOVER_TICK_MILLIS = 250L
     }

@@ -68,16 +68,16 @@ enum class BufferingLoadKind {
     Idle,
 }
 
-/** 按加载触发类型归类缓冲提示：恢复先于切集，切集先于首次打开。 */
-fun bufferingLoadKind(
-    switching: Boolean,
-    restoring: Boolean,
-    initialLoading: Boolean,
-): BufferingLoadKind = when {
-    restoring -> BufferingLoadKind.Restore
-    switching -> BufferingLoadKind.Switch
-    initialLoading -> BufferingLoadKind.Open
-    else -> BufferingLoadKind.Idle
+/** 按播放页阶段归类缓冲提示：恢复先于切集，切集先于打开。 */
+fun bufferingLoadKind(phase: PlayerScreenPhase): BufferingLoadKind = when (phase) {
+    PlayerScreenPhase.Restoring -> BufferingLoadKind.Restore
+    PlayerScreenPhase.Switching -> BufferingLoadKind.Switch
+    PlayerScreenPhase.Preparing,
+    PlayerScreenPhase.AwaitingHandover,
+    PlayerScreenPhase.Loading,
+    -> BufferingLoadKind.Open
+
+    PlayerScreenPhase.Ready -> BufferingLoadKind.Idle
 }
 
 /**
