@@ -157,18 +157,16 @@ class PlayerGesturesTest {
         )
         data class LoadingCase(
             val name: String,
-            val switching: Boolean,
-            val initial: Boolean,
-            val restoring: Boolean,
+            val phase: PlayerScreenPhase,
             val allowed: Set<PlayerAction>,
         )
         val cases = listOf(
-            LoadingCase("未加载", switching = false, initial = false, restoring = false, allowed = PlayerAction.entries.toSet()),
-            LoadingCase("首次加载", switching = false, initial = true, restoring = false, allowed = initialLoading),
-            LoadingCase("切集", switching = true, initial = false, restoring = false, allowed = switchingOrRestoring),
-            LoadingCase("恢复原片", switching = false, initial = false, restoring = true, allowed = switchingOrRestoring),
-            LoadingCase("切集并恢复", switching = true, initial = false, restoring = true, allowed = switchingOrRestoring),
-            LoadingCase("首次加载优先", switching = true, initial = true, restoring = false, allowed = initialLoading),
+            LoadingCase("未加载", PlayerScreenPhase.Ready, PlayerAction.entries.toSet()),
+            LoadingCase("准备中", PlayerScreenPhase.Preparing, initialLoading),
+            LoadingCase("等待接手", PlayerScreenPhase.AwaitingHandover, initialLoading),
+            LoadingCase("首次加载", PlayerScreenPhase.Loading, initialLoading),
+            LoadingCase("切集", PlayerScreenPhase.Switching, switchingOrRestoring),
+            LoadingCase("恢复原片", PlayerScreenPhase.Restoring, switchingOrRestoring),
         )
 
         cases.forEach { case ->
@@ -177,21 +175,21 @@ class PlayerGesturesTest {
                 assertEquals(
                     "${case.name}/${action.name}",
                     expected,
-                    actionAllowed(action, case.switching, case.initial, case.restoring),
+                    actionAllowed(action, case.phase),
                 )
                 assertEquals(
                     "${case.name}/${action.name} 外观",
                     expected,
-                    actionLooksEnabled(action, true, true, case.switching, case.initial, case.restoring),
+                    actionLooksEnabled(action, true, true, case.phase),
                 )
             }
         }
 
         // 上一集/下一集在列表边界始终置灰，与加载阶段无关。
-        assertFalse(actionLooksEnabled(PlayerAction.Previous, false, true, false, false, false))
-        assertFalse(actionLooksEnabled(PlayerAction.Next, true, false, false, false, false))
-        assertTrue(actionLooksEnabled(PlayerAction.Previous, true, false, false, false, false))
-        assertTrue(actionLooksEnabled(PlayerAction.Next, false, true, false, false, false))
+        assertFalse(actionLooksEnabled(PlayerAction.Previous, false, true, PlayerScreenPhase.Ready))
+        assertFalse(actionLooksEnabled(PlayerAction.Next, true, false, PlayerScreenPhase.Ready))
+        assertTrue(actionLooksEnabled(PlayerAction.Previous, true, false, PlayerScreenPhase.Ready))
+        assertTrue(actionLooksEnabled(PlayerAction.Next, false, true, PlayerScreenPhase.Ready))
     }
 
     @Test
@@ -232,17 +230,17 @@ class PlayerGesturesTest {
 
     @Test
     fun `锁定或面板打开时不触发双击反馈`() {
-        assertFalse(doubleTapFeedbackAllowed(false, true, false, false, false))
-        assertFalse(doubleTapFeedbackAllowed(true, false, false, false, false))
-        assertFalse(doubleTapFeedbackAllowed(true, true, false, false, false))
+        assertFalse(doubleTapFeedbackAllowed(false, true, PlayerScreenPhase.Ready))
+        assertFalse(doubleTapFeedbackAllowed(true, false, PlayerScreenPhase.Ready))
+        assertFalse(doubleTapFeedbackAllowed(true, true, PlayerScreenPhase.Ready))
     }
 
     @Test
-    fun `切集首次加载与恢复期间不触发双击反馈`() {
-        assertFalse(doubleTapFeedbackAllowed(false, false, switching = true, initialLoading = false, restoring = false))
-        assertFalse(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = true, restoring = false))
-        assertFalse(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = false, restoring = true))
-        assertTrue(doubleTapFeedbackAllowed(false, false, switching = false, initialLoading = false, restoring = false))
+    fun `加载阶段期间不触发双击反馈`() {
+        assertFalse(doubleTapFeedbackAllowed(false, false, PlayerScreenPhase.Switching))
+        assertFalse(doubleTapFeedbackAllowed(false, false, PlayerScreenPhase.Loading))
+        assertFalse(doubleTapFeedbackAllowed(false, false, PlayerScreenPhase.Restoring))
+        assertTrue(doubleTapFeedbackAllowed(false, false, PlayerScreenPhase.Ready))
     }
 
     @Test
@@ -304,12 +302,12 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `反馈清空条件覆盖锁定面板加载与恢复`() {
-        assertTrue(doubleTapFeedbackBlocked(true, false, false, false, false))
-        assertTrue(doubleTapFeedbackBlocked(false, true, false, false, false))
-        assertTrue(doubleTapFeedbackBlocked(false, false, true, false, false))
-        assertTrue(doubleTapFeedbackBlocked(false, false, false, true, false))
-        assertTrue(doubleTapFeedbackBlocked(false, false, false, false, true))
-        assertFalse(doubleTapFeedbackBlocked(false, false, false, false, false))
+    fun `反馈清空条件覆盖锁定面板与各加载阶段`() {
+        assertTrue(doubleTapFeedbackBlocked(true, false, PlayerScreenPhase.Ready))
+        assertTrue(doubleTapFeedbackBlocked(false, true, PlayerScreenPhase.Ready))
+        assertTrue(doubleTapFeedbackBlocked(false, false, PlayerScreenPhase.Switching))
+        assertTrue(doubleTapFeedbackBlocked(false, false, PlayerScreenPhase.Loading))
+        assertTrue(doubleTapFeedbackBlocked(false, false, PlayerScreenPhase.Restoring))
+        assertFalse(doubleTapFeedbackBlocked(false, false, PlayerScreenPhase.Ready))
     }
 }

@@ -11,7 +11,7 @@ class PlayerBufferingIndicatorTest {
     fun `打开缓冲显示转圈与文字`() {
         assertTrue(
             bufferingHint(
-                kind = bufferingLoadKind(switching = false, restoring = false, initialLoading = true),
+                kind = bufferingLoadKind(PlayerScreenPhase.Loading),
                 buffering = true,
                 showsPicture = false,
                 quietBlack = false,
@@ -36,7 +36,7 @@ class PlayerBufferingIndicatorTest {
     fun `恢复原片缓冲显示转圈与文字`() {
         assertTrue(
             bufferingHint(
-                kind = bufferingLoadKind(switching = true, restoring = true, initialLoading = false),
+                kind = bufferingLoadKind(PlayerScreenPhase.Restoring),
                 buffering = true,
                 showsPicture = false,
                 quietBlack = false,
@@ -48,7 +48,7 @@ class PlayerBufferingIndicatorTest {
     fun `切集缓冲不显示提示`() {
         assertFalse(
             bufferingHint(
-                kind = bufferingLoadKind(switching = true, restoring = false, initialLoading = false),
+                kind = bufferingLoadKind(PlayerScreenPhase.Switching),
                 buffering = true,
                 showsPicture = true,
                 quietBlack = false,
