@@ -17,8 +17,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 归还字节源：当前目标不再需要该源时按位置交还，触发点是播到结束、暂停在片尾、
- * 真正停止、换目标与切集接管成功。控制层只表达「不再需要」，摘走与关闭在界面侧。
+ * 归还字节源：控制层声明此刻仍需保留的媒体位置，被移出集合的位置由界面侧摘走并关闭。
+ * 触发点是播到结束、暂停在片尾、真正停止、换目标与切集接管成功。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerSourceReturnTest {
@@ -29,14 +29,20 @@ class PlaybackControllerSourceReturnTest {
     /** 每次归还发生时，引擎已经下发过几次加载：用来断言归还晚于新加载下发。 */
     private val startsAtReturn = mutableListOf<Int>()
 
+    /** 上一版保留集合：注入出口按差集记录归还，与路由层同一判据。 */
+    private var retained: Set<String> = emptySet()
+
     private fun TestScope.controller(returned: MutableList<String>): PlaybackController = PlaybackController(
         engine,
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
-        returnSource = { location ->
-            returned += location
-            startsAtReturn += engine.startedUrls.size
+        retain = { locations ->
+            (retained - locations).forEach { location ->
+                returned += location
+                startsAtReturn += engine.startedUrls.size
+            }
+            retained = locations
         },
     )
 

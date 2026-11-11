@@ -19,21 +19,16 @@ import kotlinx.coroutines.launch
  * 浏览页点开媒体的入口：视频先同步切进播放页，再在后台解析外挂字幕目录与网络连接；
  * 音频等媒体准备完成后才进入播放页。
  *
- * 每次打开由入口阶段分配代际；准备的成功与失败都带同一代际才被接受，
+ * 每次打开由打开交接分配代际；准备的成功与失败都带同一代际才被接受，
  * 迟到的结果一律丢弃，不得起播、不得离开播放页。
  */
 class PlaybackEntryOpener(
     private val scope: CoroutineScope,
-    private val entryState: PlaybackEntryState,
+    private val handover: OpeningHandover,
     private val directoryEntries: suspend () -> List<MediaFile>,
     private val networkStreams: () -> NetworkStreams,
     private val onEnterPlayer: () -> Unit,
-    private val onStartPlayback: (
-        current: MediaFile,
-        playlist: List<MediaFile>,
-        directoryEntries: List<MediaFile>,
-        generation: Int,
-    ) -> Unit,
+    private val onPrepared: () -> Unit,
     private val onShowFailure: (MediaFailure) -> Unit,
     private val onLeavePlayer: () -> Unit,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
@@ -58,7 +53,7 @@ class PlaybackEntryOpener(
      */
     fun open(entry: MediaFile, entries: List<MediaFile>, enterBeforePreparing: Boolean): Int {
         cancel()
-        val generation = entryState.begin(preparing = enterBeforePreparing)
+        val generation = handover.begin(preparing = enterBeforePreparing)
         if (enterBeforePreparing) onEnterPlayer()
         val current = Preparation()
         preparation = current
@@ -72,7 +67,7 @@ class PlaybackEntryOpener(
                 Result.failure<PreparedPlayback>(failure)
             }
             // 阻塞的准备调用不响应取消，回到这里时可能已开始另一次打开：代际不同就丢弃。
-            if (!entryState.isCurrent(generation)) {
+            if (!handover.isCurrent(generation)) {
                 // 这次准备作废：丢掉它自己探测预置的读句柄，不动后一次打开的。
                 current.prepared?.discard()
                 preparation = null
@@ -82,18 +77,19 @@ class PlaybackEntryOpener(
             preparation = null
             prepared.fold(
                 onSuccess = { playback ->
-                    if (!entryState.prepared(generation)) return@launch
-                    if (!enterBeforePreparing) onEnterPlayer()
-                    onStartPlayback(
-                        playback.current,
-                        playback.playlist,
-                        playback.directoryEntries,
-                        generation,
+                    val ready = handover.prepared(
+                        generation = generation,
+                        playlist = playback.playlist,
+                        current = playback.current,
+                        directoryEntries = playback.directoryEntries,
                     )
+                    if (!ready) return@launch
+                    if (!enterBeforePreparing) onEnterPlayer()
+                    onPrepared()
                 },
                 onFailure = { failure ->
                     val mediaFailure = (failure as? MediaSourceException)?.failure ?: MediaFailure.Unknown
-                    if (!entryState.failed(generation)) return@launch
+                    if (!handover.cancel(generation)) return@launch
                     diagnostics.log { "准备失败: ${entry.name} ($mediaFailure)" }
                     onShowFailure(mediaFailure)
                     if (enterBeforePreparing) onLeavePlayer()
