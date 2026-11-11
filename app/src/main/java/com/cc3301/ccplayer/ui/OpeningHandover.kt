@@ -63,7 +63,8 @@ class OpeningHandover(
     private var currentGeneration: Int? = null
 
     /** 这次打开是在播放页里继续准备（视频）；音频的准备在浏览页完成。 */
-    private var preparesInPage = false
+    var preparesInPage = false
+        private set
 
     /** 准备完成后留下的待起播请求；接手时取走，只起播一次。 */
     private var pending: PendingRequest? = null

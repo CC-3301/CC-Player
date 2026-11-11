@@ -168,7 +168,7 @@ class WebDavStreamsTest {
         transport.addFile(movie, payload)
         httpRequest(streams.urlFor(movie))
 
-        streams.returnSource(movie)
+        streams.retain(emptySet())
 
         awaitClosed(transport.handles.getValue(movie))
         httpRequest(streams.urlFor(movie))
@@ -260,7 +260,7 @@ class WebDavStreamsTest {
             assertFalse("取用那条线程被卡住", taking.isAlive)
         }
 
-        streams.returnSource(movie)
+        streams.retain(emptySet())
         val deadline = System.nanoTime() + 5_000_000_000L
         while (System.nanoTime() < deadline && transport.handles.values.any { !it.closed }) {
             Thread.sleep(10)
@@ -334,7 +334,7 @@ class WebDavStreamsTest {
             assertFalse("后一次探好的句柄被前一次作废关掉了", secondHandle.closed)
             httpRequest(shared.urlFor(movie))
             assertEquals("探测结果仍交给播放复用", 2, transport.openedSizes.size)
-            shared.returnSource(movie)
+            shared.retain(emptySet())
             awaitClosed(secondHandle)
         } finally {
             shared.close()

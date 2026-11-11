@@ -361,56 +361,60 @@ private fun PlayerCoverLayer(coverFile: File?, modifier: Modifier = Modifier) {
 
 @Composable
 fun PlayerScreen(
-    state: PlaybackState,
-    progress: PlaybackProgress,
-    seekPreviewMillis: Long?,
-    seekSettlement: SeekSettlement?,
-    playlist: List<MediaFile>,
-    currentIndex: Int,
-    decodeMode: DecodeMode,
-    loopMode: LoopMode,
-    orientationMode: OrientationMode,
-    orientationOverride: ScreenOrientation?,
-    screenOrientation: ScreenOrientation,
-    autoPlayNext: Boolean,
-    sleepTimerState: SleepTimerState,
-    sleepTimerOption: SleepTimerOption?,
-    levelControls: PlayerLevelControls,
-    surfaceCallback: MpvTextureView.Callback,
-    surfacePresentation: SurfacePresentation,
-    /** 纯音频目标的已缓存封面；没有时为 null，封面层显示占位图。 */
-    coverFile: File?,
-    /** 当前目标是纯音频：只有这类目标使用封面层。 */
-    audioTarget: Boolean,
-    switching: Boolean,
-    restoring: Boolean,
-    buffering: Boolean,
-    initialLoading: Boolean,
-    /** 准备期：顶栏只留返回与更多、底栏隐藏；接手后恢复。 */
-    preparing: Boolean,
-    subtitleTracks: List<SubtitleTrack>,
-    externalSubtitles: List<MediaFile>,
-    subtitleSelection: SubtitleSelection,
-    onPlayPause: () -> Unit,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit,
-    onSeekPreview: (Long, Boolean) -> Unit,
-    onSeekCommit: () -> Unit,
-    onSeekBy: (Long) -> Long,
-    onSeekStep: (Long) -> Long?,
-    onSeekHeartbeat: () -> Unit,
-    onPlaylistSelect: (MediaFile) -> Unit,
-    onSelectDecodeMode: (DecodeMode) -> Unit,
-    onSelectLoopMode: (LoopMode) -> Unit,
-    onSelectOrientationMode: (OrientationMode) -> Unit,
-    onToggleAutoPlayNext: () -> Unit,
-    onSelectSleepTimer: (SleepTimerOption) -> Unit,
-    onCancelSleepTimer: () -> Unit,
-    onSelectSubtitle: (SubtitleMenuItem) -> Unit,
-    onToggleRotation: () -> Unit,
-    onClose: () -> Unit,
+    session: PlayerScreenState,
+    actions: PlayerActions,
+    content: PlayerScreenContent,
+    access: PlayerScreenAccess,
     modifier: Modifier = Modifier,
 ) {
+    val progressFacts = session.progress
+    val menuFacts = session.menu
+    val phase = session.loading.phase
+    val state = progressFacts.state
+    val progress = progressFacts.progress
+    val seekPreviewMillis = progressFacts.seekPreviewMillis
+    val seekSettlement = progressFacts.seekSettlement
+    val surfacePresentation = progressFacts.surfacePresentation
+    val audioTarget = progressFacts.audioTarget
+    val currentIndex = progressFacts.currentIndex
+    val buffering = session.loading.buffering
+    val playlist = content.playlist
+    val subtitleTracks = content.subtitleTracks
+    val externalSubtitles = content.externalSubtitles
+    val coverFile = content.coverFile
+    val decodeMode = menuFacts.decodeMode
+    val loopMode = menuFacts.loopMode
+    val orientationMode = menuFacts.orientationMode
+    val orientationOverride = menuFacts.orientationOverride
+    val screenOrientation = menuFacts.screenOrientation
+    val autoPlayNext = menuFacts.autoPlayNext
+    val sleepTimerState = menuFacts.sleepTimerState
+    val sleepTimerOption = menuFacts.sleepTimerOption
+    val subtitleSelection = menuFacts.subtitleSelection
+    val levelControls = access.levelControls
+    val surfaceCallback = access.surfaceCallback
+    val switching = phase.isSwitching
+    val restoring = phase.isRestoring
+    val initialLoading = phase.isInitialLoading
+    val preparing = phase.isPreparing
+    val onPlayPause: () -> Unit = actions::playPause
+    val onPrevious: () -> Unit = actions::previous
+    val onNext: () -> Unit = actions::next
+    val onSeekPreview: (Long, Boolean) -> Unit = actions::seekPreview
+    val onSeekCommit: () -> Unit = actions::seekCommit
+    val onSeekBy: (Long) -> Long = actions::seekBy
+    val onSeekStep: (Long) -> Long? = actions::seekStep
+    val onSeekHeartbeat: () -> Unit = actions::seekHeartbeat
+    val onPlaylistSelect: (MediaFile) -> Unit = actions::selectPlaylistItem
+    val onSelectDecodeMode: (DecodeMode) -> Unit = actions::selectDecodeMode
+    val onSelectLoopMode: (LoopMode) -> Unit = actions::selectLoopMode
+    val onSelectOrientationMode: (OrientationMode) -> Unit = actions::selectOrientationMode
+    val onToggleAutoPlayNext: () -> Unit = actions::toggleAutoPlayNext
+    val onSelectSleepTimer: (SleepTimerOption) -> Unit = actions::selectSleepTimer
+    val onCancelSleepTimer: () -> Unit = actions::cancelSleepTimer
+    val onSelectSubtitle: (SubtitleMenuItem) -> Unit = actions::selectSubtitle
+    val onToggleRotation: () -> Unit = actions::toggleRotation
+    val onClose: () -> Unit = actions::back
     val lock = remember { PlayerLock() }
     val controls = remember { PlayerControlsVisibility() }
     val panels = remember { PlayerPanelState() }
@@ -427,12 +431,8 @@ fun PlayerScreen(
     LaunchedEffect(switching) {
         switchedThisSession = switchedSinceOpen(switching, switchedThisSession)
     }
-    val firstBuffering = isFirstBuffering(initialLoading, switchedThisSession)
-    val bufferingKind = bufferingLoadKind(
-        switching = switching,
-        restoring = restoring,
-        initialLoading = initialLoading,
-    )
+    val firstBuffering = isFirstBuffering(phase, switchedThisSession)
+    val bufferingKind = bufferingLoadKind(phase)
     // 首次撤黑门：进页盖着黑等屏幕转过来，方向对齐或等满时限后再撤黑。
     // 比例未知期间一直盖黑由比例判据负责，不进这道门，也不设超时。
     var placementGate by remember { mutableStateOf(PlayerPlacementGate()) }
@@ -540,7 +540,7 @@ fun PlayerScreen(
 
     // 切集、加载、恢复、面板或锁定状态切换时清空手势反馈，避免盖在缓冲层上。
     LaunchedEffect(switching, initialLoading, restoring, panelVisible, locked) {
-        if (doubleTapFeedbackBlocked(locked, panelVisible, switching, initialLoading, restoring)) {
+        if (doubleTapFeedbackBlocked(locked, panelVisible, phase)) {
             doubleTapFeedback.reset()
             seekHint = null
             volumeHint = null
@@ -650,9 +650,7 @@ fun PlayerScreen(
             locked = locked,
             panelOpen = panelVisible,
             controlsPresent = controlsPresent,
-            switching = switching,
-            initialLoading = initialLoading,
-            restoring = restoring,
+            phase = phase,
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
             levelControls = levelControls,
@@ -778,7 +776,7 @@ fun PlayerScreen(
                         onCancelSleepTimer()
                         panels.close()
                     },
-                    enabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
+                    enabled = actionAllowed(PlayerAction.More, phase),
                     panelWidth = morePanelWidth,
                     panelMaxHeight = morePanelMaxHeight,
                     modifier = Modifier
@@ -804,23 +802,19 @@ fun PlayerScreen(
                 title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                 moreVisible = moreVisible,
                 interactive = topBarInteractive,
-                rotateEnabled = actionAllowed(PlayerAction.Rotate, switching, initialLoading, restoring),
+                rotateEnabled = actionAllowed(PlayerAction.Rotate, phase),
                 rotateAppearanceEnabled = actionLooksEnabled(
                     PlayerAction.Rotate,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
-                    switching = switching,
-                    initialLoading = initialLoading,
-                    restoring = restoring,
+                    phase = phase,
                 ),
-                moreEnabled = actionAllowed(PlayerAction.More, switching, initialLoading, restoring),
+                moreEnabled = actionAllowed(PlayerAction.More, phase),
                 moreAppearanceEnabled = actionLooksEnabled(
                     PlayerAction.More,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
-                    switching = switching,
-                    initialLoading = initialLoading,
-                    restoring = restoring,
+                    phase = phase,
                 ),
                 preparing = preparing,
                 onBack = onClose,
@@ -860,9 +854,7 @@ fun PlayerScreen(
                 externalSubtitles = externalSubtitles,
                 subtitleSelection = subtitleSelection,
                 subtitleMenuVisible = subtitleMenuVisible && panelVisible,
-                switching = switching,
-                initialLoading = initialLoading,
-                restoring = restoring,
+                phase = phase,
                 interactive = bottomBarInteractive,
                 onPlayPause = {
                     controls.showByUserAction()
@@ -997,9 +989,7 @@ private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
     controlsPresent: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
+    phase: PlayerScreenPhase,
     positionMillis: Long,
     durationMillis: Long,
     levelControls: PlayerLevelControls,
@@ -1020,15 +1010,13 @@ private fun PlayerGestureLayer(
     val enabled = gesturesAllowed(locked, panelOpen)
     val gesturesEnabled = enabled
     // 各手势按实际动作单独判定，避免音量/进度被禁时连双击播放/暂停一起关掉。
-    val playPauseAllowed = actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring)
-    val seekAllowed = actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring)
-    val volumeAllowed = actionAllowed(PlayerAction.Volume, switching, initialLoading, restoring)
+    val playPauseAllowed = actionAllowed(PlayerAction.PlayPause, phase)
+    val seekAllowed = actionAllowed(PlayerAction.Seek, phase)
+    val volumeAllowed = actionAllowed(PlayerAction.Volume, phase)
     val doubleTapFeedbackEnabled = doubleTapFeedbackAllowed(
         locked = locked,
         panelOpen = panelOpen,
-        switching = switching,
-        initialLoading = initialLoading,
-        restoring = restoring,
+        phase = phase,
     )
     // 回调与播放位置取最新一份，避免手势层在位置变化时重启。
     val latestOnTogglePlayPause = rememberUpdatedState(onTogglePlayPause)
@@ -1491,9 +1479,7 @@ private fun Controls(
     externalSubtitles: List<MediaFile>,
     subtitleSelection: SubtitleSelection,
     subtitleMenuVisible: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
+    phase: PlayerScreenPhase,
     interactive: Boolean,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -1526,7 +1512,7 @@ private fun Controls(
                 menu = subtitleMenuItems(subtitleTracks, externalSubtitles, subtitleSelection),
                 onSelect = onSelectSubtitle,
                 interactive = interactive &&
-                    actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
+                    actionAllowed(PlayerAction.Subtitles, phase),
                 modifier = Modifier.padding(horizontal = AppSpacing.Lg),
             )
         }
@@ -1539,14 +1525,12 @@ private fun Controls(
             // 面板打开时轨道让给关闭层：不拖动，也不改播放位置。
             enabled = onBlankTap == null &&
                 interactive &&
-                actionAllowed(PlayerAction.Seek, switching, initialLoading, restoring),
+                actionAllowed(PlayerAction.Seek, phase),
             appearanceEnabled = actionLooksEnabled(
                 PlayerAction.Seek,
                 canGoPrevious = currentIndex > 0,
                 canGoNext = currentIndex in 0 until playlist.lastIndex,
-                switching = switching,
-                initialLoading = initialLoading,
-                restoring = restoring,
+                phase = phase,
             ),
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
@@ -1557,9 +1541,7 @@ private fun Controls(
             playing = state == PlaybackState.Playing,
             canGoPrevious = currentIndex > 0,
             canGoNext = currentIndex in 0 until playlist.lastIndex,
-            switching = switching,
-            initialLoading = initialLoading,
-            restoring = restoring,
+            phase = phase,
             interactive = interactive,
             subtitleMenuVisible = subtitleMenuVisible,
             onPlayPause = onPlayPause,
@@ -1578,9 +1560,7 @@ private fun PlayerIconBar(
     playing: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
+    phase: PlayerScreenPhase,
     interactive: Boolean,
     subtitleMenuVisible: Boolean,
     onPlayPause: () -> Unit,
@@ -1602,14 +1582,12 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
-                enabled = interactive && actionAllowed(PlayerAction.Lock, switching, initialLoading, restoring),
+                enabled = interactive && actionAllowed(PlayerAction.Lock, phase),
                 appearanceEnabled = actionLooksEnabled(
                     PlayerAction.Lock,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
-                    switching = switching,
-                    initialLoading = initialLoading,
-                    restoring = restoring,
+                    phase = phase,
                 ),
                 modifier = Modifier
                     .align(Alignment.CenterStart)
@@ -1626,14 +1604,12 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
                     enabled = interactive && canGoPrevious &&
-                        actionAllowed(PlayerAction.Previous, switching, initialLoading, restoring),
+                        actionAllowed(PlayerAction.Previous, phase),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Previous,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
+                        phase = phase,
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
@@ -1648,14 +1624,12 @@ private fun PlayerIconBar(
                     ),
                     onClick = onPlayPause,
                     enabled = interactive &&
-                        actionAllowed(PlayerAction.PlayPause, switching, initialLoading, restoring),
+                        actionAllowed(PlayerAction.PlayPause, phase),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.PlayPause,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
+                        phase = phase,
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
@@ -1668,14 +1642,12 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
                     enabled = interactive && canGoNext &&
-                        actionAllowed(PlayerAction.Next, switching, initialLoading, restoring),
+                        actionAllowed(PlayerAction.Next, phase),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Next,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
+                        phase = phase,
                     ),
                     modifier = Modifier.size(
                         metrics.transportButtonWidth,
@@ -1691,14 +1663,12 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
                     enabled = interactive &&
-                        actionAllowed(PlayerAction.Subtitles, switching, initialLoading, restoring),
+                        actionAllowed(PlayerAction.Subtitles, phase),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Subtitles,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
+                        phase = phase,
                     ),
                     active = subtitleMenuVisible,
                     modifier = Modifier.size(metrics.sideTouchTarget),
@@ -1711,14 +1681,12 @@ private fun PlayerIconBar(
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
                     enabled = interactive &&
-                        actionAllowed(PlayerAction.Playlist, switching, initialLoading, restoring),
+                        actionAllowed(PlayerAction.Playlist, phase),
                     appearanceEnabled = actionLooksEnabled(
                         PlayerAction.Playlist,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
-                        switching = switching,
-                        initialLoading = initialLoading,
-                        restoring = restoring,
+                        phase = phase,
                     ),
                     modifier = Modifier.size(metrics.sideTouchTarget),
                     iconSize = metrics.sideIconSize,

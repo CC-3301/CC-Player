@@ -198,23 +198,19 @@ fun dragGesture(
 /** 锁定或任一面板打开时，手势层不响应。 */
 fun gesturesAllowed(locked: Boolean, panelOpen: Boolean): Boolean = !locked && !panelOpen
 
-/** 切集、首次加载、恢复、面板打开或锁定时，手势反馈应清空且不再显示。 */
+/** 加载阶段、面板打开或锁定时，手势反馈应清空且不再显示。 */
 fun doubleTapFeedbackBlocked(
     locked: Boolean,
     panelOpen: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
-): Boolean = locked || panelOpen || switching || initialLoading || restoring
+    phase: PlayerScreenPhase,
+): Boolean = locked || panelOpen || phase != PlayerScreenPhase.Ready
 
 /** 双击跳转反馈是否应触发：手势可用且当前允许跳转。 */
 fun doubleTapFeedbackAllowed(
     locked: Boolean,
     panelOpen: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
-): Boolean = !doubleTapFeedbackBlocked(locked, panelOpen, switching, initialLoading, restoring)
+    phase: PlayerScreenPhase,
+): Boolean = !doubleTapFeedbackBlocked(locked, panelOpen, phase)
 
 /** 锁定时只放行 [PlayerInput.UnlockButton]；其余元素既不响应手势也不显示。 */
 fun inputAllowed(input: PlayerInput, locked: Boolean): Boolean =
@@ -285,8 +281,8 @@ class PlayerGesturePressTracker {
 }
 
 /** 首次缓冲：本次播放还没有开始过切集时的加载阶段。 */
-fun isFirstBuffering(initialLoading: Boolean, switchedSinceOpen: Boolean): Boolean =
-    initialLoading && !switchedSinceOpen
+fun isFirstBuffering(phase: PlayerScreenPhase, switchedSinceOpen: Boolean): Boolean =
+    phase.isInitialLoading && !switchedSinceOpen
 
 /** 本次播放是否开始过切集：开始过之后加载阶段不再算首次缓冲，切集失败回退也算。 */
 fun switchedSinceOpen(switching: Boolean, alreadySwitched: Boolean): Boolean =
@@ -330,13 +326,18 @@ private val switchingOrRestoringActions = initialLoadingActions + setOf(
  */
 fun actionAllowed(
     action: PlayerAction,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
-): Boolean = when {
-    initialLoading -> action in initialLoadingActions
-    switching || restoring -> action in switchingOrRestoringActions
-    else -> true
+    phase: PlayerScreenPhase,
+): Boolean = when (phase) {
+    PlayerScreenPhase.Preparing,
+    PlayerScreenPhase.AwaitingHandover,
+    PlayerScreenPhase.Loading,
+    -> action in initialLoadingActions
+
+    PlayerScreenPhase.Switching,
+    PlayerScreenPhase.Restoring,
+    -> action in switchingOrRestoringActions
+
+    PlayerScreenPhase.Ready -> true
 }
 
 /** 该操作是否还取决于相邻条目：上一集/下一集分别看列表边界。 */
@@ -358,9 +359,7 @@ fun actionLooksEnabled(
     action: PlayerAction,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
-    switching: Boolean,
-    initialLoading: Boolean,
-    restoring: Boolean,
+    phase: PlayerScreenPhase,
 ): Boolean =
     adjacencyAvailable(action, canGoPrevious, canGoNext) &&
-        actionAllowed(action, switching, initialLoading, restoring)
+        actionAllowed(action, phase)
