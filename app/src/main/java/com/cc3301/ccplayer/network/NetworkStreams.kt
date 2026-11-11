@@ -18,6 +18,9 @@ interface NetworkStreams : Closeable {
     /** 位置对应的本机地址。 */
     fun urlFor(location: String): String
 
+    /** 声明此刻仍需保留的媒体位置：不在集合里的已就绪源当场摘走，在关源线程关闭；地址保留。 */
+    fun retain(locations: Set<String>)
+
     /** 当前目标不再需要该源：当场摘走已就绪的那一条，在后台关闭；地址保留，下一次请求重新建立。 */
     fun returnSource(location: String)
 
@@ -43,9 +46,17 @@ interface PreparedSource {
  */
 class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStreams>) : NetworkStreams {
 
+    /** 上一版保留集合：只处理被移出集合的位置。 */
+    private val retention = RetainedLocations()
+
     override fun prepare(location: String): PreparedSource = streamsFor(location).prepare(location)
 
     override fun urlFor(location: String): String = streamsFor(location).urlFor(location)
+
+    /** 差集与按协议分派都在这里：只把被移出集合的位置交给对应协议归还。 */
+    override fun retain(locations: Set<String>) {
+        retention.droppedBy(locations).forEach { location -> streamsFor(location).returnSource(location) }
+    }
 
     override fun returnSource(location: String) {
         streamsFor(location).returnSource(location)
@@ -64,4 +75,20 @@ class RoutingNetworkStreams(private val streamsByScheme: Map<String, NetworkStre
     private fun streamsFor(location: String): NetworkStreams =
         streamsByScheme[schemeOf(location)]
             ?: throw MediaSourceException(MediaFailure.NotFound, "没有能处理这个位置的网络源：$location")
+}
+
+/**
+ * 保留集合的差集：记住上一版集合，只交出被移出集合的位置；集合未变化时交出空集。
+ * 一个实例代表一处归还范围：路由层一处，各协议各一处。
+ */
+internal class RetainedLocations {
+
+    private var retained: Set<String> = emptySet()
+
+    fun droppedBy(locations: Set<String>): Set<String> {
+        if (locations == retained) return emptySet()
+        val dropped = retained - locations
+        retained = locations
+        return dropped
+    }
 }
