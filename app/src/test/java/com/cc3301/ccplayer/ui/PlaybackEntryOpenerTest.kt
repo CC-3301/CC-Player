@@ -100,7 +100,7 @@ private class EntryRecorder {
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackEntryOpenerTest {
 
-    private val entryState = PlaybackEntryState()
+    private lateinit var handover: OpeningHandover
 
     private val networkVideo = testVideo("第1集.mkv", "smb://nas/media/第1集.mkv")
         .copy(source = MediaSource.Network)
@@ -113,17 +113,26 @@ class PlaybackEntryOpenerTest {
         directoryEntries: suspend () -> List<MediaFile>,
         streams: () -> NetworkStreams,
         diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-    ): PlaybackEntryOpener = PlaybackEntryOpener(
-        scope = scope,
-        entryState = entryState,
-        directoryEntries = directoryEntries,
-        networkStreams = streams,
-        onEnterPlayer = recorder::enter,
-        onStartPlayback = recorder::start,
-        onShowFailure = recorder::showFailure,
-        onLeavePlayer = recorder::leave,
-        diagnostics = diagnostics,
-    )
+    ): PlaybackEntryOpener {
+        handover = OpeningHandover(
+            startPlayback = { files, media, generation, entries ->
+                recorder.start(media, files, entries, generation)
+                true
+            },
+            nowMillis = { 0L },
+        )
+        return PlaybackEntryOpener(
+            scope = scope,
+            handover = handover,
+            directoryEntries = directoryEntries,
+            networkStreams = streams,
+            onEnterPlayer = recorder::enter,
+            onPrepared = { handover.attemptHandover(canStart = true) },
+            onShowFailure = recorder::showFailure,
+            onLeavePlayer = recorder::leave,
+            diagnostics = diagnostics,
+        )
+    }
 
     @Test
     fun `视频点击后立即进入播放页再等待目录与网络探测`() = runTest {
@@ -143,7 +152,7 @@ class PlaybackEntryOpenerTest {
         val generation = opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
 
         assertEquals(1, recorder.enterCount)
-        assertEquals(EntryPhase.Preparing, entryState.phase)
+        assertEquals(EntryPhase.Preparing, handover.phase)
         assertNull(recorder.opened)
 
         directoryGate.complete(Unit)
@@ -155,7 +164,7 @@ class PlaybackEntryOpenerTest {
 
         assertEquals(listOf(networkVideo.location), streams.probed)
         val result = requireNotNull(recorder.opened)
-        assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
+        assertEquals(EntryPhase.Accepted, handover.phase)
         assertEquals(generation, recorder.openedGeneration)
         assertEquals("http://127.0.0.1:1/第1集.mkv", result.current.playbackLocation)
         assertEquals(listOf("http://127.0.0.1:1/第1集.mkv"), result.playlist.map { it.playbackLocation })
@@ -261,16 +270,16 @@ class PlaybackEntryOpenerTest {
         runCurrent()
 
         assertTrue("音频不预先进入播放页", recorder.events.isEmpty())
-        assertEquals(EntryPhase.Preparing, entryState.phase)
-        assertFalse("音频准备在浏览页完成，不显示准备期界面", entryState.preparingUi)
+        assertEquals(EntryPhase.Preparing, handover.phase)
+        assertFalse("音频准备在浏览页完成，不显示准备期界面", handover.preparingUi)
 
         directoryGate.complete(Unit)
         advanceUntilIdle()
 
         assertEquals(listOf("enter", "start:$generation"), recorder.events)
         assertEquals(listOf(audio), recorder.opened?.playlist)
-        assertEquals(EntryPhase.AwaitingHandover, entryState.phase)
-        assertFalse("音频进入时不显示准备期界面", entryState.preparingUi)
+        assertEquals(EntryPhase.Accepted, handover.phase)
+        assertFalse("音频进入时不显示准备期界面", handover.preparingUi)
     }
 
     @Test
@@ -291,7 +300,7 @@ class PlaybackEntryOpenerTest {
         assertNull(recorder.opened)
         assertEquals(MediaFailure.Unknown, recorder.shownFailure)
         assertEquals(0, recorder.leaveCount)
-        assertNull(entryState.phase)
+        assertNull(handover.phase)
     }
 
     @Test
@@ -314,7 +323,7 @@ class PlaybackEntryOpenerTest {
         assertEquals(MediaFailure.Authentication, recorder.shownFailure)
         assertEquals(1, recorder.leaveCount)
         assertEquals(listOf("enter", "failure:Authentication", "leave"), recorder.events)
-        assertNull(entryState.phase)
+        assertNull(handover.phase)
     }
 
     @Test
@@ -393,14 +402,14 @@ class PlaybackEntryOpenerTest {
         val generation = opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
         runCurrent()
         // 取消只清入口阶段，不打断阻塞中的准备：迟到的成功必须按代际丢弃。
-        entryState.cancelEntry()
+        handover.onLeftPlayerPage()
         streams.gate.complete(Unit)
         advanceUntilIdle()
 
         assertNull(recorder.opened)
         assertNull(recorder.shownFailure)
         assertEquals(0, recorder.leaveCount)
-        assertFalse(entryState.isCurrent(generation))
+        assertFalse(handover.isCurrent(generation))
     }
 
     @Test
@@ -416,7 +425,7 @@ class PlaybackEntryOpenerTest {
 
         opener.open(networkVideo, listOf(networkVideo), enterBeforePreparing = true)
         runCurrent()
-        entryState.cancelEntry()
+        handover.onLeftPlayerPage()
         streams.failure = MediaSourceException(MediaFailure.Unreachable, "连不上")
         streams.gate.complete(Unit)
         advanceUntilIdle()
@@ -466,13 +475,13 @@ class PlaybackEntryOpenerTest {
 
         val generation = opener.open(audio, listOf(audio), enterBeforePreparing = false)
         runCurrent()
-        entryState.cancelEntry()
+        handover.onLeftPlayerPage()
         directoryGate.complete(Unit)
         advanceUntilIdle()
 
         assertEquals(0, recorder.enterCount)
         assertNull(recorder.opened)
         assertNull(recorder.shownFailure)
-        assertFalse(entryState.isCurrent(generation))
+        assertFalse(handover.isCurrent(generation))
     }
 }
