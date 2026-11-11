@@ -9,18 +9,24 @@ import com.cc3301.ccplayer.library.MediaFile
 import com.cc3301.ccplayer.library.MediaKind
 import com.cc3301.ccplayer.library.mediaKindOf
 import com.cc3301.ccplayer.playback.PlaybackController
+import com.cc3301.ccplayer.playback.PlaybackFailure
 import com.cc3301.ccplayer.playback.PlaybackProgress
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SeekSettlement
 import com.cc3301.ccplayer.playback.SurfacePresentation
+import com.cc3301.ccplayer.settings.OrientationMode
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.io.File
 
 /**
  * 播放页的状态持有者：收集播放控制层的事实，组装会话事实、内容与播放页阶段。
  *
- * 进入播放页时挂上播放控制层，离开播放页时断开并清空。
+ * 播放会话开始时挂上播放控制层，会话结束时断开并清空；播放页隐藏期间继续收集，
+ * 常亮、比例与加载失败提示这些界面副作用依赖同一批结论。
  */
 class PlayerScreenViewModel : ViewModel() {
 
@@ -39,6 +45,8 @@ class PlayerScreenViewModel : ViewModel() {
     private var restoringValue by mutableStateOf(false)
     private var engineBuffering by mutableStateOf(false)
     private var failed by mutableStateOf(false)
+
+    private val _failures = MutableSharedFlow<PlaybackFailure>(extraBufferCapacity = 8)
 
     /** 引擎当前的缓冲事实；打开交接期间的实际显示值由界面与入口阶段合成。 */
     val controllerBuffering: Boolean get() = engineBuffering
@@ -63,6 +71,9 @@ class PlayerScreenViewModel : ViewModel() {
 
     /** 屏幕上现在该显示什么。 */
     val targetSurface: SurfacePresentation get() = surfacePresentationValue
+
+    /** 加载失败事件：界面按它提示，并决定首次加载失败是否退回浏览页。 */
+    val failures: SharedFlow<PlaybackFailure> = _failures.asSharedFlow()
 
     /** 挂上播放控制层并开始收集；同一条控制层重复挂载不重复收集。 */
     fun attach(controller: PlaybackController) {
@@ -98,6 +109,7 @@ class PlayerScreenViewModel : ViewModel() {
             launch { controller.restoring.collect { value -> restoringValue = value } }
             launch { controller.buffering.collect { value -> engineBuffering = value } }
             launch { controller.playbackFailed.collect { value -> failed = value } }
+            launch { controller.playbackFailures.collect { value -> _failures.tryEmit(value) } }
             launch { controller.surfacePresentation.collect { value -> surfacePresentationValue = value } }
             launch {
                 controller.subtitleTracks.collect { value ->
@@ -131,12 +143,15 @@ class PlayerScreenViewModel : ViewModel() {
         failed = false
     }
 
-    /** 组装当前会话事实；入口与界面环境事实由界面在这一帧同步传入。 */
+    /** 组装当前会话事实；入口事实与来自设置的菜单事实由界面在这一帧同步传入。 */
     fun session(
         entryPhase: EntryPhase?,
         preparesInPage: Boolean,
         bufferingShown: Boolean,
-        environment: PlayerScreenEnvironment,
+        orientationMode: OrientationMode,
+        orientationOverride: ScreenOrientation?,
+        screenOrientation: ScreenOrientation,
+        autoPlayNext: Boolean,
     ): PlayerScreenState {
         val media = currentMedia
         return PlayerScreenState(
@@ -161,11 +176,16 @@ class PlayerScreenViewModel : ViewModel() {
                 ),
                 buffering = bufferingShown,
             ),
-            menu = menuFacts.copy(
-                orientationMode = environment.orientationMode,
-                orientationOverride = environment.orientationOverride,
-                screenOrientation = environment.screenOrientation,
-                autoPlayNext = environment.autoPlayNext,
+            menu = PlayerMenuFacts(
+                decodeMode = menuFacts.decodeMode,
+                loopMode = menuFacts.loopMode,
+                orientationMode = orientationMode,
+                orientationOverride = orientationOverride,
+                screenOrientation = screenOrientation,
+                autoPlayNext = autoPlayNext,
+                sleepTimerState = menuFacts.sleepTimerState,
+                sleepTimerOption = menuFacts.sleepTimerOption,
+                subtitleSelection = menuFacts.subtitleSelection,
             ),
         )
     }
