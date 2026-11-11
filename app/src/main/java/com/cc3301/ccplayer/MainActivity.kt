@@ -287,10 +287,10 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             val binder = service as PlaybackService.LocalBinder
             playback = binder
-            // 字节源由界面侧持有：切集重试前的丢弃与当前目标不再需要时的归还都由这里注入。
+            // 字节源由界面侧持有：切集重试前的丢弃与此刻仍需保留的媒体位置都由这里注入。
             binder.controller.attachNetworkSources(
                 discardByteSources = ::discardByteSourcesForSwitch,
-                returnSource = ::returnByteSource,
+                retain = { locations -> streams?.retain(locations) },
             )
             stateCollection = lifecycleScope.launch {
                 launch {
@@ -1121,17 +1121,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
         }
     }
 
-    /**
-     * 归还当前目标不再需要的字节源：回环条目当场摘走已就绪的源，关闭在关源线程上做。
-     * 这里只转发位置，不等任何网络动作。
-     */
-    private fun returnByteSource(location: String) {
-        streams?.returnSource(location)
-    }
-
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
-        playback?.controller?.attachNetworkSources(discardByteSources = { false }, returnSource = { })
+        playback?.controller?.attachNetworkSources(discardByteSources = { false }, retain = { })
         stateCollection?.cancel()
         stateCollection = null
         playback = null
