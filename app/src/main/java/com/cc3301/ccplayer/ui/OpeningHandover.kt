@@ -62,7 +62,8 @@ class OpeningHandover(
     private var currentGeneration: Int? = null
 
     /** 这次打开是在播放页里继续准备（视频）；音频的准备在浏览页完成。 */
-    private var preparesInPage = false
+    var preparesInPage = false
+        private set
 
     /** 已接手但首次加载还没有结论：只有这个窗口内的首次加载失败才退回列表。 */
     private var initialLoadPending = false

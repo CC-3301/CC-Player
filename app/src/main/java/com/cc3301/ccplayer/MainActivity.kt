@@ -97,6 +97,8 @@ import com.cc3301.ccplayer.ui.PlaybackEntryOpener
 import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
+import com.cc3301.ccplayer.ui.PlayerScreenLoadFacts
+import com.cc3301.ccplayer.ui.PlayerScreenViewModel
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
 import com.cc3301.ccplayer.ui.SettingsScreen
@@ -104,6 +106,10 @@ import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
 import com.cc3301.ccplayer.ui.failedEntryExit
+import com.cc3301.ccplayer.ui.isInitialLoading
+import com.cc3301.ccplayer.ui.isPreparing
+import com.cc3301.ccplayer.ui.isRestoring
+import com.cc3301.ccplayer.ui.isSwitching
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.mediaFailureText
 import com.cc3301.ccplayer.ui.notificationOpenAction
@@ -138,6 +144,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
     }
 
     private val settingsViewModel: SettingsViewModel by viewModels { SettingsViewModel.factory(applicationContext) }
+
+    /** 播放页状态持有者：收下会话事实，派生出播放页阶段。 */
+    private val playerScreen: PlayerScreenViewModel by viewModels()
 
     private val mediaPreview: MediaPreviewSource get() = (application as CcPlayerApplication).mediaPreview
 
@@ -441,6 +450,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                     if (target != null) value = mediaPreview.cachedImage(target)
                 }
 
+                // 播放页阶段由会话事实派生；界面只读这一个值，不再各自拼加载布尔。
+                playerScreen.update(
+                    PlayerScreenLoadFacts(
+                        entryPhase = openingHandover.phase,
+                        preparesInPage = openingHandover.preparesInPage,
+                        playbackState = playbackState,
+                        switching = switching,
+                        restoring = restoring,
+                    ),
+                )
+                val playerPhase = playerScreen.phase
                 when {
                     // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
                     coldStartPending -> {
@@ -473,11 +493,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback {
                             surfacePresentation = surfacePresentation,
                             coverFile = playerCover,
                             audioTarget = audioTarget,
-                            switching = switching,
-                            restoring = restoring,
+                            switching = playerPhase.isSwitching,
+                            restoring = playerPhase.isRestoring,
                             buffering = openingHandover.showsBuffering(buffering),
-                            initialLoading = openingHandover.initialLoading(playbackState, switching),
-                            preparing = openingHandover.preparingUi,
+                            initialLoading = playerPhase.isInitialLoading,
+                            preparing = playerPhase.isPreparing,
                             subtitleTracks = subtitleTracks,
                             externalSubtitles = externalSubtitles,
                             subtitleSelection = subtitleSelection,
