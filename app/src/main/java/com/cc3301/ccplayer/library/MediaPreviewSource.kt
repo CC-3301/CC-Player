@@ -54,19 +54,25 @@ interface MediaPreviewSource {
      * 播放页封面层用它与列表共用同一份缓存；没有缓存或已超过有效期时返回 null。
      */
     suspend fun cachedImage(file: MediaFile): File? = null
+
+    /**
+     * 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。
+     * 可见请求调度器为每一项新订阅调用一次。
+     */
+    fun beginVisiblePreview(file: MediaFile) = Unit
+
+    /**
+     * 该条目本次运行内的抽帧状态；没有记录时返回 null。
+     * 可见请求调度器读同一份决定失败重试的间隔与次数。
+     */
+    fun previewEntryState(file: MediaFile): PreviewEntryState? = null
 }
 
 /**
  * 卡片预览：预览图（null 时界面用占位图）与时长（null 时不显示角标）。
  * [retryable] 表示这次是失败收尾，调度器先跳过该项，等可见项出完后按递进间隔重试。
- * [attempts] 是抽帧状态里的已试次数；调度器据它算重试间隔与次数，不再自己计数。
  */
-data class MediaPreview(
-    val image: File?,
-    val durationMillis: Long?,
-    val retryable: Boolean = false,
-    val attempts: Int = 0,
-)
+data class MediaPreview(val image: File?, val durationMillis: Long?, val retryable: Boolean = false)
 
 /** 一次读取会话得到的时长结果：已知值、确定没有、读取失败。 */
 sealed interface PreviewDuration {
@@ -80,7 +86,7 @@ data class MediaPreviewExtraction(val imageBytes: ByteArray?, val duration: Prev
     val durationMillis: Long? get() = (duration as? PreviewDuration.Known)?.millis
 }
 
-/** 抽帧失败的阶段；日志按阶段各写一类，便于判断卡在哪一环。 */
+/** 抽帧失败的阶段；日志与抽帧状态共用这一套分类，便于判断卡在哪一环。 */
 enum class PreviewFailureStage {
     /** 打开数据源失败。 */
     OpenSource,
@@ -102,23 +108,28 @@ class PreviewStageException(
     cause: Throwable? = null,
 ) : IOException(message, cause)
 
-/** 失败阶段的名字；日志与抽帧状态共用这一套叫法。 */
-internal val PreviewFailureStage.label: String
-    get() = when (this) {
+/** 抽取失败落在哪一阶段；日志里的阶段名只有这一处映射。 */
+internal fun previewFailureStage(failure: Exception): String = when (failure) {
+    is PreviewStageException -> when (failure.stage) {
         PreviewFailureStage.OpenSource -> "打开数据源"
         PreviewFailureStage.Read -> "读取"
         PreviewFailureStage.Decode -> "解码"
         PreviewFailureStage.Timeout -> "超时"
     }
 
-/** 抽取失败落在哪一阶段；日志里的阶段名只有这一处映射。 */
-internal fun previewFailureStage(failure: Exception): String = when (failure) {
-    is PreviewStageException -> failure.stage.label
-
     is MediaSourceException -> if (failure.failure == MediaFailure.Unreachable) "建连" else "打开数据源"
     is java.io.FileNotFoundException -> "打开数据源"
     is IllegalArgumentException, is SecurityException -> "路径解析"
     else -> "读取"
+}
+
+/** 异常归到哪个失败阶段，记进抽帧状态；日志另有更细的叫法，见 [previewFailureStage]。 */
+internal fun previewFailureStageOf(failure: Exception): PreviewFailureStage = when (failure) {
+    is PreviewStageException -> failure.stage
+    is MediaSourceException -> PreviewFailureStage.OpenSource
+    is java.io.FileNotFoundException -> PreviewFailureStage.OpenSource
+    is IllegalArgumentException, is SecurityException -> PreviewFailureStage.OpenSource
+    else -> PreviewFailureStage.Read
 }
 
 /**
@@ -246,6 +257,15 @@ class CachedMediaPreviewSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.Prefetch)
 
+    /** 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。 */
+    override fun beginVisiblePreview(file: MediaFile) {
+        if (file.source != MediaSource.Network) return
+        entryState(previewKey(file))?.resetAttempts()
+    }
+
+    /** 该条目本次运行的抽帧状态；没有记录时返回 null。 */
+    override fun previewEntryState(file: MediaFile): PreviewEntryState? = entryState(previewKey(file))
+
     /**
      * 更新当前可见与预取范围。
      * 排队中的预取取得许可后据此复查：范围不再包含该位置时直接放弃，不消耗抽取。
@@ -271,7 +291,7 @@ class CachedMediaPreviewSource(
         }
         return when (file.source) {
             MediaSource.Local -> localPreview(file, key, targetWidth, priority)
-            MediaSource.Network -> networkImage(file, key, targetWidth, priority).toPreview(key)
+            MediaSource.Network -> networkImage(file, key, targetWidth, priority).toPreview()
         }
     }
 
@@ -305,12 +325,7 @@ class CachedMediaPreviewSource(
         if (stage == null) return MediaPreview(loaded.image, loaded.durationMillis)
         // 本地抽取失败先按失败收尾交给调度器重试，次数用尽后保持占位图。
         val attempts = stateFor(key).fail(stage)
-        return MediaPreview(
-            image = loaded.image,
-            durationMillis = loaded.durationMillis,
-            retryable = attempts <= LOCAL_RETRY_LIMIT,
-            attempts = attempts,
-        )
+        return MediaPreview(loaded.image, loaded.durationMillis, retryable = attempts <= LOCAL_RETRY_LIMIT)
     }
 
     /** 只读缓存取封面：播放页封面层与列表共用同一份缓存，不触发抽取。 */
@@ -320,13 +335,8 @@ class CachedMediaPreviewSource(
         return cache.entry(thumbnailCacheKey(file, policy, targetWidth), cacheMaxAge(file))?.file
     }
 
-    /** 抽取结果转成卡片预览：失败的结果带上可重试标记与状态里的已试次数。 */
-    private fun LoadedPreview.toPreview(key: String): MediaPreview = MediaPreview(
-        image = image,
-        durationMillis = durationMillis,
-        retryable = failed,
-        attempts = entryState(key)?.attempts ?: 0,
-    )
+    /** 抽取结果转成卡片预览：失败的结果带上可重试标记。 */
+    private fun LoadedPreview.toPreview(): MediaPreview = MediaPreview(image, durationMillis, failed)
 
     /** 命中缓存后先出图；时长未知时在后台补读，排在可见与预取之后，不阻塞本次出图。 */
     private fun refillDuration(
@@ -375,11 +385,7 @@ class CachedMediaPreviewSource(
         val waited = monotonicClockMillis() - requestedAt
         if (!acquired) {
             diagnostics.log { "本地封面: ${file.name} 等解码许可超时 ${waited}ms" }
-            return LoadedPreview(
-                image = null,
-                durationMillis = null,
-                failureStage = PreviewFailureStage.Timeout.label,
-            )
+            return LoadedPreview(image = null, durationMillis = null, failureStage = PreviewFailureStage.Timeout)
         }
         diagnostics.log { "本地封面: ${file.name} 等解码许可 ${waited}ms" }
         try {
@@ -514,11 +520,7 @@ class CachedMediaPreviewSource(
                     val waited = monotonicClockMillis() - started
                     if (!acquired) {
                         diagnostics.log { "网络封面: ${file.name} 等预打开名额超时 ${waited}ms" }
-                        LoadedPreview(
-                            image = null,
-                            durationMillis = null,
-                            failureStage = PreviewFailureStage.Timeout.label,
-                        )
+                        LoadedPreview(image = null, durationMillis = null, failureStage = PreviewFailureStage.Timeout)
                     } else {
                         try {
                             diagnostics.log { "网络封面: ${file.name} 等预打开名额 ${waited}ms" }
@@ -740,11 +742,7 @@ class CachedMediaPreviewSource(
                 } catch (cancellation: CancellationException) {
                     throw cancellation
                 } catch (failure: Exception) {
-                    LoadedPreview(
-                        image = null,
-                        durationMillis = null,
-                        failureStage = previewFailureStage(failure),
-                    )
+                    LoadedPreview(image = null, durationMillis = null, failureStage = previewFailureStageOf(failure))
                 }
                 if (loaded.abandoned) {
                     // 先移出再取消：等待者不会取到已取消的 Deferred 空转。
@@ -765,6 +763,10 @@ class CachedMediaPreviewSource(
             }
         }
     }
+
+    /** 条目在缓存与抽帧状态里用的键。 */
+    private fun previewKey(file: MediaFile): String =
+        thumbnailCacheKey(file, policy, previewTargetWidth(file, policy))
 
     /** 条目本次运行的抽帧状态；没有记录时返回 null。 */
     private fun entryState(key: String): PreviewEntryState? = entries.state(key)
@@ -808,7 +810,7 @@ class CachedMediaPreviewSource(
             "缩略图抽取失败: ${file.name} (${failure.javaClass.simpleName}) | 阶段: $stage" +
                 (cause?.let { " | 原因: $it" } ?: "")
         }
-        LoadedPreview(image = null, durationMillis = null, failureStage = stage)
+        LoadedPreview(image = null, durationMillis = null, failureStage = previewFailureStageOf(failure))
     }
 
     private class LoadedPreview(
@@ -817,7 +819,7 @@ class CachedMediaPreviewSource(
         /** 本次结果只给本次调用者，不作为成功结果共享给同键等待者（离屏放弃或时长补读放弃）。 */
         val abandoned: Boolean = false,
         /** 失败阶段；null 表示不是失败收尾，落到缓存或占位图。 */
-        val failureStage: String? = null,
+        val failureStage: PreviewFailureStage? = null,
     ) {
         /** 这一次是失败收尾：不落缓存，交给调度器递进重试。 */
         val failed: Boolean get() = failureStage != null
