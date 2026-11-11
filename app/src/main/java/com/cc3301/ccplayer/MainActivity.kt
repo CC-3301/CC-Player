@@ -93,7 +93,6 @@ import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerScreenAccess
-import com.cc3301.ccplayer.ui.PlayerScreenEnvironment
 import com.cc3301.ccplayer.ui.PlayerScreenViewModel
 import com.cc3301.ccplayer.ui.PlayerSessionOrientation
 import com.cc3301.ccplayer.ui.ScreenOrientation
@@ -202,7 +201,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         )
     }
 
-    private var stateCollection: Job? = null
+    private var settingsCollection: Job? = null
     private var streams: NetworkStreams? = null
 
     /** 退到后台丢弃字节源的判定：加载期间记待丢弃，加载结束或回前台前补做。 */
@@ -273,41 +272,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                 discardByteSources = ::discardByteSourcesForSwitch,
                 retain = { locations -> streams?.retain(locations) },
             )
-            // 播放页事实由播放页 ViewModel 收集；界面只留生命周期与资源管理的副作用。
+            // 播放页事实由播放页 ViewModel 收集；界面只把设置变化写回控制层。
             playerScreen.attach(binder.controller)
-            stateCollection = lifecycleScope.launch {
-                launch {
-                    binder.controller.state.collect { state ->
-                        updateKeepScreenOn(state)
-                        // 退后台时加载中没丢成的字节源，加载一结束就补做；已回到前台则留给回前台补做。
-                        if (state != PlaybackState.Loading) {
-                            staleSourceDiscardPolicy.onLoadingFinished(
-                                inBackground = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
-                                discard = ::discardByteSources,
-                            )
-                        }
-                    }
-                }
-                launch {
-                    binder.controller.surfacePresentation.collect {
-                        // 屏上那一帧的比例；有效就更新，离页或新会话时由会话对象作废。
-                        sessionOrientation.onVideoAspectRatio(it.aspectRatio)
-                    }
-                }
-                launch {
-                    binder.controller.playbackFailures.collect { failure ->
-                        // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
-                        Toast.makeText(
-                            this@MainActivity,
-                            getString(R.string.player_playback_failed),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                        // 只认本次入口的首次加载失败：旧会话迟到的失败与后续播放失败都不关播放页。
-                        if (openingHandover.consumeInitialFailure(failure.generation, failure.firstLoad)) {
-                            closePlayer()
-                        }
-                    }
-                }
+            settingsCollection = lifecycleScope.launch {
                 launch { settings.autoPlayNext.collect { binder.controller.setAutoPlayNext(it) } }
                 launch { settings.resumeMode.collect { binder.controller.setResumeMode(it) } }
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
@@ -369,6 +336,35 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                 LaunchedEffect(playerScreen.playbackState, playerScreen.switching) {
                     openingHandover.onPlaybackUpdate(playerScreen.playbackState, playerScreen.switching)
                 }
+                // 播放状态结论来自播放页 ViewModel：常亮与退后台丢弃按它收尾。
+                LaunchedEffect(playerScreen.playbackState) {
+                    updateKeepScreenOn()
+                    if (playerScreen.playbackState != PlaybackState.Loading) {
+                        staleSourceDiscardPolicy.onLoadingFinished(
+                            inBackground = !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+                            discard = ::discardByteSources,
+                        )
+                    }
+                }
+                // 屏上那一帧的比例；有效就更新，离页或新会话时由会话对象作废。
+                LaunchedEffect(playerScreen.targetSurface) {
+                    sessionOrientation.onVideoAspectRatio(playerScreen.targetSurface.aspectRatio)
+                }
+                // 加载失败：提示并按入口代际决定要不要退回浏览页。
+                LaunchedEffect(Unit) {
+                    playerScreen.failures.collect { failure ->
+                        // 引擎加载失败不提供具体原因，只能提示“播放失败”；来源探测失败另走具体原因。
+                        Toast.makeText(
+                            this@MainActivity,
+                            getString(R.string.player_playback_failed),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        // 只认本次入口的首次加载失败：旧会话迟到的失败与后续播放失败都不关播放页。
+                        if (openingHandover.consumeInitialFailure(failure.generation, failure.firstLoad)) {
+                            closePlayer()
+                        }
+                    }
+                }
                 // 播放页方向交给系统的传感器旋转模式：进页、改设置、点转屏、画面比例变化与离页时下发。
                 // 比例跟着会话走：新会话作废，回到同一会话沿用，切集期间用屏上旧画面的比例。
                 LaunchedEffect(
@@ -422,17 +418,15 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
 
                     playerVisible -> {
                         BackHandler { handlePlayerBack() }
-                        // 会话事实由播放页 ViewModel 收集与组装；入口与界面环境事实在这一帧同步合入。
+                        // 会话事实由播放页 ViewModel 收集与组装；入口与来自设置的菜单事实在这一帧同步合入。
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
                             preparesInPage = openingHandover.preparesInPage,
                             bufferingShown = openingHandover.showsBuffering(playerScreen.controllerBuffering),
-                            environment = PlayerScreenEnvironment(
-                                orientationMode = orientationMode,
-                                orientationOverride = sessionOrientation.override,
-                                screenOrientation = screenOrientation,
-                                autoPlayNext = autoPlayNext,
-                            ),
+                            orientationMode = orientationMode,
+                            orientationOverride = sessionOrientation.override,
+                            screenOrientation = screenOrientation,
+                            autoPlayNext = autoPlayNext,
                         )
                         val playerContent = playerScreen.content(coverFile = playerCover)
                         PlayerScreen(
@@ -1019,7 +1013,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         openingHandover.onLeftPlayerPage()
         onSurfaceReleased()
         playerVisible = false
-        playerScreen.detach()
         restoreBrowserSystemUi()
         updateKeepScreenOn()
     }
@@ -1087,8 +1080,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
         playback?.controller?.attachNetworkSources(discardByteSources = { false }, retain = { })
-        stateCollection?.cancel()
-        stateCollection = null
+        settingsCollection?.cancel()
+        settingsCollection = null
         playerScreen.detach()
         playback = null
         if (bound) {

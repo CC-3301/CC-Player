@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.ui
 
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -201,7 +202,10 @@ class PlayerScreenPhaseTest {
             entryPhase = null,
             preparesInPage = false,
             bufferingShown = false,
-            environment = PlayerScreenEnvironment(),
+            orientationMode = OrientationMode.System,
+            orientationOverride = null,
+            screenOrientation = ScreenOrientation.Portrait,
+            autoPlayNext = false,
         )
         assertEquals(PlayerScreenPhase.Ready, ready.loading.phase)
 
@@ -209,7 +213,10 @@ class PlayerScreenPhaseTest {
             entryPhase = EntryPhase.Preparing,
             preparesInPage = true,
             bufferingShown = true,
-            environment = PlayerScreenEnvironment(autoPlayNext = true),
+            orientationMode = OrientationMode.System,
+            orientationOverride = null,
+            screenOrientation = ScreenOrientation.Portrait,
+            autoPlayNext = true,
         )
         assertEquals(PlayerScreenPhase.Preparing, preparing.loading.phase)
         assertTrue(preparing.loading.buffering)
