@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.ui
 
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.settings.OrientationMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -93,14 +94,23 @@ class PlayerScreenPhaseTest {
     }
 
     @Test
-    fun `接手后的首次加载是加载中`() {
+    fun `接手后以控制层的加载事实为准`() {
         assertEquals(
             PlayerScreenPhase.Loading,
-            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Idle),
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Loading),
         )
         assertEquals(
             PlayerScreenPhase.Loading,
             phaseOf(entryPhase = null, playbackState = PlaybackState.Loading),
+        )
+        // 已接手会保留到这次打开被替换：就绪与终态都不再算加载中。
+        assertEquals(
+            PlayerScreenPhase.Ready,
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Playing),
+        )
+        assertEquals(
+            PlayerScreenPhase.Ready,
+            phaseOf(entryPhase = EntryPhase.Accepted, playbackState = PlaybackState.Ended),
         )
     }
 
@@ -201,7 +211,10 @@ class PlayerScreenPhaseTest {
             entryPhase = null,
             preparesInPage = false,
             bufferingShown = false,
-            environment = PlayerScreenEnvironment(),
+            orientationMode = OrientationMode.System,
+            orientationOverride = null,
+            screenOrientation = ScreenOrientation.Portrait,
+            autoPlayNext = false,
         )
         assertEquals(PlayerScreenPhase.Ready, ready.loading.phase)
 
@@ -209,7 +222,10 @@ class PlayerScreenPhaseTest {
             entryPhase = EntryPhase.Preparing,
             preparesInPage = true,
             bufferingShown = true,
-            environment = PlayerScreenEnvironment(autoPlayNext = true),
+            orientationMode = OrientationMode.System,
+            orientationOverride = null,
+            screenOrientation = ScreenOrientation.Portrait,
+            autoPlayNext = true,
         )
         assertEquals(PlayerScreenPhase.Preparing, preparing.loading.phase)
         assertTrue(preparing.loading.buffering)

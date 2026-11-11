@@ -11,7 +11,13 @@ private class FakeNetworkStreams : NetworkStreams {
 
     val probed = mutableListOf<String>()
 
+    /** 本协议名下已就绪的位置：不在保留集合里的会被关掉。 */
+    val ready = mutableSetOf<String>()
+
     val returned = mutableListOf<String>()
+
+    /** 被叫来声明保留集合的次数。 */
+    var retainCalls = 0
 
     var discards = 0
 
@@ -31,15 +37,11 @@ private class FakeNetworkStreams : NetworkStreams {
 
     override fun urlFor(location: String): String = "http://127.0.0.1:1/${location.substringAfterLast('/')}"
 
-    /** 单个协议自己持有的保留集合：与路由层同一判据。 */
-    private val retention = RetainedLocations()
-
     override fun retain(locations: Set<String>) {
-        retention.droppedBy(locations).forEach { returned += it }
-    }
-
-    override fun returnSource(location: String) {
-        returned += location
+        retainCalls++
+        val dropped = ready.filterNot { it in locations }
+        ready.removeAll(dropped.toSet())
+        returned += dropped
     }
 
     override fun discardByteSources() {
@@ -97,40 +99,40 @@ class RoutingNetworkStreamsTest {
     }
 
     @Test
-    fun `归还按方案分派`() {
-        streams.returnSource("smb://nas/media/电影.mkv")
-        streams.returnSource("https://dav.example.com/dav/电影.mkv")
-
-        assertEquals(listOf("smb://nas/media/电影.mkv"), smb.returned)
-        assertEquals(listOf("https://dav.example.com/dav/电影.mkv"), webDav.returned)
-    }
-
-    @Test
     fun `保留集合只归还被移出的位置`() {
         val kept = "smb://nas/media/第一部.mkv"
         val removed = "smb://nas/media/第二部.mkv"
+        smb.ready += kept
+        smb.ready += removed
 
         streams.retain(setOf(kept, removed))
         streams.retain(setOf(kept))
 
         assertEquals(listOf(removed), smb.returned)
+        assertEquals(setOf(kept), smb.ready)
     }
 
     @Test
     fun `保留集合未变化时不动作`() {
         val first = "smb://nas/media/第一部.mkv"
         val second = "smb://nas/media/第二部.mkv"
+        smb.ready += first
+        smb.ready += second
 
         streams.retain(setOf(first, second))
-        streams.retain(setOf(first, second))
+        streams.retain(setOf(first))
+        streams.retain(setOf(first))
 
-        assertEquals(emptyList<String>(), smb.returned)
+        assertEquals("集合未变化时不叫协议", 1, smb.retainCalls)
+        assertEquals(listOf(second), smb.returned)
     }
 
     @Test
     fun `保留集合按方案分派`() {
         val smbMovie = "smb://nas/media/电影.mkv"
         val davMovie = "https://dav.example.com/dav/电影.mkv"
+        smb.ready += smbMovie
+        webDav.ready += davMovie
 
         streams.retain(setOf(smbMovie, davMovie))
         streams.retain(emptySet())

@@ -53,8 +53,6 @@ private class GatedNetworkStreams : NetworkStreams {
 
     override fun retain(locations: Set<String>) = Unit
 
-    override fun returnSource(location: String) = Unit
-
     override fun discardByteSources() = Unit
 
     override fun close() = Unit

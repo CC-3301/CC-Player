@@ -15,7 +15,7 @@ enum class EntryPhase {
     /** 等待接手：已经准备好，但还没交给播放控制层。 */
     AwaitingHandover,
 
-    /** 已接手：播放控制层已接受这次打开，入口只等首个就绪、切集或终态上报。 */
+    /** 已接手：播放控制层已接受这次打开；界面显隐与缓冲指示都从它推导，直到这次打开被替换或离开播放页。 */
     Accepted,
 }
 
@@ -43,6 +43,7 @@ enum class HandoverAttempt {
  * 时间由外部推进，本类不自带协程；收尾动作由界面按返回值决定。
  *
  * 兜底只在等待接手阶段计时，只在前台累计；失败与取消直接清空阶段与代际。
+ * 已接手后目标的首个就绪、切集与终态不改阶段：它们只参与缓冲指示的推导，事实由控制层提供。
  */
 class OpeningHandover(
     private val startPlayback: (
@@ -65,9 +66,6 @@ class OpeningHandover(
     var preparesInPage = false
         private set
 
-    /** 已接手但首次加载还没有结论：只有这个窗口内的首次加载失败才退回列表。 */
-    private var initialLoadPending = false
-
     /** 准备完成后留下的待起播请求；接手时取走，只起播一次。 */
     private var pending: PendingRequest? = null
 
@@ -87,7 +85,6 @@ class OpeningHandover(
         generationSerial++
         currentGeneration = generationSerial
         preparesInPage = preparing
-        initialLoadPending = false
         pending = null
         resetTiming()
         phase = EntryPhase.Preparing
@@ -128,7 +125,6 @@ class OpeningHandover(
             return HandoverAttempt.Rejected
         }
         phase = EntryPhase.Accepted
-        initialLoadPending = true
         pauseTiming()
         return HandoverAttempt.Accepted
     }
@@ -156,38 +152,30 @@ class OpeningHandover(
     }
 
     /**
-     * 播放控制层上报状态：已接手后首个就绪或切集即结束入口阶段，首次加载窗口同时关闭。
-     * 已结束与空闲也结束入口阶段，但保留首次加载窗口：加载失败事件随后到达时仍要退回列表。
+     * 缓冲指示：入口阶段未结束时由入口显示；已接手后，目标首个就绪、转入切集或到达终态即交还给控制层。
+     * 准备中与等待接手期间的上报仍属于上一段会话，不参与判定。
      */
-    fun onPlaybackUpdate(playbackState: PlaybackState, switching: Boolean) {
-        if (phase != EntryPhase.Accepted) return
-        if (switching || playbackState.isReady) {
-            phase = null
-            initialLoadPending = false
-            return
-        }
-        if (playbackState == PlaybackState.Ended || playbackState == PlaybackState.Idle) {
-            phase = null
-        }
-    }
+    fun showsBuffering(controllerBuffering: Boolean, playbackState: PlaybackState, switching: Boolean): Boolean =
+        controllerBuffering || (preparesInPage && phase != null && !handoverSettled(playbackState, switching))
 
-    /** 入口阶段未结束时立即显示缓冲指示；首个就绪后与控制层的缓冲状态交接。 */
-    fun showsBuffering(controllerBuffering: Boolean): Boolean =
-        controllerBuffering || (
-            preparesInPage &&
-                (phase == EntryPhase.Preparing || phase == EntryPhase.AwaitingHandover || phase == EntryPhase.Accepted)
-            )
+    /** 已接手的目标是否已经越过首次加载：首个就绪、切集或终态。 */
+    private fun handoverSettled(playbackState: PlaybackState, switching: Boolean): Boolean =
+        phase == EntryPhase.Accepted &&
+            (
+                switching || playbackState.isReady ||
+                    playbackState == PlaybackState.Ended || playbackState == PlaybackState.Idle
+                )
 
     /** 准备期与首次加载（非切集）只允许返回与不依赖加载的控件。 */
     fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
         phase.isPreparingPhase || isInitialLoading(playbackState, switching)
 
     /**
-     * 首次加载失败：只接受当前代际、首次加载窗口内、且是在播放页里准备的打开。
-     * 窗口外的后续播放失败与音频首播失败都不关播放页。
+     * 首次加载失败：只接受当前代际、在播放页里准备的打开；后续播放失败与音频首播失败都不关播放页。
+     * 「是不是首次加载」由控制层的失败事件判定，入口不再另存窗口。
      */
     fun consumeInitialFailure(generation: Int, firstLoad: Boolean): Boolean {
-        if (!firstLoad || !preparesInPage || !initialLoadPending || !isCurrent(generation)) return false
+        if (!firstLoad || !preparesInPage || !isCurrent(generation)) return false
         abandon()
         return true
     }
@@ -210,7 +198,6 @@ class OpeningHandover(
         phase = null
         currentGeneration = null
         pending = null
-        initialLoadPending = false
         resetTiming()
     }
 
