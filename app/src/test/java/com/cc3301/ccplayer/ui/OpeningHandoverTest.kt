@@ -418,6 +418,42 @@ class OpeningHandoverTest {
         assertTrue(starts.isEmpty())
     }
 
+    // ---- 编排 ----
+
+    @Test
+    fun `点开、准备完成、接手到首个就绪的整条链`() {
+        val generation = handover.begin(preparing = true)
+        assertTrue(handover.isCurrent(generation))
+
+        handover.prepared(generation, playlist, current, directoryEntries)
+        assertEquals(EntryPhase.AwaitingHandover, handover.phase)
+
+        assertEquals(HandoverAttempt.Accepted, handover.attemptHandover(canStart = true))
+        assertEquals(EntryPhase.Accepted, handover.phase)
+        assertEquals(generation, starts.single().generation)
+
+        handover.onPlaybackUpdate(PlaybackState.Loading, switching = false)
+        assertTrue(handover.showsBuffering(controllerBuffering = false))
+
+        handover.onPlaybackUpdate(PlaybackState.Playing, switching = false)
+        assertNull(handover.phase)
+        assertFalse(handover.initialLoading(PlaybackState.Playing, switching = false))
+    }
+
+    @Test
+    fun `兜底到点回滚后不再起播`() {
+        val generation = handover.begin(preparing = true)
+        handover.prepared(generation, playlist, current, directoryEntries)
+
+        nowMillis = 5_000
+        assertTrue(handover.advance())
+
+        assertNull(handover.phase)
+        assertFalse(handover.isCurrent(generation))
+        assertEquals(HandoverAttempt.NotYet, handover.attemptHandover(canStart = true))
+        assertTrue(starts.isEmpty())
+    }
+
     @Test
     fun `控制层不接受时作废这次打开且不重复起播`() {
         controlAccepts = false
