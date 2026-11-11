@@ -190,12 +190,32 @@ class LoopbackStreamServerTest {
         assertEquals(1, opened)
         assertFalse(source.closed)
 
-        server.returnSource(key)
+        server.retain(emptySet())
 
         awaitCondition { source.closed }
         // 摘走之后的下一次请求重新建源。
         assertArrayEquals(payload, httpRequest(url).body)
         assertEquals(2, opened)
+    }
+
+    @Test
+    fun `保留集合只摘走不在集合里的已就绪源`() {
+        val keptKey = "smb://nas/media/纪录片.mkv"
+        val keptSource = RecordingByteSource(payload)
+        var keptOpened = 0
+        val keptUrl = server.serve(keptKey) {
+            keptOpened++
+            keptSource
+        }
+        httpRequest(url)
+        httpRequest(keptUrl)
+
+        server.retain(setOf(keptKey))
+
+        awaitCondition { source.closed }
+        assertFalse("集合里的源不动", keptSource.closed)
+        assertArrayEquals(payload, httpRequest(keptUrl).body)
+        assertEquals("集合里的源不重建", 1, keptOpened)
     }
 
     @Test
@@ -262,7 +282,7 @@ class LoopbackStreamServerTest {
         httpRequest(slowUrl)
 
         val started = System.nanoTime()
-        server.returnSource(slowKey)
+        server.retain(emptySet())
         val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
 
         try {
@@ -281,7 +301,7 @@ class LoopbackStreamServerTest {
             val target = logged.serve(key) { RecordingByteSource(payload) }
             httpRequest(target)
 
-            logged.returnSource(key)
+            logged.retain(emptySet())
 
             awaitCondition { diagnostics.messages.any { it.startsWith("归还字节源") } }
             assertTrue(diagnostics.messages.any { it.contains("耗时:") })
@@ -292,7 +312,7 @@ class LoopbackStreamServerTest {
 
     @Test
     fun `没有就绪源时归还不动手`() {
-        server.returnSource(key)
+        server.retain(emptySet())
 
         // 不动手的判据：下一次请求仍复用第一次建好的源，没有多建一条。
         assertArrayEquals(payload, httpRequest(url).body)
@@ -320,7 +340,7 @@ class LoopbackStreamServerTest {
         val request = Thread { httpRequest(target) }.apply { start() }
         assertTrue(entered.await(5, TimeUnit.SECONDS))
         // 建源在途：归还摘不到就绪的源，也不会把关闭要求留给下一轮。
-        server.returnSource(failKey)
+        server.retain(emptySet())
         unblock.countDown()
         request.join(5_000)
 
@@ -362,14 +382,14 @@ class LoopbackStreamServerTest {
         assertTrue(building.await(5, TimeUnit.SECONDS))
 
         // 建源在途：归还摘不到就绪的源，也不打断这次建源。
-        server.returnSource(builtKey)
+        server.retain(emptySet())
         release.countDown()
         request.join(5_000)
 
         assertFalse("在途建好的源仍归条目持有", builtClosed.get())
         assertArrayEquals(payload, httpRequest(target).body)
         // 这次请求读完了，条目里已是那条在途建好的源；再归还才摘得走。
-        server.returnSource(builtKey)
+        server.retain(emptySet())
         awaitCondition { builtClosed.get() }
     }
 
@@ -410,7 +430,7 @@ class LoopbackStreamServerTest {
         }
         assertTrue(building.await(5, TimeUnit.SECONDS))
 
-        server.returnSource(oldKey)
+        server.retain(emptySet())
         awaitCondition { old.closed }
         assertFalse("归还旧目标不打断新目标的在途建源", newClosed.get())
 
