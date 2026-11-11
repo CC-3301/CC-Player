@@ -1,7 +1,8 @@
 package com.cc3301.ccplayer.library
 
 import java.io.File
-import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineDispatcher
@@ -339,19 +340,9 @@ private fun encodeMetadata(
     return lines.joinToString("\n")
 }
 
-/** 先尝试原子改名；失败时复制到同目录唯一临时名再改名，避免复制中断留下半张图。 */
+/** 同目录改名替换：目标已存在时直接覆盖；源文件与目标同在一个缓存目录，不做跨卷复制。 */
 private fun replaceFile(source: File, target: File) {
-    if (source.renameTo(target)) return
-    val staged = File.createTempFile("${target.name}.", TEMP_SUFFIX, target.parentFile)
-    try {
-        source.copyTo(staged, overwrite = true)
-        if (!staged.renameTo(target)) {
-            throw IOException("无法替换缩略图缓存文件：${target.name}")
-        }
-        source.delete()
-    } finally {
-        staged.delete()
-    }
+    Files.move(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
 }
 
 /** 缓存键到文件名的映射：用 SHA-256 避免不同缓存键撞到同一个缓存文件。 */
