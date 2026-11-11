@@ -16,17 +16,17 @@ class PreviewEntryStateTest {
     fun `失败累计已试次数并记下阶段`() {
         val state = states.stateFor("a")
 
-        assertEquals(1, state.fail("读取"))
-        assertEquals(2, state.fail("解码"))
+        assertEquals(1, state.fail(PreviewFailureStage.Read))
+        assertEquals(2, state.fail(PreviewFailureStage.Decode))
 
         assertEquals(2, state.attempts)
-        assertEquals(PreviewEntryResult.Failed("解码"), state.result)
+        assertEquals(PreviewEntryResult.Failed(PreviewFailureStage.Decode), state.result)
     }
 
     @Test
     fun `出图后失败计数与预取抑制一起清零`() {
         val state = states.stateFor("a")
-        state.fail("读取")
+        state.fail(PreviewFailureStage.Read)
         state.suppressPrefetch()
 
         state.succeed()
@@ -34,6 +34,18 @@ class PreviewEntryStateTest {
         assertEquals(0, state.attempts)
         assertEquals(PreviewEntryResult.Image, state.result)
         assertFalse(state.prefetchSuppressed)
+    }
+
+    @Test
+    fun `新一轮可见订阅把已试次数从零计`() {
+        val state = states.stateFor("a")
+        state.fail(PreviewFailureStage.Read)
+        state.fail(PreviewFailureStage.Read)
+
+        state.resetAttempts()
+
+        assertEquals(0, state.attempts)
+        assertEquals("上次结果保留", PreviewEntryResult.Failed(PreviewFailureStage.Read), state.result)
     }
 
     @Test
@@ -92,12 +104,12 @@ class PreviewEntryStateTest {
 
     @Test
     fun `记录满时逐条淘汰最久未用，不再整体清空`() {
-        states.stateFor("a").fail("读取")
-        states.stateFor("b").fail("读取")
+        states.stateFor("a").fail(PreviewFailureStage.Read)
+        states.stateFor("b").fail(PreviewFailureStage.Read)
         // 用一次 a：最近使用顺序变成 b、a。
         assertEquals(1, states.state("a")!!.attempts)
 
-        states.stateFor("c").fail("读取")
+        states.stateFor("c").fail(PreviewFailureStage.Read)
 
         assertNull("最久未用的 b 被淘汰", states.state("b"))
         assertEquals("其余记录不清空", 1, states.state("a")!!.attempts)

@@ -14,7 +14,7 @@ import kotlinx.coroutines.yield
  *
  * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
  * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次；
- * 第几次与还能试几次都读抽帧源持有的抽帧状态，调度器不再自己计数。
+ * 等几秒与还能排几次都从抽帧源持有的抽帧状态读，调度器不另记已试次数。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
@@ -82,6 +82,7 @@ class VisiblePreviewScheduler(
      */
     suspend fun preview(entry: MediaFile, index: Int): MediaPreview {
         if (entry.isDirectory) return EMPTY_PREVIEW
+        var subscribed = false
         val request = synchronized(lock) {
             if (closed) return EMPTY_PREVIEW
             val existing = requests[entry.location]
@@ -91,11 +92,14 @@ class VisiblePreviewScheduler(
                 existing
             } else {
                 Request(entry, index, CompletableDeferred()).also { created ->
+                    subscribed = true
                     created.subscribers = 1
                     requests[created.file.location] = created
                 }
             }
         }
+        // 新订阅先让抽帧源开始新一轮，再下发：网络条目的可见重试从零计。
+        if (subscribed) source.beginVisiblePreview(entry)
         dispatch()
         var cancelled = false
         try {
@@ -266,14 +270,12 @@ class VisiblePreviewScheduler(
             if (!isCurrentAttemptLocked(request, attemptId)) return
             request.attemptId++
             request.job = null
-            if (preview.retryable) request.noteFailedAttempt(preview.attempts)
-            if (preview.retryable && request.retriesUsed() <= VISIBLE_RETRY_MAX_ATTEMPTS) {
+            if (preview.retryable) request.retried = true
+            if (preview.retryable && canRetryLocked(request)) {
                 // 失败项先跳过：保留 deferred 与订阅，等可见项全部出图后再按递进间隔重试。
                 request.retryPending = true
             } else {
-                // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
-                if (requests[request.file.location] === request) requests.remove(request.file.location)
-                if (!request.deferred.isCompleted) request.deferred.complete(preview)
+                completeLocked(request, preview)
             }
         }
         // 重新走一轮下发，并独立安排重试计时：失败项要靠这一轮排空后才轮到重试。
@@ -289,10 +291,10 @@ class VisiblePreviewScheduler(
             request.isDispatchableLocked() && request.file.location in visibleLocations
         }
         if (candidates.isEmpty()) return null
-        val fresh = candidates.filter { !it.alreadyFailed() }
+        val fresh = candidates.filter { request -> !request.retried }
         if (fresh.isNotEmpty()) return fresh.minByOrNull(Request::index)
         val freshRunning = requests.values.any { request ->
-            request.job != null && !request.alreadyFailed() && request.file.location in visibleLocations
+            request.job != null && !request.retried && request.file.location in visibleLocations
         }
         return if (freshRunning) null else candidates.minByOrNull(Request::index)
     }
@@ -309,7 +311,7 @@ class VisiblePreviewScheduler(
 
     /** 还有首次尝试没出图的可见项：在跑，或可下发。 */
     private fun hasFreshWorkLocked(): Boolean = requests.values.any { request ->
-        !request.alreadyFailed() &&
+        !request.retried &&
             request.file.location in visibleLocations &&
             (request.job != null || request.isDispatchableLocked())
     }
@@ -347,12 +349,18 @@ class VisiblePreviewScheduler(
 
     /** 等满递进间隔后把失败项重新排上；期间离屏或取消就不再重试。 */
     private suspend fun awaitRetry(request: Request) {
-        // 间隔在锁内取：步数只由下发线程在锁内改。
-        val step = synchronized(lock) {
+        // 等几秒读抽帧状态里的已试次数：第 n 次失败等 n 秒。
+        val attempts = synchronized(lock) {
             if (closed || request.deferred.isCompleted) return
-            request.retryStep
+            source.previewEntryState(request.file)?.attempts
         }
-        delay(VISIBLE_RETRY_STEP_MILLIS * step)
+        if (attempts == null) {
+            // 状态记录已被容量淘汰：这一项没有可再试的余量，按占位图收尾。
+            synchronized(lock) { completeLocked(request, EMPTY_PREVIEW) }
+            resumeAfterAttempt()
+            return
+        }
+        delay(VISIBLE_RETRY_STEP_MILLIS * attempts)
         // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。批次收尾会唤醒，不轮询。
         while (true) {
             val gate = synchronized(lock) {
@@ -377,10 +385,21 @@ class VisiblePreviewScheduler(
             if (request.job !== attempt.job) return
             request.attemptId++
             request.job = null
-            if (requests[request.file.location] === request) requests.remove(request.file.location)
-            if (!request.deferred.isCompleted) request.deferred.complete(EMPTY_PREVIEW)
+            completeLocked(request, EMPTY_PREVIEW)
         }
         resumeAfterAttempt()
+    }
+
+    /** 还能不能排下一次重试：已试次数读抽帧状态，超过可见重试上限就不再排。 */
+    private fun canRetryLocked(request: Request): Boolean {
+        val attempts = source.previewEntryState(request.file)?.attempts ?: return false
+        return attempts <= VISIBLE_RETRY_MAX_ATTEMPTS
+    }
+
+    /** 把结果交给订阅者并移除请求；完成与暂停之间不留下已完成的请求。 */
+    private fun completeLocked(request: Request, preview: MediaPreview) {
+        if (requests[request.file.location] === request) requests.remove(request.file.location)
+        if (!request.deferred.isCompleted) request.deferred.complete(preview)
     }
 
     private fun isCurrentAttemptLocked(request: Request, attemptId: Long): Boolean =
@@ -396,10 +415,8 @@ class VisiblePreviewScheduler(
         var subscribers: Int = 0,
         var attemptId: Long = 0,
         var job: Job? = null,
-        /** 本轮订阅在抽帧状态里的已试次数基线；第一次失败后由那次结果定下。 */
-        var attemptsBase: Int? = null,
-        /** 下次重试的步数：抽帧状态已试次数减基线，也决定等几秒。 */
-        var retryStep: Int = 0,
+        /** 本轮订阅已经失败过：之后的下发都算重试，排在首次尝试之后。 */
+        var retried: Boolean = false,
         /** 正在等重试计时；期间不参与下发。 */
         var retryPending: Boolean = false,
         /** 正在跑的重试计时任务。 */
@@ -408,19 +425,6 @@ class VisiblePreviewScheduler(
 
         /** 没有在跑的 attempt，也没有在等重试计时，才算可下发。 */
         fun isDispatchableLocked(): Boolean = job == null && !retryPending
-
-        /** 本轮订阅已经失败过：之后的下发都算重试。 */
-        fun alreadyFailed(): Boolean = attemptsBase != null
-
-        /** 记这次失败后抽帧状态里的已试次数；第一次失败时定下基线。 */
-        fun noteFailedAttempt(attempts: Int) {
-            val base = attemptsBase ?: (attempts - 1)
-            attemptsBase = base
-            retryStep = attempts - base
-        }
-
-        /** 本轮订阅用掉的可见重试次数。 */
-        fun retriesUsed(): Int = retryStep
     }
 
     private class Attempt(

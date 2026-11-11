@@ -8,49 +8,55 @@ internal sealed interface PreviewEntryResult {
     /** 解码成功但没有可用图。 */
     data object NoImage : PreviewEntryResult
 
-    /** 抽取失败；[stage] 与日志里的失败阶段同名。 */
-    data class Failed(val stage: String) : PreviewEntryResult
+    /** 抽取失败；[stage] 是失败落在的那一环。 */
+    data class Failed(val stage: PreviewFailureStage) : PreviewEntryResult
 }
 
 /**
  * 抽帧状态：一个条目在本次运行内的抽帧状况——上次结果、已试次数、最早可再试时刻、是否对预取抑制。
  * 由抽帧源持有，抽帧源与可见请求调度器读同一份；只描述结果，不含进行中的任务（ADR-0043）。
  */
-internal class PreviewEntryState {
+class PreviewEntryState internal constructor() {
 
-    /** 上次结果；还没有结果时为 null。 */
-    @Volatile
-    var result: PreviewEntryResult? = null
-        private set
-
-    /** 已试次数：连续失败累计，出图或确认无图后清零。 */
+    /** 已试次数：连续失败累计，出图或确认无图后清零；网络条目从新一轮可见订阅起计。 */
     @Volatile
     var attempts: Int = 0
         private set
 
+    /** 上次结果；还没有结果时为 null。 */
+    @Volatile
+    internal var result: PreviewEntryResult? = null
+        private set
+
     /** 最早可再试时刻（单调毫秒）；0 表示没有退避。 */
     @Volatile
-    var retryAtMillis: Long = 0
+    internal var retryAtMillis: Long = 0
         private set
 
     /** 预取抑制：预取失败或无图后不再重复预取，变为可见时清除。 */
     @Volatile
-    var prefetchSuppressed: Boolean = false
+    internal var prefetchSuppressed: Boolean = false
         private set
 
     /** 无图记忆的过期时刻；[result] 不是无图时为 null。 */
     @Volatile
-    var noImageExpiresAtMillis: Long? = null
+    internal var noImageExpiresAtMillis: Long? = null
         private set
 
     /** 时长补读连续失败次数；退避按它成倍增长。 */
     @Volatile
-    var durationAttempts: Int = 0
+    internal var durationAttempts: Int = 0
         private set
+
+    /** 开始新一轮可见订阅：已试次数从零计，上次结果保留。 */
+    @Synchronized
+    internal fun resetAttempts() {
+        attempts = 0
+    }
 
     /** 记一次抽取失败；返回累计失败次数。 */
     @Synchronized
-    fun fail(stage: String): Int {
+    internal fun fail(stage: PreviewFailureStage): Int {
         attempts++
         result = PreviewEntryResult.Failed(stage)
         noImageExpiresAtMillis = null
@@ -59,7 +65,7 @@ internal class PreviewEntryState {
 
     /** 给出图结果：失败计数、上次结果与预取抑制一起清掉。 */
     @Synchronized
-    fun succeed() {
+    internal fun succeed() {
         attempts = 0
         result = PreviewEntryResult.Image
         noImageExpiresAtMillis = null
@@ -68,7 +74,7 @@ internal class PreviewEntryState {
 
     /** 记「确认无图」：失败计数清零，到期后重新按可能有图处理。 */
     @Synchronized
-    fun recordNoImage(expiresAtMillis: Long) {
+    internal fun recordNoImage(expiresAtMillis: Long) {
         attempts = 0
         result = PreviewEntryResult.NoImage
         noImageExpiresAtMillis = expiresAtMillis
@@ -76,38 +82,38 @@ internal class PreviewEntryState {
 
     /** 只清「确认无图」，其余字段不动。 */
     @Synchronized
-    fun forgetNoImage() {
+    internal fun forgetNoImage() {
         if (result != PreviewEntryResult.NoImage) return
         result = null
         noImageExpiresAtMillis = null
     }
 
     @Synchronized
-    fun suppressPrefetch() {
+    internal fun suppressPrefetch() {
         prefetchSuppressed = true
     }
 
     @Synchronized
-    fun clearPrefetchSuppression() {
+    internal fun clearPrefetchSuppression() {
         prefetchSuppressed = false
     }
 
     /** 记一次时长补读失败；返回连续失败次数。 */
     @Synchronized
-    fun failDuration(): Int {
+    internal fun failDuration(): Int {
         durationAttempts++
         return durationAttempts
     }
 
     /** 推迟到 [millis] 才允许重试。 */
     @Synchronized
-    fun deferUntil(millis: Long) {
+    internal fun deferUntil(millis: Long) {
         retryAtMillis = millis
     }
 
     /** 时长补读恢复正常：失败计数与退避一起清掉。 */
     @Synchronized
-    fun clearDurationFailure() {
+    internal fun clearDurationFailure() {
         durationAttempts = 0
         retryAtMillis = 0
     }
