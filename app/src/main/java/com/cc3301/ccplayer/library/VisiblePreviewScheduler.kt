@@ -13,7 +13,8 @@ import kotlinx.coroutines.yield
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
  * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
- * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次。
+ * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次；
+ * 第几次与还能试几次都读抽帧源持有的抽帧状态，调度器不再自己计数。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
@@ -265,9 +266,9 @@ class VisiblePreviewScheduler(
             if (!isCurrentAttemptLocked(request, attemptId)) return
             request.attemptId++
             request.job = null
-            if (preview.retryable && request.retryAttempts < VISIBLE_RETRY_MAX_ATTEMPTS) {
+            if (preview.retryable) request.noteFailedAttempt(preview.attempts)
+            if (preview.retryable && request.retriesUsed() <= VISIBLE_RETRY_MAX_ATTEMPTS) {
                 // 失败项先跳过：保留 deferred 与订阅，等可见项全部出图后再按递进间隔重试。
-                request.retryAttempts++
                 request.retryPending = true
             } else {
                 // 先在锁内完成并移除，避免完成与暂停之间留下已完成的请求。
@@ -288,10 +289,10 @@ class VisiblePreviewScheduler(
             request.isDispatchableLocked() && request.file.location in visibleLocations
         }
         if (candidates.isEmpty()) return null
-        val fresh = candidates.filter { it.retryAttempts == 0 }
+        val fresh = candidates.filter { !it.alreadyFailed() }
         if (fresh.isNotEmpty()) return fresh.minByOrNull(Request::index)
         val freshRunning = requests.values.any { request ->
-            request.job != null && request.retryAttempts == 0 && request.file.location in visibleLocations
+            request.job != null && !request.alreadyFailed() && request.file.location in visibleLocations
         }
         return if (freshRunning) null else candidates.minByOrNull(Request::index)
     }
@@ -308,7 +309,7 @@ class VisiblePreviewScheduler(
 
     /** 还有首次尝试没出图的可见项：在跑，或可下发。 */
     private fun hasFreshWorkLocked(): Boolean = requests.values.any { request ->
-        request.retryAttempts == 0 &&
+        !request.alreadyFailed() &&
             request.file.location in visibleLocations &&
             (request.job != null || request.isDispatchableLocked())
     }
@@ -346,10 +347,10 @@ class VisiblePreviewScheduler(
 
     /** 等满递进间隔后把失败项重新排上；期间离屏或取消就不再重试。 */
     private suspend fun awaitRetry(request: Request) {
-        // 间隔在锁内取：重试次数只由下发线程在锁内改。
+        // 间隔在锁内取：步数只由下发线程在锁内改。
         val step = synchronized(lock) {
             if (closed || request.deferred.isCompleted) return
-            request.retryAttempts
+            request.retryStep
         }
         delay(VISIBLE_RETRY_STEP_MILLIS * step)
         // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。批次收尾会唤醒，不轮询。
@@ -395,8 +396,10 @@ class VisiblePreviewScheduler(
         var subscribers: Int = 0,
         var attemptId: Long = 0,
         var job: Job? = null,
-        /** 已安排的失败重试次数，上限 [VISIBLE_RETRY_MAX_ATTEMPTS]。 */
-        var retryAttempts: Int = 0,
+        /** 本轮订阅在抽帧状态里的已试次数基线；第一次失败后由那次结果定下。 */
+        var attemptsBase: Int? = null,
+        /** 下次重试的步数：抽帧状态已试次数减基线，也决定等几秒。 */
+        var retryStep: Int = 0,
         /** 正在等重试计时；期间不参与下发。 */
         var retryPending: Boolean = false,
         /** 正在跑的重试计时任务。 */
@@ -405,6 +408,19 @@ class VisiblePreviewScheduler(
 
         /** 没有在跑的 attempt，也没有在等重试计时，才算可下发。 */
         fun isDispatchableLocked(): Boolean = job == null && !retryPending
+
+        /** 本轮订阅已经失败过：之后的下发都算重试。 */
+        fun alreadyFailed(): Boolean = attemptsBase != null
+
+        /** 记这次失败后抽帧状态里的已试次数；第一次失败时定下基线。 */
+        fun noteFailedAttempt(attempts: Int) {
+            val base = attemptsBase ?: (attempts - 1)
+            attemptsBase = base
+            retryStep = attempts - base
+        }
+
+        /** 本轮订阅用掉的可见重试次数。 */
+        fun retriesUsed(): Int = retryStep
     }
 
     private class Attempt(
