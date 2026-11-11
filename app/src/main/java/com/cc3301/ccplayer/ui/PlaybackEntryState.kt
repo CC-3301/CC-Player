@@ -6,22 +6,6 @@ import androidx.compose.runtime.setValue
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.isInitialLoading
 
-/** 一次打开的唯一步骤事实；同一时刻只有一个。 */
-enum class EntryPhase {
-    /** 准备中：入口还在解析目录、外挂字幕或网络连接。 */
-    Preparing,
-
-    /** 等待接手：已经准备好，但还没交给播放控制层。 */
-    AwaitingHandover,
-
-    /** 已接手：播放控制层已接受这次打开，入口只等首个就绪、切集或终态上报。 */
-    Accepted,
-}
-
-/** 准备期：返回按撤回或退出处理，界面只保留返回与更多。 */
-val EntryPhase?.isPreparingPhase: Boolean
-    get() = this == EntryPhase.Preparing || this == EntryPhase.AwaitingHandover
-
 /**
  * 浏览页进入播放页的入口阶段。
  *
