@@ -57,6 +57,14 @@ data class PlayerMenuFacts(
     val subtitleSelection: SubtitleSelection = SubtitleSelection.Off,
 )
 
+/** 播放页的界面环境事实：方向设置、本次转屏结果、屏幕方向与自动连播。 */
+data class PlayerScreenEnvironment(
+    val orientationMode: OrientationMode = SettingsRepository.DEFAULT_ORIENTATION_MODE,
+    val orientationOverride: ScreenOrientation? = null,
+    val screenOrientation: ScreenOrientation = ScreenOrientation.Portrait,
+    val autoPlayNext: Boolean = SettingsRepository.DEFAULT_AUTO_PLAY_NEXT,
+)
+
 /** 播放页的内容：列表与文件。事实对象不放这些，避免整组事实被判不稳定。 */
 data class PlayerScreenContent(
     val playlist: List<MediaFile> = emptyList(),

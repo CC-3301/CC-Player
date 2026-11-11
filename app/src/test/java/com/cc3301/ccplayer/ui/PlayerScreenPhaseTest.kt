@@ -195,11 +195,24 @@ class PlayerScreenPhaseTest {
     }
 
     @Test
-    fun `宿主初始为就绪且收下事实后随之改变`() {
+    fun `宿主按入口事实组装会话与阶段`() {
         val viewModel = PlayerScreenViewModel()
-        assertEquals(PlayerScreenPhase.Ready, viewModel.phase)
+        val ready = viewModel.session(
+            entryPhase = null,
+            preparesInPage = false,
+            bufferingShown = false,
+            environment = PlayerScreenEnvironment(),
+        )
+        assertEquals(PlayerScreenPhase.Ready, ready.loading.phase)
 
-        viewModel.update(facts(playbackState = PlaybackState.Loading, switching = true))
-        assertEquals(PlayerScreenPhase.Switching, viewModel.phase)
+        val preparing = viewModel.session(
+            entryPhase = EntryPhase.Preparing,
+            preparesInPage = true,
+            bufferingShown = true,
+            environment = PlayerScreenEnvironment(autoPlayNext = true),
+        )
+        assertEquals(PlayerScreenPhase.Preparing, preparing.loading.phase)
+        assertTrue(preparing.loading.buffering)
+        assertTrue(preparing.menu.autoPlayNext)
     }
 }
