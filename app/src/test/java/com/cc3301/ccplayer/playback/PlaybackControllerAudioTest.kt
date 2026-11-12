@@ -9,7 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * 音频体验：起播与跳转后的淡入请求，音频输出中断后的暂停。
+ * 音频体验：起播与切换文件的淡入请求，音频输出中断后的暂停。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PlaybackControllerAudioTest {
@@ -34,17 +34,17 @@ class PlaybackControllerAudioTest {
     }
 
     @Test
-    fun `seeking asks for another fade in`() {
+    fun `seeking asks for no fade in`() {
         open(media)
         engine.reportMediaLoaded()
         engine.reportPositionChanged(1_000, 60_000)
         controller.updateSeekPreview(requestSeek = true, positionMillis = 30_000)
 
         controller.commitSeekPreview()
-        // 声音在播放核心回报这一跳执行完之后恢复并淡入。
         engine.reportFirstFrameReady()
 
-        assertEquals(listOf(500L, 500L), engine.fadeInDurations)
+        // seek 不淡入：跳转落定后直接以正常音量出声。
+        assertEquals(listOf(PlaybackController.FADE_IN_MILLIS), engine.fadeInDurations)
     }
 
     @Test

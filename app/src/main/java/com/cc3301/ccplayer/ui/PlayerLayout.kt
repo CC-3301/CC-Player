@@ -301,6 +301,9 @@ val PlayerSeekDragDeadZone = 3.dp
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 
+/** 滚轮跳转提示的显示时长：一格当场落定，提示按这段时间收起。 */
+const val SEEK_HINT_VISIBLE_MILLIS = 1_000L
+
 /**
  * 落定通知是否该撤掉界面的进度保持值：只有比已处理过的通知更新的 id 才撤。
  * 同一目标连续两次落定也能撤；旧代际的迟到通知不会误清新保持值。
