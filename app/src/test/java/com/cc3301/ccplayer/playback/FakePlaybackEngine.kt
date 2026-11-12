@@ -256,6 +256,13 @@ class FakePlaybackEngine : PlaybackEngine {
         disableSubtitleCalls++
     }
 
+    /** 视频轨开关序列：false 为关闭、true 为选回。 */
+    val videoTrackEnabledCalls = mutableListOf<Boolean>()
+
+    override fun setVideoTrackEnabled(enabled: Boolean) {
+        videoTrackEnabledCalls += enabled
+    }
+
     private var attachedSurface: Surface? = null
 
     /** 视频输出翻转次数；用于断言 3 秒无新帧只翻转一次。 */

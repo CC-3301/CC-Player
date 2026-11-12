@@ -196,6 +196,12 @@ class PlaybackController(
     private val _renderSurfaceAvailable = MutableStateFlow(true)
     val renderSurfaceAvailable: StateFlow<Boolean> = _renderSurfaceAvailable.asStateFlow()
 
+    /** 视频轨是否选中；关闭时只保留音频，Surface 与视频输出都保持原样。 */
+    private var videoTrackEnabled = true
+
+    /** 现在是否真的会出画面：Surface 挂着且视频轨没有关闭。 */
+    private val rendersPicture: Boolean get() = _renderSurfaceAvailable.value && videoTrackEnabled
+
     /** 播放失败事件，供界面提示“播放失败”。 */
     private val _playbackFailures = MutableSharedFlow<PlaybackFailure>(extraBufferCapacity = 1)
     val playbackFailures: SharedFlow<PlaybackFailure> = _playbackFailures.asSharedFlow()
@@ -617,7 +623,7 @@ class PlaybackController(
         syncAudioMute()
         settlePresentation()
         // 屏上确实没有帧时（交接前就没有画面）按播放态回前台的路径等新帧。
-        if (screenFrame == ScreenFrame.None && foreground && _renderSurfaceAvailable.value) {
+        if (screenFrame == ScreenFrame.None && foreground && rendersPicture) {
             beginSurfaceRestore(reason = "打开取消")
         }
     }
@@ -829,7 +835,7 @@ class PlaybackController(
     private fun restorePausedFrameIfNoPicture() {
         if (!active || !paused || !foreground || holdBlack) return
         if (screenFrame != ScreenFrame.None) return
-        if (!_renderSurfaceAvailable.value) return
+        if (!rendersPicture) return
         beginSurfaceRestore(reason = "回前台暂停态")
     }
 
@@ -841,7 +847,7 @@ class PlaybackController(
         val wasAvailable = _renderSurfaceAvailable.value
         _renderSurfaceAvailable.value = available
         if (available) {
-            if (!wasAvailable) beginSurfaceRestore()
+            if (!wasAvailable && rendersPicture) beginSurfaceRestore()
         } else {
             if (wasAvailable) diagnostics.log("Surface 分离")
             // Surface 销毁后屏幕上没有画面：回前台按黑底等首个新帧。
@@ -854,6 +860,19 @@ class PlaybackController(
         updateLoadTimers()
         finishLoadWithoutSurface()
         evaluateDeferredReady()
+    }
+
+    /**
+     * 关闭视频轨只保留音频，或重新选回视频轨。
+     *
+     * 只改轨道选择：Surface 与视频输出不拆不重建，音频不暂停也不重配。
+     * 关闭期间按没有可渲染画面处理：加载以文件完成作为就绪。
+     */
+    fun setVideoTrackEnabled(enabled: Boolean) {
+        if (enabled == videoTrackEnabled) return
+        videoTrackEnabled = enabled
+        engine.setVideoTrackEnabled(enabled)
+        updateLoadTimers()
     }
 
     /**
@@ -901,7 +920,7 @@ class PlaybackController(
                 val startedAtMillis = nowMillis()
                 delay(SURFACE_RESTORE_WAIT_MILLIS)
                 // 退后台取消等待之外再判一次前台：翻转会重建整条视频输出，后台不能做。
-                if (!active || !_renderSurfaceAvailable.value || !foreground) return@launch
+                if (!active || !rendersPicture || !foreground) return@launch
                 if (loadPhase != LoadPhase.None || !awaitingSurfaceFrame) return@launch
                 awaitingSurfaceFrame = false
                 // 本次恢复到此收尾：下一次恢复重新允许一次刷新。
@@ -1704,8 +1723,8 @@ class PlaybackController(
             finishReady(phase, frameConfirmed = true)
             return
         }
-        if (!_renderSurfaceAvailable.value) {
-            // 后台没有可渲染画面：文件已加载即视为就绪，回前台由 Surface 重挂恢复画面。
+        if (!rendersPicture) {
+            // 没有可渲染画面：文件已加载即视为就绪，回前台由 Surface 重挂恢复画面。
             finishReady(phase)
             return
         }
@@ -1727,7 +1746,7 @@ class PlaybackController(
     private fun finishLoadWithoutSurface() {
         val phase = loadPhase
         if (phase == LoadPhase.None) return
-        if (_renderSurfaceAvailable.value) return
+        if (rendersPicture) return
         if (!mediaLoaded || !resumeLookupDone) return
         finishReady(phase)
     }
@@ -2014,7 +2033,7 @@ class PlaybackController(
         }
         // 暂停态没有更靠后的出帧信号：就绪即撤旧帧，直接露新集首帧，不铺黑底。
         // 只有前台且 Surface 可渲染时屏上才有画面可露；后台与 Surface 分离时维持黑底。
-        if (paused && foreground && _renderSurfaceAvailable.value) {
+        if (paused && foreground && rendersPicture) {
             screenFrame = ScreenFrame.Target
             quietBlack = false
         }
@@ -2047,7 +2066,7 @@ class PlaybackController(
     }
 
     /** 等新帧窗口的计时条件：只在前台且有可渲染 Surface 时累积。 */
-    private fun loadTimingAllowed(): Boolean = foreground && _renderSurfaceAvailable.value
+    private fun loadTimingAllowed(): Boolean = foreground && rendersPicture
 
     /** 当前阶段是否由加载看护裁决：首次打开、切集与恢复原片共用同一套计时。 */
     private fun loadGuardPhase(): Boolean =
@@ -2604,8 +2623,8 @@ class PlaybackController(
         return if (events.isEmpty()) "无" else events.joinToString("、")
     }
 
-    /** 环境字段：Surface 是否可用与是否在前台各记各的。 */
-    private fun surfaceText(): String = if (_renderSurfaceAvailable.value) "有" else "无"
+    /** 环境字段：是否真会出画面（Surface 可用且视频轨未关闭）与是否在前台各记各的。 */
+    private fun surfaceText(): String = if (rendersPicture) "有" else "无"
 
     private fun backgroundText(): String = if (foreground) "否" else "是"
 

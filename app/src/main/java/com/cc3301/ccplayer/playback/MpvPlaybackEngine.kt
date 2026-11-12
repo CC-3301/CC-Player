@@ -433,6 +433,11 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString(SID_PROPERTY, SID_OFF)
     }
 
+    /** 关闭视频轨只保留音频，或重新选回视频轨；Surface 与视频输出都保持原样。 */
+    override fun setVideoTrackEnabled(enabled: Boolean) {
+        MPVLib.setPropertyString(VID_PROPERTY, if (enabled) VID_AUTO else VID_OFF)
+    }
+
     /**
      * 挂载 Surface：排队中的分离可能还没跑完，摘挂载会落在刚挂上的这一块之后。
      * 队列没有在途任务时当场挂；有在途任务就把这次挂载排到分离之后，调用线程不等待。
@@ -1106,6 +1111,7 @@ class MpvPlaybackEngine(
         const val EOF_REACHED_PROPERTY = "eof-reached"
         const val PATH_PROPERTY = "path"
         const val SID_PROPERTY = "sid"
+        const val VID_PROPERTY = "vid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"
         const val ID_ENTRY = "id"
@@ -1120,6 +1126,12 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+
+        /** `vid` 取该值表示按默认规则自动选择视频轨。 */
+        const val VID_AUTO = "auto"
+
+        /** `vid` 取该值表示不选视频轨，只保留音频。 */
+        const val VID_OFF = "no"
     }
 }
 

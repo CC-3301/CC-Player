@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import android.view.View
 import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.AnimatedVisibility
@@ -365,6 +366,7 @@ fun PlayerScreen(
     actions: PlayerActions,
     content: PlayerScreenContent,
     access: PlayerScreenAccess,
+    visible: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val progressFacts = session.progress
@@ -480,8 +482,8 @@ fun PlayerScreen(
     val subtitleMenuVisible = panels.subtitlesOpen
     val moreVisible = panels.moreOpen
 
-    // 面板或抽屉打开时，系统返回只关闭面板，不离开播放页。
-    BackHandler(enabled = playerBackClosesPanel(panels.anyOpen)) { panels.close() }
+    // 面板或抽屉打开时，系统返回只关闭面板，不离开播放页；隐藏时常驻视图不消费返回。
+    BackHandler(enabled = visible && playerBackClosesPanel(panels.anyOpen)) { panels.close() }
 
     // 首次加载与切集不改变控制层显隐：显示状态重新计时，隐藏状态全程保持隐藏。
     // 已打开的面板保持打开，仍被拦截的操作按不可用外观处理。
@@ -604,6 +606,7 @@ fun PlayerScreen(
         val playlistPlacement = with(density) {
             playlistDrawerPlacement(maxWidth.toPx(), maxHeight.toPx())
         }
+        // 离开播放页但继续播放时只隐藏：INVISIBLE 不绘制、不接收触摸，SurfaceTexture 仍挂在窗口上。
         AndroidView(
             factory = { context ->
                 MpvTextureView(context).also { view -> view.callback = surfaceCallback }
@@ -614,6 +617,7 @@ fun PlayerScreen(
                     width = with(density) { viewport.width.toDp() },
                     height = with(density) { viewport.height.toDp() },
                 ),
+            update = { view -> view.visibility = if (visible) View.VISIBLE else View.INVISIBLE },
         )
         // 黑底画在视频视图之后：屏幕上没有可显示的画面时铺黑底（首次打开、片尾恢复、切集无画面、无视频轨）。
         // 刚进播放页、比例还没到时也盖住；横向视频还要等屏幕转到位，别让竖向摆出来的首帧先露一下。

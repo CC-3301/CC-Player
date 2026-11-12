@@ -102,6 +102,12 @@ interface PlaybackEngine {
      */
     fun awaitFramePresentation()
 
+    /**
+     * 关闭视频轨只保留音频，或重新选回视频轨。
+     * 只改轨道选择：Surface 与视频输出都保持原样。
+     */
+    fun setVideoTrackEnabled(enabled: Boolean)
+
     /** 按百分比设置音频输出音量（0–100）；只用于音频焦点暂降与恢复。 */
     fun setVolumePercent(percent: Int)
 
