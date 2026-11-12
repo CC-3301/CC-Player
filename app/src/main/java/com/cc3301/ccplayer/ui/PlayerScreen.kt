@@ -1238,7 +1238,8 @@ private fun PlayerGestureLayer(
                     }
                 }
             }
-            // 滚轮调时长：中间区域上滚后退、下滚前进，连续滚动累积；每格当场落定，提示按显示时长收起。
+            // 滚轮调时长：中间区域上滚后退、下滚前进 5 秒，每格在最后一次已下发的目标上累加，
+            // 播放位置跟不上也照常累加；每格当场落定并解除静音，提示按显示时长收起。
             .pointerInput(gesturesEnabled, seekAllowed) {
                 if (!gesturesEnabled || !seekAllowed) return@pointerInput
                 awaitPointerEventScope {

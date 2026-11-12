@@ -102,6 +102,9 @@ class PlaybackController(
     /** 最后一次下发的预览 seek 身份；松手的落点认的是这一跳。 */
     private var lastPreviewSeekId: Long? = null
 
+    /** 最后一次已下发的 seek 目标；滚轮连滚在它上面继续累加，不看播放位置是否已经跟上。 */
+    private var lastIssuedSeekTargetMillis: Long? = null
+
     /** 播放核心回报的最后一条本代 seek 身份；落定只按 seekId 确认，不按目标毫秒。 */
     private var lastExecutedSeekId: Long? = null
 
@@ -1367,14 +1370,15 @@ class PlaybackController(
     }
 
     /**
-     * 滚轮调时长的一档：在当前位置或本次预览目标上累计 [deltaMillis]，返回新的预览目标。
-     * 一格就是一次完整的跳转：停滚当即收尾，不设等待窗口，声音在收尾时立刻恢复。
+     * 滚轮调时长的一档：以最后一次已下发的 seek 目标为基数累计 [deltaMillis]，返回新的预览目标。
+     * 基数不看播放位置有没有跟上，播放核心还在上一跳时就接着那个落点继续走，连滚按格累加。
+     * 一格就是一次完整的跳转：下发后当场收尾并解除静音，不设等待窗口。
      */
     fun updateSeekPreviewBy(deltaMillis: Long): Long? {
         if (!active) return null
         val durationMillis = playedDurationMillis
         if (durationMillis <= 0L) return null
-        val baseMillis = _seekPreviewMillis.value ?: playedPositionMillis
+        val baseMillis = lastIssuedSeekTargetMillis ?: playedPositionMillis
         val target = (baseMillis + deltaMillis).coerceIn(0L, durationMillis)
         if (target == baseMillis) return null
         if (!previewTo(target, requestSeek = true)) return null
@@ -1508,6 +1512,7 @@ class PlaybackController(
      * 复用的那一跳此前已经回报过执行时，落定当场结算。
      */
     private fun landSeek(targetMillis: Long, seekId: Long, fromPreview: Boolean) {
+        lastIssuedSeekTargetMillis = targetMillis
         playedPositionMillis = targetMillis
         _progress.value = PlaybackProgress(targetMillis, _progress.value.durationMillis)
         pendingLanding = LandingSeek(seekId, targetMillis, fromPreview)
@@ -1956,6 +1961,10 @@ class PlaybackController(
         }
         playedPositionMillis = positionMillis
         playedDurationMillis = durationMillis
+        // 播放位置已经到达滚轮落点：这个目标不再是基数，下一格从当前播放位置起算。
+        if (lastIssuedSeekTargetMillis?.let { abs(positionMillis - it) <= PREVIEW_SEEK_DEAD_ZONE_MILLIS } == true) {
+            lastIssuedSeekTargetMillis = null
+        }
         _progress.value = PlaybackProgress(positionMillis, durationMillis)
         val media = currentMedia() ?: return
         if (reachedEnd()) {
@@ -2712,6 +2721,7 @@ class PlaybackController(
         _seekPreviewMillis.value = null
         lastPreviewSeekTargetMillis = null
         lastPreviewSeekId = null
+        lastIssuedSeekTargetMillis = null
         lastExecutedSeekId = null
         releasePreviewMute()
     }
