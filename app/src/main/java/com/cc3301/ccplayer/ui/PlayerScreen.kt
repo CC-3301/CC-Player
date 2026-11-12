@@ -854,16 +854,16 @@ fun PlayerScreen(
                 title = playlist.getOrNull(currentIndex)?.name.orEmpty(),
                 moreVisible = moreVisible,
                 interactive = topBarInteractive,
-                rotateEnabled = actionAllowed(PlayerAction.Rotate, phase),
-                rotateAppearanceEnabled = actionLooksEnabled(
+                rotateEnabled = actionEnabled(
                     PlayerAction.Rotate,
+                    interactive = topBarInteractive,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
                     phase = phase,
                 ),
-                moreEnabled = actionAllowed(PlayerAction.More, phase),
-                moreAppearanceEnabled = actionLooksEnabled(
+                moreEnabled = actionEnabled(
                     PlayerAction.More,
+                    interactive = topBarInteractive,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
                     phase = phase,
@@ -1017,6 +1017,8 @@ fun PlayerScreen(
                 playlist = playlist,
                 currentIndex = currentIndex,
                 placement = playlistPlacement,
+                // 抽屉只在控制层可见且未锁定时渲染，剩下的判据就是加载阶段。
+                enabled = actionAllowed(PlayerAction.Playlist, phase),
                 onSelect = { media -> panels.selectPlaylistItem(media, onPlaylistSelect) },
             )
         }
@@ -1419,9 +1421,7 @@ private fun PlayerTopBar(
     moreVisible: Boolean,
     interactive: Boolean,
     rotateEnabled: Boolean,
-    rotateAppearanceEnabled: Boolean,
     moreEnabled: Boolean,
-    moreAppearanceEnabled: Boolean,
     modifier: Modifier = Modifier,
     preparing: Boolean = false,
     onBack: () -> Unit,
@@ -1475,7 +1475,7 @@ private fun PlayerTopBar(
                     Icon(
                         painter = painterResource(R.drawable.ic_player_screen_rotation),
                         contentDescription = stringResource(R.string.player_rotate),
-                        tint = if (rotateAppearanceEnabled) AppColors.Foreground else DisabledToolColor,
+                        tint = if (rotateEnabled) AppColors.Foreground else DisabledToolColor,
                     )
                 }
             } else {
@@ -1490,7 +1490,7 @@ private fun PlayerTopBar(
                 Icon(
                     imageVector = Icons.Filled.MoreVert,
                     contentDescription = stringResource(R.string.player_more),
-                    tint = if (moreAppearanceEnabled) playerToolColor(moreVisible) else DisabledToolColor,
+                    tint = if (moreEnabled) playerToolColor(moreVisible) else DisabledToolColor,
                 )
             }
         }
@@ -1580,14 +1580,13 @@ private fun Controls(
             seekSettlement = seekSettlement,
             // 面板打开时轨道让给关闭层：不拖动，也不改播放位置。
             enabled = onBlankTap == null &&
-                interactive &&
-                actionAllowed(PlayerAction.Seek, phase),
-            appearanceEnabled = actionLooksEnabled(
-                PlayerAction.Seek,
-                canGoPrevious = currentIndex > 0,
-                canGoNext = currentIndex in 0 until playlist.lastIndex,
-                phase = phase,
-            ),
+                actionEnabled(
+                    PlayerAction.Seek,
+                    interactive = interactive,
+                    canGoPrevious = currentIndex > 0,
+                    canGoNext = currentIndex in 0 until playlist.lastIndex,
+                    phase = phase,
+                ),
             onPreview = onSeekPreview,
             onCommit = onSeekCommit,
             onHeartbeat = onSeekHeartbeat,
@@ -1638,9 +1637,9 @@ private fun PlayerIconBar(
                 icon = R.drawable.ic_player_lock_closed,
                 contentDescription = stringResource(R.string.player_lock),
                 onClick = onLock,
-                enabled = interactive && actionAllowed(PlayerAction.Lock, phase),
-                appearanceEnabled = actionLooksEnabled(
+                enabled = actionEnabled(
                     PlayerAction.Lock,
+                    interactive = interactive,
                     canGoPrevious = canGoPrevious,
                     canGoNext = canGoNext,
                     phase = phase,
@@ -1659,10 +1658,9 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_previous,
                     contentDescription = stringResource(R.string.player_previous),
                     onClick = onPrevious,
-                    enabled = interactive && canGoPrevious &&
-                        actionAllowed(PlayerAction.Previous, phase),
-                    appearanceEnabled = actionLooksEnabled(
+                    enabled = actionEnabled(
                         PlayerAction.Previous,
+                        interactive = interactive,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
                         phase = phase,
@@ -1679,10 +1677,9 @@ private fun PlayerIconBar(
                         if (playing) R.string.player_pause else R.string.player_play,
                     ),
                     onClick = onPlayPause,
-                    enabled = interactive &&
-                        actionAllowed(PlayerAction.PlayPause, phase),
-                    appearanceEnabled = actionLooksEnabled(
+                    enabled = actionEnabled(
                         PlayerAction.PlayPause,
+                        interactive = interactive,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
                         phase = phase,
@@ -1697,10 +1694,9 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_next,
                     contentDescription = stringResource(R.string.player_next),
                     onClick = onNext,
-                    enabled = interactive && canGoNext &&
-                        actionAllowed(PlayerAction.Next, phase),
-                    appearanceEnabled = actionLooksEnabled(
+                    enabled = actionEnabled(
                         PlayerAction.Next,
+                        interactive = interactive,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
                         phase = phase,
@@ -1718,10 +1714,9 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_subtitles,
                     contentDescription = stringResource(R.string.player_subtitles),
                     onClick = onToggleSubtitles,
-                    enabled = interactive &&
-                        actionAllowed(PlayerAction.Subtitles, phase),
-                    appearanceEnabled = actionLooksEnabled(
+                    enabled = actionEnabled(
                         PlayerAction.Subtitles,
+                        interactive = interactive,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
                         phase = phase,
@@ -1736,10 +1731,9 @@ private fun PlayerIconBar(
                     icon = R.drawable.ic_player_playlist,
                     contentDescription = stringResource(R.string.player_playlist),
                     onClick = onTogglePlaylist,
-                    enabled = interactive &&
-                        actionAllowed(PlayerAction.Playlist, phase),
-                    appearanceEnabled = actionLooksEnabled(
+                    enabled = actionEnabled(
                         PlayerAction.Playlist,
+                        interactive = interactive,
                         canGoPrevious = canGoPrevious,
                         canGoNext = canGoNext,
                         phase = phase,
@@ -1789,7 +1783,7 @@ private fun PlayerIconButtonSurface(
     }
 }
 
-/** 播放器图标按钮：只有图标；外观是否禁用与点击是否可用分开，展开时改变颜色。 */
+/** 播放器图标按钮：只有图标；不可点时图标置灰，展开时改变颜色。 */
 @Composable
 private fun PlayerIconButton(
     @DrawableRes icon: Int,
@@ -1797,7 +1791,6 @@ private fun PlayerIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    appearanceEnabled: Boolean = true,
     active: Boolean = false,
     iconSize: Dp = PlayerSideIconSize,
 ) {
@@ -1810,7 +1803,7 @@ private fun PlayerIconButton(
             painter = painterResource(icon),
             contentDescription = contentDescription,
             tint = when {
-                !appearanceEnabled -> DisabledToolColor
+                !enabled -> DisabledToolColor
                 active -> AppColors.Accent
                 else -> AppColors.Foreground
             },
@@ -1833,7 +1826,6 @@ private fun SeekBar(
     onHeartbeat: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    appearanceEnabled: Boolean = true,
 ) {
     val maximum = durationMillis.coerceAtLeast(1L)
     // 预览状态绑定到当前媒体与时长：切集后不沿用上一集的 seek 目标。
@@ -1892,21 +1884,21 @@ private fun SeekBar(
         disabledActiveTrackColor = DisabledToolColor,
         disabledInactiveTrackColor = DisabledToolColor,
     )
-    val thumbColor = if (appearanceEnabled && labels.seekEnabled) colors.thumbColor else colors.disabledThumbColor
-    val activeTrackColor = if (appearanceEnabled && labels.seekEnabled) {
+    val thumbColor = if (sliderEnabled) colors.thumbColor else colors.disabledThumbColor
+    val activeTrackColor = if (sliderEnabled) {
         colors.activeTrackColor
     } else {
         colors.disabledActiveTrackColor
     }
-    val inactiveTrackColor = if (appearanceEnabled && labels.seekEnabled) {
+    val inactiveTrackColor = if (sliderEnabled) {
         colors.inactiveTrackColor
     } else {
         colors.disabledInactiveTrackColor
     }
     val stateText = stringResource(R.string.player_progress_state, labels.current, labels.total)
     val timeStyle = MaterialTheme.typography.labelLarge.copy(fontFeatureSettings = "tnum")
-    // 切集与恢复原片期间拖动被拦截，外观同点击判据一起置灰。
-    val timeColor = if (appearanceEnabled) AppColors.Foreground else DisabledToolColor
+    // 拖动被拦截时时间标签一同置灰。
+    val timeColor = if (enabled) AppColors.Foreground else DisabledToolColor
     val latestLeftTimeWidthPx = rememberUpdatedState(leftTimeWidthPx)
     val latestRightTimeWidthPx = rememberUpdatedState(rightTimeWidthPx)
     val density = LocalDensity.current
@@ -2454,6 +2446,7 @@ private fun PlaylistDrawer(
     playlist: List<MediaFile>,
     currentIndex: Int,
     placement: PlaylistDrawerPlacement,
+    enabled: Boolean,
     onSelect: (MediaFile) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -2542,6 +2535,7 @@ private fun PlaylistDrawer(
                             .clickable(
                                 interactionSource = interaction,
                                 indication = null,
+                                enabled = enabled,
                                 onClick = {
                                     onSelect(media)
                                     feedback.show()
@@ -2578,7 +2572,7 @@ private fun PlaylistDrawer(
                             modifier = Modifier
                                 .matchParentSize()
                                 .padding(end = PlayerPlaylistHighlightEndInset)
-                                .playerPressFeedback(PlayerPressTarget.PlaylistRow, true, feedback),
+                                .playerPressFeedback(PlayerPressTarget.PlaylistRow, enabled, feedback),
                         )
                     }
                 }
