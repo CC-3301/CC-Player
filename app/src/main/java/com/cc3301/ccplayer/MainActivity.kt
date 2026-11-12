@@ -28,6 +28,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,6 +38,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -218,6 +220,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     }
 
     private var playerVisible by mutableStateOf(false)
+
+    /** 播放页视图是否常驻：离开播放页继续播放时保留视图，只隐藏；结束播放时置回 false。 */
+    private var playerPageRetained by mutableStateOf(false)
 
     /** 「APP 内后台播放」当前取值：离开播放页时决定是否停止播放。 */
     private var inAppBackgroundPlayback = SettingsRepository.DEFAULT_IN_APP_BACKGROUND_PLAYBACK
@@ -403,6 +408,129 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                     if (target != null) value = mediaPreview.cachedImage(target)
                 }
 
+                // 浏览界面：离开播放页继续播放时，播放页视图常驻在它下面，只隐藏、不销毁。
+                val browseContent: @Composable () -> Unit = {
+                    when {
+                        navState.screen == AppScreen.Settings -> {
+                            BackHandler { navigation.closeSettings() }
+                            SettingsScreen(
+                                insetPadding = browseInsets,
+                                state = settingsState,
+                                onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
+                                onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
+                                onSetInAppBackgroundPlayback = settingsViewModel::setInAppBackgroundPlayback,
+                                onSetResumeMode = settingsViewModel::setResumeMode,
+                                onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
+                                onSetRestoreLastDirectory = settingsViewModel::setRestoreLastDirectory,
+                                onSetDecodeMode = settingsViewModel::setDecodeMode,
+                                onSetOrientationMode = settingsViewModel::setOrientationMode,
+                                onSetDiagnosticsEnabled = settingsViewModel::setDiagnosticsEnabled,
+                                onExportDiagnostics = ::exportDiagnostics,
+                                onClose = navigation::closeSettings,
+                            )
+                        }
+
+                        navState.screen == AppScreen.Home -> {
+                            BackHandler { handleHomeBack() }
+                            HomeScreen(
+                                insetPadding = browseInsets,
+                                onOpenProtocol = { protocol ->
+                                    library.clearNetworkSourceForm()
+                                    navigation.openProtocol(protocol)
+                                },
+                                onOpenSettings = navigation::openSettings,
+                            )
+                        }
+
+                        navState.screen == AppScreen.Sources -> {
+                            BackHandler {
+                                library.clearNetworkSourceForm()
+                                navigation.backToHome()
+                            }
+                            SourceListScreen(
+                                insetPadding = browseInsets,
+                                protocol = navState.sourcesProtocol,
+                                state = sourcesState,
+                                onOpenSettings = navigation::openSettings,
+                                onAdd = {
+                                    if (navState.sourcesProtocol == SourceProtocol.Local) {
+                                        picker.launch(null)
+                                    } else {
+                                        library.openNewSourceForm(navState.sourcesProtocol)
+                                    }
+                                },
+                                onOpenSource = { source ->
+                                    diagnostics.log {
+                                        connectionLogLine(source.protocol, source.name, source.location)
+                                    }
+                                    library.openSource(source)
+                                },
+                                onEditSource = library::openEditSourceForm,
+                                onDeleteSource = library::removeSource,
+                                onFormFieldChange = library::updateFormField,
+                                onDismissForm = library::dismissNetworkSourceForm,
+                                onSaveForm = library::saveNetworkSourceForm,
+                            )
+                        }
+
+                        else -> {
+                            BackHandler {
+                                when (navigation.backFromLibrary()) {
+                                    LibraryBackAction.NavigateUp -> library.navigateUp()
+                                    LibraryBackAction.LeaveLibrary -> Unit
+                                }
+                            }
+                            LibraryScreen(
+                                insetPadding = browseInsets,
+                                state = libraryState,
+                                mediaPreview = mediaPreview,
+                                previewReloadTick = libraryPreviewTick,
+                                onOpenEntry = { entry ->
+                                    logLibraryNavigation(
+                                        diagnostics = diagnostics,
+                                        rootName = libraryState.stack.firstOrNull()?.name ?: "",
+                                        relativePath = libraryState.stack
+                                            .drop(1)
+                                            .joinToString("/") { it.name },
+                                        entryName = entry.name,
+                                        directory = entry.isDirectory,
+                                    )
+                                    if (entry.isDirectory) {
+                                        library.enter(entry)
+                                    } else {
+                                        val current = playerScreen.currentMedia
+                                        val reopen = libraryEntryAction(
+                                            entryLocation = entry.location,
+                                            currentLocation = current?.location,
+                                            playbackActive = playerScreen.playbackState != PlaybackState.Idle,
+                                        ) == LibraryEntryAction.ReopenPlayerPage
+                                        if (reopen) {
+                                            showPlayerPage()
+                                        } else {
+                                            val entryIsVideo = mediaKindOf(entry.name) == MediaKind.Video
+                                            // 加载开始前列表与视频轨还是上一段会话的结论：首帧方向按点开的条目算。
+                                            entryHasNoVideo = !entryIsVideo
+                                            playbackEntryOpener.open(
+                                                entry = entry,
+                                                entries = libraryState.entries,
+                                                enterBeforePreparing = entryIsVideo,
+                                            )
+                                        }
+                                    }
+                                },
+                                onOpenSettings = navigation::openSettings,
+                                onSelectView = { choice ->
+                                    lifecycleScope.launch { settings.setView(choice.viewMode, choice.gridColumns) }
+                                },
+                                onSelectSort = { order -> lifecycleScope.launch { settings.setSortOrder(order) } },
+                                onScrollToTop = library::scrollToTop,
+                                onRetry = library::retry,
+                                onSavePosition = library::savePosition,
+                            )
+                        }
+                    }
+                }
+
                 when {
                     // 冷启动恢复判定完成前只显示纯色底：不画首页，也不逐级播放目录栈。
                     coldStartPending -> {
@@ -415,8 +543,12 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         )
                     }
 
-                    playerVisible -> {
-                        BackHandler { handlePlayerBack() }
+                    // 离开播放页继续播放时播放页视图留在组合里：只隐藏、不接收触摸，Surface 不销毁；
+                    // 浏览界面画在它上面。
+                    playerVisible || playerPageRetained -> {
+                        if (playerVisible) {
+                            BackHandler { handlePlayerBack() }
+                        }
                         // 会话事实由播放页 ViewModel 收集与组装；入口与来自设置的菜单事实在这一帧同步合入。
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
@@ -432,131 +564,35 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                             autoPlayNext = autoPlayNext,
                         )
                         val playerContent = playerScreen.content(coverFile = playerCover)
-                        PlayerScreen(
-                            session = playerSession,
-                            actions = this@MainActivity,
-                            content = playerContent,
-                            access = playerAccess,
-                        )
-                    }
-
-                    navState.screen == AppScreen.Settings -> {
-                        BackHandler { navigation.closeSettings() }
-                        SettingsScreen(
-                            insetPadding = browseInsets,
-                            state = settingsState,
-                            onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
-                            onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
-                            onSetInAppBackgroundPlayback = settingsViewModel::setInAppBackgroundPlayback,
-                            onSetResumeMode = settingsViewModel::setResumeMode,
-                            onSetAutoRestorePosition = settingsViewModel::setAutoRestorePosition,
-                            onSetRestoreLastDirectory = settingsViewModel::setRestoreLastDirectory,
-                            onSetDecodeMode = settingsViewModel::setDecodeMode,
-                            onSetOrientationMode = settingsViewModel::setOrientationMode,
-                            onSetDiagnosticsEnabled = settingsViewModel::setDiagnosticsEnabled,
-                            onExportDiagnostics = ::exportDiagnostics,
-                            onClose = navigation::closeSettings,
-                        )
-                    }
-
-                    navState.screen == AppScreen.Home -> {
-                        BackHandler { handleHomeBack() }
-                        HomeScreen(
-                            insetPadding = browseInsets,
-                            onOpenProtocol = { protocol ->
-                                library.clearNetworkSourceForm()
-                                navigation.openProtocol(protocol)
-                            },
-                            onOpenSettings = navigation::openSettings,
-                        )
-                    }
-
-                    navState.screen == AppScreen.Sources -> {
-                        BackHandler {
-                            library.clearNetworkSourceForm()
-                            navigation.backToHome()
-                        }
-                        SourceListScreen(
-                            insetPadding = browseInsets,
-                            protocol = navState.sourcesProtocol,
-                            state = sourcesState,
-                            onOpenSettings = navigation::openSettings,
-                            onAdd = {
-                                if (navState.sourcesProtocol == SourceProtocol.Local) {
-                                    picker.launch(null)
-                                } else {
-                                    library.openNewSourceForm(navState.sourcesProtocol)
-                                }
-                            },
-                            onOpenSource = { source ->
-                                diagnostics.log {
-                                    connectionLogLine(source.protocol, source.name, source.location)
-                                }
-                                library.openSource(source)
-                            },
-                            onEditSource = library::openEditSourceForm,
-                            onDeleteSource = library::removeSource,
-                            onFormFieldChange = library::updateFormField,
-                            onDismissForm = library::dismissNetworkSourceForm,
-                            onSaveForm = library::saveNetworkSourceForm,
-                        )
-                    }
-
-                    else -> {
-                        BackHandler {
-                            when (navigation.backFromLibrary()) {
-                                LibraryBackAction.NavigateUp -> library.navigateUp()
-                                LibraryBackAction.LeaveLibrary -> Unit
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            PlayerScreen(
+                                session = playerSession,
+                                actions = this@MainActivity,
+                                content = playerContent,
+                                access = playerAccess,
+                                visible = playerVisible,
+                            )
+                            // 返回浏览界面时播放页只隐藏：整层吞掉触摸，避免浏览界面的空档落到播放页手势层。
+                            if (!playerVisible) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .pointerInput(Unit) {
+                                            awaitPointerEventScope {
+                                                while (true) {
+                                                    awaitPointerEvent().changes.forEach { change ->
+                                                        if (change.pressed) change.consume()
+                                                    }
+                                                }
+                                            }
+                                        },
+                                )
+                                browseContent()
                             }
                         }
-                        LibraryScreen(
-                            insetPadding = browseInsets,
-                            state = libraryState,
-                            mediaPreview = mediaPreview,
-                            previewReloadTick = libraryPreviewTick,
-                            onOpenEntry = { entry ->
-                                logLibraryNavigation(
-                                    diagnostics = diagnostics,
-                                    rootName = libraryState.stack.firstOrNull()?.name ?: "",
-                                    relativePath = libraryState.stack
-                                        .drop(1)
-                                        .joinToString("/") { it.name },
-                                    entryName = entry.name,
-                                    directory = entry.isDirectory,
-                                )
-                                if (entry.isDirectory) {
-                                    library.enter(entry)
-                                } else {
-                                    val current = playerScreen.currentMedia
-                                    val reopen = libraryEntryAction(
-                                        entryLocation = entry.location,
-                                        currentLocation = current?.location,
-                                        playbackActive = playerScreen.playbackState != PlaybackState.Idle,
-                                    ) == LibraryEntryAction.ReopenPlayerPage
-                                    if (reopen) {
-                                        showPlayerPage()
-                                    } else {
-                                        val entryIsVideo = mediaKindOf(entry.name) == MediaKind.Video
-                                        // 加载开始前列表与视频轨还是上一段会话的结论：首帧方向按点开的条目算。
-                                        entryHasNoVideo = !entryIsVideo
-                                        playbackEntryOpener.open(
-                                            entry = entry,
-                                            entries = libraryState.entries,
-                                            enterBeforePreparing = entryIsVideo,
-                                        )
-                                    }
-                                }
-                            },
-                            onOpenSettings = navigation::openSettings,
-                            onSelectView = { choice ->
-                                lifecycleScope.launch { settings.setView(choice.viewMode, choice.gridColumns) }
-                            },
-                            onSelectSort = { order -> lifecycleScope.launch { settings.setSortOrder(order) } },
-                            onScrollToTop = library::scrollToTop,
-                            onRetry = library::retry,
-                            onSavePosition = library::savePosition,
-                        )
                     }
+
+                    else -> browseContent()
                 }
             }
         }
@@ -744,6 +780,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
      * 为假表示回到同一会话（通知栏入口等），沿用已记录的比例。
      */
     private fun enterPlayer(newSession: Boolean) {
+        // 回到播放页：重新选回视频轨，沿用同一 Surface。
+        playback?.controller?.setVideoTrackEnabled(true)
         if (newSession) {
             // 新的打开开始时先收掉上一次的接手兜底 ticker；等待接手由打开交接重新起算。
             stopEntryHandoverTimer()
@@ -1010,15 +1048,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
 
     /**
      * 离开播放页但保持播放：播放列表、当前项与进度留在播放服务里，
-     * 返回播放页时直接沿用，不重新解析目录或加载文件。
+     * 播放页视图常驻不销毁，返回播放页时直接沿用，不重新解析目录或加载文件。
      */
     private fun leavePlayerPage() {
         stopEntryHandoverTimer()
         playbackEntryOpener.cancel()
         // 打开没有真正开始就离开：撤回交接，旧片恢复出声与画面。
         playback?.controller?.cancelOpenHandover()
+        // 继续播放：关掉视频轨只留音频，视图与 Surface 留在组合里，视频输出不拆。
+        playback?.controller?.setVideoTrackEnabled(false)
         openingHandover.onLeftPlayerPage()
-        onSurfaceReleased()
+        playerPageRetained = true
         playerVisible = false
         restoreBrowserSystemUi()
         updateKeepScreenOn()
@@ -1051,8 +1091,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         stopEntryHandoverTimer()
         playbackEntryOpener.cancel()
         playback?.controller?.stop()
-        onSurfaceReleased()
         openingHandover.onLeftPlayerPage()
+        // 结束播放：播放页视图退出组合，视频输出随播放服务停止销毁。
+        playerPageRetained = false
         playerVisible = false
         playerScreen.detach()
         // 切回浏览页前恢复系统栏与方向，避免 insets 变化让浏览页布局跳动。
@@ -1091,6 +1132,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         settingsCollection = null
         playerScreen.detach()
         playback = null
+        // 引擎已经不在：挂载记录随之作废，重新连上时按现有 Surface 补挂。
+        surfaceSession.onEngineLost()
         if (bound) {
             unbindService(connection)
             bound = false
