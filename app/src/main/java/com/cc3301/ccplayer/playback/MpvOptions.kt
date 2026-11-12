@@ -20,13 +20,20 @@ object MpvOptions {
     /** 只把 error 及以上日志送进日志桥。 */
     const val MSG_LEVEL = "all=error"
 
+    /** 诊断打开时把 warn 及以上日志送进日志桥，libass 的字体缺失告警可见。 */
+    const val MSG_LEVEL_DIAGNOSTICS = "all=warn"
+
     /** 音频缓冲（秒）：拆视频输出会同步阻塞播放核心，缓冲越大越不容易欠载断音。 */
     const val AUDIO_BUFFER = "0.5"
 
-    fun initial(cacheDir: String): Map<String, String> = linkedMapOf(
+    fun initial(
+        cacheDir: String,
+        subtitleFontsDir: String,
+        diagnosticsEnabled: Boolean,
+    ): Map<String, String> = linkedMapOf(
         "config" to "no",
         "terminal" to "no",
-        "msg-level" to MSG_LEVEL,
+        "msg-level" to if (diagnosticsEnabled) MSG_LEVEL_DIAGNOSTICS else MSG_LEVEL,
         "idle" to "once",
         "keep-open" to "yes",
         "force-window" to "no",
@@ -35,5 +42,6 @@ object MpvOptions {
         "audio-buffer" to AUDIO_BUFFER,
         "gpu-shader-cache-dir" to cacheDir,
         "icc-cache-dir" to cacheDir,
+        "sub-fonts-dir" to subtitleFontsDir,
     )
 }
