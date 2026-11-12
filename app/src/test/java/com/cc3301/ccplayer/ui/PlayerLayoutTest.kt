@@ -119,6 +119,18 @@ class PlayerLayoutTest {
     }
 
     @Test
+    fun `被拦下的控件与无反馈区域不显示按压反馈`() {
+        PlayerPressTarget.values().forEach { target ->
+            assertFalse(playerPressFeedbackShown(target, enabled = false))
+        }
+
+        assertTrue(playerPressFeedbackShown(PlayerPressTarget.IconButton, enabled = true))
+        assertTrue(playerPressFeedbackShown(PlayerPressTarget.PlaylistRow, enabled = true))
+        assertFalse(playerPressFeedbackShown(PlayerPressTarget.LockLayer, enabled = true))
+        assertFalse(playerPressFeedbackShown(PlayerPressTarget.OutsideDismissLayer, enabled = true))
+    }
+
+    @Test
     fun `缓冲文字 1dp scrim 60 个百分点描边`() {
         assertEquals(1.dp, PlayerBufferingTextStrokeWidth)
         assertEquals(0.60f, PLAYER_BUFFERING_TEXT_SCRIM_ALPHA, TOLERANCE)

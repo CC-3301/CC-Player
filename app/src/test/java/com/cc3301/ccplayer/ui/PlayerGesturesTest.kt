@@ -153,7 +153,6 @@ class PlayerGesturesTest {
         val switchingOrRestoring = initialLoading + setOf(
             PlayerAction.Previous,
             PlayerAction.Next,
-            PlayerAction.PlayPause,
         )
         data class LoadingCase(
             val name: String,
@@ -190,6 +189,14 @@ class PlayerGesturesTest {
         assertFalse(actionLooksEnabled(PlayerAction.Next, true, false, PlayerScreenPhase.Ready))
         assertTrue(actionLooksEnabled(PlayerAction.Previous, true, false, PlayerScreenPhase.Ready))
         assertTrue(actionLooksEnabled(PlayerAction.Next, false, true, PlayerScreenPhase.Ready))
+    }
+
+    @Test
+    fun `切集与恢复期间播放暂停按不可用外观置灰并拦截`() {
+        listOf(PlayerScreenPhase.Switching, PlayerScreenPhase.Restoring).forEach { phase ->
+            assertFalse(actionAllowed(PlayerAction.PlayPause, phase))
+            assertFalse(actionLooksEnabled(PlayerAction.PlayPause, true, true, phase))
+        }
     }
 
     @Test
