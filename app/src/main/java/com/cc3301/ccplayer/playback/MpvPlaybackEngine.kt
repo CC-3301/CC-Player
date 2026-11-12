@@ -1,10 +1,12 @@
 package com.cc3301.ccplayer.playback
 
 import android.content.Context
+import android.system.Os
 import android.view.Surface
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -23,6 +25,7 @@ class MpvPlaybackEngine(
     private val context: Context,
     private val cacheDir: String,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    private val subtitleFonts: SubtitleFonts,
 ) : PlaybackEngine, MPVLib.EventObserver {
 
     private var listener: PlaybackEngine.Listener? = null
@@ -153,6 +156,10 @@ class MpvPlaybackEngine(
     )
 
     fun initialize() {
+        // 字体必须早于 mpv 初始化落盘：libass 在初始化时建立字体数据库。
+        val fontsDirectory = subtitleFonts.prepare()
+        // config=no 时 mpv 不从配置目录取 fonts.conf，fontconfig 改为读这个环境变量。
+        Os.setenv("FONTCONFIG_FILE", SubtitleFonts.configFile(fontsDirectory).absolutePath, true)
         // 上一次释放的销毁在后台收尾：等待有上限，超时只留诊断。
         val generation = nativeCore.beginCreate(NATIVE_CREATE_WAIT_MILLIS) {
             diagnostics.log("创建: 上一次释放的销毁未在 ${NATIVE_CREATE_WAIT_MILLIS}ms 内收尾，继续尝试创建")
@@ -162,15 +169,16 @@ class MpvPlaybackEngine(
             return
         }
         try {
-            createNativeCore()
+            createNativeCore(fontsDirectory)
         } finally {
             nativeCore.finishCreate()
         }
     }
 
-    private fun createNativeCore() {
+    private fun createNativeCore(subtitleFontsDir: File) {
         MPVLib.create(context.applicationContext)
-        MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
+        MpvOptions.initial(cacheDir, subtitleFontsDir.absolutePath, diagnostics.enabled)
+            .forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
         MPVLib.addObserver(this)
         MPVLib.addLogObserver(errorLog)

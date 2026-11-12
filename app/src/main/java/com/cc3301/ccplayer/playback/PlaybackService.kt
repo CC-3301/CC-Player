@@ -72,8 +72,14 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val diagnostics = (application as CcPlayerApplication).diagnostics
-        playbackEngine = MpvPlaybackEngine(applicationContext, cacheDir.absolutePath, diagnostics)
+        val app = application as CcPlayerApplication
+        val diagnostics = app.diagnostics
+        playbackEngine = MpvPlaybackEngine(
+            applicationContext,
+            cacheDir.absolutePath,
+            diagnostics,
+            app.subtitleFonts,
+        )
         playbackController = PlaybackController(
             playbackEngine,
             RoomPlaybackProgressRepository.create(this),

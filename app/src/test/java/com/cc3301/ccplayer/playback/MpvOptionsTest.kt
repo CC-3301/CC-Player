@@ -5,7 +5,7 @@ import org.junit.Test
 
 class MpvOptionsTest {
 
-    private val options = MpvOptions.initial(CACHE_DIR)
+    private val options = MpvOptions.initial(CACHE_DIR, FONTS_DIR, diagnosticsEnabled = false)
 
     @Test
     fun `hardware decoding falls back to software automatically`() {
@@ -44,7 +44,20 @@ class MpvOptionsTest {
         assertEquals("0.5", options["audio-buffer"])
     }
 
+    @Test
+    fun `the embedded subtitle fonts are handed to mpv as the subtitle fonts directory`() {
+        assertEquals(FONTS_DIR, options["sub-fonts-dir"])
+    }
+
+    @Test
+    fun `diagnostics raise the native log level to warn`() {
+        val diagnosticsOptions = MpvOptions.initial(CACHE_DIR, FONTS_DIR, diagnosticsEnabled = true)
+
+        assertEquals("all=warn", diagnosticsOptions["msg-level"])
+    }
+
     private companion object {
         const val CACHE_DIR = "/data/user/0/com.cc3301.ccplayer/cache"
+        const val FONTS_DIR = "/data/user/0/com.cc3301.ccplayer/files/subtitle-fonts"
     }
 }
