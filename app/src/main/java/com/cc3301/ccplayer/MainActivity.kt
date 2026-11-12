@@ -100,6 +100,7 @@ import com.cc3301.ccplayer.ui.SettingsScreen
 import com.cc3301.ccplayer.ui.SettingsViewModel
 import com.cc3301.ccplayer.ui.SourceListScreen
 import com.cc3301.ccplayer.ui.SubtitleMenuItem
+import com.cc3301.ccplayer.ui.browseInsetPadding
 import com.cc3301.ccplayer.ui.failedEntryExit
 import com.cc3301.ccplayer.ui.libraryEntryAction
 import com.cc3301.ccplayer.ui.mediaFailureText
@@ -307,6 +308,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         )
         setContent {
             CcPlayerTheme {
+                // 浏览界面顶部 inset 在这里采样一次，各界面只消费。播放页仍读实时 inset。
+                val browseInsets = browseInsetPadding()
                 val libraryState by library.state.collectAsState()
                 val sourcesState by library.sourcesState.collectAsState()
                 val settingsState by settingsViewModel.state.collectAsState()
@@ -440,6 +443,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                     navState.screen == AppScreen.Settings -> {
                         BackHandler { navigation.closeSettings() }
                         SettingsScreen(
+                            insetPadding = browseInsets,
                             state = settingsState,
                             onSetAutoPlayNext = settingsViewModel::setAutoPlayNext,
                             onSetBackgroundPlayback = settingsViewModel::setBackgroundPlayback,
@@ -458,6 +462,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                     navState.screen == AppScreen.Home -> {
                         BackHandler { handleHomeBack() }
                         HomeScreen(
+                            insetPadding = browseInsets,
                             onOpenProtocol = { protocol ->
                                 library.clearNetworkSourceForm()
                                 navigation.openProtocol(protocol)
@@ -472,6 +477,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                             navigation.backToHome()
                         }
                         SourceListScreen(
+                            insetPadding = browseInsets,
                             protocol = navState.sourcesProtocol,
                             state = sourcesState,
                             onOpenSettings = navigation::openSettings,
@@ -504,6 +510,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                             }
                         }
                         LibraryScreen(
+                            insetPadding = browseInsets,
                             state = libraryState,
                             mediaPreview = mediaPreview,
                             previewReloadTick = libraryPreviewTick,

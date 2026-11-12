@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -42,13 +41,14 @@ import com.cc3301.ccplayer.ui.theme.AppSpacing
 fun HomeScreen(
     onOpenProtocol: (SourceProtocol) -> Unit,
     onOpenSettings: () -> Unit,
+    insetPadding: Modifier,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .then(insetPadding),
     ) {
         ScreenHeader(
             title = stringResource(R.string.app_name),
