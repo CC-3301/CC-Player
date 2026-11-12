@@ -65,6 +65,52 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
+    fun `第一屏不等可见窗口就下发`() = runTest {
+        val source = SchedulerRecordingSource()
+        val scheduler = scheduler(source, backgroundScope)
+
+        // 还没有 update：列表布局没出来，卡片刚订阅。
+        val requests = (0..2).map { index -> async { scheduler.preview(entries[index], index) } }
+        runCurrent()
+
+        assertEquals(listOf(0, 1, 2), source.started)
+        requests.forEach { it.await() }
+    }
+
+    @Test
+    fun `拖动后排队中的旧任务丢弃，已进入解码的那一张跑完`() = runTest {
+        val source = SchedulerRecordingSource().apply {
+            gate = CompletableDeferred()
+            extractingLocations = setOf(entries[0].location)
+        }
+        val scheduler = scheduler(source, backgroundScope)
+        scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
+        val decoding = async { scheduler.preview(entries[0], 0) }
+        // 排队中的这一张被暂停后订阅保留，调用方会一直等下一次可见，这里不等它。
+        val queued = launch {
+            try {
+                scheduler.preview(entries[1], 1)
+            } catch (cancellation: CancellationException) {
+                // 暂停不动订阅，只有订阅取消才会取消等待。
+            }
+        }
+        runCurrent()
+        assertEquals(listOf(0, 1), source.started)
+
+        // 拖到后面：旧范围整体离屏。
+        scheduler.update(entries, firstVisible = 5, lastVisible = 6, rowSize = 1)
+        runCurrent()
+
+        assertEquals(listOf(1), source.cancelled)
+
+        source.gate?.complete(Unit)
+        runCurrent()
+
+        assertEquals(1L, withTimeout(1_000) { decoding.await() }.durationMillis)
+        queued.cancel()
+    }
+
+    @Test
     fun `滚动离屏再回后重新下发并收到结果`() = runTest {
         val source = SchedulerRecordingSource().apply { gate = CompletableDeferred() }
         val scheduler = scheduler(source, backgroundScope)
@@ -177,20 +223,20 @@ class VisiblePreviewSchedulerTest {
     }
 
     @Test
-    fun `新索引进入可见区后能收到结果`() = runTest {
+    fun `新条目先于窗口更新订阅也会立刻下发`() = runTest {
         val source = SchedulerRecordingSource()
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
 
-        // 新条目先于窗口更新调用 preview：不能按旧窗口直接判空。
+        // 新条目先于窗口更新订阅：不等窗口，立刻下发。
         val entering = async { scheduler.preview(entries[5], 5) }
         runCurrent()
-        assertTrue(source.started.isEmpty())
+        assertEquals(listOf(5), source.started)
 
         scheduler.update(entries, firstVisible = 0, lastVisible = 6, rowSize = 1)
         runCurrent()
 
-        assertNotNull(withTimeout(1_000) { entering.await() })
+        assertEquals(6L, withTimeout(1_000) { entering.await() }.durationMillis)
         assertEquals(listOf(5), source.started)
     }
 
@@ -752,6 +798,12 @@ private class SchedulerRecordingSource : MediaPreviewSource {
 
     var gate: CompletableDeferred<Unit>? = null
     var failure: Throwable? = null
+
+    /** 已进入解码的位置：这些条目暂停时不取消，跑完再收尾。 */
+    var extractingLocations: Set<String> = emptySet()
+
+    override fun isPreviewExtracting(file: MediaFile): Boolean =
+        file.location in extractingLocations
 
     override suspend fun preview(file: MediaFile): MediaPreview = visiblePreview(file, 0)
 

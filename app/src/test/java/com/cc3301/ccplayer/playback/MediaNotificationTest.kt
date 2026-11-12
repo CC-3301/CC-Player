@@ -101,18 +101,18 @@ class MediaNotificationTest {
     }
 
     @Test
-    fun `an expired thumbnail is not reused`() = runBlocking {
+    fun `a cached thumbnail stays valid without expiry`() = runBlocking {
         var now = 1_000L
-        val policy = ThumbnailPolicy(missingModifiedValidityMillis = 1_000)
-        val expiringCache = ThumbnailCache(directory = directory, maxBytes = 64, clock = { now })
+        val policy = ThumbnailPolicy()
+        val persistentCache = ThumbnailCache(directory = directory, maxBytes = 64, clock = { now })
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv")
-        expiringCache.save(cacheKey(media, policy), byteArrayOf(7, 8, 9))
-        val covers = NotificationCoverCache(expiringCache, policy)
+        persistentCache.save(cacheKey(media, policy), byteArrayOf(7, 8, 9))
+        val covers = NotificationCoverCache(persistentCache, policy)
 
-        assertEquals(expiringCache.file(cacheKey(media, policy)), covers.file(media))
+        assertEquals(persistentCache.file(cacheKey(media, policy)), covers.file(media))
 
-        now += 2_000L
-        assertNull(covers.file(media))
+        now += 365L * 24 * 60 * 60 * 1000
+        assertEquals(persistentCache.file(cacheKey(media, policy)), covers.file(media))
     }
 
     @Test
