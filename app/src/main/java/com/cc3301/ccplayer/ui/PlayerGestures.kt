@@ -351,14 +351,16 @@ private fun adjacencyAvailable(
 }
 
 /**
- * 控件外观是否可用：与点击判据同源，被拦截的操作才置灰，可点的控件不显示为禁用外观。
- * 上一集/下一集在列表边界始终置灰。
+ * 控件此刻是否可点，点击与置灰都由它派生。
+ * 栏不可交互（锁定、退场）时一律不可点；上一集/下一集另看列表边界；其余按加载阶段。
  */
-fun actionLooksEnabled(
+fun actionEnabled(
     action: PlayerAction,
+    interactive: Boolean,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
     phase: PlayerScreenPhase,
 ): Boolean =
-    adjacencyAvailable(action, canGoPrevious, canGoNext) &&
+    interactive &&
+        adjacencyAvailable(action, canGoPrevious, canGoNext) &&
         actionAllowed(action, phase)
