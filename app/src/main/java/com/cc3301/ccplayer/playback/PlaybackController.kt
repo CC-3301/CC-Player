@@ -96,10 +96,10 @@ class PlaybackController(
     private val _seekSettlement = MutableStateFlow<SeekSettlement?>(null)
     val seekSettlement: StateFlow<SeekSettlement?> = _seekSettlement.asStateFlow()
 
-    /** 最后一次下发的预览 seek 目标；收尾目标与它相差不足死区时复用，不重发。 */
+    /** 最后一次下发的预览 seek 目标；松手的落点就是它，不补发。 */
     private var lastPreviewSeekTargetMillis: Long? = null
 
-    /** 最后一次下发的预览 seek 身份；死区复用时落定要认的是这一跳。 */
+    /** 最后一次下发的预览 seek 身份；松手的落点认的是这一跳。 */
     private var lastPreviewSeekId: Long? = null
 
     /** 播放核心回报的最后一条本代 seek 身份；落定只按 seekId 确认，不按目标毫秒。 */
@@ -1366,7 +1366,10 @@ class PlaybackController(
         schedulePreviewEnd(PREVIEW_IDLE_TIMEOUT_MILLIS, commit = false)
     }
 
-    /** 滚轮调时长的一档：在当前位置或本次预览目标上累计 [deltaMillis]，返回新的预览目标。 */
+    /**
+     * 滚轮调时长的一档：在当前位置或本次预览目标上累计 [deltaMillis]，返回新的预览目标。
+     * 一格就是一次完整的跳转：停滚当即收尾，不设等待窗口，声音在收尾时立刻恢复。
+     */
     fun updateSeekPreviewBy(deltaMillis: Long): Long? {
         if (!active) return null
         val durationMillis = playedDurationMillis
@@ -1375,18 +1378,17 @@ class PlaybackController(
         val target = (baseMillis + deltaMillis).coerceIn(0L, durationMillis)
         if (target == baseMillis) return null
         if (!previewTo(target, requestSeek = true)) return null
-        // 滚轮停滚由控制器收尾：窗口内再来一档就顺延，不先落定再重新静音。
-        schedulePreviewEnd(WHEEL_SETTLE_MILLIS, commit = true)
+        endSeekPreview(commit = true)
         return target
     }
 
-    /** 松手或取消拖动：落定到预览位置，声音在这一跳被执行后恢复并淡入；没有预览时不动作。 */
+    /** 松手或取消拖动：落点取最后一次已下发的目标，声音当场恢复；没有预览时不动作。 */
     fun commitSeekPreview() {
         endSeekPreview(commit = true)
     }
 
     /**
-     * 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音在这一跳被执行后恢复并淡入。
+     * 立即跳转到 [positionMillis]：与松手收尾同一条路径，声音当场恢复，seek 不做淡入。
      * 目标文件还没打开时（首次加载与恢复原片的加载期）不下发，避免 seek 打到旧文件上；
      * 切集期照常下发，预览与松手收尾仍各受自己的加载期闸门约束。
      */
@@ -1433,7 +1435,7 @@ class PlaybackController(
         return positionMillis.coerceIn(0L, limit)
     }
 
-    /** 兜底：预览活跃但 [settleMillis] 内没有心跳或滚轮更新时自动收尾。 */
+    /** 兜底：预览活跃但 [settleMillis] 内没有心跳时自动收尾。 */
     private fun schedulePreviewEnd(settleMillis: Long, commit: Boolean) {
         previewEndJob?.cancel()
         previewEndJob = scope.launch {
@@ -1444,38 +1446,31 @@ class PlaybackController(
     }
 
     /**
-     * 预览的唯一结束入口：收起预览位置与兜底计时。
-     * [commit] 为真时把落定目标交给引擎：与最后一次下发的目标完全相同时复用，否则补一跳精确 seek；
-     * 声音在播放核心回报这一跳执行完之后恢复并淡入，避免落定前的旧位置以满音量播出。
-     * [commitTarget] 为外部跳转的目标，省略时落定到预览位置。
+     * 预览的唯一结束入口：收起预览位置与兜底计时，并当场恢复声音。
+     * [commit] 为真时落定画面：落点取最后一次已下发的目标，一律不补发；
+     * [commitTarget] 为外部跳转的目标，照常下发一次普通 seek。
      * [external] 为真表示外部跳转：不受加载期闸门约束。
      */
     private fun endSeekPreview(commit: Boolean, commitTarget: Long? = null, external: Boolean = false) {
         previewEndJob?.cancel()
         previewEndJob = null
-        // 预览落定同样不进片尾安全余量：停在片尾会立刻触发播完与自动暂停。
-        val target = commitTarget ?: _seekPreviewMillis.value?.let(::previewSeekTarget)
-        val lastIssuedTarget = lastPreviewSeekTargetMillis
-        val lastIssuedSeekId = lastPreviewSeekId
+        // 最后一次已下发的预览目标与它的身份：松手的落点就是它，不再补发。
+        val issued = lastPreviewSeekTargetMillis?.let { target ->
+            lastPreviewSeekId?.let { seekId -> target to seekId }
+        }
         _seekPreviewMillis.value = null
         lastPreviewSeekTargetMillis = null
         lastPreviewSeekId = null
+        // 静音只属于拖动期间：松手即解除，不等落定回执。
+        releasePreviewMute()
         if (!commit) {
-            // 取消、切集或会话结束：落定作废，静音与吞掉的暂停回声都在这里收场。
+            // 取消、切集或会话结束：落定作废，吞掉的暂停回声在这里收场。
             settleIgnoredPauseEcho()
             clearLandingSeek()
-            releasePreviewMute()
             return
         }
-        // 会话已结束：没有落定可等，静音与吞掉的暂停回声都在这里收场。
+        // 会话已结束：没有落定可等，吞掉的暂停回声在这里收场。
         if (!active) {
-            settleIgnoredPauseEcho()
-            releasePreviewMute()
-            return
-        }
-        // 没有新的落点：等待中的落定仍靠它自己的回执放开，静音不在早退分支恢复；
-        // 吞掉的暂停回声在这里收场，恢复仍按播放意图决定。
-        if (target == null) {
             settleIgnoredPauseEcho()
             return
         }
@@ -1483,24 +1478,28 @@ class PlaybackController(
         // 吞掉的暂停回声在这里清掉，新加载由自己接管引擎。
         if (!external && loadPhase != LoadPhase.None) {
             settleIgnoredPauseEcho()
-            releasePreviewMute()
             return
+        }
+        val target: Long
+        val seekId: Long
+        if (commitTarget != null) {
+            target = commitTarget
+            // 外部跳转与已下发目标完全相同时复用那一跳：同一目标再下发一次会让画面先闪一下。
+            seekId = issued?.takeIf { it.first == target }?.second ?: engine.seekTo(target).seekId
+        } else {
+            // 松手一律不补发：没有已下发目标就没有落点，只收尾，不改写与预览无关的播放状态。
+            val landing = issued ?: run {
+                settleIgnoredPauseEcho()
+                return
+            }
+            target = landing.first
+            seekId = landing.second
         }
         clearRestoreHoldOnUserAction()
         // 用户主动跳转后不再算停在片尾。
         pausedAtEpisodeEnd = false
         // 外部跳转改写这一代加载的落点：就绪时进度从它开始，不回到加载起点。
         if (external && loadPhase != LoadPhase.None) loadStartPositionMillis = target
-        // 同一目标再下发一次会让画面先闪一下再落定：目标完全相同时复用最后一跳；
-        // 预览落定改写仍在执行的那一跳并重新下发，旧目标的回执不再结算落点；外部跳转照常排队。
-        val seekId = when {
-            lastIssuedTarget != null && lastIssuedSeekId != null && target == lastIssuedTarget ->
-                lastIssuedSeekId
-
-            external -> engine.seekTo(target).seekId
-            else -> engine.previewSeekTo(target).seekId
-        }
-        // 外部跳转（带目标）是普通 seek；没有外部目标时落定的是预览位置。
         landSeek(target, seekId, fromPreview = commitTarget == null)
     }
 
@@ -1515,12 +1514,10 @@ class PlaybackController(
         if (lastExecutedSeekId == seekId) settleLanding()
     }
 
-    /** 落定结算：恢复声音并淡入，再按进程级序号通知界面撤掉保持值。 */
+    /** 落定结算：只决定画面；声音已在收尾时恢复，seek 不做淡入，再按进程级序号通知界面撤掉保持值。 */
     private fun settleLanding() {
         val landing = pendingLanding ?: return
         pendingLanding = null
-        releasePreviewMute()
-        engine.fadeInAudio(FADE_IN_MILLIS)
         // 预览期间吞掉的暂停回声在这里收尾：原本在播放就让引擎接着播。
         settleIgnoredPauseEcho()
         _seekSettlement.value = SeekSettlement(settlementIds.incrementAndGet(), landing.targetMillis)
@@ -2898,11 +2895,14 @@ class PlaybackController(
     }
 
     companion object {
-        /** 起播与跳转后的音频淡入时长，固定值。 */
+        /** 起播与切换文件后的音频淡入时长，固定值；seek 不做淡入。 */
         const val FADE_IN_MILLIS = 500L
 
-        /** 拖动预览重发 seek 的目标差阈值：目标与最后一次下发相差超过这段时长就补一跳。 */
-        const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 1_000L
+        /**
+         * 拖动预览重发 seek 的目标差阈值：目标与最后一次下发相差超过这段时长就补一跳。
+         * 取 300 毫秒是为了让松手落点与手指位置最多差这么多，从而不需要在松手后补发。
+         */
+        const val PREVIEW_SEEK_DEAD_ZONE_MILLIS = 300L
 
         /**
          * 预览与落定目标离片尾留出的安全余量。必须严格大于「播完」容差：
@@ -2918,9 +2918,6 @@ class PlaybackController(
 
         /** 拖动预览的兜底窗口：心跳停这么久才收尾，容忍两次心跳丢失。 */
         const val PREVIEW_IDLE_TIMEOUT_MILLIS = 3_000L
-
-        /** 滚轮停滚后落定的窗口；窗口内再来一档就顺延。 */
-        const val WHEEL_SETTLE_MILLIS = 1_000L
 
         /** 缓冲指示的延迟：超过这个时长仍未就绪才显示提示。 */
         const val BUFFER_INDICATOR_DELAY_MILLIS = 1000L

@@ -86,6 +86,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -1074,6 +1075,15 @@ private fun PlayerGestureLayer(
     var seekDragActive by remember { mutableStateOf(false) }
     PreviewHeartbeat(dragging = seekDragActive) { latestOnSeekHeartbeat.value() }
 
+    // 滚轮一格当场落定，不经过预览状态：提示按自己的显示时长收起，不跟着预览状态走。
+    // 拖动开始会重启这段计时，不把拖动中途的提示收掉。
+    var wheelSeekHints by remember { mutableIntStateOf(0) }
+    LaunchedEffect(wheelSeekHints, seekDragActive) {
+        if (wheelSeekHints == 0 || seekDragActive) return@LaunchedEffect
+        delay(SEEK_HINT_VISIBLE_MILLIS)
+        latestOnSeekHint.value(null)
+    }
+
     Box(
         modifier = modifier
             .pointerInput(gesturesEnabled, playPauseAllowed, seekAllowed) {
@@ -1113,8 +1123,6 @@ private fun PlayerGestureLayer(
                     val drag = PlayerDragGesture(threshold, touchSlop)
                     drag.start(gestureZone(down.position.x, size.width))
                     var seekDrag: PlayerSeekDrag? = null
-                    // 手指当前的累计位移：松手按它结算真实目标，死区只拦重复下发。
-                    var lastSeekDragX = 0f
                     // 最后一次真正下发 seek 的位移与目标；只有越过死区才前进。
                     var lastSeekIssuedX: Float? = null
                     var lastSeekIssuedTarget: Long? = null
@@ -1152,7 +1160,6 @@ private fun PlayerGestureLayer(
                                         seekDrag = it
                                         seekDragActive = true
                                     }
-                                    lastSeekDragX = update.seekDragX
                                     // 目标恒为手指当前位置；死区只决定这一刻要不要重发 seek。
                                     seek.preview(update.seekDragX)?.let { target ->
                                         val requestSeek = seekBeyondDeadZone(
@@ -1179,15 +1186,12 @@ private fun PlayerGestureLayer(
                         seekDragActive = false
                         latestOnVolumeHint.value(null)
                         latestOnSeekHint.value(null)
-                        // 松手、被转屏或输入中断都落定；落点就是手指当前位置，死区不改变落点。
-                        seekDrag?.finish(lastSeekDragX)?.let { target ->
-                            latestOnSeekPreview.value(target, false)
-                            latestOnSeekCommit.value()
-                        }
+                        // 松手、被转屏或输入中断都落定：落点由控制层取最后一次已下发的目标，不补发。
+                        if (seekDrag != null) latestOnSeekCommit.value()
                     }
                 }
             }
-            // 滚轮调时长：中间区域上滚后退、下滚前进，连续滚动累积；停滚由控制层收尾。
+            // 滚轮调时长：中间区域上滚后退、下滚前进，连续滚动累积；每格当场落定，提示按显示时长收起。
             .pointerInput(gesturesEnabled, seekAllowed) {
                 if (!gesturesEnabled || !seekAllowed) return@pointerInput
                 awaitPointerEventScope {
@@ -1201,6 +1205,7 @@ private fun PlayerGestureLayer(
                         change.consume()
                         latestOnGestureInteraction.value()
                         latestOnSeekHint.value(SeekHint(target, target - latestPosition.value))
+                        wheelSeekHints++
                     }
                 }
             },
@@ -2013,7 +2018,7 @@ private fun SeekBar(
                             // 最后一次真正下发 seek 的手指位置与目标：死区只拦重复下发，不改变目标。
                             var lastSeekX = down.position.x
                             var lastSeekTarget = target
-                            // 手指当前横坐标：松手按它结算落定目标。
+                            // 手指当前横坐标：拖动中按它换算目标。
                             var pointerX = down.position.x
                             down.consume()
                             dragMillis = target
@@ -2054,11 +2059,11 @@ private fun SeekBar(
                                     }
                                 }
                             } finally {
-                                // 松手、多指取消或手势被系统收回都走这里：复位拖动状态并按最后目标落定，只提交一次。
+                                // 松手、多指取消或手势被系统收回都走这里：复位拖动状态并按最后已下发的目标落定，只提交一次。
                                 dragMillis = null
                                 dragTimeWidthPx = null
                                 sliderDragging = false
-                                latestCommitAt.value(target)
+                                latestCommitAt.value(lastSeekTarget)
                             }
                         }
                     },
