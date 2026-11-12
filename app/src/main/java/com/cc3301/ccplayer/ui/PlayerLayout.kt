@@ -194,6 +194,10 @@ fun playerPressFeedbackEnabled(target: PlayerPressTarget): Boolean = when (targe
     -> false
 }
 
+/** 该控件此刻是否显示按压反馈：目标区域支持反馈，且点击未被拦下。 */
+fun playerPressFeedbackShown(target: PlayerPressTarget, enabled: Boolean): Boolean =
+    enabled && playerPressFeedbackEnabled(target)
+
 /** 播放页按压涟漪颜色。 */
 val PlayerPressRippleColor = Color.White
 
