@@ -111,6 +111,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.areAnyPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -589,7 +590,7 @@ fun PlayerScreen(
                     if (event.type == PointerEventType.Enter) {
                         pointer.onPointerEnter()
                     } else {
-                        pointer.onPointerMove(position, pointerDensity)
+                        pointer.onPointerMove(position, pointerDensity, pressed = event.buttons.areAnyPressed)
                     }
                 }
             }
