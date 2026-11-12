@@ -577,6 +577,57 @@ class PlaybackControllerSeekPreviewTest {
     }
 
     @Test
+    fun `滚轮连续三格上滚，落点从起点后退十五秒`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        // 这一跳已执行完，但播放位置样本还停在原处：累加不看它有没有跟上。
+        engine.reportFirstFrameReady()
+        engine.reportPositionChanged(60_000, 600_000)
+        assertEquals(50_000L, controller.updateSeekPreviewBy(-5_000))
+        engine.reportFirstFrameReady()
+        engine.reportPositionChanged(60_000, 600_000)
+        assertEquals(45_000L, controller.updateSeekPreviewBy(-5_000))
+
+        // 每格都真正下发一次 seek，落点按最后一次下发目标累计。
+        assertEquals(listOf(55_000L, 50_000L, 45_000L), engine.seekPositions)
+        assertNull(controller.seekPreviewMillis.value)
+        assertEquals(45_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `滚轮连续三格下滚，落点从起点前进十五秒`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        assertEquals(65_000L, controller.updateSeekPreviewBy(5_000))
+        engine.reportFirstFrameReady()
+        engine.reportPositionChanged(60_000, 600_000)
+        assertEquals(70_000L, controller.updateSeekPreviewBy(5_000))
+        engine.reportFirstFrameReady()
+        engine.reportPositionChanged(60_000, 600_000)
+        assertEquals(75_000L, controller.updateSeekPreviewBy(5_000))
+
+        assertEquals(listOf(65_000L, 70_000L, 75_000L), engine.seekPositions)
+        assertEquals(75_000L, controller.progress.value.positionMillis)
+    }
+
+    @Test
+    fun `滚轮落点被播放位置追上后，下一格从播放位置起算`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(60_000, 600_000)
+
+        assertEquals(55_000L, controller.updateSeekPreviewBy(-5_000))
+        engine.reportFirstFrameReady()
+        // 播放位置到达落点，随后正常前进：旧落点不再当基数。
+        engine.reportPositionChanged(55_000, 600_000)
+        engine.reportPositionChanged(180_000, 600_000)
+
+        assertEquals(175_000L, controller.updateSeekPreviewBy(-5_000))
+    }
+
+    @Test
     fun `a wheel step at the file start does nothing`() = runTest {
         val controller = playingController()
         engine.reportPositionChanged(0, 600_000)
