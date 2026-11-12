@@ -5,7 +5,6 @@ import com.cc3301.ccplayer.library.ThumbnailCache
 import com.cc3301.ccplayer.library.ThumbnailPolicy
 import com.cc3301.ccplayer.library.previewTargetWidth
 import com.cc3301.ccplayer.library.thumbnailCacheKey
-import com.cc3301.ccplayer.library.thumbnailCacheMaxAge
 import java.io.File
 
 /** 点击媒体通知回到播放页的入口动作。 */
@@ -79,8 +78,8 @@ internal class NotificationProgressTrigger {
 }
 
 /**
- * 缩略图封面读取：每次都按缓存键和有效期向缓存查询，命中不跨刷新复用，
- * 文件被淘汰或超过有效期时能及时退回应用图标。
+ * 缩略图封面读取：每次都按缓存键向缓存查询，命中不跨刷新复用，
+ * 文件被淘汰时能及时退回应用图标。
  */
 internal class NotificationCoverCache(
     private val cache: ThumbnailCache,
@@ -88,10 +87,7 @@ internal class NotificationCoverCache(
 ) {
     suspend fun file(media: MediaFile?): File? {
         if (media == null) return null
-        return cache.file(
-            thumbnailCacheKey(media, policy, previewTargetWidth(media, policy)),
-            thumbnailCacheMaxAge(media, policy),
-        )
+        return cache.file(thumbnailCacheKey(media, policy, previewTargetWidth(media, policy)))
     }
 }
 

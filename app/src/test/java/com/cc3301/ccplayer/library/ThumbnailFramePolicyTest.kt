@@ -12,16 +12,14 @@ import org.junit.Test
 class ThumbnailFramePolicyTest {
 
     @Test
-    fun `本地视频按比例抽三帧并含三分之一兜底`() {
+    fun `本地视频按比例抽两帧并含三分之一兜底`() {
         val positions = framePositions(100_000, LOCAL_FRAME_COUNT)
 
-        assertEquals(3, positions.size)
-        assertEquals(10_000_000L, positions[0].micros)
-        assertEquals(33_333_333L, positions[1].micros)
-        assertEquals(66_666_666L, positions[2].micros)
-        assertFalse(positions[0].fallback)
-        assertTrue(positions[1].fallback)
-        assertFalse(positions[2].fallback)
+        assertEquals(2, positions.size)
+        assertEquals(33_333_333L, positions[0].micros)
+        assertEquals(66_666_666L, positions[1].micros)
+        assertTrue(positions[0].fallback)
+        assertFalse(positions[1].fallback)
     }
 
     @Test
@@ -40,12 +38,13 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络候选为主候选加 60 秒与 90 秒，最多三个`() {
+    fun `网络候选为主候选加 60 秒兜底，最多两个`() {
         assertEquals(
-            listOf(1_000_000L, 60_000_000L, 90_000_000L),
+            listOf(1_000_000L, 60_000_000L),
             networkFrameCandidates(90_000),
         )
-        assertEquals(3, networkFrameCandidates(10_000_000).size)
+        assertEquals(2, networkFrameCandidates(10_000_000).size)
+        assertEquals(listOf(30_000_000L, 60_000_000L), networkFrameCandidates(10_000_000))
         assertEquals(1_000_000L, networkFrameCandidates(null).first())
     }
 
@@ -67,7 +66,7 @@ class ThumbnailFramePolicyTest {
     }
 
     @Test
-    fun `网络主候选纯色时退到 60 秒与 90 秒候选`() = runTest {
+    fun `网络主候选纯色时退到 60 秒兜底`() = runTest {
         val asked = mutableListOf<Long>()
         var released = 0
 
@@ -75,19 +74,19 @@ class ThumbnailFramePolicyTest {
             positions = networkFrameCandidates(90_000),
             decode = { micros ->
                 asked += micros
-                if (micros == 90_000_000L) "正常帧" else "纯色帧"
+                if (micros == 60_000_000L) "正常帧" else "纯色帧"
             },
             isSolid = { frame -> frame == "纯色帧" },
             release = { released++ },
         )
 
         assertEquals("正常帧", frame)
-        assertEquals(listOf(1_000_000L, 60_000_000L, 90_000_000L), asked)
-        assertEquals(2, released)
+        assertEquals(listOf(1_000_000L, 60_000_000L), asked)
+        assertEquals(1, released)
     }
 
     @Test
-    fun `网络三个候选都是纯色时保持占位图`() = runTest {
+    fun `网络两个候选都纯色时直接用已解出的帧`() = runTest {
         val asked = mutableListOf<Long>()
         var released = 0
 
@@ -101,9 +100,10 @@ class ThumbnailFramePolicyTest {
             release = { released++ },
         )
 
-        assertNull(frame)
-        assertEquals(3, asked.size)
-        assertEquals(3, released)
+        // 宁可偏暗也不为躲黑帧多一次网络寻址：只解两个候选，交出最后那一帧。
+        assertEquals("纯色帧", frame)
+        assertEquals(listOf(1_000_000L, 60_000_000L), asked)
+        assertEquals(1, released)
     }
 
     @Test
@@ -130,8 +130,8 @@ class ThumbnailFramePolicyTest {
     fun `时长未知时本地从片头开始取固定候选且最后一个兜底`() {
         val local = framePositions(0, LOCAL_FRAME_COUNT)
 
-        assertEquals(listOf(0L, 1_000_000L, 3_000_000L), local.map { it.micros })
-        assertEquals(listOf(false, false, true), local.map { it.fallback })
+        assertEquals(listOf(0L, 1_000_000L), local.map { it.micros })
+        assertEquals(listOf(false, true), local.map { it.fallback })
     }
 
     @Test
@@ -218,11 +218,11 @@ class ThumbnailFramePolicyTest {
             positions = networkFrameCandidates(90_000),
             decode = { micros -> asked += micros; micros },
             isSolid = { false },
-            isDark = { micros -> micros != 90_000_000L },
+            isDark = { micros -> micros != 60_000_000L },
         )
 
-        assertEquals(90_000_000L, frame)
-        assertEquals(listOf(1_000_000L, 60_000_000L, 90_000_000L), asked)
+        assertEquals(60_000_000L, frame)
+        assertEquals(listOf(1_000_000L, 60_000_000L), asked)
     }
 
     @Test
@@ -296,7 +296,7 @@ class ThumbnailFramePolicyTest {
     fun `极短时长的抽帧位置仍落在时长内`() {
         val positions = framePositions(1, LOCAL_FRAME_COUNT)
 
-        assertEquals(listOf(100L, 333L, 666L), positions.map { it.micros })
+        assertEquals(listOf(333L, 666L), positions.map { it.micros })
         assertTrue(positions.all { it.micros in 0L..999L })
     }
 

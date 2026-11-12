@@ -13,9 +13,11 @@ import kotlinx.coroutines.yield
  * 可见请求调度器：浏览页与缩略图源之间的调度层。
  *
  * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
+ * 新订阅不等可见窗口：条目一订阅就下发，卡片组合完成前已开始抽第一屏；窗口到达后按可见范围重排。
  * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次；
  * 等几秒与还能排几次都从抽帧源持有的抽帧状态读，调度器不另记已试次数。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
+ * 可见范围变化时排队中的旧任务全部丢弃，已进入解码的那一张取消不了，让它跑完并落盘。
  * 预取仍由 [prefetcher] 负责，可见请求优先于预取，且预取不进入可见请求队列。
  *
  * 状态不变量：
@@ -31,6 +33,8 @@ import kotlinx.coroutines.yield
  * 7. 离屏、空窗口与 [reset] 取消重试计时但保留待重试标记；再次可见时按当前间隔重新计时。
  * 8. 重试计时由 attempt 收尾与订阅收尾直接安排，不依赖 [dispatch] 的收尾分支；
  *    等批次收尾由信号唤醒，不轮询。
+ * 9. 没下发过的请求不等可见窗口；暂停过的请求要重新可见才下发（见 [isOnScreenLocked]）。
+ * 10. 已进入解码的 attempt 不作废：取消会打断在途传输读并丢掉已解出的帧。
  */
 class VisiblePreviewScheduler(
     private val source: MediaPreviewSource,
@@ -44,9 +48,6 @@ class VisiblePreviewScheduler(
     private val requests = LinkedHashMap<String, Request>()
 
     private var visibleLocations: Set<String> = emptySet()
-
-    /** 是否已经收到过窗口；没有窗口时先排队，等界面给出可见范围再下发。 */
-    private var windowKnown = false
 
     private var dispatching = false
 
@@ -67,7 +68,6 @@ class VisiblePreviewScheduler(
             emptySet()
         }
         synchronized(lock) {
-            windowKnown = true
             visibleLocations = visible
             pauseOutsideLocked(visible)
         }
@@ -77,8 +77,9 @@ class VisiblePreviewScheduler(
     }
 
     /**
-     * 订阅一个条目的预览。请求先入队，是否下发由当前窗口决定：
-     * 新入屏条目可能先调用这里、后收到 [update]，因此不能按旧窗口直接拒绝。
+     * 订阅一个条目的预览。请求先入队：没下发过且没被暂停过的请求立刻下发，
+     * 不等 [update] 的布局结果，因此第一屏在卡片组合完成前就开始抽；
+     * 新入屏条目也可能先调用这里、后收到 [update]，不能按旧窗口直接拒绝。
      */
     suspend fun preview(entry: MediaFile, index: Int): MediaPreview {
         if (entry.isDirectory) return EMPTY_PREVIEW
@@ -123,7 +124,6 @@ class VisiblePreviewScheduler(
         synchronized(lock) {
             closed = false
             visibleLocations = emptySet()
-            windowKnown = true
             pauseAllLocked(CANCEL_REASON_RESET)
         }
         prefetcher.cancelAll()
@@ -135,7 +135,6 @@ class VisiblePreviewScheduler(
         val pending = synchronized(lock) {
             closed = true
             visibleLocations = emptySet()
-            windowKnown = true
             dispatching = false
             // 作废旧批次：它与新批次并跑会打乱下发顺序。
             drainGeneration++
@@ -160,9 +159,13 @@ class VisiblePreviewScheduler(
     }
 
     private fun pauseOutsideLocked(visible: Set<String>) {
-        requests.values
-            .filter { request -> request.file.location !in visible }
-            .forEach { request -> pauseLocked(request, CANCEL_REASON_OFFSCREEN) }
+        requests.values.forEach { request ->
+            if (request.file.location in visible) {
+                request.paused = false
+            } else {
+                pauseLocked(request, CANCEL_REASON_OFFSCREEN)
+            }
+        }
     }
 
     private fun pauseAllLocked(reason: String) {
@@ -174,16 +177,23 @@ class VisiblePreviewScheduler(
      * 再次可见时重新按当前间隔计时，不会回到可见就 0 秒重试。
      */
     private fun pauseLocked(request: Request, reason: String) {
+        request.paused = true
         cancelAttemptLocked(request, reason)
         request.retryTimer?.cancel()
         request.retryTimer = null
     }
 
-    /** 取消当前 attempt 并带上原因：原因会随取消异常传到抽取层写进日志。 */
-    private fun cancelAttemptLocked(request: Request, reason: String): Job? =
-        invalidateAttemptLocked(request)?.also { job ->
-            job.cancel(CancellationException(reason))
-        }
+    /**
+     * 取消当前 attempt 并带上原因：原因会随取消异常传到抽取层写进日志。
+     * 已进入解码的那一张不取消：取消会打断在途传输读、丢掉已解出的帧；让它跑完并落盘，
+     * 结果照常交给已订阅的卡片，下次可见直接命中。
+     */
+    private fun cancelAttemptLocked(request: Request, reason: String) {
+        val job = request.job ?: return
+        if (source.isPreviewExtracting(request.file)) return
+        invalidateAttemptLocked(request)
+        job.cancel(CancellationException(reason))
+    }
 
     /** 作废当前 attempt，返回被取消的 Job；回调随后会因令牌或 Job 身份不符而退出。 */
     private fun invalidateAttemptLocked(request: Request): Job? {
@@ -243,7 +253,6 @@ class VisiblePreviewScheduler(
         while (true) {
             val attempt = synchronized(lock) {
                 if (generation != drainGeneration) return
-                if (!windowKnown || visibleLocations.isEmpty()) return
                 val next = nextDispatchableLocked() ?: return
                 val attemptId = ++next.attemptId
                 // 先建 Job 并登记，再启动：reset/pause 在两步之间也能取消到它。
@@ -288,13 +297,13 @@ class VisiblePreviewScheduler(
      */
     private fun nextDispatchableLocked(): Request? {
         val candidates = requests.values.filter { request ->
-            request.isDispatchableLocked() && request.file.location in visibleLocations
+            request.isDispatchableLocked() && isOnScreenLocked(request)
         }
         if (candidates.isEmpty()) return null
         val fresh = candidates.filter { request -> !request.retried }
         if (fresh.isNotEmpty()) return fresh.minByOrNull(Request::index)
         val freshRunning = requests.values.any { request ->
-            request.job != null && !request.retried && request.file.location in visibleLocations
+            request.job != null && !request.retried && isOnScreenLocked(request)
         }
         return if (freshRunning) null else candidates.minByOrNull(Request::index)
     }
@@ -312,9 +321,16 @@ class VisiblePreviewScheduler(
     /** 还有首次尝试没出图的可见项：在跑，或可下发。 */
     private fun hasFreshWorkLocked(): Boolean = requests.values.any { request ->
         !request.retried &&
-            request.file.location in visibleLocations &&
+            isOnScreenLocked(request) &&
             (request.job != null || request.isDispatchableLocked())
     }
+
+    /**
+     * 该请求是否该排队：在可见范围内，或还没下发过且没被暂停过。
+     * 后一条让第一屏不等列表布局：卡片一订阅就入队，窗口到达后按可见范围重排。
+     */
+    private fun isOnScreenLocked(request: Request): Boolean =
+        request.file.location in visibleLocations || (request.attemptId == 0L && !request.paused)
 
     /** 唤醒等批次收尾的重试计时；醒来后各自复查可见性。 */
     private fun wakeRetryWaiters() {
@@ -331,7 +347,7 @@ class VisiblePreviewScheduler(
             if (hasFreshWorkLocked()) return
             requests.values
                 .filter { request ->
-                    request.retryPending && request.retryTimer == null && request.file.location in visibleLocations
+                    request.retryPending && request.retryTimer == null && isOnScreenLocked(request)
                 }
                 .forEach { request ->
                     val job = scope.launch(start = CoroutineStart.LAZY) { awaitRetry(request) }
@@ -372,7 +388,7 @@ class VisiblePreviewScheduler(
         val again = synchronized(lock) {
             if (closed || request.deferred.isCompleted) return
             request.retryPending = false
-            request.file.location in visibleLocations
+            isOnScreenLocked(request)
         }
         if (again) dispatch()
     }
@@ -405,8 +421,7 @@ class VisiblePreviewScheduler(
     private fun isCurrentAttemptLocked(request: Request, attemptId: Long): Boolean =
         !request.deferred.isCompleted && request.attemptId == attemptId
 
-    private fun hasDispatchableLocked(): Boolean =
-        visibleLocations.isNotEmpty() && nextDispatchableLocked() != null
+    private fun hasDispatchableLocked(): Boolean = nextDispatchableLocked() != null
 
     private class Request(
         val file: MediaFile,
@@ -415,6 +430,8 @@ class VisiblePreviewScheduler(
         var subscribers: Int = 0,
         var attemptId: Long = 0,
         var job: Job? = null,
+        /** 已因离屏或重建暂停过：重新可见前不再下发。 */
+        var paused: Boolean = false,
         /** 本轮订阅已经失败过：之后的下发都算重试，排在首次尝试之后。 */
         var retried: Boolean = false,
         /** 正在等重试计时；期间不参与下发。 */

@@ -9,30 +9,37 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** 命中的缓存条目：图片文件（无图条目为 null）、记录的时长、时长是否已知，以及是否标记为无图。 */
+/** 落盘的封面失败记录：失败时间与已试次数。重启后据此按退避时间跳过。 */
+data class CachedFailure(val failedAtMillis: Long, val attempts: Int)
+
+/** 命中的缓存条目：图片文件（无图与失败条目为 null）、记录的时长、时长是否已知、是否标记为无图。 */
 data class CachedThumbnail(
     val file: File?,
     val durationMillis: Long?,
     val durationKnown: Boolean,
     /** 元数据来自上一次运行的无图记录；本次运行仍需重新确认是否有图。 */
     val noImage: Boolean = false,
+    /** 元数据来自上一次运行的失败记录；[file] 为 null，重启后按退避时间跳过。 */
+    val failure: CachedFailure? = null,
 )
 
 /**
  * 缩略图磁盘缓存：条目放在 [directory] 下，总字节数超过 [maxBytes] 时先删最近最少使用的条目。
  * 命中时把文件的最后修改时间写成当前时间，作为「最近使用」的记录。
  *
- * 每个条目带一份元数据，第一行是写入时间，第二行是时长：
- * `unknown` 或缺失表示时长未知，`null` 表示确定没有时长，数字表示已知时长；第三行标记无图条目。
- * 无图条目只占元数据、不计入字节上限，按条数单独淘汰。
- * 写入时间用于有效期判断。磁盘读写与启动清理都在 IO 调度执行。
+ * 每个条目带一份元数据，记时长、是否无图与失败记录（失败时间与已试次数），格式为若干行 `键=值`：
+ * `duration` 为 `unknown`（时长未知）、`null`（确定没有时长）或毫秒数；
+ * `no-image` 标记无图条目；`failed-at` 与 `failed-attempts` 成对出现，标记抽帧失败的条目。
+ * 无图与失败记录都只占元数据、不计入字节上限，按条数一起淘汰。
+ * 缓存不设有效期：命中的条目一直有效，条目只能被容量上限淘汰或按缓存键失配。
+ * 磁盘读写与启动清理都在 IO 调度执行。
  */
 class ThumbnailCache(
     private val directory: File,
     private val maxBytes: Long,
     private val clock: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val maxNoImageEntries: Int = MAX_NO_IMAGE_ENTRIES,
+    private val maxMetadataEntries: Int = MAX_METADATA_ENTRIES,
 ) {
 
     /** 同一目录的实例共用锁，避免多实例同时替换同名文件。 */
@@ -42,18 +49,16 @@ class ThumbnailCache(
     @Volatile
     private var cleaned = false
 
-    /** 取出该缓存键对应的条目；没有缓存或已超过有效期时返回 null。 */
-    suspend fun entry(location: String, maxAgeMillis: Long? = null): CachedThumbnail? =
-        withContext(ioDispatcher) {
-            ensureCleanup()
-            synchronized(locks.entry) { readEntry(location, maxAgeMillis) }
-        }
+    /** 取出该缓存键对应的条目；没有缓存时返回 null。 */
+    suspend fun entry(location: String): CachedThumbnail? = withContext(ioDispatcher) {
+        ensureCleanup()
+        synchronized(locks.entry) { readEntry(location) }
+    }
 
-    /** 取出该缓存键对应的缓存文件；没有缓存或已超过有效期时返回 null。 */
-    suspend fun file(location: String, maxAgeMillis: Long? = null): File? =
-        entry(location, maxAgeMillis)?.file
+    /** 取出该缓存键对应的缓存文件；没有缓存或条目只记了元数据时返回 null。 */
+    suspend fun file(location: String): File? = entry(location)?.file
 
-    /** 写入该缓存键对应的缓存文件与元数据，并清掉超限的旧条目。 */
+    /** 写入该缓存键对应的缓存文件与元数据，并清掉超限的旧条目。成功结果顺带清掉失败记录。 */
     suspend fun save(
         location: String,
         bytes: ByteArray,
@@ -74,9 +79,15 @@ class ThumbnailCache(
         writeMetadataOnly(location, durationMillis, durationKnown)
     }
 
+    /** 记一条抽帧失败：失败时间与已试次数，重启后据此按退避时间跳过。 */
+    suspend fun saveFailure(location: String, failedAtMillis: Long, attempts: Int) = withContext(ioDispatcher) {
+        ensureCleanup()
+        writeFailure(location, failedAtMillis, attempts)
+    }
+
     /**
      * 缓存命中后补写时长；条目不存在时不写，避免留下孤儿元数据。
-     * 元数据缺失时沿用图片的修改时间，不把有效期窗口向后推。
+     * 元数据文件的修改时间是它的最近使用记录，补写时长不能把它刷新成刚用过。
      */
     suspend fun writeDuration(location: String, durationMillis: Long?) = withContext(ioDispatcher) {
         ensureCleanup()
@@ -86,40 +97,31 @@ class ThumbnailCache(
             val existing = metadata.takeIf { it.isFile }?.readMetadata()
             val noImage = !image.isFile
             if (noImage && existing?.noImage != true) return@synchronized
-            val writtenAt = existing?.writtenAt
-                ?: image.lastModified().takeIf { it > 0 }
-                ?: clock()
-            // 命中已刷新过元数据 mtime；补写时长不能把它退回旧的写入时间。
-            val lastModified = metadata.takeIf { it.isFile }?.lastModified()
-                ?.takeIf { it > 0 }
-                ?: writtenAt
+            val lastModified = metadata.lastModified().takeIf { it > 0 } ?: clock()
             writeMetadata(
                 metadata = metadata,
-                writtenAt = writtenAt,
                 durationMillis = durationMillis,
                 durationKnown = true,
                 noImage = noImage,
+                failure = null,
                 lastModifiedMillis = lastModified,
             )
         }
     }
 
-    private fun readEntry(location: String, maxAgeMillis: Long?): CachedThumbnail? {
+    private fun readEntry(location: String): CachedThumbnail? {
         val cached = File(directory, cacheFileName(location))
         val metadataFile = metadataFile(location).takeIf { it.isFile }
         val metadata = metadataFile?.readMetadata()
         val hasImage = cached.isFile
-        if (!hasImage && metadata?.noImage != true) return null
-        if (maxAgeMillis != null) {
-            val writtenAt = metadata?.writtenAt ?: return null
-            if (clock() - writtenAt > maxAgeMillis) return null
-        }
+        if (!hasImage && metadata?.noImage != true && metadata?.failure == null) return null
         if (hasImage) cached.setLastModified(clock()) else metadataFile?.setLastModified(clock())
         return CachedThumbnail(
             file = if (hasImage) cached else null,
             durationMillis = metadata?.durationMillis,
             durationKnown = metadata?.durationKnown == true,
             noImage = !hasImage && metadata?.noImage == true,
+            failure = if (hasImage) null else metadata?.failure,
         )
     }
 
@@ -133,7 +135,6 @@ class ThumbnailCache(
         val target = File(directory, cacheFileName(location))
         val metadata = metadataFile(location)
         synchronized(locks.entry) {
-            val writtenAt = clock()
             var tempImage: File? = null
             var tempMetadata: File? = null
             try {
@@ -141,7 +142,7 @@ class ThumbnailCache(
                 tempMetadata = temporaryFile(metadata.name)
                 tempImage.writeBytes(bytes)
                 tempMetadata.writeText(
-                    encodeMetadata(writtenAt, durationMillis, durationKnown, noImage = false),
+                    encodeMetadata(durationMillis, durationKnown, noImage = false, failure = null),
                 )
                 // 先换图片再换元数据：元数据出现时图片已经存在，孤儿清理不会误删新元数据。
                 replaceFile(tempImage, target)
@@ -151,6 +152,7 @@ class ThumbnailCache(
                 tempImage?.delete()
                 tempMetadata?.delete()
             }
+            val writtenAt = clock()
             target.setLastModified(writtenAt)
             metadata.setLastModified(writtenAt)
         }
@@ -171,29 +173,47 @@ class ThumbnailCache(
             image.delete()
             writeMetadata(
                 metadata = metadata,
-                writtenAt = writtenAt,
                 durationMillis = durationMillis,
                 durationKnown = durationKnown,
                 noImage = true,
+                failure = null,
                 lastModifiedMillis = writtenAt,
             )
         }
         evictBeyondLimit(keep = null)
-        // 只有新写入无图条目时才需要按条数清理，普通图片保存不扫元数据。
-        evictNoImageEntries()
+        // 只有新写入元数据条目时才需要按条数清理，普通图片保存不扫元数据。
+        evictMetadataEntries()
+    }
+
+    private fun writeFailure(location: String, failedAtMillis: Long, attempts: Int) {
+        directory.mkdirs()
+        val metadata = metadataFile(location)
+        synchronized(locks.entry) {
+            val writtenAt = clock()
+            // 失败不写「无图」，只记元数据；已缓存的图片原样保留。
+            writeMetadata(
+                metadata = metadata,
+                durationMillis = null,
+                durationKnown = false,
+                noImage = false,
+                failure = CachedFailure(failedAtMillis = failedAtMillis, attempts = attempts),
+                lastModifiedMillis = writtenAt,
+            )
+        }
+        evictMetadataEntries()
     }
 
     private fun writeMetadata(
         metadata: File,
-        writtenAt: Long,
         durationMillis: Long?,
         durationKnown: Boolean,
         noImage: Boolean,
+        failure: CachedFailure?,
         lastModifiedMillis: Long,
     ) {
         val temp = temporaryFile(metadata.name)
         try {
-            temp.writeText(encodeMetadata(writtenAt, durationMillis, durationKnown, noImage))
+            temp.writeText(encodeMetadata(durationMillis, durationKnown, noImage, failure))
             replaceFile(temp, metadata)
             metadata.setLastModified(lastModifiedMillis)
         } finally {
@@ -242,24 +262,16 @@ class ThumbnailCache(
         }
     }
 
-    /** 无图条目只占元数据，不计入字节上限，按条数单独淘汰。 */
-    private fun evictNoImageEntries() {
+    /** 无图条目与失败记录只占元数据，不计入字节上限，按条数一起淘汰。 */
+    private fun evictMetadataEntries() {
         synchronized(locks.entry) {
-            val metadataFiles = directory.listFiles().orEmpty()
+            val entries = directory.listFiles().orEmpty()
                 .filter { it.isFile && it.name.endsWith(METADATA_SUFFIX) }
-            if (metadataFiles.size <= maxNoImageEntries) return@synchronized
-            val entries = metadataFiles
-                .filter { metadata ->
-                    val image = File(
-                        directory,
-                        metadata.name.removeSuffix(METADATA_SUFFIX) + IMAGE_SUFFIX,
-                    )
-                    !image.isFile && metadata.readMetadata()?.noImage == true
-                }
-                .sortedBy { it.lastModified() }
+                .filter { metadata -> !File(directory, metadata.name.removeSuffix(METADATA_SUFFIX)).isFile }
+            if (entries.size <= maxMetadataEntries) return@synchronized
             var count = entries.size
-            for (entry in entries) {
-                if (count <= maxNoImageEntries) break
+            for (entry in entries.sortedBy { it.lastModified() }) {
+                if (count <= maxMetadataEntries) break
                 if (entry.delete()) count--
             }
         }
@@ -272,7 +284,7 @@ class ThumbnailCache(
             .forEach { it.delete() }
     }
 
-    /** 图片被外部删除后留下的元数据没有意义，一并清掉；无图条目按标记保留。 */
+    /** 图片被外部删除后留下的元数据没有意义，一并清掉；无图与失败记录按各自的标记保留。 */
     private fun deleteOrphanMetadata() {
         synchronized(locks.entry) {
             val images = directory.listFiles().orEmpty()
@@ -281,8 +293,9 @@ class ThumbnailCache(
             directory.listFiles().orEmpty()
                 .filter { it.isFile && it.name.endsWith(METADATA_SUFFIX) }
                 .filter { metadata ->
-                    metadata.name.removeSuffix(METADATA_SUFFIX) !in images &&
-                        metadata.readMetadata()?.noImage != true
+                    if (metadata.name.removeSuffix(METADATA_SUFFIX) in images) return@filter false
+                    val recorded = metadata.readMetadata()
+                    recorded?.noImage != true && recorded?.failure == null
                 }
                 .forEach { metadata -> metadata.delete() }
         }
@@ -304,39 +317,52 @@ private class DirectoryLocks {
 private val directoryLocks = ConcurrentHashMap<String, DirectoryLocks>()
 
 private data class Metadata(
-    val writtenAt: Long,
     val durationMillis: Long?,
     val durationKnown: Boolean,
     val noImage: Boolean,
+    val failure: CachedFailure?,
 )
 
 private fun File.readMetadata(): Metadata? {
     val lines = runCatching { readLines() }.getOrNull() ?: return null
-    val writtenAt = lines.getOrNull(0)?.toLongOrNull() ?: return null
-    val durationLine = lines.getOrNull(1)
-    val durationMillis = durationLine?.toLongOrNull()
+    val values = lines.mapNotNull { line ->
+        val separator = line.indexOf('=')
+        if (separator <= 0) null else line.substring(0, separator) to line.substring(separator + 1)
+    }.toMap()
+    val durationLine = values[META_DURATION] ?: return null
+    val durationMillis = durationLine.toLongOrNull()
+    val failedAt = values[META_FAILED_AT]?.toLongOrNull()
+    val attempts = values[META_FAILED_ATTEMPTS]?.toIntOrNull()
     return Metadata(
-        writtenAt = writtenAt,
         durationMillis = durationMillis,
-        // 旧格式没有第二行，或第二行无法解析时，时长保持未知，命中后会重新读取。
+        // 时长行缺失或无法解析时按未知处理，命中后重新读取。
         durationKnown = durationMillis != null || durationLine == DURATION_NONE,
-        noImage = lines.getOrNull(2) == NO_IMAGE_MARKER,
+        noImage = values[META_NO_IMAGE] == TRUE_VALUE,
+        failure = if (failedAt != null && attempts != null) {
+            CachedFailure(failedAtMillis = failedAt, attempts = attempts)
+        } else {
+            null
+        },
     )
 }
 
 private fun encodeMetadata(
-    writtenAt: Long,
     durationMillis: Long?,
     durationKnown: Boolean,
     noImage: Boolean,
+    failure: CachedFailure?,
 ): String {
     val durationLine = when {
         !durationKnown -> DURATION_UNKNOWN
         durationMillis != null -> durationMillis.toString()
         else -> DURATION_NONE
     }
-    val lines = mutableListOf(writtenAt.toString(), durationLine)
-    if (noImage) lines += NO_IMAGE_MARKER
+    val lines = mutableListOf(META_DURATION + "=" + durationLine)
+    if (noImage) lines += META_NO_IMAGE + "=" + TRUE_VALUE
+    if (failure != null) {
+        lines += META_FAILED_AT + "=" + failure.failedAtMillis
+        lines += META_FAILED_ATTEMPTS + "=" + failure.attempts
+    }
     return lines.joinToString("\n")
 }
 
@@ -354,9 +380,13 @@ private fun cacheFileName(location: String): String {
 private const val IMAGE_SUFFIX = ".img"
 private const val METADATA_SUFFIX = ".meta"
 private const val TEMP_SUFFIX = ".tmp"
+private const val META_DURATION = "duration"
+private const val META_NO_IMAGE = "no-image"
+private const val META_FAILED_AT = "failed-at"
+private const val META_FAILED_ATTEMPTS = "failed-attempts"
+private const val TRUE_VALUE = "true"
 private const val DURATION_NONE = "null"
 private const val DURATION_UNKNOWN = "unknown"
-private const val NO_IMAGE_MARKER = "no-image"
 
-/** 无图条目的数量上限；它们只占元数据，需要单独控制增长。 */
-private const val MAX_NO_IMAGE_ENTRIES = 2_048
+/** 只占元数据的条目（无图与失败记录）的数量上限；它们不计字节，需要单独控制增长。 */
+private const val MAX_METADATA_ENTRIES = 2_048
