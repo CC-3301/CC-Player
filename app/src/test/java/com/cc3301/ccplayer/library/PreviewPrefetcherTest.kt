@@ -177,6 +177,8 @@ private class RecordingPreviewSource : MediaPreviewSource {
         return MediaPreview(image = null, durationMillis = null)
     }
 
+    override fun isPreviewExtracting(file: MediaFile): Boolean = false
+
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) {
         events += PreviewEvent.Window(visibleLocations, prefetchLocations)
     }
