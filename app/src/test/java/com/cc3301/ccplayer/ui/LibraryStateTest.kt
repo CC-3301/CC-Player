@@ -51,7 +51,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64, sortOrder = SortOrder.NameAscending),
         )
 
         assertEquals(DirectoryScrollTarget(index = 1, offset = 64), loaded.scrollTarget)
@@ -65,7 +65,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/已删除.mkv", scrollOffset = 40),
+            position = DirectoryPosition(entryLocation = "root/已删除.mkv", scrollOffset = 40, sortOrder = SortOrder.NameAscending),
         )
 
         assertEquals(DirectoryScrollTarget(index = 2, offset = 0), loaded.scrollTarget)
@@ -78,7 +78,7 @@ class LibraryStateTest {
         val loaded = LibraryState(autoRestorePosition = false).withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 64, sortOrder = SortOrder.NameAscending),
         )
 
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
@@ -90,7 +90,7 @@ class LibraryStateTest {
         val loaded = LibraryState(autoRestorePosition = false).withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24, sortOrder = SortOrder.NameAscending),
         )
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
 
@@ -110,7 +110,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24, sortOrder = SortOrder.NameAscending),
         )
         assertEquals(DirectoryScrollTarget(index = 1, offset = 24), loaded.scrollTarget)
 
@@ -131,9 +131,9 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 8),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 8, sortOrder = SortOrder.NameDescending),
         )
-        assertEquals(DirectoryScrollTarget(index = 0, offset = 8), loaded.scrollTarget)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
 
         val applied = loaded.withDisplayPreferences(
             viewMode = loaded.viewMode,
@@ -145,6 +145,23 @@ class LibraryStateTest {
         )
 
         assertEquals(DirectoryScrollTarget(index = 1, offset = 8), applied.scrollTarget)
+    }
+
+    @Test
+    fun `记录里的排序与当前排序不一致时从顶部开始`() {
+        val entries = listOf(entry("ep1.mkv", 1), entry("ep2.mkv", 2))
+
+        val loaded = LibraryState(sortOrder = SortOrder.NameDescending).withLoadedEntries(
+            entries = entries,
+            failure = null,
+            position = DirectoryPosition(
+                entryLocation = "root/ep2.mkv",
+                scrollOffset = 24,
+                sortOrder = SortOrder.NameAscending,
+            ),
+        )
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), loaded.scrollTarget)
     }
 
     @Test
@@ -172,7 +189,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep10.mkv", scrollOffset = 8),
+            position = DirectoryPosition(entryLocation = "root/ep10.mkv", scrollOffset = 8, sortOrder = SortOrder.NameAscending),
         )
 
         assertEquals(DirectoryScrollTarget(index = 1, offset = 8), loaded.scrollTarget)
@@ -184,7 +201,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep1.mkv", scrollOffset = 12),
+            position = DirectoryPosition(entryLocation = "root/ep1.mkv", scrollOffset = 12, sortOrder = SortOrder.NameAscending),
         )
 
         val resorted = loaded.withDisplayPreferences(
@@ -204,7 +221,7 @@ class LibraryStateTest {
         val loaded = LibraryState().withLoadedEntries(
             entries = entries,
             failure = null,
-            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24),
+            position = DirectoryPosition(entryLocation = "root/ep2.mkv", scrollOffset = 24, sortOrder = SortOrder.NameAscending),
         )
 
         val switched = loaded.withDisplayPreferences(
