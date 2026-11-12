@@ -47,6 +47,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -202,6 +203,33 @@ private val PlayerBottomBarGradient = Brush.verticalGradient(
 
 /** 播放列表条目固定高度，用于把当前项滚到可视区域中间。 */
 private val PlayerPlaylistItemHeight = 44.dp
+
+/**
+ * 鼠标左键按住拖动滚动：滚动组件在触摸之外不认鼠标拖拽，这里只把鼠标的按下移动换算成列表位移。
+ * 触摸、滚轮与行点击照旧走各自通道。
+ */
+private fun Modifier.mouseDragScroll(state: LazyListState): Modifier = pointerInput(state) {
+    awaitPointerEventScope {
+        while (true) {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (down.type != PointerType.Mouse) continue
+            var lastY = down.position.y
+            var dragging = false
+            while (true) {
+                val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) break
+                val delta = change.position.y - lastY
+                lastY = change.position.y
+                if (!dragging) {
+                    if (kotlin.math.abs(delta) < viewConfiguration.touchSlop) continue
+                    dragging = true
+                }
+                state.dispatchRawDelta(-delta)
+                change.consume()
+            }
+        }
+    }
+}
 
 /** 吞掉区域内触摸，避免落到下层手势层；不建立可点击语义。 */
 private fun Modifier.blockPlayerGestures(): Modifier = pointerInput(Unit) {
@@ -2509,7 +2537,9 @@ private fun PlaylistDrawer(
                     top = verticalPadding,
                     bottom = verticalPadding,
                 ),
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .mouseDragScroll(listState),
             ) {
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
