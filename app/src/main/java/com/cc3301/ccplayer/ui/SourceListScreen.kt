@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -63,6 +62,7 @@ fun SourceListScreen(
     onFormFieldChange: (NetworkSourceFieldKind, String) -> Unit,
     onDismissForm: () -> Unit,
     onSaveForm: () -> Unit,
+    insetPadding: Modifier,
     modifier: Modifier = Modifier,
 ) {
     var pendingDelete by remember { mutableStateOf<ConnectionSource?>(null) }
@@ -72,7 +72,7 @@ fun SourceListScreen(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .then(insetPadding),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             ScreenHeader(

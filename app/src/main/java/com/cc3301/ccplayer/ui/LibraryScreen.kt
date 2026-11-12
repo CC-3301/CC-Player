@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -109,6 +108,7 @@ fun LibraryScreen(
     onScrollToTop: () -> Unit,
     onRetry: () -> Unit,
     onSavePosition: (sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) -> Unit,
+    insetPadding: Modifier,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -210,7 +210,7 @@ fun LibraryScreen(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .then(insetPadding),
     ) {
         ScreenHeader(
             title = state.currentDirectory?.name.orEmpty(),
