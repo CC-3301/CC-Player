@@ -21,20 +21,16 @@ class PlayerPointerVisibilityTest {
     private val oneX = Density(1f)
     private val threeX = Density(3f)
 
-    /** 进入播放页再把指针隐藏，作为「指针隐藏后鼠标在动」的起点。 */
-    private fun hidePointer() {
+    /** 进入播放页、指针停在 [position]，再把指针隐藏：之后的移动都按这个起点判定。 */
+    private fun hidePointer(position: Offset = Offset.Zero) {
         pointer.onPointerEnter()
+        pointer.onPointerMove(position, oneX, pressed = false)
         pointer.hide()
     }
 
     @Test
-    fun `指针位移死区为 10dp`() {
-        assertEquals(10.dp, PlayerPointerMoveDeadZone)
-    }
-
-    @Test
-    fun `指针持续位移窗口为 150ms`() {
-        assertEquals(150L, PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS)
+    fun `指针位移死区为 100dp`() {
+        assertEquals(100.dp, PlayerPointerMoveDeadZone)
     }
 
     @Test
@@ -51,267 +47,170 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `上下起伏不唤出指针也不重置隐藏计时`() {
-        hidePointer()
-
-        // 幅度 6dp、半周期 100ms 的起伏：单程都不到死区。
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        repeat(10) { index ->
-            now += 100L
-            pointer.onPointerMove(Offset(0f, if (index % 2 == 0) 6f else 0f), oneX)
-        }
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `单程越过死区但持续不到窗口的抖动不唤出指针`() {
-        hidePointer()
-
-        // 幅度 12dp、半周期 20ms：每半程都越过死区，但每半程都不到窗口。
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        repeat(10) { index ->
-            now += 20L
-            pointer.onPointerMove(Offset(0f, if (index % 2 == 0) 12f else 0f), oneX)
-        }
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `来回抵消的位移不累计成同向净位移`() {
-        hidePointer()
-
-        // 上下各 8dp 反复：路径长度累计 24dp，但没有一次朝同一方向到 10dp。
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 500L
-        pointer.onPointerMove(Offset(0f, 8f), oneX)
-        now = 700L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 900L
-        pointer.onPointerMove(Offset(0f, 8f), oneX)
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `同向净位移累计越过死区且持续满窗口时唤出指针`() {
-        hidePointer()
+    fun `起点取指针隐藏那一刻的坐标`() {
+        hidePointer(position = Offset(40f, 40f))
 
         now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 130L
-        pointer.onPointerMove(Offset(0f, 6f), oneX)
-
-        // 同向累计已越过死区，但持续只有 30ms，指针不出现也不重新计时。
-        now = 160L
-        pointer.onPointerMove(Offset(0f, 12f), oneX)
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-
-        now = 280L
-        pointer.onPointerMove(Offset(0f, 24f), oneX)
-
-        assertTrue(pointer.visible)
-        assertEquals(280L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `持续移动满窗口才唤出指针`() {
-        hidePointer()
-
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 110L
-        pointer.onPointerMove(Offset(0f, 1f), oneX)
-
-        // 同向净位移早已越过死区，持续不满 150ms 时仍不出现。
-        now = 259L
-        pointer.onPointerMove(Offset(0f, 24f), oneX)
+        pointer.onPointerMove(Offset(40f, 139f), oneX, pressed = false)
         assertFalse(pointer.visible)
 
-        now = 260L
-        pointer.onPointerMove(Offset(0f, 25f), oneX)
-
-        assertTrue(pointer.visible)
-        assertEquals(260L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `一次越过死区的位移不算持续移动`() {
-        hidePointer()
-
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
         now = 200L
-        pointer.onPointerMove(Offset(0f, 20f), oneX)
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `进入播放页后单次越界不唤出指针`() {
-        hidePointer()
-
-        now = 400L
-        pointer.onPointerMove(Offset(0f, 20f), oneX)
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `反向位移从净位移里扣减，不清空已攒的位移`() {
-        hidePointer()
-
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 110L
-        pointer.onPointerMove(Offset(0f, 10f), oneX)
-
-        // 向下 6dp 从向上的净位移里扣减，剩 4dp，方向与起点都不变。
-        now = 130L
-        pointer.onPointerMove(Offset(0f, 4f), oneX)
-        assertFalse(pointer.visible)
-
-        now = 280L
-        pointer.onPointerMove(Offset(0f, 14f), oneX)
-
+        pointer.onPointerMove(Offset(40f, 140f), oneX, pressed = false)
         assertTrue(pointer.visible)
-        assertEquals(280L, pointer.lastActivityAtMillis)
+        assertEquals(200L, pointer.lastActivityAtMillis)
     }
 
     @Test
-    fun `净位移被抵消到不再推进时以新方向重新起算`() {
+    fun `斜向移动按直线距离判定`() {
         hidePointer()
 
+        // (60, 79) 到起点的直线距离 99.2dp，不到死区。
         now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 110L
-        pointer.onPointerMove(Offset(0f, 6f), oneX)
-
-        // 向下 6dp 把向上的 6dp 扣到 0，改为向下起算，起点是此刻。
-        now = 130L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 270L
-        pointer.onPointerMove(Offset(0f, -12f), oneX)
+        pointer.onPointerMove(Offset(60f, 79f), oneX, pressed = false)
         assertFalse(pointer.visible)
 
-        now = 280L
-        pointer.onPointerMove(Offset(0f, -13f), oneX)
-
+        // (60, 80) 正好 100dp。
+        now = 200L
+        pointer.onPointerMove(Offset(60f, 80f), oneX, pressed = false)
         assertTrue(pointer.visible)
-        assertEquals(280L, pointer.lastActivityAtMillis)
+        assertEquals(200L, pointer.lastActivityAtMillis)
     }
 
     @Test
-    fun `换向后的位移继续累加，垂直移动不会卡住净位移`() {
+    fun `抖动既不唤出指针也不重置隐藏计时`() {
         hidePointer()
 
+        // 幅度 6dp、半周期 100ms 的抖动：每次都不到直线距离死区。
         now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 110L
-        pointer.onPointerMove(Offset(8f, 0f), oneX)
-        // 净位移只有 8dp，先不唤出。
-        now = 130L
-        pointer.onPointerMove(Offset(8f, 5f), oneX)
-        assertFalse(pointer.visible)
-
-        now = 150L
-        pointer.onPointerMove(Offset(8f, 8f), oneX)
-        assertFalse(pointer.visible)
-
-        now = 270L
-        pointer.onPointerMove(Offset(8f, 10f), oneX)
-
-        assertTrue(pointer.visible)
-        assertEquals(270L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `停手超过窗口后小幅移动不唤出指针`() {
-        hidePointer()
-
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 110L
-        pointer.onPointerMove(Offset(5f, 0f), oneX)
-        now = 130L
-        pointer.onPointerMove(Offset(9.5f, 0f), oneX)
-        assertFalse(pointer.visible)
-
-        // 停 10 秒再补 0.5dp：这段累计已经中断，不能靠补差额凑满死区。
-        now = 10_130L
-        pointer.onPointerMove(Offset(10f, 0f), oneX)
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `慢速斜向拖动满窗口后唤出指针`() {
-        hidePointer()
-
-        // 阶梯状斜拖：横向、纵向 2dp 交替前进，同向净位移累计到 10dp 用满 150ms。
-        val path = listOf(
-            100L to Offset(0f, 0f),
-            110L to Offset(2f, 0f),
-            130L to Offset(2f, 2f),
-            150L to Offset(4f, 2f),
-            170L to Offset(4f, 4f),
-            190L to Offset(6f, 4f),
-            210L to Offset(6f, 6f),
-            230L to Offset(8f, 6f),
-            250L to Offset(8f, 8f),
-        )
-        for ((at, position) in path) {
-            now = at
-            pointer.onPointerMove(position, oneX)
+        repeat(20) { index ->
+            now += 100L
+            pointer.onPointerMove(Offset(if (index % 2 == 0) 6f else 0f, 0f), oneX, pressed = false)
         }
-        assertFalse(pointer.visible)
-
-        now = 260L
-        pointer.onPointerMove(Offset(10f, 8f), oneX)
-
-        assertTrue(pointer.visible)
-        assertEquals(260L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `三倍屏下同向净位移不到 30 像素不唤出指针`() {
-        hidePointer()
-
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), threeX)
-        now = 110L
-        pointer.onPointerMove(Offset(0f, 1f), threeX)
-        now = 300L
-        pointer.onPointerMove(Offset(0f, 29f), threeX)
 
         assertFalse(pointer.visible)
         assertEquals(0L, pointer.lastActivityAtMillis)
     }
 
     @Test
-    fun `三倍屏下同向净位移满 30 像素且持续满窗口时唤出指针`() {
+    fun `来回摆动按路径累加也不算移动`() {
+        hidePointer()
+
+        // 每程 60dp、来回 8 次，路径累计 480dp，但离起点始终不超过 60dp。
+        now = 100L
+        repeat(8) { index ->
+            now += 100L
+            pointer.onPointerMove(Offset(if (index % 2 == 0) 60f else 0f, 0f), oneX, pressed = false)
+        }
+
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `停顿不重算起点`() {
         hidePointer()
 
         now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), threeX)
-        now = 110L
-        pointer.onPointerMove(Offset(0f, 1f), threeX)
-        now = 260L
-        pointer.onPointerMove(Offset(0f, 31f), threeX)
+        pointer.onPointerMove(Offset(60f, 0f), oneX, pressed = false)
 
+        // 停 10 秒再接着走：起点仍是隐藏那一刻的位置，不清零重算。
+        now = 10_100L
+        pointer.onPointerMove(Offset(99f, 0f), oneX, pressed = false)
+        assertFalse(pointer.visible)
+
+        now = 10_200L
+        pointer.onPointerMove(Offset(100f, 0f), oneX, pressed = false)
         assertTrue(pointer.visible)
-        assertEquals(260L, pointer.lastActivityAtMillis)
+        assertEquals(10_200L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `反向移动不清空已走的直线距离`() {
+        hidePointer()
+
+        now = 100L
+        pointer.onPointerMove(Offset(80f, 0f), oneX, pressed = false)
+        now = 200L
+        pointer.onPointerMove(Offset(30f, 0f), oneX, pressed = false)
+        assertFalse(pointer.visible)
+
+        now = 300L
+        pointer.onPointerMove(Offset(101f, 0f), oneX, pressed = false)
+        assertTrue(pointer.visible)
+        assertEquals(300L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `按住拖动既不唤出指针也不重置隐藏计时`() {
+        hidePointer()
+
+        now = 100L
+        repeat(5) { index ->
+            now += 100L
+            pointer.onPointerMove(Offset(0f, 60f * (index + 1)), oneX, pressed = true)
+        }
+
+        assertFalse(pointer.visible)
+        assertEquals(0L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `三倍屏下直线距离满三百像素才唤出指针`() {
+        hidePointer()
+
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 299f), threeX, pressed = false)
+        assertFalse(pointer.visible)
+
+        now = 200L
+        pointer.onPointerMove(Offset(0f, 300f), threeX, pressed = false)
+        assertTrue(pointer.visible)
+        assertEquals(200L, pointer.lastActivityAtMillis)
+    }
+
+    @Test
+    fun `可见时按移动重新计时`() {
+        pointer.onPointerEnter()
+        assertTrue(pointer.visible)
+
+        now = 1_000L
+        pointer.onPointerMove(Offset(1f, 1f), oneX, pressed = false)
+        assertEquals(1_000L, pointer.lastActivityAtMillis)
+
+        now = 3_999L
+        pointer.hideIfExpired()
+        assertTrue(pointer.visible)
+
+        now = 4_000L
+        pointer.hideIfExpired()
+        assertFalse(pointer.visible)
+    }
+
+    @Test
+    fun `隐藏后走满死区唤出指针，随后静止三秒再次隐藏`() {
+        pointer.onPointerEnter()
+
+        now = 3_000L
+        pointer.hideIfExpired()
+        assertFalse(pointer.visible)
+
+        // 没有移动过，隐藏时没有坐标：第一次移动只作起点，不唤出指针。
+        now = 3_020L
+        pointer.onPointerMove(Offset(0f, 2f), oneX, pressed = false)
+        assertFalse(pointer.visible)
+
+        now = 3_040L
+        pointer.onPointerMove(Offset(0f, 102f), oneX, pressed = false)
+        assertTrue(pointer.visible)
+        assertEquals(3_040L, pointer.lastActivityAtMillis)
+
+        now = 6_039L
+        pointer.hideIfExpired()
+        assertTrue(pointer.visible)
+
+        now = 6_040L
+        pointer.hideIfExpired()
+        assertFalse(pointer.visible)
     }
 
     @Test
@@ -323,52 +222,28 @@ class PlayerPointerVisibilityTest {
 
         // 远小于死区的一次移动也直接跟随，并重新计时。
         now = 2_900L
-        pointer.onPointerMove(Offset(0.5f, 0.5f), oneX)
+        pointer.onPointerMove(Offset(0.5f, 0.5f), oneX, pressed = false)
 
         assertTrue(pointer.visible)
         assertEquals(2_900L, pointer.lastActivityAtMillis)
     }
 
     @Test
-    fun `控制层隐藏后指针回到位移判据`() {
+    fun `控制层隐藏后指针回到直线距离判据`() {
         pointer.onPointerEnter()
+        now = 100L
+        pointer.onPointerMove(Offset(0f, 0f), oneX, pressed = false)
         pointerFollowsBars(barsPresent = true, pointer = pointer)
         pointerFollowsBars(barsPresent = false, pointer = pointer)
         assertFalse(pointer.visible)
 
-        now = 100L
-        pointer.onPointerMove(Offset(0f, 0f), oneX)
-        now = 400L
-        pointer.onPointerMove(Offset(0f, 4f), oneX)
-
-        assertFalse(pointer.visible)
-        assertEquals(0L, pointer.lastActivityAtMillis)
-    }
-
-    @Test
-    fun `隐藏后持续移动重新计时并再次隐藏`() {
-        pointer.onPointerEnter()
-
-        now = 3_000L
-        pointer.hideIfExpired()
+        now = 200L
+        pointer.onPointerMove(Offset(0f, 99f), oneX, pressed = false)
         assertFalse(pointer.visible)
 
-        now = 3_020L
-        pointer.onPointerMove(Offset(0f, 2f), oneX)
-        now = 3_040L
-        pointer.onPointerMove(Offset(0f, 4f), oneX)
-        now = 3_190L
-        pointer.onPointerMove(Offset(0f, 14f), oneX)
+        now = 300L
+        pointer.onPointerMove(Offset(0f, 100f), oneX, pressed = false)
         assertTrue(pointer.visible)
-        assertEquals(3_190L, pointer.lastActivityAtMillis)
-
-        now = 6_189L
-        pointer.hideIfExpired()
-        assertTrue(pointer.visible)
-
-        now = 6_190L
-        pointer.hideIfExpired()
-        assertFalse(pointer.visible)
     }
 
     @Test
@@ -393,7 +268,7 @@ class PlayerPointerVisibilityTest {
         runCurrent()
         assertFalse(looped.visible)
 
-        // 隐藏 16 毫秒后再移动：指针出现，并从此刻重新计时。
+        // 隐藏 16 毫秒后再进入播放页：指针出现，并从此刻重新计时。
         advanceTimeBy(16L)
         looped.onPointerEnter()
         visibleSignal.trySend(Unit)

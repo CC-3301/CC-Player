@@ -289,11 +289,8 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 指针位移死区：朝同一方向的净位移要达到它才算移动，来回抵消的抖动不计数。 */
-val PlayerPointerMoveDeadZone = 10.dp
-
-/** 指针持续位移窗口：同向净位移要持续它以上才算真的在动，不到窗口就反向的位移不算。 */
-const val PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS = 150L
+/** 指针位移死区：指针隐藏后，起点到当前指针位置的直线距离要达到它才唤出指针。 */
+val PlayerPointerMoveDeadZone = 100.dp
 
 /** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
 val PlayerSeekDragDeadZone = 3.dp
