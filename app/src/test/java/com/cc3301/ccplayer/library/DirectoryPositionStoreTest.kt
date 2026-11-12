@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.library
 
+import androidx.datastore.preferences.core.edit
 import com.cc3301.ccplayer.playback.DecodeMode
 import com.cc3301.ccplayer.settings.FakePreferencesDataStore
 import com.cc3301.ccplayer.settings.SettingsRepository
@@ -17,8 +18,8 @@ class DirectoryPositionStoreTest {
 
     @Test
     fun `按连接源与相对目录分别记录与读回`() = runTest {
-        val rootPosition = DirectoryPosition(entryLocation = "smb://nas/media/电影.mkv", scrollOffset = 0)
-        val subPosition = DirectoryPosition(entryLocation = "smb://nas/media/剧集/第01集.mkv", scrollOffset = 84)
+        val rootPosition = DirectoryPosition(entryLocation = "smb://nas/media/电影.mkv", scrollOffset = 0, sortOrder = SortOrder.NameAscending)
+        val subPosition = DirectoryPosition(entryLocation = "smb://nas/media/剧集/第01集.mkv", scrollOffset = 84, sortOrder = SortOrder.NameAscending)
 
         store.save("smb://nas/media", "", rootPosition)
         store.save("smb://nas/media", "剧集", subPosition)
@@ -30,16 +31,16 @@ class DirectoryPositionStoreTest {
 
     @Test
     fun `同一位置再次保存覆盖旧记录`() = runTest {
-        store.save("content://root/媒体", "", DirectoryPosition("content://root/媒体/a.mkv", 10))
-        store.save("content://root/媒体", "", DirectoryPosition("content://root/媒体/b.mkv", 32))
+        store.save("content://root/媒体", "", DirectoryPosition("content://root/媒体/a.mkv", 10, SortOrder.NameAscending))
+        store.save("content://root/媒体", "", DirectoryPosition("content://root/媒体/b.mkv", 32, SortOrder.NameAscending))
 
-        assertEquals(DirectoryPosition("content://root/媒体/b.mkv", 32), store.load("content://root/媒体", ""))
+        assertEquals(DirectoryPosition("content://root/媒体/b.mkv", 32, SortOrder.NameAscending), store.load("content://root/媒体", ""))
     }
 
     @Test
     fun `连接源身份不同时互不覆盖`() = runTest {
-        store.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 1))
-        store.save("https://dav.example.com/cc", "", DirectoryPosition("https://dav.example.com/cc/a.mkv", 2))
+        store.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 1, SortOrder.NameAscending))
+        store.save("https://dav.example.com/cc", "", DirectoryPosition("https://dav.example.com/cc/a.mkv", 2, SortOrder.NameAscending))
 
         assertEquals("smb://nas/media/a.mkv", store.load("smb://nas/media", "")?.entryLocation)
         assertEquals("https://dav.example.com/cc/a.mkv", store.load("https://dav.example.com/cc", "")?.entryLocation)
@@ -47,9 +48,9 @@ class DirectoryPositionStoreTest {
 
     @Test
     fun `删除连接源清理它的全部记录且不碰其他源`() = runTest {
-        store.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 1))
-        store.save("smb://nas/media", "剧集", DirectoryPosition("smb://nas/media/剧集/b.mkv", 2))
-        store.save("smb://nas/other", "", DirectoryPosition("smb://nas/other/c.mkv", 3))
+        store.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 1, SortOrder.NameAscending))
+        store.save("smb://nas/media", "剧集", DirectoryPosition("smb://nas/media/剧集/b.mkv", 2, SortOrder.NameAscending))
+        store.save("smb://nas/other", "", DirectoryPosition("smb://nas/other/c.mkv", 3, SortOrder.NameAscending))
 
         store.clearSource("smb://nas/media")
 
@@ -66,7 +67,7 @@ class DirectoryPositionStoreTest {
         val positionStore = DataStoreDirectoryPositionStore(positionStorage)
 
         settings.setDecodeMode(DecodeMode.Software)
-        positionStore.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 12))
+        positionStore.save("smb://nas/media", "", DirectoryPosition("smb://nas/media/a.mkv", 12, SortOrder.NameAscending))
 
         assertEquals(DecodeMode.Software, settings.decodeMode.first())
         val settingsKeys = settingsStorage.data.first().asMap().keys.map { it.name }
@@ -74,6 +75,26 @@ class DirectoryPositionStoreTest {
         assertTrue(settingsKeys.none { it.startsWith("position_") })
         assertTrue(positionKeys.isNotEmpty())
         assertTrue(positionKeys.all { it.startsWith("position_") })
+    }
+
+    @Test
+    fun `位置记录带上写入时的排序`() = runTest {
+        val position = DirectoryPosition("smb://nas/media/b.mkv", 48, SortOrder.LastModifiedNewestFirst)
+
+        store.save("smb://nas/media", "", position)
+
+        assertEquals(position, store.load("smb://nas/media", ""))
+    }
+
+    @Test
+    fun `没有排序的旧记录视为没有记录`() = runTest {
+        val storage = FakePreferencesDataStore()
+        storage.edit { preferences ->
+            preferences[DataStoreDirectoryPositionStore.positionKey("smb://nas/media", "")] =
+                "48\nsmb://nas/media/b.mkv"
+        }
+
+        assertNull(DataStoreDirectoryPositionStore(storage).load("smb://nas/media", ""))
     }
 
     @Test

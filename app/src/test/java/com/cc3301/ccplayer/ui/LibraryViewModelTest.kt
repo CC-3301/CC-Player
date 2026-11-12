@@ -609,7 +609,7 @@ class LibraryViewModelTest {
         val source = viewModel.sourcesState.value.smb.single()
         viewModel.openSource(source)
         advanceUntilIdle()
-        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/已删除.mkv", 16))
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/已删除.mkv", 16, SortOrder.NameAscending))
         advanceUntilIdle()
 
         viewModel.openSource(source)
@@ -636,6 +636,144 @@ class LibraryViewModelTest {
             "smb://nas/media/a.mkv",
             positions.load("smb://nas/media", "")?.entryLocation,
         )
+    }
+
+    @Test
+    fun `切排序后进入目录从顶部开始`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+            testVideo("c.mkv", "smb://nas/media/c.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 30)
+        advanceUntilIdle()
+
+        settings.setSortOrder(SortOrder.NameDescending)
+        advanceUntilIdle()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `切排序后在当前目录滚动再进出该目录按新排序的记录恢复`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+            testVideo("c.mkv", "smb://nas/media/c.mkv"),
+        )
+        openSmbForm(address = "nas", path = "media")
+        advanceUntilIdle()
+        val source = viewModel.sourcesState.value.smb.single()
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        settings.setSortOrder(SortOrder.NameDescending)
+        advanceUntilIdle()
+        viewModel.savePosition("smb://nas/media", "", "smb://nas/media/b.mkv", 24)
+        advanceUntilIdle()
+
+        viewModel.openSource(source)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 24), viewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `读取失败的空列表上切排序后重试仍从顶部开始`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        positions.save(
+            smbRoot.location,
+            "",
+            DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending),
+        )
+        val failing = createViewModel(
+            library = FailTimesMediaLibrary(DirectoryMediaLibrary(tree), failures = 1),
+            navigation = NavigationViewModel(),
+        )
+        val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
+        failing.openSource(source)
+        advanceUntilIdle()
+        assertTrue(failing.state.value.entries.isEmpty())
+
+        settings.setSortOrder(SortOrder.NameDescending)
+        advanceUntilIdle()
+        failing.retry()
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), failing.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `排序写入早于进入目录时该目录仍从顶部开始`() = runTest {
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        positions.save(
+            smbRoot.location,
+            "",
+            DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending),
+        )
+        val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
+        val gatedViewModel = createViewModel(library = gated, navigation = NavigationViewModel())
+        val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
+
+        settings.setSortOrder(SortOrder.NameDescending)
+        advanceUntilIdle()
+        gatedViewModel.openSource(source)
+        advanceUntilIdle()
+        assertTrue(gatedViewModel.state.value.loading)
+
+        gated.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), gatedViewModel.state.value.scrollTarget)
+    }
+
+    @Test
+    fun `首次套用排序偏好时记录里的排序不一致从顶部开始`() = runTest {
+        val seedStore = FakePreferencesDataStore()
+        val seedSettings = SettingsRepository(seedStore)
+        seedSettings.setSortOrder(SortOrder.NameDescending)
+        val gatedStore = GatedPreferencesDataStore(seedStore.data.first())
+        val gatedViewModel = createViewModel(
+            settings = SettingsRepository(gatedStore),
+            navigation = NavigationViewModel(),
+        )
+        tree.addDirectory(
+            smbRoot,
+            testVideo("a.mkv", "smb://nas/media/a.mkv"),
+            testVideo("b.mkv", "smb://nas/media/b.mkv"),
+        )
+        positions.save(
+            smbRoot.location,
+            "",
+            DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending),
+        )
+        val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
+
+        gatedViewModel.openSource(source)
+        advanceUntilIdle()
+        assertEquals(DirectoryScrollTarget(index = 1, offset = 40), gatedViewModel.state.value.scrollTarget)
+
+        gatedStore.gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), gatedViewModel.state.value.scrollTarget)
     }
 
     @Test
@@ -676,7 +814,7 @@ class LibraryViewModelTest {
             testVideo("a.mkv", "smb://nas/media/a.mkv"),
             testVideo("b.mkv", "smb://nas/media/b.mkv"),
         )
-        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40))
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending))
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
 
         gatedViewModel.openSource(source)
@@ -705,12 +843,12 @@ class LibraryViewModelTest {
             testVideo("ep10.mkv", "smb://nas/media/ep10.mkv"),
             testVideo("ep2.mkv", "smb://nas/media/ep2.mkv"),
         )
-        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/ep2.mkv", 8))
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/ep2.mkv", 8, SortOrder.NameDescending))
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
 
         gatedViewModel.openSource(source)
         advanceUntilIdle()
-        assertEquals(DirectoryScrollTarget(index = 0, offset = 8), gatedViewModel.state.value.scrollTarget)
+        assertEquals(DirectoryScrollTarget(index = 0, offset = 0), gatedViewModel.state.value.scrollTarget)
 
         gatedStore.gate.complete(Unit)
         advanceUntilIdle()
@@ -1080,7 +1218,7 @@ class LibraryViewModelTest {
         viewModel.scrollToTop()
         advanceUntilIdle()
 
-        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0), positions.load("smb://nas/media", ""))
+        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0, SortOrder.NameAscending), positions.load("smb://nas/media", ""))
     }
 
     @Test
@@ -1115,7 +1253,7 @@ class LibraryViewModelTest {
             testVideo("a.mkv", "smb://nas/media/a.mkv"),
             testVideo("b.mkv", "smb://nas/media/b.mkv"),
         )
-        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40))
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending))
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
         val gatedViewModel = createViewModel(library = gated)
         val source = ConnectionSource(SourceProtocol.Smb, "NAS", smbRoot.location, smbRoot)
@@ -1143,7 +1281,7 @@ class LibraryViewModelTest {
             testVideo("a.mkv", "smb://nas/media/a.mkv"),
             testVideo("b.mkv", "smb://nas/media/b.mkv"),
         )
-        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40))
+        positions.save(smbRoot.location, "", DirectoryPosition("smb://nas/media/b.mkv", 40, SortOrder.NameAscending))
         settings.setAutoRestorePosition(false)
         advanceUntilIdle()
         val gated = GatedMediaLibrary(DirectoryMediaLibrary(tree))
@@ -1184,8 +1322,8 @@ class LibraryViewModelTest {
         advanceUntilIdle()
 
         assertEquals(DirectoryScrollTarget(index = 0, offset = 0), viewModel.state.value.scrollTarget)
-        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0), viewModel.state.value.savedPosition)
-        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0), positions.load(smbRoot.location, ""))
+        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0, SortOrder.NameAscending), viewModel.state.value.savedPosition)
+        assertEquals(DirectoryPosition("smb://nas/media/a.mkv", 0, SortOrder.NameAscending), positions.load(smbRoot.location, ""))
 
         val recreated = createViewModel()
         advanceUntilIdle()
@@ -1208,7 +1346,7 @@ class LibraryViewModelTest {
         positions.save(
             localRoot.location,
             "剧集/第二季",
-            DirectoryPosition("content://root/媒体/剧集/第二季/第02集.mkv", 36),
+            DirectoryPosition("content://root/媒体/剧集/第二季/第02集.mkv", 36, SortOrder.NameAscending),
         )
         snapshots.save(
             NavigationSnapshot(
