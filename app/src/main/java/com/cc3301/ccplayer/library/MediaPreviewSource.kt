@@ -71,7 +71,7 @@ interface MediaPreviewSource {
      * 该条目是否已经开始解码。可见范围变化时，已开始的这一张跑完再走，
      * 排队中的直接丢弃；取消已开始的那一张会打断在途传输读、丢掉已解出的帧。
      */
-    fun isPreviewExtracting(file: MediaFile): Boolean = false
+    fun isPreviewExtracting(file: MediaFile): Boolean
 }
 
 /**

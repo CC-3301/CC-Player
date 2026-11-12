@@ -447,6 +447,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
@@ -479,6 +481,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 2, rowSize = 1)
@@ -510,6 +514,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(listOf(entries[0]), firstVisible = 0, lastVisible = 0, rowSize = 1)
@@ -546,6 +552,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
@@ -584,6 +592,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
         scheduler.update(entries, firstVisible = 0, lastVisible = 1, rowSize = 1)
@@ -624,6 +634,8 @@ class VisiblePreviewSchedulerTest {
             override fun beginVisiblePreview(file: MediaFile) {
                 states.beginVisible(file)
             }
+
+            override fun isPreviewExtracting(file: MediaFile): Boolean = false
 
             // 预取不参与这条用例的计数，也不改变调度状态。
             override suspend fun prefetch(file: MediaFile): MediaPreview =
@@ -748,6 +760,8 @@ private class LateCancelSource : MediaPreviewSource {
     override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+
+    override fun isPreviewExtracting(file: MediaFile): Boolean = false
 }
 
 /** 抽取等闸门放行；用来让任务集中进入完成回调。 */
@@ -767,6 +781,8 @@ private class CompletionGateSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+
+    override fun isPreviewExtracting(file: MediaFile): Boolean = false
 }
 
 /** 记录抽图开始顺序的抽取器，用来断言一屏可见项的出图顺序。 */

@@ -36,5 +36,7 @@ class MediaPreviewHolderTest {
 
     private class FakePreviewSource : MediaPreviewSource {
         override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(image = null, durationMillis = null)
+
+        override fun isPreviewExtracting(file: MediaFile): Boolean = false
     }
 }
