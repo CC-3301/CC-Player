@@ -56,8 +56,8 @@ class PlaybackControllerPlayerExitTest {
 
     @Test
     fun `离开播放页后自动下一集开启时播完继续`() {
-        // 离开播放页等同于 Surface 不可用：音频仍继续，播完按开关决定连播。
-        controller.setRenderSurfaceAvailable(false)
+        // 离开播放页继续播放：视频轨关闭，音频仍继续，播完按开关决定连播。
+        controller.setVideoTrackEnabled(false)
         controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
             mediaFile("a.mkv"),
@@ -73,7 +73,7 @@ class PlaybackControllerPlayerExitTest {
     @Test
     fun `离开播放页后自动下一集关闭时播完停止`() {
         controller.setAutoPlayNext(false)
-        controller.setRenderSurfaceAvailable(false)
+        controller.setVideoTrackEnabled(false)
         controller.openPlaylistForTest(TEST_ENTRY_GENERATION,
             listOf(mediaFile("a.mkv"), mediaFile("b.mkv")),
             mediaFile("a.mkv"),

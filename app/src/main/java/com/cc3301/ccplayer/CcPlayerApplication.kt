@@ -12,6 +12,7 @@ import com.cc3301.ccplayer.network.DataStoreBookmarkStore
 import com.cc3301.ccplayer.network.EncryptedCredentialStore
 import com.cc3301.ccplayer.network.NetworkSourceRepository
 import com.cc3301.ccplayer.network.RoutingMediaReads
+import com.cc3301.ccplayer.playback.SubtitleFonts
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbJConnector
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -40,6 +41,9 @@ class CcPlayerApplication : Application() {
 
     lateinit var diagnostics: Diagnostics
         private set
+
+    /** 字幕字体：进程启动时在后台释放，播放核心初始化前保证就绪。 */
+    val subtitleFonts: SubtitleFonts by lazy { SubtitleFonts(this, diagnostics) }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -81,6 +85,8 @@ class CcPlayerApplication : Application() {
         super.onCreate()
         diagnostics = Diagnostics(SessionFileSink(File(filesDir, Diagnostics.DIRECTORY_NAME)))
         installCrashHandler()
+        // 字体释放要早于 mpv 初始化，放到后台线程做，播放核心初始化时通常已经就绪。
+        scope.launch(Dispatchers.IO) { subtitleFonts.prepare() }
         scope.launch {
             var initialized = false
             var backoffMillis = INITIAL_RETRY_DELAY_MILLIS

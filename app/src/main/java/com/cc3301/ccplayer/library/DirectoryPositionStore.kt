@@ -9,8 +9,12 @@ import androidx.datastore.preferences.preferencesDataStore
 import java.util.Base64
 import kotlinx.coroutines.flow.first
 
-/** 一个目录的浏览位置：第一个可见条目与它上方的滚动偏移。 */
-data class DirectoryPosition(val entryLocation: String, val scrollOffset: Int)
+/** 一个目录的浏览位置：第一个可见条目、它上方的滚动偏移与写入时的排序。 */
+data class DirectoryPosition(
+    val entryLocation: String,
+    val scrollOffset: Int,
+    val sortOrder: SortOrder,
+)
 
 /** 目录位置记忆的存储接缝：按连接源身份与相对目录分别读写。 */
 interface DirectoryPositionStore {
@@ -64,13 +68,19 @@ class DataStoreDirectoryPositionStore(
         fun encodeSegment(value: String): String =
             Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray(Charsets.UTF_8))
 
-        fun encode(position: DirectoryPosition): String = "${position.scrollOffset}\n${position.entryLocation}"
+        fun encode(position: DirectoryPosition): String =
+            "${position.sortOrder.name}\n${position.scrollOffset}\n${position.entryLocation}"
 
         fun decode(value: String): DirectoryPosition? {
-            val separator = value.indexOf('\n')
-            if (separator < 0) return null
-            val offset = value.substring(0, separator).toIntOrNull() ?: return null
-            return DirectoryPosition(entryLocation = value.substring(separator + 1), scrollOffset = offset)
+            val parts = value.split('\n', limit = 3)
+            if (parts.size < 3) return null
+            val sortOrder = SortOrder.entries.firstOrNull { it.name == parts[0] } ?: return null
+            val offset = parts[1].toIntOrNull() ?: return null
+            return DirectoryPosition(
+                entryLocation = parts[2],
+                scrollOffset = offset,
+                sortOrder = sortOrder,
+            )
         }
     }
 }
@@ -83,18 +93,19 @@ fun relativeDirectoryPath(stack: List<MediaFile>): String =
 data class DirectoryScrollTarget(val index: Int, val offset: Int)
 
 /**
- * 由记录算出滚动目标：关闭记忆时回到顶部；记录条目还在时定位到它；
- * 条目已不存在时停在末尾；没有记录时也回到顶部。
+ * 由记录算出滚动目标：关闭记忆时回到顶部；记录的排序与当前排序不一致时视为没有记录、回到顶部；
+ * 记录条目还在时定位到它；条目已不存在时停在末尾；没有记录时也回到顶部。
  */
 fun directoryScrollTarget(
     entries: List<MediaFile>,
     position: DirectoryPosition?,
     restore: Boolean,
+    sortOrder: SortOrder,
 ): DirectoryScrollTarget? {
     if (entries.isEmpty()) return null
     val top = DirectoryScrollTarget(index = 0, offset = 0)
     if (!restore) return top
-    val saved = position ?: return top
+    val saved = position?.takeIf { it.sortOrder == sortOrder } ?: return top
     val index = entries.indexOfFirst { it.location == saved.entryLocation }
     return if (index >= 0) {
         DirectoryScrollTarget(index = index, offset = saved.scrollOffset)

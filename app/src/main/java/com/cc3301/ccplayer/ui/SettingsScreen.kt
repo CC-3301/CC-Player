@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -71,13 +70,14 @@ fun SettingsScreen(
     onSetDiagnosticsEnabled: (Boolean) -> Unit,
     onExportDiagnostics: () -> Unit,
     onClose: () -> Unit,
+    insetPadding: Modifier,
     modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .then(insetPadding),
     ) {
         ScreenHeader(
             title = stringResource(R.string.settings_open),

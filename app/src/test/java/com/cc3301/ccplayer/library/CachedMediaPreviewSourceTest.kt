@@ -122,7 +122,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `网络候选帧全为纯色时保持占位图`() = runTest {
+    fun `网络两个候选都纯色时用已解出的帧，不再追加候选`() = runTest {
         val solid = SolidNetworkPreviewExtractor()
         val bounded = CachedMediaPreviewSource(
             extractor = solid,
@@ -131,9 +131,8 @@ class CachedMediaPreviewSourceTest {
 
         val preview = bounded.preview(network("纯色.mkv"))
 
-        assertNull(preview.image)
-        assertEquals(3, solid.decodes)
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertNotNull(preview.image)
+        assertEquals(2, solid.decodes)
     }
 
     @Test
@@ -197,48 +196,39 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `修改时间缺失时按大小与有效期缓存`() = runTest {
+    fun `修改时间缺失时按位置与大小缓存且不设有效期`() = runTest {
         var now = 1_000L
-        val fallback = CachedMediaPreviewSource(
-            extractor = extractor,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined, clock = { now }),
-        )
+        val cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined, clock = { now })
+        val fallback = CachedMediaPreviewSource(extractor = extractor, cache = cache)
         extractor.imageBytes = byteArrayOf(1)
 
         val first = fallback.preview(network("电影.mkv", lastModified = 0))
-        now += MISSING_MODIFIED_VALIDITY_MILLIS - 1
+        now += 365L * 24 * 60 * 60 * 1000
         val second = fallback.preview(network("电影.mkv", lastModified = 0))
 
         assertNotNull(first.image)
         assertEquals(first.image, second.image)
         assertEquals(1, extractor.imageRequests.size)
         assertEquals(1, imageFileCount())
-
-        now += 2
-        extractor.imageBytes = byteArrayOf(2)
-        val expired = fallback.preview(network("电影.mkv", lastModified = 0))
-
-        assertArrayEquals(byteArrayOf(2), expired.image!!.readBytes())
-        assertEquals(2, extractor.imageRequests.size)
     }
 
     @Test
-    fun `修改时间缺失时有效期变化不命中旧缓存`() = runTest {
+    fun `修改时间缺失时策略版本变化不命中旧缓存`() = runTest {
         val cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined, clock = { 1_000L })
-        val shortLived = CachedMediaPreviewSource(
+        val old = CachedMediaPreviewSource(
             extractor = extractor,
             cache = cache,
-            policy = ThumbnailPolicy(missingModifiedValidityMillis = 1_000),
+            policy = ThumbnailPolicy(version = 4),
         )
-        val longLived = CachedMediaPreviewSource(
+        val current = CachedMediaPreviewSource(
             extractor = extractor,
             cache = cache,
-            policy = ThumbnailPolicy(missingModifiedValidityMillis = 2_000),
+            policy = ThumbnailPolicy(version = 5),
         )
         extractor.imageBytes = byteArrayOf(1)
 
-        shortLived.preview(network("电影.mkv", lastModified = 0))
-        longLived.preview(network("电影.mkv", lastModified = 0))
+        old.preview(network("电影.mkv", lastModified = 0))
+        current.preview(network("电影.mkv", lastModified = 0))
 
         assertEquals(2, extractor.imageRequests.size)
         assertEquals(2, imageFileCount())
@@ -455,7 +445,7 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `无图条目修改时间缺失且有效期到期后重新抽取`() = runTest {
+    fun `无图条目修改时间缺失时命中缓存且不设有效期`() = runTest {
         var now = 1_000L
         val cache = ThumbnailCache(
             directory = directory,
@@ -476,16 +466,10 @@ class CachedMediaPreviewSourceTest {
         assertNull(bounded.preview(file).image)
         assertEquals(1, extractor.imageRequests.size)
 
-        now += MISSING_MODIFIED_VALIDITY_MILLIS - 1
+        // 修改时间缺失也不设有效期：很久以后仍按缓存键命中，不重抽。
+        now += 365L * 24 * 60 * 60 * 1000
         assertNull(bounded.preview(file).image)
         assertEquals(1, extractor.imageRequests.size)
-
-        now += 2
-        extractor.imageBytes = byteArrayOf(1, 2)
-        val fresh = bounded.preview(file)
-
-        assertArrayEquals(byteArrayOf(1, 2), fresh.image!!.readBytes())
-        assertEquals(2, extractor.imageRequests.size)
     }
 
     @Test
@@ -536,7 +520,8 @@ class CachedMediaPreviewSourceTest {
 
         assertNull(bounded.preview(file).image)
         assertEquals(1, tracker.requests)
-        assertEquals(0, directory.listFiles().orEmpty().count { it.name.endsWith(".meta") })
+        // 抽取失败只落失败记录，不写图片缓存，也不写「无图」。
+        assertEquals(0, imageFileCount())
 
         now += 30_000
         assertNull(bounded.preview(file).image)
@@ -563,7 +548,7 @@ class CachedMediaPreviewSourceTest {
         assertNull(failed.image)
         assertTrue("失败结果交给调度器重试", failed.retryable)
         assertEquals(1, tracker.requests)
-        assertTrue("失败不落缓存", directory.listFiles().orEmpty().isEmpty())
+        assertTrue("失败只落失败记录，不写图片缓存", imageFileCount() == 0)
 
         // 重试节奏由可见请求调度器安排，这里再请求就立刻重抽。
         assertNull(bounded.preview(file).image)
@@ -596,7 +581,7 @@ class CachedMediaPreviewSourceTest {
             val failed = bounded.preview(file)
 
             assertNull(failed.image)
-            assertTrue(directory.listFiles().isNullOrEmpty())
+            assertEquals(0, imageFileCount())
 
             File(file.location).writeBytes(byteArrayOf(1, 2, 3))
             now += 30_000
@@ -606,6 +591,37 @@ class CachedMediaPreviewSourceTest {
         } finally {
             filesDirectory.deleteRecursively()
         }
+    }
+
+    @Test
+    fun `失败结果落盘，重启后按退避时间跳过`() = runTest {
+        var now = 1_000L
+        fun newSource(): CachedMediaPreviewSource = CachedMediaPreviewSource(
+            extractor = extractor,
+            cache = ThumbnailCache(
+                directory = directory,
+                maxBytes = 1 shl 20,
+                ioDispatcher = Dispatchers.Unconfined,
+                clock = { now },
+            ),
+            wallClockMillis = { now },
+            backgroundScope = unconfinedBackgroundScope,
+        )
+        extractor.imageFailure = IOException("打开数据源失败")
+        val file = local("电影.mkv", lastModified = 1_000)
+        assertNull(newSource().preview(file).image)
+
+        // 重启：失败记录在退避窗口内，不重复抽取。
+        extractor.imageFailure = null
+        extractor.imageBytes = byteArrayOf(7)
+        now += 500
+        assertNull(newSource().preview(file).image)
+        assertEquals(1, extractor.imageRequests.size)
+
+        // 退避窗口过后重新抽取，成功后覆盖失败记录。
+        now += 1_000
+        assertArrayEquals(byteArrayOf(7), newSource().preview(file).image!!.readBytes())
+        assertEquals(2, extractor.imageRequests.size)
     }
 
     @Test
@@ -896,7 +912,7 @@ class CachedMediaPreviewSourceTest {
         val preview = source.preview(network("电影.mkv"))
 
         assertNull(preview.image)
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertTrue("失败不写图片缓存", imageFileCount() == 0)
     }
 
     @Test
@@ -906,7 +922,7 @@ class CachedMediaPreviewSourceTest {
         val preview = source.preview(network("电影.mkv"))
 
         assertNull(preview.image)
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertTrue("超时不写图片缓存", imageFileCount() == 0)
     }
 
     @Test
@@ -1077,22 +1093,6 @@ class CachedMediaPreviewSourceTest {
         )
         assertNotNull(afterRestart.preview(file).image)
         assertEquals(1, restarted.imageRequests.size)
-    }
-
-    @Test
-    fun `失败结果仅本次运行内记忆，重启后重新确认`() = runTest {
-        extractor.imageFailure = MediaSourceException(MediaFailure.Unreachable, "连不上")
-        val file = network("失败.mkv")
-
-        assertNull(source.preview(file).image)
-        assertTrue(directory.listFiles().isNullOrEmpty())
-
-        val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
-        val afterRestart = CachedMediaPreviewSource(
-            extractor = restarted,
-            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-        )
-        assertNotNull(afterRestart.preview(file).image)
     }
 
     @Test
@@ -1748,7 +1748,7 @@ class CachedMediaPreviewSourceTest {
         }
         assertFalse("重试用尽后保持占位图", source.preview(file).retryable)
         assertEquals(4, extractor.imageRequests.size)
-        assertTrue("抽取失败不写无图缓存", directory.listFiles().isNullOrEmpty())
+        assertTrue("抽取失败不写无图缓存与图片缓存", imageFileCount() == 0)
     }
 
     @Test

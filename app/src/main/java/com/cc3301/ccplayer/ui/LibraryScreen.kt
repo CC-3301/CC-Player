@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -85,6 +84,7 @@ import com.cc3301.ccplayer.ui.theme.AppSpacing
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 
 /** 浏览页条目保留白色点击涟漪；主题其它组件不显示按压反馈。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -109,6 +109,7 @@ fun LibraryScreen(
     onScrollToTop: () -> Unit,
     onRetry: () -> Unit,
     onSavePosition: (sourceLocation: String, relativePath: String, entryLocation: String, scrollOffset: Int) -> Unit,
+    insetPadding: Modifier,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -210,7 +211,7 @@ fun LibraryScreen(
         modifier = modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .safeDrawingPadding(),
+            .then(insetPadding),
     ) {
         ScreenHeader(
             title = state.currentDirectory?.name.orEmpty(),
@@ -372,45 +373,78 @@ private fun EntryArea(
     onOpenEntry: (MediaFile) -> Unit,
 ) {
     val entries = state.visibleEntries
-    when (state.viewMode) {
-        ViewMode.List -> LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = AppSpacing.Sm,
-                end = AppSpacing.Sm,
-                top = 6.dp,
-                bottom = 28.dp,
-            ),
-        ) {
-            listItems(entries, key = { _, entry -> entry.location }) { index, entry ->
-                EntryRow(
-                    entry = entry,
-                    index = index,
-                    previewScheduler = previewScheduler,
-                    previewReloadTick = previewReloadTick,
-                    onOpenEntry = onOpenEntry,
-                )
+    val quickBar = remember { QuickScrollBarVisibility() }
+
+    // 滚动时快速滚动条出现；进入目录的首次布局不算滚动。
+    LaunchedEffect(state.viewMode) {
+        snapshotFlow {
+            if (state.viewMode == ViewMode.List) {
+                listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            } else {
+                gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset
             }
+        }.drop(1).collect { quickBar.onScroll() }
+    }
+
+    when (state.viewMode) {
+        ViewMode.List -> Box(Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = AppSpacing.Sm,
+                    end = AppSpacing.Sm,
+                    top = 6.dp,
+                    bottom = 28.dp,
+                ),
+            ) {
+                listItems(entries, key = { _, entry -> entry.location }) { index, entry ->
+                    EntryRow(
+                        entry = entry,
+                        index = index,
+                        previewScheduler = previewScheduler,
+                        previewReloadTick = previewReloadTick,
+                        onOpenEntry = onOpenEntry,
+                    )
+                }
+            }
+            QuickScrollBarOverlay(
+                bar = quickBar,
+                itemCount = entries.size,
+                rowSize = 1,
+                firstVisibleIndex = { listState.firstVisibleItemIndex },
+                visibleItemCount = { listState.layoutInfo.visibleItemsInfo.size },
+                onLocate = { index -> listState.scrollToItem(index) },
+            )
         }
 
-        ViewMode.Grid -> LazyVerticalGrid(
-            columns = GridCells.Fixed(state.gridColumns),
-            state = gridState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            gridItems(entries, key = { _, entry -> entry.location }) { index, entry ->
-                EntryCard(
-                    entry = entry,
-                    index = index,
-                    previewScheduler = previewScheduler,
-                    previewReloadTick = previewReloadTick,
-                    onOpenEntry = onOpenEntry,
-                )
+        ViewMode.Grid -> Box(Modifier.fillMaxSize()) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(state.gridColumns),
+                state = gridState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = AppSpacing.Lg, vertical = AppSpacing.Sm),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                gridItems(entries, key = { _, entry -> entry.location }) { index, entry ->
+                    EntryCard(
+                        entry = entry,
+                        index = index,
+                        previewScheduler = previewScheduler,
+                        previewReloadTick = previewReloadTick,
+                        onOpenEntry = onOpenEntry,
+                    )
+                }
             }
+            QuickScrollBarOverlay(
+                bar = quickBar,
+                itemCount = entries.size,
+                rowSize = state.gridColumns,
+                firstVisibleIndex = { gridState.firstVisibleItemIndex },
+                visibleItemCount = { gridState.layoutInfo.visibleItemsInfo.size },
+                onLocate = { index -> gridState.scrollToItem(index) },
+            )
         }
     }
 }

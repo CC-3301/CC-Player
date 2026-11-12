@@ -75,15 +75,13 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `带有效期的条目从写入起算`() = runBlocking {
+    fun `缓存不设有效期，长时间后仍然命中`() = runBlocking {
         now = 1_000L
         cache.save("content://root/a.mkv", ByteArray(4))
 
-        now = 1_499L
-        assertNotNull(cache.file("content://root/a.mkv", maxAgeMillis = 500))
+        now = 365L * 24 * 60 * 60 * 1000
 
-        now = 1_501L
-        assertNull(cache.file("content://root/a.mkv", maxAgeMillis = 500))
+        assertNotNull(cache.file("content://root/a.mkv"))
     }
 
     @Test
@@ -119,7 +117,7 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `旧格式单行元数据视为时长未知`() = runBlocking {
+    fun `无法解析的元数据按时长未知处理`() = runBlocking {
         val key = "content://root/a.mkv"
         cache.save(key, ByteArray(4), durationMillis = 187_000)
         val image = cache.file(key)!!
@@ -133,7 +131,7 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `元数据第二行 null 表示确定无时长`() = runBlocking {
+    fun `时长行 null 表示确定无时长`() = runBlocking {
         cache.save("content://root/a.mkv", ByteArray(4), durationMillis = null)
 
         val entry = cache.entry("content://root/a.mkv")
@@ -409,7 +407,7 @@ class ThumbnailCacheTest {
             directory = directory,
             maxBytes = 1 shl 20,
             clock = { now },
-            maxNoImageEntries = 2,
+            maxMetadataEntries = 2,
         )
         capped.saveWithoutImage("content://root/命中甲.mp3", durationMillis = 1)
         now += 10
@@ -432,7 +430,7 @@ class ThumbnailCacheTest {
             directory = directory,
             maxBytes = 1 shl 20,
             clock = { now },
-            maxNoImageEntries = 2,
+            maxMetadataEntries = 2,
         )
         capped.saveWithoutImage("content://root/补写甲.mp3", durationKnown = false)
         now += 10
@@ -458,7 +456,7 @@ class ThumbnailCacheTest {
             directory = directory,
             maxBytes = 1 shl 20,
             clock = { now },
-            maxNoImageEntries = 2,
+            maxMetadataEntries = 2,
         )
         val imageKey = "content://root/共存图片.mkv"
         capped.save(imageKey, ByteArray(4), durationMillis = 9)
@@ -485,7 +483,7 @@ class ThumbnailCacheTest {
             directory = directory,
             maxBytes = 1 shl 20,
             clock = { now },
-            maxNoImageEntries = 3,
+            maxMetadataEntries = 3,
         )
         (1..5).forEach { index ->
             now += 10
@@ -505,7 +503,7 @@ class ThumbnailCacheTest {
         val capped = ThumbnailCache(
             directory = directory,
             maxBytes = 1,
-            maxNoImageEntries = 100,
+            maxMetadataEntries = 100,
         )
         (1..10).forEach { index ->
             capped.saveWithoutImage("content://root/仅元数据$index.mp3", durationMillis = index.toLong())
@@ -573,21 +571,51 @@ class ThumbnailCacheTest {
     }
 
     @Test
-    fun `补写时长沿用图片修改时间不续期`() = runBlocking {
+    fun `补写时长不刷新元数据的最近使用时间`() = runBlocking {
         val key = "content://root/沿用时间.mkv"
         now = 900L
         cache.save(key, ByteArray(4))
         val image = cache.file(key)!!
-        File(image.parentFile, image.name + ".meta").delete()
-        image.setLastModified(1_000L)
-        now = 1_200L
+        val metadata = File(image.parentFile, image.name + ".meta")
+        metadata.setLastModified(1_000L)
 
+        now = 1_200L
         cache.writeDuration(key, 187_000)
 
-        now = 1_400L
-        assertNotNull(cache.entry(key, maxAgeMillis = 500))
-        now = 1_501L
-        assertNull(cache.entry(key, maxAgeMillis = 500))
+        assertEquals(1_000L, metadata.lastModified())
+        assertEquals(187_000L, cache.entry(key)!!.durationMillis)
+    }
+
+    @Test
+    fun `失败记录落盘后可读出失败时间与已试次数`() = runBlocking {
+        cache.saveFailure("content://root/a.mkv", failedAtMillis = 5_000L, attempts = 2)
+
+        val entry = cache.entry("content://root/a.mkv")
+
+        assertNotNull(entry)
+        assertNull(entry!!.file)
+        assertTrue(!entry.noImage)
+        assertEquals(5_000L, entry.failure!!.failedAtMillis)
+        assertEquals(2, entry.failure!!.attempts)
+    }
+
+    @Test
+    fun `失败记录在启动清理后保留`() = runBlocking {
+        cache.saveFailure("content://root/a.mkv", failedAtMillis = 5_000L, attempts = 2)
+        val reopened = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now })
+
+        assertNotNull(reopened.entry("content://root/a.mkv"))
+    }
+
+    @Test
+    fun `成功封面覆盖失败记录`() = runBlocking {
+        cache.saveFailure("content://root/a.mkv", failedAtMillis = 5_000L, attempts = 2)
+
+        cache.save("content://root/a.mkv", ByteArray(4), durationMillis = 1_000)
+
+        val entry = cache.entry("content://root/a.mkv")
+        assertNotNull(entry!!.file)
+        assertNull(entry.failure)
     }
 
     private fun File.imageCount(): Int =

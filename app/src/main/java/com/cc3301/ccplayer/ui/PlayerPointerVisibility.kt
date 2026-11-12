@@ -10,12 +10,12 @@ import androidx.compose.ui.unit.Density
 /**
  * 播放页鼠标指针的显隐与自动隐藏计时。
  *
- * 指针在 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 内没有有效移动即隐藏。有效移动要求净位移达到
- * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）且这段累计持续
- * [PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS] 以上：位移按向量累加成净位移，反向的位移自然
- * 抵消、换向（含垂直）的位移继续累加；净位移反向越过起点、或相邻两次移动相隔超过窗口时，
- * 累计清零重开。
- * 指针随顶/底栏的实际可见性显隐，见 [pointerFollowsBars]；栏在场时指针直接跟随鼠标，不做判定。
+ * 指针静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 即隐藏。隐藏期间鼠标移动是否算有效移动只看直线
+ * 距离：起点取指针隐藏那一刻的坐标，起点到当前指针位置的直线距离达到
+ * [PlayerPointerMoveDeadZone]（按当前密度换算成像素）才让指针出现并更新起点。不按路径长度累加，
+ * 不设停顿重算，也不设反向清零，起点只在指针隐藏与判定有效时更新。
+ * 按住拖动期间既不唤出指针，也不重置隐藏计时；控制层在场时指针直接跟随鼠标，不走这条判据，见
+ * [pointerFollowsBars]。
  */
 class PlayerPointerVisibility(
     private val elapsedMillis: () -> Long = { SystemClock.elapsedRealtime() },
@@ -30,67 +30,41 @@ class PlayerPointerVisibility(
     var lastActivityAtMillis: Long = elapsedMillis()
         private set
 
-    /** 上一次移动事件的位置；进入播放页后清空，下一次移动只记位置。 */
+    /** 最近一次指针位置；隐藏时取它作为判定的起点。 */
     private var lastPosition: Offset? = null
 
-    /** 当前这段累计的净位移向量；为零表示没有正在累计的位移。 */
-    private var netMove: Offset = Offset.Zero
+    /** 判定的起点：指针隐藏那一刻的坐标，只在隐藏与判定有效时更新。 */
+    private var startPosition: Offset? = null
 
-    /** 当前这段净位移的起始时刻。 */
-    private var moveStartedAtMillis: Long = 0L
-
-    /** 上一次移动事件的时刻；为 null 表示这段累计已中断。 */
-    private var lastEventAtMillis: Long? = null
-
-    /** 指针进入播放页：指针出现，位移状态清空，进入后的第一次移动只记位置。 */
+    /** 指针进入播放页：指针出现，起点清空，下一次隐藏重新取起点。 */
     fun onPointerEnter() {
         lastPosition = null
-        netMove = Offset.Zero
-        lastEventAtMillis = null
+        startPosition = null
         show()
     }
 
     /**
-     * 指针移动：净位移越过死区并持续满窗口才算真的在动，此时指针出现并重新起算。
-     * 栏在场时不做判定，直接显示并重新计时。
+     * 指针移动：隐藏期间直线距离达到死区才算有效移动，指针出现并更新起点；可见时按这次移动重新
+     * 计时。按住拖动不参与判定，也不重置计时。栏在场时不做判定，直接跟随。
      */
-    fun onPointerMove(position: Offset, density: Density) {
-        val now = elapsedMillis()
-        val previous = lastPosition
+    fun onPointerMove(position: Offset, density: Density, pressed: Boolean) {
         lastPosition = position
 
         if (followsPointerDirectly) {
-            clearMove(now)
             show()
             return
         }
-        if (previous == null) {
-            lastEventAtMillis = now
-            clearMove(now)
+        if (pressed) return
+        if (visible) {
+            show()
             return
         }
 
-        val delta = position - previous
-        if (delta.getDistance() <= 0f) return
-
-        // 相邻移动相隔超过窗口：这段位移已经中断，累计清零、从这次事件重新起算。
-        val gap = lastEventAtMillis?.let { now - it }
-        lastEventAtMillis = now
-        if (gap == null || gap > PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS) clearMove(now)
-
-        val summed = netMove + delta
-        if (netMove.x * summed.x + netMove.y * summed.y <= 0f) {
-            // 净位移反向越过起点：以这次位移重新起算。
-            netMove = delta
-            moveStartedAtMillis = now
-        } else {
-            netMove = summed
-        }
-
+        val start = startPosition ?: position.also { startPosition = it }
         val deadZonePx = with(density) { PlayerPointerMoveDeadZone.toPx() }
-        if (netMove.getDistance() < deadZonePx) return
-        if (now - moveStartedAtMillis < PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS) return
-        clearMove(now)
+        if ((position - start).getDistance() < deadZonePx) return
+
+        startPosition = position
         show()
     }
 
@@ -100,11 +74,10 @@ class PlayerPointerVisibility(
         lastActivityAtMillis = elapsedMillis()
     }
 
-    /** 隐藏指针；隐藏后重新按位移判据判定。 */
+    /** 隐藏指针，起点取隐藏这一刻的坐标。 */
     fun hide() {
         visible = false
-        netMove = Offset.Zero
-        lastEventAtMillis = null
+        startPosition = lastPosition
     }
 
     /** 距自动隐藏的剩余毫秒；指针已隐藏时返回 -1。 */
@@ -125,12 +98,6 @@ class PlayerPointerVisibility(
     fun onControlLayerPresenceChanged(present: Boolean) {
         followsPointerDirectly = present
         if (present) show() else hide()
-    }
-
-    /** 清空这段净位移，起点改为 [now]。 */
-    private fun clearMove(now: Long) {
-        netMove = Offset.Zero
-        moveStartedAtMillis = now
     }
 }
 

@@ -192,7 +192,9 @@ data class LibraryState(
             val topped = loaded.scrolledToTop()
             topped.copy(
                 pendingScrollToTop = false,
-                savedPosition = topped.visibleEntries.firstOrNull()?.let { DirectoryPosition(it.location, 0) },
+                savedPosition = topped.visibleEntries.firstOrNull()?.let {
+                    DirectoryPosition(it.location, 0, sortOrder)
+                },
             )
         } else {
             loaded.retargeted()
@@ -203,7 +205,7 @@ data class LibraryState(
     private fun retargeted(
         restorePosition: Boolean = autoRestorePosition || restorePositionForced,
     ): LibraryState = copy(
-        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, restorePosition),
+        scrollTarget = directoryScrollTarget(visibleEntries, savedPosition, restorePosition, sortOrder),
         scrollRevision = scrollRevision + 1,
     )
 
@@ -217,7 +219,7 @@ data class LibraryState(
         savedPosition = if (pendingWhileLoading) {
             savedPosition
         } else {
-            visibleEntries.firstOrNull()?.let { DirectoryPosition(it.location, 0) } ?: savedPosition
+            visibleEntries.firstOrNull()?.let { DirectoryPosition(it.location, 0, sortOrder) } ?: savedPosition
         },
     )
 }
@@ -522,7 +524,7 @@ class LibraryViewModel(
         if (sourceLocation.isBlank()) return
         val current = _state.value
         if (current.loading || current.visibleEntries.none { it.location == entryLocation }) return
-        val position = DirectoryPosition(entryLocation, scrollOffset)
+        val position = DirectoryPosition(entryLocation, scrollOffset, current.sortOrder)
         _state.update { current ->
             if (current.sourceLocation == sourceLocation && relativeDirectoryPath(current.stack) == relativePath) {
                 val index = current.visibleEntries.indexOfFirst { it.location == entryLocation }

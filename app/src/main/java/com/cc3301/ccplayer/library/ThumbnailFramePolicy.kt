@@ -3,7 +3,7 @@ package com.cc3301.ccplayer.library
 import java.io.IOException
 
 /** 抽帧策略版本；策略变化时缓存键随之变化。 */
-internal const val THUMBNAIL_POLICY_VERSION = 4
+internal const val THUMBNAIL_POLICY_VERSION = 5
 
 /** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
 internal const val THUMBNAIL_TARGET_WIDTH = 512
@@ -21,7 +21,7 @@ internal const val THUMBNAIL_MAX_WIDTH = 512
 internal const val THUMBNAIL_JPEG_QUALITY = 85
 
 /** 本地视频最多抽取的帧数。 */
-internal const val LOCAL_FRAME_COUNT = 3
+internal const val LOCAL_FRAME_COUNT = 2
 
 /** 网络单帧的最早位置：1 秒。 */
 internal const val NETWORK_MIN_FRAME_POSITION_MICROS = 1_000_000L
@@ -34,9 +34,6 @@ internal const val FALLBACK_FRAME_FRACTION = 1.0 / 3.0
 
 /** 时长未知时依次尝试的抽帧位置（微秒）；从片头开始，最后一个用于兜底。 */
 private val UNKNOWN_DURATION_POSITIONS_MICROS = listOf(0L, 1_000_000L, 3_000_000L, 5_000_000L)
-
-/** 修改时间缺失时缓存键的有效期。 */
-internal const val MISSING_MODIFIED_VALIDITY_MILLIS = 24 * 60 * 60 * 1000L
 
 /** 纯色判定：采样亮度的最大值与最小值之差小于该值视为纯色。 */
 internal const val SOLID_LUMINANCE_RANGE = 16
@@ -73,8 +70,8 @@ internal fun framePositions(durationMillis: Long, frameCount: Int): List<FramePo
     }.distinctBy { it.micros }
 }
 
-/** 主候选是纯色帧时依次退到的位置（微秒）。 */
-private val NETWORK_FALLBACK_FRAME_POSITION_MICROS = listOf(60_000_000L, 90_000_000L)
+/** 主候选不合格时退到的位置（微秒）：60 秒。 */
+private val NETWORK_FALLBACK_FRAME_POSITION_MICROS = listOf(60_000_000L)
 
 /**
  * 网络主候选位置（微秒）：`min(max(1% 时长, 1 秒), 30 秒)`；时长未知时取 1 秒，不取片头。
@@ -86,15 +83,16 @@ internal fun networkFramePosition(durationMillis: Long?): Long {
         ?: NETWORK_MIN_FRAME_POSITION_MICROS
 }
 
-/** 网络抽帧候选位置（微秒）：主候选之后依次试 60 秒与 90 秒，最多三个。 */
+/** 网络抽帧候选位置（微秒）：主候选之后退到 60 秒，最多两个。 */
 internal fun networkFrameCandidates(durationMillis: Long?): List<Long> =
     listOf(networkFramePosition(durationMillis)) + NETWORK_FALLBACK_FRAME_POSITION_MICROS
 
 /**
- * 网络抽帧：按候选位置依次解码，取第一个非纯色帧；三个候选都不合格时返回 null，界面保持占位图。
+ * 网络抽帧：按候选位置依次解码，取第一个可用帧。
  * 只有黑帧或纯色帧才退到下一个候选：候选位置是给「画面不可用」准备的，
- * 某个位置解不出图说明这一帧抽不出来，换位置不改变结果，直接按抽取失败收尾。
- * 不合格帧在换下一个候选前由 [release] 回收。
+ * 某个位置解不出图说明这一帧抽不出来，换位置不改变结果，直接按抽取失败收尾（返回 null）。
+ * 候选都解码出来仍不合格时直接交出最后解出的那一帧，不再追加候选：
+ * 宁可偶尔偏暗，也不为躲黑帧多一次网络寻址。不合格帧由 [release] 回收。
  */
 internal suspend fun <T> extractNetworkFrame(
     positions: List<Long>,
@@ -103,12 +101,17 @@ internal suspend fun <T> extractNetworkFrame(
     release: (T) -> Unit = {},
     isDark: (T) -> Boolean = { false },
 ): T? {
+    var lastDecoded: T? = null
     for (micros in positions) {
         val frame = decode(micros) ?: return null
-        if (!isSolid(frame) && !isDark(frame)) return frame
-        release(frame)
+        if (!isSolid(frame) && !isDark(frame)) {
+            lastDecoded?.let(release)
+            return frame
+        }
+        lastDecoded?.let(release)
+        lastDecoded = frame
     }
-    return null
+    return lastDecoded
 }
 
 /** 按位置解码候选帧；解不出的位置直接丢弃。 */

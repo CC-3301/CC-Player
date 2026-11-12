@@ -142,7 +142,7 @@ class PlayerGesturesTest {
     }
 
     @Test
-    fun `加载阶段按表格放行操作与外观`() {
+    fun `加载阶段按表格放行可点操作`() {
         val initialLoading = setOf(
             PlayerAction.Back,
             PlayerAction.More,
@@ -153,7 +153,6 @@ class PlayerGesturesTest {
         val switchingOrRestoring = initialLoading + setOf(
             PlayerAction.Previous,
             PlayerAction.Next,
-            PlayerAction.PlayPause,
         )
         data class LoadingCase(
             val name: String,
@@ -175,21 +174,61 @@ class PlayerGesturesTest {
                 assertEquals(
                     "${case.name}/${action.name}",
                     expected,
-                    actionAllowed(action, case.phase),
-                )
-                assertEquals(
-                    "${case.name}/${action.name} 外观",
-                    expected,
-                    actionLooksEnabled(action, true, true, case.phase),
+                    actionEnabled(
+                        action,
+                        interactive = true,
+                        canGoPrevious = true,
+                        canGoNext = true,
+                        phase = case.phase,
+                    ),
                 )
             }
         }
 
         // 上一集/下一集在列表边界始终置灰，与加载阶段无关。
-        assertFalse(actionLooksEnabled(PlayerAction.Previous, false, true, PlayerScreenPhase.Ready))
-        assertFalse(actionLooksEnabled(PlayerAction.Next, true, false, PlayerScreenPhase.Ready))
-        assertTrue(actionLooksEnabled(PlayerAction.Previous, true, false, PlayerScreenPhase.Ready))
-        assertTrue(actionLooksEnabled(PlayerAction.Next, false, true, PlayerScreenPhase.Ready))
+        assertFalse(actionEnabled(PlayerAction.Previous, true, false, true, PlayerScreenPhase.Ready))
+        assertFalse(actionEnabled(PlayerAction.Next, true, true, false, PlayerScreenPhase.Ready))
+        assertTrue(actionEnabled(PlayerAction.Previous, true, true, false, PlayerScreenPhase.Ready))
+        assertTrue(actionEnabled(PlayerAction.Next, true, false, true, PlayerScreenPhase.Ready))
+    }
+
+    @Test
+    fun `栏不可交互时所有操作都置灰且点不动`() {
+        PlayerScreenPhase.entries.forEach { phase ->
+            PlayerAction.entries.forEach { action ->
+                assertFalse(
+                    "${phase.name}/${action.name}",
+                    actionEnabled(
+                        action,
+                        interactive = false,
+                        canGoPrevious = true,
+                        canGoNext = true,
+                        phase = phase,
+                    ),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `旋转进度条与播放列表只在就绪时可用`() {
+        listOf(PlayerAction.Rotate, PlayerAction.Seek, PlayerAction.Playlist).forEach { action ->
+            PlayerScreenPhase.entries.forEach { phase ->
+                assertEquals(
+                    "${action.name}/${phase.name}",
+                    phase == PlayerScreenPhase.Ready,
+                    actionAllowed(action, phase),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `切集与恢复期间播放暂停按不可用外观置灰并拦截`() {
+        listOf(PlayerScreenPhase.Switching, PlayerScreenPhase.Restoring).forEach { phase ->
+            assertFalse(actionAllowed(PlayerAction.PlayPause, phase))
+            assertFalse(actionEnabled(PlayerAction.PlayPause, true, true, true, phase))
+        }
     }
 
     @Test

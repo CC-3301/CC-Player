@@ -194,6 +194,10 @@ fun playerPressFeedbackEnabled(target: PlayerPressTarget): Boolean = when (targe
     -> false
 }
 
+/** 该控件此刻是否显示按压反馈：目标区域支持反馈，且点击未被拦下。 */
+fun playerPressFeedbackShown(target: PlayerPressTarget, enabled: Boolean): Boolean =
+    enabled && playerPressFeedbackEnabled(target)
+
 /** 播放页按压涟漪颜色。 */
 val PlayerPressRippleColor = Color.White
 
@@ -289,17 +293,17 @@ val PlayerSeekHintLineGap = 6.dp
 /** 播放页内鼠标静止多久后隐藏指针。 */
 const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
 
-/** 指针位移死区：朝同一方向的净位移要达到它才算移动，来回抵消的抖动不计数。 */
-val PlayerPointerMoveDeadZone = 10.dp
-
-/** 指针持续位移窗口：同向净位移要持续它以上才算真的在动，不到窗口就反向的位移不算。 */
-const val PLAYER_POINTER_SUSTAINED_MOVE_WINDOW_MILLIS = 150L
+/** 指针位移死区：指针隐藏后，起点到当前指针位置的直线距离要达到它才唤出指针。 */
+val PlayerPointerMoveDeadZone = 100.dp
 
 /** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
 val PlayerSeekDragDeadZone = 3.dp
 
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
+
+/** 滚轮跳转提示的显示时长：一格当场落定，提示按这段时间收起。 */
+const val SEEK_HINT_VISIBLE_MILLIS = 1_000L
 
 /**
  * 落定通知是否该撤掉界面的进度保持值：只有比已处理过的通知更新的 id 才撤。

@@ -1,10 +1,12 @@
 package com.cc3301.ccplayer.playback
 
 import android.content.Context
+import android.system.Os
 import android.view.Surface
 import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import `is`.xyz.mpv.MPVLib
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -23,6 +25,7 @@ class MpvPlaybackEngine(
     private val context: Context,
     private val cacheDir: String,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    private val subtitleFonts: SubtitleFonts,
 ) : PlaybackEngine, MPVLib.EventObserver {
 
     private var listener: PlaybackEngine.Listener? = null
@@ -153,6 +156,10 @@ class MpvPlaybackEngine(
     )
 
     fun initialize() {
+        // 字体必须早于 mpv 初始化落盘：libass 在初始化时建立字体数据库。
+        val fontsDirectory = subtitleFonts.prepare()
+        // config=no 时 mpv 不从配置目录取 fonts.conf，fontconfig 改为读这个环境变量。
+        Os.setenv("FONTCONFIG_FILE", SubtitleFonts.configFile(fontsDirectory).absolutePath, true)
         // 上一次释放的销毁在后台收尾：等待有上限，超时只留诊断。
         val generation = nativeCore.beginCreate(NATIVE_CREATE_WAIT_MILLIS) {
             diagnostics.log("创建: 上一次释放的销毁未在 ${NATIVE_CREATE_WAIT_MILLIS}ms 内收尾，继续尝试创建")
@@ -162,15 +169,16 @@ class MpvPlaybackEngine(
             return
         }
         try {
-            createNativeCore()
+            createNativeCore(fontsDirectory)
         } finally {
             nativeCore.finishCreate()
         }
     }
 
-    private fun createNativeCore() {
+    private fun createNativeCore(subtitleFontsDir: File) {
         MPVLib.create(context.applicationContext)
-        MpvOptions.initial(cacheDir).forEach { (option, value) -> MPVLib.setOptionString(option, value) }
+        MpvOptions.initial(cacheDir, subtitleFontsDir.absolutePath, diagnostics.enabled)
+            .forEach { (option, value) -> MPVLib.setOptionString(option, value) }
         MPVLib.init()
         MPVLib.addObserver(this)
         MPVLib.addLogObserver(errorLog)
@@ -423,6 +431,11 @@ class MpvPlaybackEngine(
 
     override fun disableSubtitles() {
         MPVLib.setPropertyString(SID_PROPERTY, SID_OFF)
+    }
+
+    /** 关闭视频轨只保留音频，或重新选回视频轨；Surface 与视频输出都保持原样。 */
+    override fun setVideoTrackEnabled(enabled: Boolean) {
+        MPVLib.setPropertyString(VID_PROPERTY, if (enabled) VID_AUTO else VID_OFF)
     }
 
     /**
@@ -1098,6 +1111,7 @@ class MpvPlaybackEngine(
         const val EOF_REACHED_PROPERTY = "eof-reached"
         const val PATH_PROPERTY = "path"
         const val SID_PROPERTY = "sid"
+        const val VID_PROPERTY = "vid"
         const val TRACK_COUNT_PROPERTY = "track-list/count"
         const val TYPE_ENTRY = "type"
         const val ID_ENTRY = "id"
@@ -1112,6 +1126,12 @@ class MpvPlaybackEngine(
 
         /** `sid` 取该值表示不显示字幕。 */
         const val SID_OFF = "no"
+
+        /** `vid` 取该值表示按默认规则自动选择视频轨。 */
+        const val VID_AUTO = "auto"
+
+        /** `vid` 取该值表示不选视频轨，只保留音频。 */
+        const val VID_OFF = "no"
     }
 }
 

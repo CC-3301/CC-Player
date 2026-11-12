@@ -66,7 +66,7 @@ internal class Media3VideoFrameExtractor(
         return compress(chosen, decoded)
     }
 
-    /** 网络视频：按候选位置逐个解码，取第一张可用帧；全部不合格时返回 null（保持占位图）。 */
+    /** 网络视频：按候选位置逐个解码，取第一张可用帧；候选都解出来仍不合格时用最后解出的那一帧。 */
     suspend fun networkImage(
         file: MediaFile,
         source: ByteSource,
