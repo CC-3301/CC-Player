@@ -3,9 +3,13 @@ package com.cc3301.ccplayer.smb
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import java.io.Closeable
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.delay
 
-/** 假连接器：用「共享 + 路径 → 子项」的映射代替真 SMB 服务器。 */
+/**
+ * 假连接器：用「共享 + 路径 → 子项」的映射代替真 SMB 服务器。
+ * 并发测试里连接与关闭来自多条线程，记录事件的列表用写时复制。
+ */
 class FakeSmbConnector : SmbConnector {
 
     var failure: MediaSourceException? = null
@@ -14,10 +18,10 @@ class FakeSmbConnector : SmbConnector {
     var listFailure: Throwable? = null
 
     /** 每次连接用到的用户名与密码。 */
-    val logins = mutableListOf<Pair<String, String?>>()
+    val logins = CopyOnWriteArrayList<Pair<String, String?>>()
 
     /** 已建立连接时给的共享名。 */
-    val shares = mutableListOf<String>()
+    val shares = CopyOnWriteArrayList<String>()
 
     /** 服务器共享枚举返回的名称。 */
     var shareNames: List<String> = emptyList()
@@ -65,10 +69,10 @@ class FakeSmbConnector : SmbConnector {
     val allHandles = mutableListOf<RecordingSmbHandle>()
 
     /** 连接与句柄的关闭顺序。 */
-    val closeOrder = mutableListOf<String>()
+    val closeOrder = CopyOnWriteArrayList<String>()
 
     /** 被关掉的连接属于哪个共享，用来断言淘汰选中了哪一条会话。 */
-    val closedShares = mutableListOf<String>()
+    val closedShares = CopyOnWriteArrayList<String>()
 
     fun addDirectory(share: String, path: String, vararg children: SmbEntry): FakeSmbConnector {
         childrenByPath["$share/$path"] = children.toList()
