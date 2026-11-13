@@ -825,7 +825,7 @@ class CachedMediaPreviewSourceTest {
         job.cancel()
         job.join()
 
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertEquals("取消后不写缓存条目", 0, cacheFileCount())
     }
 
     @Test
@@ -839,7 +839,7 @@ class CachedMediaPreviewSourceTest {
         job.cancel()
         job.join()
 
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertEquals("取消后不写缓存条目", 0, cacheFileCount())
     }
 
     @Test
@@ -1083,7 +1083,7 @@ class CachedMediaPreviewSourceTest {
         assertNull(source.preview(file).image)
         assertNull(source.preview(file).image)
         assertEquals(1, extractor.imageRequests.size)
-        assertTrue(directory.listFiles().isNullOrEmpty())
+        assertEquals("无图不落缓存条目", 0, cacheFileCount())
 
         // 新实例相当于重启：无图结果不被持久化，重新确认。
         val restarted = FakeMediaPreviewExtractor(imageBytes = byteArrayOf(1))
@@ -1687,6 +1687,12 @@ class CachedMediaPreviewSourceTest {
     private fun imageFileCount(): Int =
         directory.listFiles().orEmpty().count { file -> file.name.endsWith(".img") }
 
+    /** 缓存条目文件数；版本标记不算条目。 */
+    private fun cacheFileCount(): Int =
+        directory.listFiles().orEmpty().count { file ->
+            file.name.endsWith(".img") || file.name.endsWith(".meta")
+        }
+
     private fun metadataFile(): File =
         directory.listFiles().orEmpty().first { file -> file.name.endsWith(".meta") }
 
@@ -1752,10 +1758,11 @@ class CachedMediaPreviewSourceTest {
 
     @Test
     fun `失败记录的退避窗口按 1 秒、3 秒、9 秒递进`() {
-        assertEquals(1_000L, failureBackoffMillis(1))
-        assertEquals(3_000L, failureBackoffMillis(2))
-        assertEquals(9_000L, failureBackoffMillis(3))
-        assertEquals("次数超过重试上限不再加长", 9_000L, failureBackoffMillis(4))
+        assertEquals(1_000L, PreviewRetryPolicy.backoffMillis(1))
+        assertEquals(3_000L, PreviewRetryPolicy.backoffMillis(2))
+        assertEquals(9_000L, PreviewRetryPolicy.backoffMillis(3))
+        assertEquals("次数超过重试上限不再加长", 9_000L, PreviewRetryPolicy.backoffMillis(4))
+        assertEquals("重试次数上限取递进档数", 3, PreviewRetryPolicy.maxRetries)
     }
 
     @Test
@@ -1843,7 +1850,7 @@ class CachedMediaPreviewSourceTest {
 
         assertNull(preview.image)
         assertEquals("准备为空时不得另开句柄取图", 0, imageCalls)
-        assertTrue("无图不落缓存", directory.listFiles().isNullOrEmpty())
+        assertEquals("无图不落缓存条目", 0, cacheFileCount())
     }
 
     @Test

@@ -556,7 +556,7 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): LoadedPreview {
-        // 打开数据源有上限：打开是取消不掉的阻塞调用，超时只停止等待。
+        // 打开数据源不设名额：打开是取消不掉的阻塞调用，等待有上限，超时只停止等待。
         val openStarted = monotonicClockMillis()
         val prepared = (try {
             openOutsideRequest(file, priority)
@@ -904,18 +904,25 @@ internal fun thumbnailCacheKey(
 internal fun systemMonotonicMillis(): Long = System.nanoTime() / 1_000_000
 
 /**
- * 失败后的递进重试间隔：第 n 次失败等 [RETRY_STEPS_MILLIS] 的第 n 档，本地与网络同一套。
+ * 失败重试节奏：第 n 次失败等第 n 档间隔，档数就是单个条目的重试次数上限，本地与网络同一套。
  * 落盘的失败记录按同一套窗口跳过，重启后落在窗口内的失败项不重试，窗口过后随第一屏重新抽取。
  */
-internal fun failureBackoffMillis(attempts: Int): Long =
-    RETRY_STEPS_MILLIS[(attempts - 1).coerceIn(0, RETRY_STEPS_MILLIS.lastIndex)]
+internal object PreviewRetryPolicy {
+
+    /** 递进的三档间隔：1 秒、3 秒、9 秒。 */
+    private val STEPS_MILLIS = longArrayOf(1_000L, 3_000L, 9_000L)
+
+    /** 单个条目最多重试几次：首发之后按档数重试。 */
+    val maxRetries: Int get() = STEPS_MILLIS.size
+
+    /** 第 [attempts] 次失败后等多久再试；超出档数按最后一档。 */
+    fun backoffMillis(attempts: Int): Long =
+        STEPS_MILLIS[(attempts - 1).coerceIn(0, STEPS_MILLIS.lastIndex)]
+}
 
 /** 失败记录是否还在退避窗口内。 */
 internal fun CachedFailure.isWithinBackoff(nowMillis: Long): Boolean =
-    nowMillis - failedAtMillis < failureBackoffMillis(attempts)
-
-/** 递进重试的三档间隔：1 秒、3 秒、9 秒。 */
-private val RETRY_STEPS_MILLIS = longArrayOf(1_000L, 3_000L, 9_000L)
+    nowMillis - failedAtMillis < PreviewRetryPolicy.backoffMillis(attempts)
 
 /** 当前可见与预取范围快照。 */
 private data class PreviewWindow(
