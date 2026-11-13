@@ -497,11 +497,11 @@ class VisiblePreviewSchedulerTest {
         requests.forEach { it.await() }
 
         assertEquals("1 出图后才轮到 0 的重试", 0, order.last())
-        assertEquals("首次一次加 5 次重试", 6, order.count { it == 0 })
+        assertEquals("首次一次加 3 次重试", 4, order.count { it == 0 })
     }
 
     @Test
-    fun `失败先跳过，可见项出完后按 1 到 5 秒递进重试且最多 5 次`() = runTest {
+    fun `失败先跳过，可见项出完后按 1 秒、3 秒、9 秒递进重试且最多 3 次`() = runTest {
         val times = mutableListOf<Long>()
         val states = RetryStates()
         val source = object : MediaPreviewSource {
@@ -524,10 +524,10 @@ class VisiblePreviewSchedulerTest {
         advanceUntilIdle()
         assertNull(request.await().image)
 
-        assertEquals("首次一次加 5 次重试", 6, times.size)
+        assertEquals("首次一次加 3 次重试", 4, times.size)
         assertEquals(
-            "递进间隔为 1s、2s、3s、4s、5s",
-            listOf(1_000L, 2_000L, 3_000L, 4_000L, 5_000L),
+            "递进间隔为 1s、3s、9s",
+            listOf(1_000L, 3_000L, 9_000L),
             times.zipWithNext { previous, next -> next - previous },
         )
     }
@@ -651,7 +651,7 @@ class VisiblePreviewSchedulerTest {
 
         val first = async { scheduler.preview(target, 0) }
         runCurrent()
-        // 首发 1 次加重试 5 次；递进间隔合计 15 秒，留足推进时间。
+        // 首发 1 次加重试 3 次；递进间隔合计 13 秒，留足推进时间。
         repeat(20) {
             if (!first.isCompleted) {
                 advanceTimeBy(1_000)
@@ -659,18 +659,18 @@ class VisiblePreviewSchedulerTest {
             }
         }
         withTimeout(5_000) { first.await() }
-        assertEquals("首发加 5 次重试", 6, rounds)
+        assertEquals("首发加 3 次重试", 4, rounds)
 
         // 重新订阅（离开可见范围再回来、回到前台都会发生）：调度器里已没有这一项，会重新给一轮。
         val second = async { scheduler.preview(target, 0) }
         runCurrent()
-        assertEquals("重新订阅立即再抽一次", 7, rounds)
+        assertEquals("重新订阅立即再抽一次", 5, rounds)
         // 这一轮还在重试中：断言完直接取消，不等它跑完。
         second.cancel()
     }
 
     @Test
-    fun `本地失败次数从抽帧状态读，重新订阅后只剩一次机会`() = runTest {
+    fun `本地失败重新订阅后重新给一轮`() = runTest {
         val directory = Files.createTempDirectory("preview-scheduler").toFile()
         try {
             val extractor = FakeMediaPreviewExtractor().apply { imageFailure = IOException("读取失败") }
@@ -701,7 +701,7 @@ class VisiblePreviewSchedulerTest {
             advanceUntilIdle()
             second.await()
 
-            assertEquals("重新订阅后本地只剩一次机会", 5, extractor.imageRequests.size)
+            assertEquals("重新订阅后本地也重新给一轮", 8, extractor.imageRequests.size)
         } finally {
             directory.deleteRecursively()
         }

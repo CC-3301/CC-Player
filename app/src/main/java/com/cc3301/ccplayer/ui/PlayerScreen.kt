@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -89,6 +90,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -277,18 +279,7 @@ private fun PointerEvent.mousePosition(): Offset? {
     return changes.firstOrNull { it.type == PointerType.Mouse }?.position
 }
 
-/** 按压反馈的一次触发：动作执行后计数加一，控件据此播一次反馈。 */
-private class PlayerPressFeedback {
-    var pulse by mutableIntStateOf(0)
-        private set
-
-    /** 动作确认执行后调用。 */
-    fun show() {
-        pulse += 1
-    }
-}
-
-/** 播放页点击：动作执行后才显示按压反馈；被拦下的点击不显示任何反馈。 */
+/** 播放页点击：按下即显示按压反馈；被闸门拦下的控件收不到按下，也不显示任何反馈。 */
 @Composable
 private fun Modifier.playerPressClickable(
     target: PlayerPressTarget,
@@ -296,41 +287,41 @@ private fun Modifier.playerPressClickable(
     role: Role? = null,
     onClick: () -> Unit,
 ): Modifier {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     val feedback = remember { PlayerPressFeedback() }
     return this
-        .playerPressFeedback(target, enabled, feedback)
+        .playerPressFeedback(target, enabled, pressed, feedback)
         .clickable(
-            interactionSource = remember { MutableInteractionSource() },
+            interactionSource = interaction,
             indication = null,
             enabled = enabled,
             role = role,
-            onClick = {
-                onClick()
-                feedback.show()
-            },
+            onClick = onClick,
         )
 }
 
 /**
- * 动作执行后的按压反馈：在热区内铺一次白色 20% 方块，随后淡出；
- * 未执行、被拦下或覆盖范围外不显示任何背景。
+ * 按压反馈：在热区内铺满白色 20% 方块，按住期间保持，松手按 [PLAYER_PRESS_FADE_MILLIS] 淡出；
+ * 按下后才判定不可执行的用 [PlayerPressFeedback.revoke] 在 [PLAYER_PRESS_REVOKE_MILLIS] 内撤掉。
+ * 未按下、被闸门拦下或覆盖范围外不绘制任何背景。
  */
 @Composable
 private fun Modifier.playerPressFeedback(
     target: PlayerPressTarget,
     enabled: Boolean,
+    pressed: Boolean,
     feedback: PlayerPressFeedback,
 ): Modifier {
     if (!playerPressFeedbackShown(target, enabled)) return this
-    val alpha = remember { Animatable(0f) }
-    LaunchedEffect(feedback.pulse) {
-        if (feedback.pulse == 0) return@LaunchedEffect
-        alpha.snapTo(PLAYER_PRESS_RIPPLE_ALPHA)
-        alpha.animateTo(0f, tween(PlayerPressFeedbackMillis))
+    val alpha = remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(pressed) {
+        if (pressed) feedback.press() else feedback.release()
+        feedback.animate(onFrame = { withFrameNanos { } }) { alpha.floatValue = it }
     }
     return drawBehind {
-        if (alpha.value > 0f) {
-            drawRect(PlayerPressRippleColor.copy(alpha = alpha.value))
+        if (alpha.floatValue > 0f) {
+            drawRect(PlayerPressRippleColor.copy(alpha = alpha.floatValue))
         }
     }
 }
@@ -345,7 +336,7 @@ private fun Modifier.playerPanel(): Modifier = this
 private fun playerToolColor(active: Boolean): Color =
     if (active) AppColors.Accent else AppColors.Muted
 
-/** 播放器次级文字按钮：统一字号、内边距与禁用态；[onClick] 返回是否执行，未执行时不显示按压反馈。 */
+/** 播放器次级文字按钮：统一字号、内边距与禁用态；[onClick] 返回是否执行，未执行时撤掉本次按压反馈。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayerTextButton(
@@ -356,14 +347,17 @@ private fun PlayerTextButton(
     color: Color = AppColors.Foreground,
     style: TextStyle = MaterialTheme.typography.labelLarge,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     val feedback = remember { PlayerPressFeedback() }
     CompositionLocalProvider(
         LocalRippleConfiguration provides null,
     ) {
-        Box(modifier = modifier.playerPressFeedback(PlayerPressTarget.TextButton, enabled, feedback)) {
+        Box(modifier = modifier.playerPressFeedback(PlayerPressTarget.TextButton, enabled, pressed, feedback)) {
             TextButton(
+                interactionSource = interaction,
                 onClick = {
-                    if (onClick()) feedback.show()
+                    if (!onClick()) feedback.revoke()
                 },
                 enabled = enabled,
                 colors = ButtonDefaults.textButtonColors(
@@ -1785,9 +1779,6 @@ private fun PlayerIconBar(
 /** 播放页禁用态的统一透明度。 */
 private const val PlayerDisabledAlpha = 0.45f
 
-/** 按压反馈从 20% 白淡出的时长，毫秒。 */
-private const val PlayerPressFeedbackMillis = 200
-
 /** 禁用控件的画布色。 */
 private val DisabledToolColor = AppColors.Faint.copy(alpha = PlayerDisabledAlpha)
 
@@ -2302,18 +2293,16 @@ private fun MoreChoiceRow(
 @Composable
 private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     val feedback = remember { PlayerPressFeedback() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .playerPressFeedback(PlayerPressTarget.MorePanelRow, enabled, feedback)
+            .playerPressFeedback(PlayerPressTarget.MorePanelRow, enabled, pressed, feedback)
             .selectable(
                 selected = checked,
                 enabled = enabled,
-                onClick = {
-                    onClick()
-                    feedback.show()
-                },
+                onClick = onClick,
                 role = Role.RadioButton,
                 interactionSource = interaction,
                 indication = null,
@@ -2347,18 +2336,16 @@ private fun MoreOptionRow(label: String, checked: Boolean, enabled: Boolean, onC
 @Composable
 private fun MoreSwitchRow(label: String, checked: Boolean, enabled: Boolean, onToggle: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     val feedback = remember { PlayerPressFeedback() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .playerPressFeedback(PlayerPressTarget.AutoPlayNextRow, enabled, feedback)
+            .playerPressFeedback(PlayerPressTarget.AutoPlayNextRow, enabled, pressed, feedback)
             .toggleable(
                 value = checked,
                 enabled = enabled,
-                onValueChange = {
-                    onToggle()
-                    feedback.show()
-                },
+                onValueChange = { onToggle() },
                 role = Role.Switch,
                 interactionSource = interaction,
                 indication = null,
@@ -2544,6 +2531,7 @@ private fun PlaylistDrawer(
                 itemsIndexed(playlist) { index, media ->
                     val active = index == currentIndex
                     val interaction = remember { MutableInteractionSource() }
+                    val pressed by interaction.collectIsPressedAsState()
                     val feedback = remember { PlayerPressFeedback() }
                     Box(
                         modifier = Modifier
@@ -2567,10 +2555,7 @@ private fun PlaylistDrawer(
                                 interactionSource = interaction,
                                 indication = null,
                                 enabled = enabled,
-                                onClick = {
-                                    onSelect(media)
-                                    feedback.show()
-                                },
+                                onClick = { onSelect(media) },
                             ),
                     ) {
                         Row(
@@ -2603,7 +2588,7 @@ private fun PlaylistDrawer(
                             modifier = Modifier
                                 .matchParentSize()
                                 .padding(end = PlayerPlaylistHighlightEndInset)
-                                .playerPressFeedback(PlayerPressTarget.PlaylistRow, enabled, feedback),
+                                .playerPressFeedback(PlayerPressTarget.PlaylistRow, enabled, pressed, feedback),
                         )
                     }
                 }

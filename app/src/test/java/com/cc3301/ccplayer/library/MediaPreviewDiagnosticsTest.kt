@@ -53,7 +53,7 @@ class MediaPreviewDiagnosticsTest {
     }
 
     @Test
-    fun `网络封面入队、等名额与等许可各记一行`() = runTest {
+    fun `网络封面入队、打开数据源与等许可各记一行`() = runTest {
         val sink = MemoryDiagnosticsSink()
         val source = source(Diagnostics(sink, UnconfinedTestDispatcher(testScheduler)).apply { enabled = true })
         extractor.imageBytes = byteArrayOf(1, 2, 3)
@@ -62,7 +62,6 @@ class MediaPreviewDiagnosticsTest {
 
         val text = sink.lines.joinToString("\n")
         assertTrue("应记入队：$text", text.contains("网络封面: 电影.mkv 入队"))
-        assertTrue("应记等预打开名额：$text", text.contains("网络封面: 电影.mkv 等预打开名额 "))
         assertTrue("应记打开数据源：$text", text.contains("网络封面: 电影.mkv 打开数据源 "))
         assertTrue("应记等解码许可：$text", text.contains("网络封面: 电影.mkv 等解码许可 "))
         assertTrue("应记开始抽帧：$text", text.contains("网络封面: 电影.mkv 开始抽帧"))

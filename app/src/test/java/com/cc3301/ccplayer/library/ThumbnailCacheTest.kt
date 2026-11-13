@@ -618,6 +618,56 @@ class ThumbnailCacheTest {
         assertNull(entry.failure)
     }
 
+    @Test
+    fun `抽帧策略版本未变时启动清理保留既有条目`() = runBlocking {
+        cache.save("content://root/a.mkv", ByteArray(4))
+
+        val reopened = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now })
+
+        assertNotNull(reopened.entry("content://root/a.mkv"))
+        assertEquals(1, directory.imageCount())
+    }
+
+    @Test
+    fun `抽帧策略版本标记与当前版本不一致时清理旧版本的缓存文件`() = runBlocking {
+        cache.save("content://root/a.mkv", ByteArray(4))
+        cache.saveFailure("content://root/b.mkv", failedAtMillis = 5_000L, attempts = 2)
+        File(directory, ".policy-version").writeText((THUMBNAIL_POLICY_VERSION - 1).toString())
+
+        val upgraded = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now })
+
+        assertNull("旧版本的图片不再命中", upgraded.entry("content://root/a.mkv"))
+        assertNull("旧版本的失败记录不再命中", upgraded.entry("content://root/b.mkv"))
+        assertEquals("旧版本的图片文件被清掉", 0, directory.imageCount())
+        assertEquals("旧版本的元数据被清掉", 0, directory.metadataCount())
+    }
+
+    @Test
+    fun `版本标记缺失时按条目记下的版本清理，当前版本的文件保留`() = runBlocking {
+        cache.save("content://root/a.mkv", ByteArray(4))
+        cache.saveWithoutImage("content://root/b.mkv")
+        cache.saveFailure("content://root/c.mkv", failedAtMillis = 5_000L, attempts = 2)
+        // 旧版本写下的条目：文件名照旧，元数据里没有版本行。
+        val retiredName = cacheName("content://root/d.mkv")
+        File(directory, retiredName).writeBytes(ByteArray(2))
+        File(directory, retiredName + ".meta").writeText("duration=unknown")
+        File(directory, ".policy-version").delete()
+
+        val reopened = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now })
+
+        assertNotNull("当前版本的图片保留", reopened.entry("content://root/a.mkv")?.file)
+        assertNotNull("当前版本的无图记录保留", reopened.entry("content://root/b.mkv"))
+        assertNotNull("当前版本的失败记录保留", reopened.entry("content://root/c.mkv"))
+        assertNull("旧版本的条目不命中", reopened.entry("content://root/d.mkv"))
+        assertEquals("只清掉旧版本的图片", 1, directory.imageCount())
+        assertEquals("只清掉旧版本的元数据", 3, directory.metadataCount())
+        assertEquals(
+            "清理后补记当前版本",
+            THUMBNAIL_POLICY_VERSION.toString(),
+            File(directory, ".policy-version").readText(),
+        )
+    }
+
     private fun File.imageCount(): Int =
         listFiles().orEmpty().count { file -> file.isFile && file.name.endsWith(".img") }
 
