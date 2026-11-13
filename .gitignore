@@ -30,3 +30,5 @@ backups/
 .worktrees/
 # CodeGraph 索引
 .codegraph/
+# gh 本地状态（device-id）
+.local/
