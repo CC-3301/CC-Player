@@ -27,12 +27,12 @@ data class CachedThumbnail(
  * 缩略图磁盘缓存：条目放在 [directory] 下，总字节数超过 [maxBytes] 时先删最近最少使用的条目。
  * 命中时把文件的最后修改时间写成当前时间，作为「最近使用」的记录。
  *
- * 每个条目带一份元数据，记时长、是否无图与失败记录（失败时间与已试次数），格式为若干行 `键=值`：
- * `duration` 为 `unknown`（时长未知）、`null`（确定没有时长）或毫秒数；
+ * 每个条目带一份元数据，记条目所属的抽帧策略版本、时长、是否无图与失败记录（失败时间与已试次数），格式为若干行 `键=值`：
+ * `version` 为条目所属的抽帧策略版本；`duration` 为 `unknown`（时长未知）、`null`（确定没有时长）或毫秒数；
  * `no-image` 标记无图条目；`failed-at` 与 `failed-attempts` 成对出现，标记抽帧失败的条目。
  * 无图与失败记录都只占元数据、不计入字节上限，按条数一起淘汰。
  * 缓存不设有效期：命中的条目一直有效，条目只能被容量上限淘汰或按缓存键失配。
- * 抽帧策略版本递增后旧键的条目不再命中，启动清理时连同元数据一起删掉。
+ * 抽帧策略版本与目录里的版本标记不一致时旧键的条目不再命中，启动清理时连同元数据一起删掉。
  * 磁盘读写与启动清理都在 IO 调度执行。
  */
 class ThumbnailCache(
@@ -41,8 +41,6 @@ class ThumbnailCache(
     private val clock: () -> Long = System::currentTimeMillis,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val maxMetadataEntries: Int = MAX_METADATA_ENTRIES,
-    /** 当前抽帧策略版本；与目录里的版本标记不一致时清掉旧键的缓存文件。 */
-    private val policyVersion: Int = THUMBNAIL_POLICY_VERSION,
 ) {
 
     /** 同一目录的实例共用锁，避免多实例同时替换同名文件。 */
@@ -149,7 +147,13 @@ class ThumbnailCache(
                 tempMetadata = temporaryFile(metadata.name)
                 tempImage.writeBytes(bytes)
                 tempMetadata.writeText(
-                    encodeMetadata(durationMillis, durationKnown, noImage = false, failure = null),
+                    encodeMetadata(
+                        durationMillis = durationMillis,
+                        durationKnown = durationKnown,
+                        noImage = false,
+                        failure = null,
+                        version = THUMBNAIL_POLICY_VERSION,
+                    ),
                 )
                 // 先换图片再换元数据：元数据出现时图片已经存在，孤儿清理不会误删新元数据。
                 replaceFile(tempImage, target)
@@ -221,7 +225,15 @@ class ThumbnailCache(
     ) {
         val temp = temporaryFile(metadata.name)
         try {
-            temp.writeText(encodeMetadata(durationMillis, durationKnown, noImage, failure))
+            temp.writeText(
+                encodeMetadata(
+                    durationMillis = durationMillis,
+                    durationKnown = durationKnown,
+                    noImage = noImage,
+                    failure = failure,
+                    version = THUMBNAIL_POLICY_VERSION,
+                ),
+            )
             replaceFile(temp, metadata)
             metadata.setLastModified(lastModifiedMillis)
             markPolicyVersion()
@@ -288,26 +300,41 @@ class ThumbnailCache(
     }
 
     /**
-     * 抽帧策略版本变了，旧版本的缓存键不会再命中：图片与元数据一起清掉，不让它们继续占容量。
-     * 没有版本标记时只补记当前版本，不清既有文件——那些文件由当前版本写下。
+     * 抽帧策略版本与目录里的标记不一致时，旧版本的缓存键不会再命中：图片与元数据一起清掉，不让它们继续占容量。
+     * 标记与当前版本一致时不扫描；标记缺失时不知道目录里是哪一版本写下的，按条目记下的版本逐条清理，当前版本的文件保留。
      */
     private fun deleteStalePolicyVersion() {
-        val marker = File(directory, POLICY_VERSION_FILE)
-        val recorded = marker.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull() ?: return
-        if (recorded == policyVersion) {
+        val recorded = File(directory, POLICY_VERSION_FILE).takeIf { it.isFile }
+            ?.readText()?.trim()?.toIntOrNull()
+        if (recorded == THUMBNAIL_POLICY_VERSION) {
             policyVersionMarked = true
             return
         }
-        directory.listFiles().orEmpty()
-            .filter { it.isFile && (it.name.endsWith(IMAGE_SUFFIX) || it.name.endsWith(METADATA_SUFFIX)) }
-            .forEach { it.delete() }
+        if (recorded == null) {
+            deleteEntriesOfRetiredVersion()
+        } else {
+            directory.listFiles().orEmpty()
+                .filter { it.isFile && (it.name.endsWith(IMAGE_SUFFIX) || it.name.endsWith(METADATA_SUFFIX)) }
+                .forEach { it.delete() }
+        }
         markPolicyVersion()
     }
 
-    /** 写下当前抽帧策略版本；没有标记时说明既有文件由当前版本写下，只在真正写入缓存时才补记。 */
+    /** 按元数据里记下的版本清理：读不出版本或版本不是当前的条目，连同配对的图片一起删掉。 */
+    private fun deleteEntriesOfRetiredVersion() {
+        directory.listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(METADATA_SUFFIX) }
+            .filter { it.readMetadata()?.version != THUMBNAIL_POLICY_VERSION }
+            .forEach { metadata ->
+                File(directory, metadata.name.removeSuffix(METADATA_SUFFIX)).delete()
+                metadata.delete()
+            }
+    }
+
+    /** 写下当前抽帧策略版本，之后的启动不再扫描。 */
     private fun markPolicyVersion() {
         if (policyVersionMarked) return
-        File(directory, POLICY_VERSION_FILE).writeText(policyVersion.toString())
+        File(directory, POLICY_VERSION_FILE).writeText(THUMBNAIL_POLICY_VERSION.toString())
         policyVersionMarked = true
     }
 
@@ -355,6 +382,7 @@ private data class Metadata(
     val durationKnown: Boolean,
     val noImage: Boolean,
     val failure: CachedFailure?,
+    val version: Int?,
 )
 
 private fun File.readMetadata(): Metadata? {
@@ -377,6 +405,7 @@ private fun File.readMetadata(): Metadata? {
         } else {
             null
         },
+        version = values[META_VERSION]?.toIntOrNull(),
     )
 }
 
@@ -385,13 +414,14 @@ private fun encodeMetadata(
     durationKnown: Boolean,
     noImage: Boolean,
     failure: CachedFailure?,
+    version: Int,
 ): String {
     val durationLine = when {
         !durationKnown -> DURATION_UNKNOWN
         durationMillis != null -> durationMillis.toString()
         else -> DURATION_NONE
     }
-    val lines = mutableListOf(META_DURATION + "=" + durationLine)
+    val lines = mutableListOf(META_VERSION + "=" + version, META_DURATION + "=" + durationLine)
     if (noImage) lines += META_NO_IMAGE + "=" + TRUE_VALUE
     if (failure != null) {
         lines += META_FAILED_AT + "=" + failure.failedAtMillis
@@ -417,6 +447,7 @@ private const val TEMP_SUFFIX = ".tmp"
 
 /** 目录里记下当前抽帧策略版本的文件，用来判断旧版本的缓存文件是否要清掉。 */
 private const val POLICY_VERSION_FILE = ".policy-version"
+private const val META_VERSION = "version"
 private const val META_DURATION = "duration"
 private const val META_NO_IMAGE = "no-image"
 private const val META_FAILED_AT = "failed-at"

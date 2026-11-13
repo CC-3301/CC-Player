@@ -18,7 +18,7 @@ internal sealed interface PreviewEntryResult {
  */
 class PreviewEntryState internal constructor() {
 
-    /** 已试次数：连续失败累计，出图或确认无图后清零；网络条目从新一轮可见订阅起计。 */
+    /** 已试次数：连续失败累计；出图、确认无图或开始新一轮可见订阅后清零，本地与网络同一规则。 */
     @Volatile
     var attempts: Int = 0
         private set

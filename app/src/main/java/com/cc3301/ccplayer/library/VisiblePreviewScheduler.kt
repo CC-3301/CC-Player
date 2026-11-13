@@ -376,7 +376,7 @@ class VisiblePreviewScheduler(
             resumeAfterAttempt()
             return
         }
-        delay(failureBackoffMillis(attempts))
+        delay(PreviewRetryPolicy.backoffMillis(attempts))
         // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。批次收尾会唤醒，不轮询。
         while (true) {
             val gate = synchronized(lock) {
@@ -406,10 +406,10 @@ class VisiblePreviewScheduler(
         resumeAfterAttempt()
     }
 
-    /** 还能不能排下一次重试：已试次数读抽帧状态，超过可见重试上限就不再排。 */
+    /** 还能不能排下一次重试：已试次数读抽帧状态，超过重试次数上限就不再排。 */
     private fun canRetryLocked(request: Request): Boolean {
         val attempts = source.previewEntryState(request.file)?.attempts ?: return false
-        return attempts <= VISIBLE_RETRY_MAX_ATTEMPTS
+        return attempts <= PreviewRetryPolicy.maxRetries
     }
 
     /** 把结果交给订阅者并移除请求；完成与暂停之间不留下已完成的请求。 */
@@ -459,9 +459,6 @@ class VisiblePreviewScheduler(
 
     private companion object {
         val EMPTY_PREVIEW = MediaPreview(image = null, durationMillis = null)
-
-        /** 单个条目的失败重试上限：首发 1 次 + 重试 3 次。 */
-        const val VISIBLE_RETRY_MAX_ATTEMPTS = 3
 
         /** 取消原因；离屏与重建保留订阅，再次可见时重新入队。 */
         const val CANCEL_REASON_OFFSCREEN = "离屏"
