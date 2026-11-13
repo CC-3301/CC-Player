@@ -56,7 +56,7 @@ interface MediaPreviewSource {
     suspend fun cachedImage(file: MediaFile): File? = null
 
     /**
-     * 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。
+     * 开始一轮可见订阅：已试次数从零计，本地与网络同一规则。
      * 可见请求调度器为每一项新订阅调用一次。
      */
     fun beginVisiblePreview(file: MediaFile) = Unit
@@ -197,15 +197,15 @@ data class ThumbnailPolicy(
  * 抽帧全局串行：本地与网络共用一份容量为 1 的许可。视频抽帧由 Media3 执行（组件内部也串行）；
  * 超时或取消只停止等待、不取消在途任务，同一时刻只跑一路；许可按列表索引发给排队的可见请求，
  * 许可空闲也不让后来者越过排队者。
- * 网络读取会话名额（从开始打开占到解码结束）同样按索引优先给可见项，预取占不到全部名额；
- * 名额只限制同时打开的网络读取会话数，解码仍由唯一许可串行执行、一次一张。
+ * 打开数据源不设名额：打开是毫秒级动作，名额只会把等待时间堆到解码之前。
  * 缓存命中立即出图，不排队、不等同键在途抽取；时长未知时在后台补读，不排到可见队列前面。
  * 同一缓存键的并发请求只抽取一次。
  * 上次结果、已试次数、无图记忆、预取抑制与时长退避都在同一份抽帧状态里；
  * 可见请求调度器读同一份决定失败重试的间隔与次数。
  * 失败或超时保持占位图且不写图片缓存，只落一条失败记录（失败时间与已试次数）；
- * 可见请求的失败交给调度器按递进间隔重试：本地最多重试 3 次，网络用尽调度器的次数后条目再次可见会重新给一轮；
- * 重启后的第一次判断按落盘记录的退避时间跳过，避免每次启动都对同一批失败项从头重试。
+ * 可见请求的失败交给调度器按 1 秒、3 秒、9 秒递进重试，单个最多重试 3 次，本地与网络同一规则；
+ * 次数用尽后回到前台、重新进入可见范围或下次冷启动时重新给一轮，不记为永久无图；
+ * 重启后的第一次判断按落盘记录的退避时间跳过，避免每次启动都对同一批失败项从头重抽。
  * 只有解码成功但没有图才写「无图」缓存；抽取失败不写「无图」。
  * 网络预取失败不在后台重试，也不记无图，只抑制后续预取；回到可见后清掉抑制并重新抽取。
  * 成功封面落盘复用；失败结果也落盘并记失败时间与已试次数，重启后按退避时间跳过，不在每次启动时从头重试；
@@ -228,18 +228,6 @@ class CachedMediaPreviewSource(
 
     /** 抽帧许可：容量为 1，本地与网络共用；可见项优先于预取取得。 */
     private val permits = PrioritySemaphore(EXTRACTION_CONCURRENCY)
-
-    /**
-     * 网络读取会话名额：限制同时处于「开始打开到解码结束」状态的条目数，一条目占两条句柄。
-     * 这里限制的是同时打开中（含正在打开）的网络读取会话数，不是同时解码数：
-     * 解码仍由 [permits] 串行执行、一次一张。
-     * 可见项优先取得；预取最多占用预留名额之外的部分。
-     * 名额从开始打开占到解码结束；超时归还名额后，后台仍可能留着未返回的打开，重试会再开一份。
-     */
-    private val preparedSlots = PrioritySemaphore(
-        capacity = MAX_PREPARED_PREVIEWS,
-        prefetchCapacity = MAX_PREPARED_PREVIEWS - VISIBLE_RESERVED_PREPARED_SLOTS,
-    )
 
     /**
      * 本次运行的抽帧状态：一个条目一份，上次结果、已试次数、退避与预取抑制都在这里。
@@ -269,9 +257,8 @@ class CachedMediaPreviewSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview =
         preview(file, PreviewPriority.Prefetch)
 
-    /** 开始一轮可见订阅：网络条目的可见重试从零计，本地条目保留本次运行内的失败累计。 */
+    /** 开始一轮可见订阅：已试次数从零计，本地与网络同一规则。 */
     override fun beginVisiblePreview(file: MediaFile) {
-        if (file.source != MediaSource.Network) return
         entryState(previewKey(file))?.resetAttempts()
     }
 
@@ -343,10 +330,10 @@ class CachedMediaPreviewSource(
         if (loaded.abandoned) return MediaPreview(image = null, durationMillis = null)
         val stage = loaded.failureStage
         if (stage == null) return MediaPreview(loaded.image, loaded.durationMillis)
-        // 本地抽取失败先按失败收尾交给调度器重试，次数用尽后保持占位图；失败结果落盘，重启后按退避时间跳过。
+        // 抽取失败先按失败收尾交给调度器重试，次数用尽后保持占位图；失败结果落盘，重启后按退避时间跳过。
         val attempts = stateFor(key).fail(stage)
         cache.saveFailure(key, wallClockMillis(), attempts)
-        return MediaPreview(loaded.image, loaded.durationMillis, retryable = attempts <= LOCAL_RETRY_LIMIT)
+        return MediaPreview(loaded.image, loaded.durationMillis, retryable = true)
     }
 
     /** 只读缓存取封面：播放页封面层与列表共用同一份缓存，不触发抽取。 */
@@ -542,20 +529,7 @@ class CachedMediaPreviewSource(
                 if (!mayExtract(file.location, priority)) {
                     LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
-                    val started = monotonicClockMillis()
-                    val acquired = preparedSlots.acquireOrNull(priority, PREPARED_SLOT_TIMEOUT_MILLIS)
-                    val waited = monotonicClockMillis() - started
-                    if (!acquired) {
-                        diagnostics.log { "网络封面: ${file.name} 等预打开名额超时 ${waited}ms" }
-                        LoadedPreview(image = null, durationMillis = null, failureStage = PreviewFailureStage.Timeout)
-                    } else {
-                        try {
-                            diagnostics.log { "网络封面: ${file.name} 等预打开名额 ${waited}ms" }
-                            prepareAndDecode(file, key, targetWidth, priority)
-                        } finally {
-                            preparedSlots.release()
-                        }
-                    }
+                    prepareAndDecode(file, key, targetWidth, priority)
                 }
             },
         )
@@ -573,8 +547,8 @@ class CachedMediaPreviewSource(
     }
 
     /**
-     * 打开句柄并起预读（占一个网络读取会话名额），再等解码许可、在许可内串行解码。
-     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束；打开超时不跟着阻塞的原生调用一起等，名额随即归还。
+     * 打开句柄并起预读，再等解码许可、在许可内串行解码。
+     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束；打开超时不跟着阻塞的原生调用一起等。
      */
     private suspend fun prepareAndDecode(
         file: MediaFile,
@@ -582,7 +556,7 @@ class CachedMediaPreviewSource(
         targetWidth: Int,
         priority: PreviewPriority,
     ): LoadedPreview {
-        // 打开数据源有上限：打开是取消不掉的阻塞调用，超时只停止等待，名额随即归还。
+        // 打开数据源有上限：打开是取消不掉的阻塞调用，超时只停止等待。
         val openStarted = monotonicClockMillis()
         val prepared = (try {
             openOutsideRequest(file, priority)
@@ -664,7 +638,7 @@ class CachedMediaPreviewSource(
      * 打开句柄并按目标位置起预读。
      *
      * 打开是取消不掉的阻塞原生调用：放在脱离请求的协程里跑，超时只停止等待，
-     * 名额随即归还，后面的可见项不跟着一个坏条目一起等。
+     * 后面的可见项不跟着一个坏条目一起等。
      * 打开最终结束后仍无人接手（超时或取消）时由打开方关闭句柄与预读。
      */
     private suspend fun openOutsideRequest(
@@ -875,34 +849,18 @@ class CachedMediaPreviewSource(
 
         /**
          * 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。
-         * 打开超时只放弃等待并归还名额，阻塞中的原生打开留在后台，由传输层超时收尾。
+         * 打开超时只放弃等待，阻塞中的原生打开留在后台，由传输层超时收尾。
          */
         private const val NETWORK_TIMEOUT_MILLIS = 15_000L
 
-        /** 等预打开名额的上限；名额被占满时不能无限期排队。 */
-        private const val PREPARED_SLOT_TIMEOUT_MILLIS = 20_000L
-
         /** 等解码许可的上限；许可被前一项占着时不能无限期排队。 */
         private const val DECODE_PERMIT_TIMEOUT_MILLIS = 20_000L
-
-        /**
-         * 同时处于「开始打开到解码结束」状态的网络条目上限；一条目占两条句柄。
-         * 只限制同时打开中（含正在打开）的读取会话数，不改变解码并发：解码仍全局串行、一次一张。
-         * 名额从开始打开占到解码结束；超时归还名额后，后台可能仍留着未返回的打开，重试会再开一份。
-         */
-        private const val MAX_PREPARED_PREVIEWS = 4
-
-        /** 预取不得占用的网络读取会话名额：预取占满其余名额时，可见项仍有这么多格可以直接打开。 */
-        private const val VISIBLE_RESERVED_PREPARED_SLOTS = 2
 
         /** 时长读取失败后的首次重试间隔；连续失败按倍数退避。 */
         private const val DURATION_RETRY_BASE_MILLIS = 30_000L
 
         /** 时长读取失败后的最大重试间隔。 */
         private const val DURATION_RETRY_MAX_MILLIS = 10 * 60 * 1000L
-
-        /** 本地抽取失败后的重试次数上限；用尽后保持占位图，条目再次可见也不再重试。 */
-        private const val LOCAL_RETRY_LIMIT = 3
 
         /** [backgroundScope] 由调用方给出应用级范围：时长补读等后台任务跟随进程，不随界面重建。 */
         fun create(
@@ -946,21 +904,18 @@ internal fun thumbnailCacheKey(
 internal fun systemMonotonicMillis(): Long = System.nanoTime() / 1_000_000
 
 /**
- * 失败记录的退避窗口：按已试次数每次 1 秒，最多 5 秒，与可见请求的 1–5 秒递进同一节奏。
- * 重启后落在窗口内的失败项不重试，避免每次启动都对同一批失败项从头重抽。
+ * 失败后的递进重试间隔：第 n 次失败等 [RETRY_STEPS_MILLIS] 的第 n 档，本地与网络同一套。
+ * 落盘的失败记录按同一套窗口跳过，重启后落在窗口内的失败项不重试，窗口过后随第一屏重新抽取。
  */
 internal fun failureBackoffMillis(attempts: Int): Long =
-    attempts.coerceIn(1, FAILURE_BACKOFF_MAX_STEPS) * FAILURE_BACKOFF_STEP_MILLIS
+    RETRY_STEPS_MILLIS[(attempts - 1).coerceIn(0, RETRY_STEPS_MILLIS.lastIndex)]
 
 /** 失败记录是否还在退避窗口内。 */
 internal fun CachedFailure.isWithinBackoff(nowMillis: Long): Boolean =
     nowMillis - failedAtMillis < failureBackoffMillis(attempts)
 
-/** 失败退避的步长。 */
-private const val FAILURE_BACKOFF_STEP_MILLIS = 1_000L
-
-/** 失败退避的最多步数：与可见请求的重试上限同为 5 次。 */
-private const val FAILURE_BACKOFF_MAX_STEPS = 5
+/** 递进重试的三档间隔：1 秒、3 秒、9 秒。 */
+private val RETRY_STEPS_MILLIS = longArrayOf(1_000L, 3_000L, 9_000L)
 
 /** 当前可见与预取范围快照。 */
 private data class PreviewWindow(
@@ -1004,14 +959,9 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
 /**
  * 带优先级的许可：许可只发给排队者中优先级最高的一位，可见请求按列表索引从小到大。
  * 许可空闲也不直接放行后来的请求，后到的高索引项不会越过仍在排队的低索引项。
- * 预取与时长补读另有配额，最多占 [prefetchCapacity] 个，可见项不会被它们堵在门外。
  * 取消等待会退出队列；已发出的许可在取消竞争中归还，避免许可泄漏。
  */
-private class PrioritySemaphore(
-    private val capacity: Int,
-    /** 非可见请求（预取与时长补读）最多同时占用的许可数；余下的留给可见项。 */
-    private val prefetchCapacity: Int = capacity,
-) {
+private class PrioritySemaphore(private val capacity: Int) {
 
     private val lock = Mutex()
     private var available = capacity
@@ -1056,27 +1006,17 @@ private class PrioritySemaphore(
     /** 连续把空闲许可发给优先级最高、且没超出自身配额的一位。 */
     private fun grantIdleLocked() {
         while (available > 0) {
-            val index = waiters.indices
-                .filter { position -> withinQuotaLocked(waiters[position]) }
-                .minByOrNull { position -> waiters[position].priority.rank } ?: return
+            val index = waiters.indices.minByOrNull { position -> waiters[position].priority.rank } ?: return
             val granted = waiters.removeAt(index)
             available--
             granted.granted.complete(Unit)
         }
     }
 
-    /** 预取与时长补读最多同时占用 [prefetchCapacity] 个；可见项不受配额限制。 */
-    private fun withinQuotaLocked(waiter: Waiter): Boolean {
-        if (waiter.priority.isVisible) return true
-        return capacity - available < prefetchCapacity
-    }
-
     private suspend fun releaseLocked() {
         val next = lock.withLock {
             available++
-            val index = waiters.indices
-                .filter { position -> withinQuotaLocked(waiters[position]) }
-                .minByOrNull { position -> waiters[position].priority.rank }
+            val index = waiters.indices.minByOrNull { position -> waiters[position].priority.rank }
             if (index == null) {
                 null
             } else {

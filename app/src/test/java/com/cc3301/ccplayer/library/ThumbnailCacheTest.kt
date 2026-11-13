@@ -618,6 +618,34 @@ class ThumbnailCacheTest {
         assertNull(entry.failure)
     }
 
+    @Test
+    fun `抽帧策略版本未变时启动清理保留既有条目`() = runBlocking {
+        cache.save("content://root/a.mkv", ByteArray(4))
+
+        val reopened = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, clock = { now })
+
+        assertNotNull(reopened.entry("content://root/a.mkv"))
+        assertEquals(1, directory.imageCount())
+    }
+
+    @Test
+    fun `抽帧策略版本递增时清理旧版本的缓存文件`() = runBlocking {
+        cache.save("content://root/a.mkv", ByteArray(4))
+        cache.saveFailure("content://root/b.mkv", failedAtMillis = 5_000L, attempts = 2)
+
+        val upgraded = ThumbnailCache(
+            directory = directory,
+            maxBytes = 1 shl 20,
+            clock = { now },
+            policyVersion = THUMBNAIL_POLICY_VERSION + 1,
+        )
+
+        assertNull("旧版本的图片不再命中", upgraded.entry("content://root/a.mkv"))
+        assertNull("旧版本的失败记录不再命中", upgraded.entry("content://root/b.mkv"))
+        assertEquals("旧版本的图片文件被清掉", 0, directory.imageCount())
+        assertEquals("旧版本的元数据被清掉", 0, directory.metadataCount())
+    }
+
     private fun File.imageCount(): Int =
         listFiles().orEmpty().count { file -> file.isFile && file.name.endsWith(".img") }
 
