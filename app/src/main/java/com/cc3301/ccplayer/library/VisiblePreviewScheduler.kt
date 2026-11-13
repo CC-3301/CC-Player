@@ -14,7 +14,7 @@ import kotlinx.coroutines.yield
  *
  * 整屏可见请求一次性下发入队，出图顺序由抽帧许可按列表索引决定（可见按索引 < 预取 < 时长补读）。
  * 新订阅不等可见窗口：条目一订阅就下发，卡片组合完成前已开始抽第一屏；窗口到达后按可见范围重排。
- * 失败项先跳过、不占队列：可见项出完后按 1s、2s、3s、4s、5s 递进重试，单个最多 5 次；
+ * 失败项先跳过、不占队列：可见项出完后按 1 秒、3 秒、9 秒递进重试，单个最多重试 3 次；
  * 等几秒与还能排几次都从抽帧源持有的抽帧状态读，调度器不另记已试次数。
  * 离屏只暂停抽取、保留待调度请求；条目再次可见时续用同一个 deferred 重新下发，避免出现永久占位。
  * 可见范围变化时排队中的旧任务全部丢弃，已进入解码的那一张取消不了，让它跑完并落盘。
@@ -338,7 +338,7 @@ class VisiblePreviewScheduler(
         gate.complete(Unit)
     }
 
-    /** 可见项全部出图后为每个失败项安排重试计时：第 n 次重试等 n 秒。 */
+    /** 可见项全部出图后为每个失败项安排重试计时：第 n 次失败按递进档等一段时间。 */
     private fun scheduleRetries() {
         val starters = ArrayList<Pair<Request, Job>>()
         synchronized(lock) {
@@ -365,7 +365,7 @@ class VisiblePreviewScheduler(
 
     /** 等满递进间隔后把失败项重新排上；期间离屏或取消就不再重试。 */
     private suspend fun awaitRetry(request: Request) {
-        // 等几秒读抽帧状态里的已试次数：第 n 次失败等 n 秒。
+        // 等几秒读抽帧状态里的已试次数：第 n 次失败等递进档里的第 n 档。
         val attempts = synchronized(lock) {
             if (closed || request.deferred.isCompleted) return
             source.previewEntryState(request.file)?.attempts
@@ -376,7 +376,7 @@ class VisiblePreviewScheduler(
             resumeAfterAttempt()
             return
         }
-        delay(VISIBLE_RETRY_STEP_MILLIS * attempts)
+        delay(failureBackoffMillis(attempts))
         // 等可见项全部出图：还有首次尝试在排队或在下发时不得插到它前面。批次收尾会唤醒，不轮询。
         while (true) {
             val gate = synchronized(lock) {
@@ -460,11 +460,8 @@ class VisiblePreviewScheduler(
     private companion object {
         val EMPTY_PREVIEW = MediaPreview(image = null, durationMillis = null)
 
-        /** 失败重试的递进步长：第 n 次重试等 n 秒。 */
-        const val VISIBLE_RETRY_STEP_MILLIS = 1_000L
-
-        /** 单个条目的失败重试上限。 */
-        const val VISIBLE_RETRY_MAX_ATTEMPTS = 5
+        /** 单个条目的失败重试上限：首发 1 次 + 重试 3 次。 */
+        const val VISIBLE_RETRY_MAX_ATTEMPTS = 3
 
         /** 取消原因；离屏与重建保留订阅，再次可见时重新入队。 */
         const val CANCEL_REASON_OFFSCREEN = "离屏"

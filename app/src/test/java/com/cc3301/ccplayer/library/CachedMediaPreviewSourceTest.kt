@@ -1738,17 +1738,24 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `本地抽取失败最多重试三次`() = runTest {
+    fun `本地失败同样交给调度器重试，不设本地专用的次数上限`() = runTest {
         extractor.imageFailure = IOException("读取失败")
         val file = local("坏文件.mkv")
 
-        // 首发失败 + 三次重试都交给调度器；之后按占位图收尾。
-        repeat(3) { attempt ->
+        // 次数上限由可见请求调度器按统一规则决定，抽帧源只把失败结果交出去并累计已试次数。
+        repeat(4) { attempt ->
             assertTrue("第 ${attempt + 1} 次失败要重试", source.preview(file).retryable)
         }
-        assertFalse("重试用尽后保持占位图", source.preview(file).retryable)
         assertEquals(4, extractor.imageRequests.size)
         assertTrue("抽取失败不写无图缓存与图片缓存", imageFileCount() == 0)
+    }
+
+    @Test
+    fun `失败记录的退避窗口按 1 秒、3 秒、9 秒递进`() {
+        assertEquals(1_000L, failureBackoffMillis(1))
+        assertEquals(3_000L, failureBackoffMillis(2))
+        assertEquals(9_000L, failureBackoffMillis(3))
+        assertEquals("次数超过重试上限不再加长", 9_000L, failureBackoffMillis(4))
     }
 
     @Test
@@ -1840,38 +1847,10 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
-    fun `可见项优先取得句柄名额，预取占不满`() = runTest {
-        val slotExtractor = PreparedSlotExtractor()
+    fun `打开超时按失败收尾，后面的可见项继续打开`() = runTest {
+        val opening = OpeningExtractor()
         val bounded = CachedMediaPreviewSource(
-            extractor = slotExtractor,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            backgroundScope = unconfinedBackgroundScope,
-        )
-        val prefetched = (0 until 6).map { index -> network("预取$index.mkv") }
-        bounded.updatePreviewWindow(
-            visibleLocations = emptySet(),
-            prefetchLocations = prefetched.map { file -> file.location }.toSet(),
-        )
-        val prefetches = prefetched.map { file -> async { bounded.prefetch(file) } }
-        runCurrent()
-        assertEquals("预取最多占 2 个名额，留 2 个给可见项", 2, slotExtractor.started.size)
-
-        val visible = async { bounded.visiblePreview(network("可见.mkv"), 9) }
-        runCurrent()
-        assertEquals("可见项不用等预取释放名额", 3, slotExtractor.started.size)
-        assertTrue(slotExtractor.started.contains("smb://nas/media/可见.mkv"))
-
-        slotExtractor.gate.complete(Unit)
-        assertNotNull(visible.await().image)
-        prefetches.forEach { it.await() }
-        assertEquals("每个已开句柄都关闭一次", slotExtractor.started.size, slotExtractor.closed.size)
-    }
-
-    @Test
-    fun `打开超时后归还句柄名额，后面的可见项继续打开`() = runTest {
-        val slotExtractor = PreparedSlotExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = slotExtractor,
+            extractor = opening,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
             backgroundScope = unconfinedBackgroundScope,
         )
@@ -1879,26 +1858,26 @@ class CachedMediaPreviewSourceTest {
             async { bounded.visiblePreview(network("卡住$index.mkv"), index) }
         }
         runCurrent()
-        assertEquals("四个名额同时被占住", 4, slotExtractor.started.size)
+        assertEquals("四个请求同时开始打开", 4, opening.started.size)
 
-        // 打开一直不返回：超时只停止等待，名额回到池里。
+        // 打开一直不返回：超时只停止等待，后面的请求照常打开。
         advanceTimeBy(15_000)
         runCurrent()
         blocked.forEach { request -> assertTrue("打开超时按失败收尾", request.await().retryable) }
 
         val later = async { bounded.visiblePreview(network("后来的.mkv"), 9) }
         runCurrent()
-        assertEquals("超时后名额可以再发出去", 5, slotExtractor.started.size)
-        assertTrue(slotExtractor.started.contains("smb://nas/media/后来的.mkv"))
+        assertEquals("超时后后面的请求照常打开", 5, opening.started.size)
+        assertTrue(opening.started.contains("smb://nas/media/后来的.mkv"))
     }
 
     @Test
-    fun `取消可见请求后归还句柄名额，已开的句柄全部关闭`() = runTest {
-        val slotExtractor = PreparedSlotExtractor()
-        slotExtractor.gate.complete(Unit)
-        slotExtractor.decodeGate = CompletableDeferred()
+    fun `取消可见请求后已开的句柄全部关闭`() = runTest {
+        val opening = OpeningExtractor()
+        opening.gate.complete(Unit)
+        opening.decodeGate = CompletableDeferred()
         val bounded = CachedMediaPreviewSource(
-            extractor = slotExtractor,
+            extractor = opening,
             cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
             backgroundScope = unconfinedBackgroundScope,
         )
@@ -1906,17 +1885,17 @@ class CachedMediaPreviewSourceTest {
             async { bounded.visiblePreview(network("占位$index.mkv"), index) }
         }
         runCurrent()
-        assertEquals("四个名额全部占住", 4, slotExtractor.started.size)
+        assertEquals("四个请求都在打开", 4, opening.started.size)
 
         blocked.drop(1).forEach { request -> request.cancel() }
         runCurrent()
-        assertEquals("取消的请求各自关闭句柄", 3, slotExtractor.closed.size)
+        assertEquals("取消的请求各自关闭句柄", 3, opening.closed.size)
 
         val later = async { bounded.visiblePreview(network("后来的.mkv"), 9) }
         runCurrent()
-        assertEquals("名额归还后才能再开", 5, slotExtractor.started.size)
+        assertEquals("后面的请求照常打开", 5, opening.started.size)
 
-        slotExtractor.decodeGate.complete(Unit)
+        opening.decodeGate.complete(Unit)
         runCurrent()
         assertNotNull(blocked[0].await().image)
         assertNotNull(later.await().image)
@@ -1951,32 +1930,6 @@ class CachedMediaPreviewSourceTest {
         runCurrent()
         assertNotNull(retry.await().image)
         assertEquals("打开超时后下一次准备新建连", 2, late.connections)
-    }
-
-    @Test
-    fun `等预打开名额超过上限按失败收尾`() = runTest {
-        val extractor = CloseHoldingExtractor()
-        val bounded = CachedMediaPreviewSource(
-            extractor = extractor,
-            cache = ThumbnailCache(directory = directory, maxBytes = 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
-            backgroundScope = unconfinedBackgroundScope,
-        )
-        val holders = (0 until 4).map { index ->
-            async { bounded.visiblePreview(network("占位$index.mkv"), index) }
-        }
-        runCurrent()
-        assertEquals("四个名额全部占住", 4, extractor.prepares)
-
-        val later = async { bounded.visiblePreview(network("后来.mkv"), 9) }
-        advanceTimeBy(20_000)
-        runCurrent()
-
-        assertTrue("等名额超时按失败收尾", later.await().retryable)
-        assertTrue("超时的请求没打开句柄", extractor.started.none { it.contains("后来.mkv") })
-
-        extractor.closeGate.complete(Unit)
-        runCurrent()
-        holders.forEach { it.cancel() }
     }
 
     @Test
@@ -2214,8 +2167,8 @@ private class SolidNetworkPreviewExtractor : MediaPreviewExtractor {
     override suspend fun durationMillis(file: MediaFile): Long? = null
 }
 
-/** 打开句柄先等闸门；记录已开与已关的句柄，用来验证句柄名额的容量与归还。 */
-private class PreparedSlotExtractor : MediaPreviewExtractor {
+/** 打开句柄先等闸门；记录已开与已关的句柄，用来验证每个句柄各关闭一次。 */
+private class OpeningExtractor : MediaPreviewExtractor {
 
     /** 打开句柄前等的闸门。 */
     val gate = CompletableDeferred<Unit>()
@@ -2239,27 +2192,6 @@ private class PreparedSlotExtractor : MediaPreviewExtractor {
                 byteArrayOf(1)
             },
             closeBlock = { closed += file.location },
-        )
-    }
-}
-
-/** 句柄打开并解码完成后卡在关闭上，用来占住预打开名额。 */
-private class CloseHoldingExtractor : MediaPreviewExtractor {
-
-    val closeGate = CompletableDeferred<Unit>()
-    val started = mutableListOf<String>()
-    var prepares = 0
-
-    override suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? = byteArrayOf(1)
-
-    override suspend fun durationMillis(file: MediaFile): Long? = null
-
-    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation {
-        prepares++
-        started += file.location
-        return NetworkPreviewPreparation(
-            decodeBlock = { byteArrayOf(1) },
-            closeBlock = { closeGate.await() },
         )
     }
 }

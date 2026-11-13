@@ -2,7 +2,7 @@ package com.cc3301.ccplayer.library
 
 import java.io.IOException
 
-/** 抽帧策略版本；策略变化时缓存键随之变化。 */
+/** 抽帧策略版本；只在抽帧算法变化时递增，缓存键随之变化，旧版本的缓存文件在启动清理时删掉。 */
 internal const val THUMBNAIL_POLICY_VERSION = 5
 
 /** 目标宽度（像素）：抽到的帧缩放到该宽度再压 JPEG。 */
