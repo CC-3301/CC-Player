@@ -43,6 +43,20 @@ class PlayerPressFeedback(private val now: () -> Long = System::currentTimeMilli
         phaseStart = now()
     }
 
+    /**
+     * 按帧推进不透明度，直到归零；按住与空闲只取一次值，不请求帧。
+     * 帧时钟由 [onFrame] 注入。
+     */
+    suspend fun animate(onFrame: suspend () -> Unit, onAlpha: (Float) -> Unit) {
+        while (true) {
+            val value = alpha()
+            onAlpha(value)
+            if (value <= 0f) return
+            if (phase != PlayerPressPhase.Fading && phase != PlayerPressPhase.Revoked) return
+            onFrame()
+        }
+    }
+
     /** 当前应绘制的不透明度。 */
     fun alpha(): Float = when (phase) {
         PlayerPressPhase.Idle -> 0f

@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -88,6 +89,46 @@ class PlayerPressFeedbackTest {
         feedback.revoke()
         assertEquals(PlayerPressPhase.Idle, feedback.phase)
         assertEquals(0f, feedback.alpha(), TOLERANCE)
+    }
+
+    @Test
+    fun `按住期间不请求帧`() = runTest {
+        feedback.press()
+
+        var frames = 0
+        var lastAlpha = 0f
+        feedback.animate(onFrame = { frames++ }) { lastAlpha = it }
+
+        assertEquals(0, frames)
+        assertEquals(PLAYER_PRESS_RIPPLE_ALPHA, lastAlpha, TOLERANCE)
+    }
+
+    @Test
+    fun `松手淡出期间逐帧推进，结束后不再请求帧`() = runTest {
+        feedback.press()
+        clock = 100
+        feedback.release()
+
+        var frames = 0
+        var lastAlpha = -1f
+        feedback.animate(onFrame = { frames++; clock += 16 }) { lastAlpha = it }
+
+        assertTrue(frames > 0)
+        assertEquals(0f, lastAlpha, TOLERANCE)
+    }
+
+    @Test
+    fun `被拦下撤除期间逐帧推进，结束后不再请求帧`() = runTest {
+        feedback.press()
+        clock = 30
+        feedback.revoke()
+
+        var frames = 0
+        var lastAlpha = -1f
+        feedback.animate(onFrame = { frames++; clock += 16 }) { lastAlpha = it }
+
+        assertTrue(frames > 0)
+        assertEquals(0f, lastAlpha, TOLERANCE)
     }
 
     private companion object {

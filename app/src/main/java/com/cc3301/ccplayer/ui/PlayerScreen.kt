@@ -317,11 +317,7 @@ private fun Modifier.playerPressFeedback(
     val alpha = remember { mutableFloatStateOf(0f) }
     LaunchedEffect(pressed) {
         if (pressed) feedback.press() else feedback.release()
-        while (true) {
-            alpha.floatValue = feedback.alpha()
-            if (alpha.floatValue <= 0f) break
-            withFrameNanos { }
-        }
+        feedback.animate(onFrame = { withFrameNanos { } }) { alpha.floatValue = it }
     }
     return drawBehind {
         if (alpha.floatValue > 0f) {
