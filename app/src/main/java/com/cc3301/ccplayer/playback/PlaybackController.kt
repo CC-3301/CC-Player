@@ -646,7 +646,7 @@ class PlaybackController(
 
     /**
      * 普通显式播放意图的收尾：状态迁移与保留集合发布在同一处完成。
-     * 切集与恢复原片不走这里：各自在新加载下发后发布，切集接管成功与片尾恢复收尾各再发布一次。
+     * 打开新目标、切集与恢复原片不走这里：各自在新加载下发后发布；切集接管成功与片尾恢复收尾各再发布一次。
      */
     private fun settleExplicitIntent(state: PlaybackState) {
         updateState(state)

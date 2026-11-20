@@ -35,6 +35,9 @@ class PlaybackControllerSourceReturnTest {
     /** 每次发布时给出的保留集合快照：发布时机只从注入出口观察。 */
     private val published = mutableListOf<Set<String>>()
 
+    /** 每次发布时引擎已收到的加载：用来断言先下发新加载、后发布。 */
+    private val startedAtPublish = mutableListOf<List<String>>()
+
     private fun TestScope.controller(returned: MutableList<String>): PlaybackController = PlaybackController(
         engine,
         progress,
@@ -47,6 +50,7 @@ class PlaybackControllerSourceReturnTest {
             }
             retained = locations
             published += locations
+            startedAtPublish += engine.startedUrls.toList()
         },
     )
 
@@ -162,14 +166,17 @@ class PlaybackControllerSourceReturnTest {
     }
 
     @Test
-    fun `换目标在发起那一刻归还旧目标`() = runTest {
+    fun `打开新目标先下发新加载再发布并归还旧目标`() = runTest {
         val returned = mutableListOf<String>()
         val controller = playingController(returned)
         val target = mediaFile("ep9.mkv")
+        startedAtPublish.clear()
 
         controller.openPlaylistForTest(generation = 2, files = listOf(target), current = target)
 
         assertEquals(listOf("root/ep1.mkv"), returned)
+        // 发布那一刻引擎已经收到新目标的加载：先下发、后发布。
+        assertEquals(listOf(listOf("root/ep1.mkv", "root/ep9.mkv")), startedAtPublish)
         assertEquals(PlaybackState.Loading, controller.state.value)
     }
 
