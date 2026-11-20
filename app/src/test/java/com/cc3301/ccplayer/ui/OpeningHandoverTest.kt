@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 打开交接：入口阶段、兜底计时与待起播请求的编排。 */
+/** 打开交接：入口阶段、兜底计时与待起播请求的编排；缓冲与控件状态由播放页加载事实覆盖。 */
 class OpeningHandoverTest {
 
     private var nowMillis = 0L
@@ -57,7 +57,6 @@ class OpeningHandoverTest {
 
         assertEquals(EntryPhase.Preparing, handover.phase)
         assertTrue(handover.preparesInPage)
-        assertTrue(handover.initialLoading(PlaybackState.Idle, switching = false))
     }
 
     @Test
@@ -87,50 +86,6 @@ class OpeningHandoverTest {
 
         assertEquals(EntryPhase.Accepted, handover.phase)
         assertFalse(handover.phase.isPreparingPhase)
-        assertTrue(handover.initialLoading(PlaybackState.Loading, switching = false))
-    }
-
-    @Test
-    fun `接手后首个就绪把缓冲指示交还给控制层`() {
-        acceptedEntry()
-
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Loading, switching = false))
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Playing, switching = false))
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Paused, switching = false))
-        assertFalse(handover.initialLoading(PlaybackState.Playing, switching = false))
-        assertEquals(EntryPhase.Accepted, handover.phase)
-    }
-
-    @Test
-    fun `接手后转入切集把缓冲指示交还给控制层`() {
-        acceptedEntry()
-
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Loading, switching = true))
-    }
-
-    @Test
-    fun `接手后到达终态把缓冲指示交还给控制层`() {
-        acceptedEntry()
-
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Ended, switching = false))
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Idle, switching = false))
-    }
-
-    @Test
-    fun `准备期只看入口阶段，不看上一会话的事实`() {
-        handover.begin(preparing = true)
-
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Playing, switching = false))
-        assertEquals(EntryPhase.Preparing, handover.phase)
-        assertTrue(handover.preparesInPage)
-    }
-
-    @Test
-    fun `等待接手同样不看上一会话的事实`() {
-        preparedEntry()
-
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Paused, switching = false))
-        assertEquals(EntryPhase.AwaitingHandover, handover.phase)
     }
 
     @Test
@@ -207,26 +162,6 @@ class OpeningHandoverTest {
         handover.attemptHandover(canStart = true)
 
         assertFalse(handover.consumeInitialFailure(generation, firstLoad = true))
-    }
-
-    @Test
-    fun `准备期显示缓冲指示`() {
-        val generation = handover.begin(preparing = true)
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Idle, switching = false))
-
-        handover.prepared(generation, playlist, current, directoryEntries)
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Loading, switching = false))
-    }
-
-    @Test
-    fun `音频进入时不显示入口缓冲`() {
-        val generation = handover.begin(preparing = false)
-        handover.prepared(generation, playlist, current, directoryEntries)
-        handover.attemptHandover(canStart = true)
-
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Loading, switching = false))
-        assertTrue(handover.showsBuffering(controllerBuffering = true, PlaybackState.Loading, switching = false))
-        assertEquals(EntryPhase.Accepted, handover.phase)
     }
 
     @Test
@@ -371,11 +306,6 @@ class OpeningHandoverTest {
         assertEquals(HandoverAttempt.Accepted, handover.attemptHandover(canStart = true))
         assertEquals(EntryPhase.Accepted, handover.phase)
         assertEquals(generation, starts.single().generation)
-
-        // 接手后到首个就绪前，缓冲指示由入口顶着；首个就绪后交还给控制层。
-        assertTrue(handover.showsBuffering(controllerBuffering = false, PlaybackState.Loading, switching = false))
-        assertFalse(handover.showsBuffering(controllerBuffering = false, PlaybackState.Playing, switching = false))
-        assertFalse(handover.initialLoading(PlaybackState.Playing, switching = false))
     }
 
     @Test

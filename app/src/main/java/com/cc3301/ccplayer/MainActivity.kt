@@ -93,6 +93,7 @@ import com.cc3301.ccplayer.ui.PlaybackEntryOpener
 import com.cc3301.ccplayer.ui.PlayerActions
 import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
+import com.cc3301.ccplayer.ui.PlayerLoadingFacts
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerScreenAccess
 import com.cc3301.ccplayer.ui.PlayerScreenViewModel
@@ -553,11 +554,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
                             preparesInPage = openingHandover.preparesInPage,
-                            bufferingShown = openingHandover.showsBuffering(
-                                controllerBuffering = playerScreen.controllerBuffering,
-                                playbackState = playerScreen.playbackState,
-                                switching = playerScreen.switching,
-                            ),
                             orientationMode = orientationMode,
                             orientationOverride = sessionOrientation.override,
                             screenOrientation = screenOrientation,
@@ -980,22 +976,31 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         surfaceSession.onSurfaceChanged(width, height)
     }
 
+    /** 播放页加载事实：入口事实与控制层事实合到一处，返回与顶栏共用。 */
+    private fun playerLoadingFacts(
+        playbackState: PlaybackState = playerScreen.playbackState,
+        switching: Boolean = playerScreen.switching,
+        restoring: Boolean = playerScreen.restoring,
+    ): PlayerLoadingFacts = playerScreen.loading(
+        entryPhase = openingHandover.phase,
+        preparesInPage = openingHandover.preparesInPage,
+        playbackState = playbackState,
+        switching = switching,
+        restoring = restoring,
+    )
+
     /**
      * 播放页系统返回：切集只取消这一跳；首次加载、恢复原片与错误态退出播放页；
      * 其余播放状态按「APP 内后台播放」决定离开后是否继续播放。
      */
     private fun handlePlayerBack() {
         val state = playerScreen.playbackState
-        val switching = playerScreen.switching
         when (
             playerBackAction(
-                state = state,
-                switching = switching,
-                restoring = playerScreen.restoring,
-                initialLoading = openingHandover.initialLoading(state, switching),
+                loading = playerLoadingFacts(),
+                playbackState = state,
                 failed = playerScreen.playbackFailed,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
-                entryPhase = openingHandover.phase,
                 atEpisodeEnd = playback?.controller?.atEpisodeEnd == true,
             )
         ) {
@@ -1006,9 +1011,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         }
     }
 
-    /** 顶栏返回：准备期与系统返回走同一套判定；其余阶段左上角返回总是结束播放。 */
+    /** 顶栏返回：打开尚未接手时与系统返回走同一套判定；其余阶段左上角返回总是结束播放。 */
     private fun handlePlayerTopBarBack() {
-        if (playerTopBarBackEndsPlayback(openingHandover.phase)) {
+        if (playerTopBarBackEndsPlayback(playerLoadingFacts())) {
             closePlayer()
         } else {
             handlePlayerBack()
@@ -1029,13 +1034,14 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         val switching = binder.controller.switching.value
         when (
             playerBackAction(
-                state = state,
-                switching = switching,
-                restoring = binder.controller.restoring.value,
-                initialLoading = openingHandover.initialLoading(state, switching),
+                loading = playerLoadingFacts(
+                    playbackState = state,
+                    switching = switching,
+                    restoring = binder.controller.restoring.value,
+                ),
+                playbackState = state,
                 failed = binder.controller.playbackFailed.value,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
-                entryPhase = openingHandover.phase,
                 atEpisodeEnd = binder.controller.atEpisodeEnd,
             )
         ) {
