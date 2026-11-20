@@ -10,8 +10,8 @@ import android.view.Surface
  */
 internal class SurfaceMountState {
 
-    /** 重挂结果：挂上、意图已变或被分离、已有挂载在途。 */
-    enum class RemountResult { Attached, Superseded, Pending }
+    /** 重挂结果：挂上、Surface 已失效、意图已变或被分离、已有挂载在途。 */
+    enum class RemountResult { Attached, Rejected, Superseded, Pending }
 
     private val lock = Any()
 
@@ -50,13 +50,16 @@ internal class SurfaceMountState {
 
     /**
      * 队列恢复后重挂：检查与 [attach] 同临界区，期间分离或换 Surface 不会插进来。
-     * [attach] 在锁内执行，调用方应在其中完成真正的挂载。
+     * [attach] 在锁内执行并返回是否真的挂上；返回 false 时回滚意图，不算可渲染。
      */
-    fun remount(surface: Surface, attach: () -> Unit): RemountResult = synchronized(lock) {
+    fun remount(surface: Surface, attach: () -> Boolean): RemountResult = synchronized(lock) {
         if (desired !== surface) return RemountResult.Superseded
         if (attached != null) return RemountResult.Pending
         attached = surface
-        attach()
+        if (!attach()) {
+            attached = null
+            return RemountResult.Rejected
+        }
         mounted = surface
         RemountResult.Attached
     }
@@ -79,6 +82,6 @@ internal class SurfaceMountState {
     /** 是否有在途或已挂载的 Surface。 */
     fun hasMount(): Boolean = synchronized(lock) { attached != null || mounted != null }
 
-    /** 当前在途意图；开输出调用方据此确定目标。 */
-    fun intended(): Surface? = synchronized(lock) { attached }
+    /** 是否真的挂着一块 Surface（可渲染事实）；与 [hasMount] 不同，不含在途意图。 */
+    fun hasMountedSurface(): Boolean = synchronized(lock) { mounted != null }
 }

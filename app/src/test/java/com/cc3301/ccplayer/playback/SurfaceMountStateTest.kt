@@ -25,7 +25,10 @@ class SurfaceMountStateTest {
         var attached = false
         assertEquals(
             SurfaceMountState.RemountResult.Superseded,
-            state.remount(surface) { attached = true },
+            state.remount(surface) {
+                attached = true
+                true
+            },
         )
         assertFalse(attached)
     }
@@ -40,7 +43,10 @@ class SurfaceMountStateTest {
         var attached = 0
         assertEquals(
             SurfaceMountState.RemountResult.Attached,
-            state.remount(surface) { attached += 1 },
+            state.remount(surface) {
+                attached += 1
+                true
+            },
         )
         assertEquals(1, attached)
         assertTrue(state.isMounted(surface))
@@ -63,6 +69,7 @@ class SurfaceMountStateTest {
             remountResult = state.remount(surface) {
                 insideAttach.countDown()
                 releaseAttach.await(2, TimeUnit.SECONDS)
+                true
             }
         }
         mounter.start()
@@ -96,7 +103,10 @@ class SurfaceMountStateTest {
         var attached = false
         assertEquals(
             SurfaceMountState.RemountResult.Superseded,
-            state.remount(oldSurface) { attached = true },
+            state.remount(oldSurface) {
+                attached = true
+                true
+            },
         )
         assertFalse(attached)
     }
@@ -121,9 +131,33 @@ class SurfaceMountStateTest {
         var attached = false
         assertEquals(
             SurfaceMountState.RemountResult.Pending,
-            state.remount(surface) { attached = true },
+            state.remount(surface) {
+                attached = true
+                true
+            },
         )
         assertFalse(attached)
+    }
+
+    @Test
+    fun `Surface 已失效时重挂回到未挂载`() {
+        val state = SurfaceMountState()
+        val surface = testSurface()
+        state.require(surface)
+        state.onTimedOut(surface)
+
+        var attachCalls = 0
+        assertEquals(
+            SurfaceMountState.RemountResult.Rejected,
+            state.remount(surface) {
+                attachCalls += 1
+                false
+            },
+        )
+        assertEquals(1, attachCalls)
+        assertFalse(state.isIntended(surface))
+        assertFalse(state.hasMount())
+        assertFalse(state.hasMountedSurface())
     }
 
     private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)
