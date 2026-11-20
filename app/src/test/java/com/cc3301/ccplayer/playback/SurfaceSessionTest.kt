@@ -7,7 +7,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Surface 会话：只由 Surface 生命周期回调拆挂，挂载与分离幂等。 */
+/** Surface 会话：只做 Surface 与宿主生命周期 adapter，挂载与分离幂等。 */
 class SurfaceSessionTest {
 
     private val attached = mutableListOf<Surface>()
@@ -24,10 +24,9 @@ class SurfaceSessionTest {
             attached += surface
             engineReady
         },
-        startOutput = { operations += "output" },
         detachEngine = {
-            detachCalls++
             operations += "detach"
+            detachCalls++
         },
         resize = { width, height ->
             resized += width to height
@@ -47,22 +46,6 @@ class SurfaceSessionTest {
 
         assertEquals(1, attached.size)
         assertSame(surface, attached.single())
-        assertEquals(SurfaceSession.State.Ready, session.state)
-    }
-
-    @Test
-    fun `remount applies the size before starting video output`() {
-        val session = session()
-        val surface = testSurface()
-
-        session.onSurfaceCreated(surface)
-        session.onSurfaceChanged(1920, 1080)
-        session.onSurfaceDestroyed()
-        operations.clear()
-
-        session.onSurfaceCreated(surface)
-
-        assertEquals(listOf("attach", "resize", "output"), operations)
         assertEquals(SurfaceSession.State.Ready, session.state)
     }
 
@@ -90,8 +73,8 @@ class SurfaceSessionTest {
         session.onSurfaceDestroyed()
         session.onSurfaceCreated(newSurface)
 
-        // 旧 Surface 已销毁但仍挂在引擎上：先分离，再挂新 Surface。
-        assertEquals(listOf("attach", "output", "detach", "attach", "output"), operations)
+        // 旧 Surface 已销毁：先分离，再挂新 Surface。
+        assertEquals(listOf("attach", "detach", "attach"), operations)
         assertSame(newSurface, attached.last())
         assertEquals(SurfaceSession.State.Ready, session.state)
     }
@@ -140,16 +123,16 @@ class SurfaceSessionTest {
     }
 
     @Test
-    fun `surface size is applied after mounting and on later changes`() {
+    fun `surface size changes are forwarded to the engine`() {
         val session = session()
         val surface = testSurface()
 
         session.onSurfaceCreated(surface)
         session.onSurfaceChanged(1920, 1080)
-        session.onSurfaceDestroyed()
-        session.onSurfaceCreated(surface)
+        session.onSurfaceChanged(1280, 720)
 
-        assertEquals(listOf(1920 to 1080, 1920 to 1080), resized)
+        // 尺寸只转发：什么时候下发给播放核心由挂载恢复决定。
+        assertEquals(listOf(1920 to 1080, 1280 to 720), resized)
     }
 
     @Test
@@ -157,12 +140,31 @@ class SurfaceSessionTest {
         val session = session()
         val surface = testSurface()
 
-        // 画面载体的可用回调自带视图尺寸：挂载后立刻下发，不必等一次额外的尺寸事件。
+        // 画面载体的可用回调自带视图尺寸：先报告挂载，再转发尺寸。
         session.onSurfaceCreated(surface)
         session.onSurfaceChanged(1280, 720)
 
-        assertEquals(listOf("attach", "output", "resize"), operations)
+        assertEquals(listOf("attach", "resize"), operations)
         assertEquals(listOf(1280 to 720), resized)
+    }
+
+    @Test
+    fun `size reported before the engine is available is applied on mount`() {
+        val session = session()
+        val surface = testSurface()
+        engineReady = false
+
+        session.onSurfaceCreated(surface)
+        session.onSurfaceChanged(1920, 1080)
+        engineReady = true
+        operations.clear()
+        resized.clear()
+
+        // 补挂前先报当前尺寸：挂载后补下尺寸、再开输出。
+        session.onEngineAvailable()
+
+        assertEquals(listOf(1920 to 1080), resized)
+        assertEquals(listOf("resize", "attach"), operations)
     }
 
     @Test

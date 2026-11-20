@@ -68,6 +68,7 @@ import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerOption
+import com.cc3301.ccplayer.playback.SurfaceMountRecovery
 import com.cc3301.ccplayer.playback.SurfaceSession
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
@@ -186,18 +187,31 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 的挂载与分离由会话持有；拆挂只由 Surface 生命周期回调触发。 */
+    /** Surface 挂载恢复：三态、队列、超时、重挂与「挂载 → 尺寸 → 开输出」顺序都归它。 */
+    private val surfaceRecovery by lazy {
+        SurfaceMountRecovery(
+            execute = { task ->
+                playback?.engine?.postToVideoOutput(task) ?: throw IllegalStateException("播放引擎不在")
+            },
+            mount = { surface -> playback?.engine?.attachSurface(surface) },
+            detachOutput = { playback?.engine?.detachSurface() },
+            resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
+            openOutput = { playback?.engine?.startVideoOutput() },
+            onDiagnostic = { message -> diagnostics.log { message } },
+        )
+    }
+
+    /** Surface 会话只报生命周期；挂载、尺寸与输出顺序归挂载恢复。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
                 playback?.engine?.let {
-                    it.attachSurface(surface)
+                    surfaceRecovery.attach(surface)
                     true
                 } ?: false
             },
-            startOutput = { playback?.engine?.startVideoOutput() },
-            detachEngine = { playback?.engine?.detachSurface() },
-            resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
+            detachEngine = { surfaceRecovery.detach() },
+            resize = { width, height -> surfaceRecovery.setSurfaceSize(width, height) },
             onAvailabilityChanged = { available ->
                 playback?.controller?.setRenderSurfaceAvailable(available)
             },
@@ -296,6 +310,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
             playback = null
             playerScreen.detach()
             surfaceSession.onEngineLost()
+            surfaceRecovery.reset()
         }
     }
 
@@ -1134,6 +1149,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         playback = null
         // 引擎已经不在：挂载记录随之作废，重新连上时按现有 Surface 补挂。
         surfaceSession.onEngineLost()
+        surfaceRecovery.reset()
         if (bound) {
             unbindService(connection)
             bound = false
@@ -1244,6 +1260,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     override fun onDestroy() {
         if (isFinishing) diagnostics.logSync("应用退出")
         surfaceSession.release()
+        surfaceRecovery.release()
         releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()

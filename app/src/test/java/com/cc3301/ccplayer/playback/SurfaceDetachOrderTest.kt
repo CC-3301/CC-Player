@@ -178,11 +178,11 @@ class SurfaceDetachOrderTest {
             attach = { calls += "attach" },
             onSkipped = { calls += "skipped" },
         )
-        sizedQueue.postSurfaceSize(1920, 1080) { name, value -> calls += "$name=$value" }
+        sizedQueue.postSurfaceSize(1920, 1080) { width, height -> calls += "size=${width}x${height}" }
 
         while (pendingTasks.isNotEmpty()) pendingTasks.removeFirst()()
 
-        assertEquals(listOf("busy", "attach", "android-surface-size=1920x1080"), calls)
+        assertEquals(listOf("busy", "attach", "size=1920x1080"), calls)
     }
 
     @Test

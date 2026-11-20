@@ -66,7 +66,7 @@ class PlaybackService : Service() {
 
     private val fileProviderAuthority: String get() = "$packageName.fileprovider"
 
-    val engine: PlaybackEngine get() = playbackEngine
+    val engine: MpvPlaybackEngine get() = playbackEngine
 
     val controller: PlaybackController get() = playbackController
 
@@ -203,7 +203,7 @@ class PlaybackService : Service() {
 
     /** 同进程绑定，界面直接用这个拿引擎与播放控制层。 */
     inner class LocalBinder : Binder() {
-        val engine: PlaybackEngine get() = this@PlaybackService.engine
+        val engine: MpvPlaybackEngine get() = this@PlaybackService.engine
 
         val controller: PlaybackController get() = this@PlaybackService.controller
 

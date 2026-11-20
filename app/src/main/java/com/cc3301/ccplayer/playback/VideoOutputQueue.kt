@@ -96,10 +96,8 @@ internal class VideoOutputQueue(
     }
 
     /** 下发 Surface 尺寸：与挂载投同一条队列，同一线程内保持「先挂载、再下尺寸、再开输出」。 */
-    fun postSurfaceSize(width: Int, height: Int, setProperty: (String, String) -> Unit) {
-        val accepted = postAlways {
-            setProperty("android-surface-size", "${width}x$height")
-        }
+    fun postSurfaceSize(width: Int, height: Int, apply: (Int, Int) -> Unit) {
+        val accepted = postAlways { apply(width, height) }
         if (!accepted) onDiagnostic("尺寸: 视频输出线程不再受理，尺寸没有下发")
     }
 
