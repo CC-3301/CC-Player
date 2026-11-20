@@ -645,6 +645,15 @@ class PlaybackController(
     }
 
     /**
+     * 普通显式播放意图的收尾：状态迁移与保留集合发布在同一处完成。
+     * 切集与恢复原片不走这里：各自在新加载下发后发布，切集接管成功与片尾恢复收尾各再发布一次。
+     */
+    private fun settleExplicitIntent(state: PlaybackState) {
+        updateState(state)
+        retainSources()
+    }
+
+    /**
      * 此刻仍需保留的媒体位置。会话活着时，加载中的目标一定在被读取（首次、切集、恢复）；
      * 空闲时停在片尾的目标不算被读取。切集中原目标在目标接管之前仍被读取，与目标一起保留。
      * 只有网络目标持有字节源；同一位置的不同列表项算同一条源。
@@ -919,10 +928,7 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 后台暂停同样按意图立刻反映：通知栏与退后台判定都读这个状态。
-        if (loadPhase == LoadPhase.None) {
-            updateState(PlaybackState.Paused)
-            retainSources()
-        }
+        if (loadPhase == LoadPhase.None) settleExplicitIntent(PlaybackState.Paused)
     }
 
     /** 已经收到目标就绪并开始播放的切集：此时暂停按“已就绪暂停”收尾。 */
@@ -1142,10 +1148,7 @@ class PlaybackController(
         engine.pause()
         settleStartedSwitchAsPaused()
         // 暂停按用户意图立刻生效，不等引擎回声；加载阶段的状态由就绪流程按意图定。
-        if (loadPhase == LoadPhase.None) {
-            updateState(PlaybackState.Paused)
-            retainSources()
-        }
+        if (loadPhase == LoadPhase.None) settleExplicitIntent(PlaybackState.Paused)
     }
 
     /**
@@ -1183,7 +1186,7 @@ class PlaybackController(
             engine.resume()
         }
         // 继续播放按用户意图立刻生效，不等引擎回声；加载阶段由就绪流程按意图定。
-        if (loadPhase == LoadPhase.None) updateState(PlaybackState.Playing)
+        if (loadPhase == LoadPhase.None) settleExplicitIntent(PlaybackState.Playing)
     }
 
     /** 音频输出中断（耳机拔出、蓝牙断连）：立即暂停，不自动恢复，等用户手动继续。 */
@@ -1192,8 +1195,7 @@ class PlaybackController(
         paused = true
         engine.pause()
         settleStartedSwitchAsPaused()
-        updateState(PlaybackState.Paused)
-        retainSources()
+        settleExplicitIntent(PlaybackState.Paused)
     }
 
     /**
@@ -1243,7 +1245,8 @@ class PlaybackController(
         active = false
         paused = false
         endSeekPreview(commit = false)
-        updateState(PlaybackState.Idle)
+        // 真正停止：没有目标还在被读取，保留集合清空。
+        settleExplicitIntent(PlaybackState.Idle)
         _decodeMode.value = DecodeMode.Hardware
         _loopMode.value = LoopMode.Sequential
         _videoAspectRatio.value = null
@@ -1254,8 +1257,6 @@ class PlaybackController(
         pausedAtEpisodeEnd = false
         resetLoadState()
         cancelSleepTimer()
-        // 真正停止：没有目标还在被读取，保留集合清空。
-        retainSources()
     }
 
     /** 设定定时暂停：替换已有的定时，不叠加。 */
@@ -1825,9 +1826,8 @@ class PlaybackController(
             _sleepTimerState.value = SleepTimerState.Off
             _sleepTimerOption.value = null
             pausedAtEpisodeEnd = true
-            updateState(PlaybackState.Paused)
             // 暂停在片尾：当前目标不再被读取。
-            retainSources()
+            settleExplicitIntent(PlaybackState.Paused)
             return
         }
         // 自然播完后的下一集与手动切集共用同一条切换路径。
@@ -1850,9 +1850,8 @@ class PlaybackController(
         // 会话结束：恢复播放由播放键重开，这里只收起预览、静音与吞掉的暂停回声。
         active = false
         endSeekPreview(commit = false)
-        updateState(PlaybackState.Ended)
         // 播到结束：当前目标不再被读取。
-        retainSources()
+        settleExplicitIntent(PlaybackState.Ended)
     }
 
     /** 用户恢复播放操作：解除片尾黑底，并允许后续失败重新提示。 */
@@ -1907,8 +1906,7 @@ class PlaybackController(
         if (!active) return
         paused = true
         engine.pause()
-        updateState(PlaybackState.Paused)
-        retainSources()
+        settleExplicitIntent(PlaybackState.Paused)
     }
 
     /** 播放已停在当前文件的末尾：位置到结尾，或文件播完时被定时暂停。 */
@@ -1944,7 +1942,7 @@ class PlaybackController(
         if (loadPhase != LoadPhase.Switching) return
         logLoadSucceeded()
         generation?.markReady()
-        // 切集接管成功：原目标不再被读取，此刻才移出保留集合。
+        // 切集接管成功：原目标不再被读取，此刻移出保留集合。
         retainSources()
         // 切集就绪（打开交接被切集接管的路径同样到此放声）。
         releaseOpeningAudio()
@@ -2393,7 +2391,7 @@ class PlaybackController(
         }
         if (paused) {
             updateState(PlaybackState.Paused)
-            // 片尾恢复同样停在一段片尾。
+            // 恢复后停在片尾：原片不再被读取，收尾时移出保留集合。
             if (restoredAtEnd) retainSources()
             // 后台切集失败回退原片：屏上已没有旧画面时补一帧，回前台不会停在纯黑暂停。
             restorePausedFrameIfNoPicture()

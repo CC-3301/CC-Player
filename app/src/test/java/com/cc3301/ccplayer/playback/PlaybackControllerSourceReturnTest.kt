@@ -32,6 +32,9 @@ class PlaybackControllerSourceReturnTest {
     /** 上一版保留集合：注入出口按差集记录归还，与路由层同一判据。 */
     private var retained: Set<String> = emptySet()
 
+    /** 每次发布时给出的保留集合快照：发布时机只从注入出口观察。 */
+    private val published = mutableListOf<Set<String>>()
+
     private fun TestScope.controller(returned: MutableList<String>): PlaybackController = PlaybackController(
         engine,
         progress,
@@ -43,6 +46,7 @@ class PlaybackControllerSourceReturnTest {
                 startsAtReturn += engine.startedUrls.size
             }
             retained = locations
+            published += locations
         },
     )
 
@@ -111,12 +115,14 @@ class PlaybackControllerSourceReturnTest {
         val returned = mutableListOf<String>()
         val controller = playingController(returned)
         engine.reportPositionChanged(600_000, 600_000)
+        published.clear()
 
         // 不是控制层设定的暂停意图（keep-open 停在末帧）：只压状态，不碰字节源。
         engine.reportPauseChanged(true)
 
         assertEquals(PlaybackState.Paused, controller.state.value)
         assertTrue("回声不判定归还", returned.isEmpty())
+        assertTrue("引擎回声不是显式意图，不发布", published.isEmpty())
     }
 
     @Test
@@ -341,5 +347,69 @@ class PlaybackControllerSourceReturnTest {
         controller.stop()
 
         assertEquals(listOf("root/ep1.mkv", "root/ep2.mkv"), returned)
+    }
+
+    @Test
+    fun `继续播放的显式意图也经收尾发布保留集合`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        engine.reportPositionChanged(500_000, 600_000)
+        controller.pause()
+        published.clear()
+
+        controller.resume()
+
+        // 集合不变也按当前目标发布一次：继续播放与暂停在同一处收尾。
+        assertEquals(listOf(setOf("root/ep1.mkv")), published)
+        assertTrue(returned.isEmpty())
+    }
+
+    @Test
+    fun `切集在下发后发布，接管成功时再发布归还起点`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        published.clear()
+
+        controller.next()
+        // 新加载下发后发布：起点与目标此刻都还在读。
+        assertEquals(listOf(setOf("root/ep1.mkv", "root/ep2.mkv")), published)
+
+        engine.reportFileLoaded()
+        engine.reportVideoReconfigured()
+        // 接管之前不发布，也不归还起点。
+        assertEquals(listOf(setOf("root/ep1.mkv", "root/ep2.mkv")), published)
+        assertTrue("接管前不归还原目标", returned.isEmpty())
+
+        engine.reportPositionChanged(1_000, 600_000)
+
+        // 接管成功：再发布一次，起点移出集合。
+        assertEquals(
+            listOf(setOf("root/ep1.mkv", "root/ep2.mkv"), setOf("root/ep2.mkv")),
+            published,
+        )
+        assertEquals(listOf("root/ep1.mkv"), returned)
+    }
+
+    @Test
+    fun `片尾恢复在下发后发布，收尾时再发布归还原片`() = runTest {
+        val returned = mutableListOf<String>()
+        val controller = playingController(returned)
+        // 原片停在片尾后自动切集，切集目标连续失败两次，回退原片进入恢复。
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+        published.clear()
+
+        engine.reportPlaybackFailed()
+        engine.reportPlaybackFailed()
+
+        // 恢复加载下发后发布：失败目标此刻移出保留集合。
+        assertEquals(listOf(setOf("root/ep1.mkv")), published)
+        assertEquals(listOf("root/ep2.mkv"), returned)
+
+        engine.reportFileLoaded()
+
+        // 恢复后停在片尾：恢复收尾再发布一次，原片移出集合。
+        assertEquals(listOf(setOf("root/ep1.mkv"), emptySet<String>()), published)
+        assertEquals(listOf("root/ep2.mkv", "root/ep1.mkv"), returned)
     }
 }
