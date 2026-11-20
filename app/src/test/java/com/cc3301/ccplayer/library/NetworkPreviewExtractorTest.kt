@@ -8,11 +8,16 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertArrayEquals
@@ -67,7 +72,7 @@ class NetworkPreviewExtractorTest {
             readAhead = executor,
         )
 
-        val prepared = extractor.prepare(movie)!!
+        val prepared = extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!
         try {
             executor.runAll()
             assertArrayEquals(ByteArray(8), prepared.decode(NETWORK_TARGET_WIDTH))
@@ -102,7 +107,7 @@ class NetworkPreviewExtractorTest {
             diagnostics = diagnostics,
         )
 
-        val prepared = extractor.prepare(movie)!!
+        val prepared = extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!
         executor.runAll()
         prepared.decode(NETWORK_TARGET_WIDTH)
         prepared.close()
@@ -242,7 +247,7 @@ class NetworkPreviewExtractorTest {
         )
 
         try {
-            extractor.prepare(movie)
+            extractor.prepare(movie, PREVIEW_PREFETCH_RANK)
             fail("应向上抛出取消")
         } catch (expected: CancellationException) {
             // 预期路径。
@@ -263,7 +268,7 @@ class NetworkPreviewExtractorTest {
         )
 
         try {
-            local.prepare(movie)
+            local.prepare(movie, PREVIEW_PREFETCH_RANK)
             fail("应向上抛出预读提交失败")
         } catch (expected: RejectedExecutionException) {
             // 预期路径。
@@ -291,7 +296,7 @@ class NetworkPreviewExtractorTest {
         )
 
         try {
-            lost.prepare(movie)
+            lost.prepare(movie, PREVIEW_PREFETCH_RANK)
             fail("应向上抛出会话失败")
         } catch (expected: MediaSourceException) {
             // 预期路径。
@@ -351,11 +356,11 @@ class NetworkPreviewExtractorTest {
             decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
             readAhead = StepExecutor(),
         )
-        val prepared = extractor.prepare(movie)!!
+        val prepared = extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!
         prepared.discard()
 
         assertEquals("打开阶段放弃要作废会话", 1, reads.discardedSessions)
-        extractor.prepare(movie)!!.close()
+        extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!.close()
         assertEquals("下一次准备要重新建连", 2, reads.connections)
     }
 
@@ -370,7 +375,7 @@ class NetworkPreviewExtractorTest {
             },
             readAhead = StepExecutor(),
         )
-        val prepared = extractor.prepare(movie)!!
+        val prepared = extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!
 
         // 解码阻塞在传输读里，等它真正开始读再按超时取消。
         val decoding = launch(Dispatchers.Default) { prepared.decode(NETWORK_TARGET_WIDTH) }
@@ -380,7 +385,7 @@ class NetworkPreviewExtractorTest {
 
         assertEquals("打断传输读要作废会话", 1, reads.discardedSessions)
 
-        extractor.prepare(movie)!!.close()
+        extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!.close()
         assertEquals("下一次准备要重新建连", 2, reads.connections)
     }
 
@@ -392,12 +397,89 @@ class NetworkPreviewExtractorTest {
             decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
             readAhead = StepExecutor(),
         )
-        val prepared = extractor.prepare(movie)!!
+        val prepared = extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!
         prepared.abandon()
 
         assertEquals("没有在途读不作废会话", 0, reads.discardedSessions)
-        extractor.prepare(movie)!!.close()
+        extractor.prepare(movie, PREVIEW_PREFETCH_RANK)!!.close()
         assertEquals("下一次准备复用会话", 1, reads.connections)
+    }
+
+    @Test
+    fun `打开超时后晚到的句柄被作废`() = runBlocking {
+        val late = LateOpenReads()
+        val extractor = NetworkPreviewExtractor(
+            late,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+            openTimeoutMillis = 50,
+        )
+
+        val request = async(Dispatchers.Default) {
+            runCatching { extractor.prepare(movie, PREVIEW_PREFETCH_RANK) }
+        }
+        assertTrue("打开应当已经开始", late.started.await(5, TimeUnit.SECONDS))
+
+        // 打开一直不返回：等到上限后按超时失败收尾，只停止等待。
+        val failure = request.await().exceptionOrNull()
+        assertTrue("应抛出打开超时：$failure", failure is PreviewStageException)
+        assertEquals(PreviewFailureStage.Timeout, (failure as PreviewStageException).stage)
+
+        // 迟到的打开终于返回：没人接手，晚到的句柄在这里作废。
+        late.gate.complete(Unit)
+        late.awaitLateOpenDiscarded()
+        assertTrue("晚到的句柄要关闭", late.discardedCount > 0)
+        assertEquals("每条晚到句柄只作废一次", late.openedCount, late.discardedCount)
+    }
+
+    @Test
+    fun `等待打开被取消时晚到的句柄被作废`() = runBlocking {
+        val late = LateOpenReads()
+        val extractor = NetworkPreviewExtractor(
+            late,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+        )
+
+        val job = launch(Dispatchers.Default) { extractor.prepare(movie, PREVIEW_PREFETCH_RANK) }
+        assertTrue("打开应当已经开始", late.started.await(5, TimeUnit.SECONDS))
+
+        job.cancel()
+        late.gate.complete(Unit)
+        withTimeout(5_000) { job.join() }
+
+        late.awaitLateOpenDiscarded()
+        assertTrue("晚到的句柄要关闭", late.discardedCount > 0)
+        assertEquals("每条晚到句柄只作废一次", late.openedCount, late.discardedCount)
+    }
+
+    @Test
+    fun `一个条目的打开超时不挡住其它条目打开`() = runBlocking {
+        val late = LateOpenReads()
+        val extractor = NetworkPreviewExtractor(
+            late,
+            decoder = NetworkPreviewDecoder { _, _, _ -> ByteArray(1) },
+            readAhead = StepExecutor(),
+            openTimeoutMillis = 50,
+        )
+
+        val first = async(Dispatchers.Default) {
+            runCatching { extractor.prepare(movie, PREVIEW_PREFETCH_RANK) }
+        }
+        val second = async(Dispatchers.Default) {
+            runCatching { extractor.prepare(movie.copy(location = "smb://nas/media/另一部.mkv"), PREVIEW_PREFETCH_RANK) }
+        }
+        late.awaitStarted(2)
+
+        listOf(first, second).forEach { request ->
+            val failure = request.await().exceptionOrNull()
+            assertTrue("应抛出打开超时：$failure", failure is PreviewStageException)
+            assertEquals(PreviewFailureStage.Timeout, (failure as PreviewStageException).stage)
+        }
+
+        late.gate.complete(Unit)
+        late.awaitLateOpenDiscarded()
+        assertEquals("晚到句柄全部作废", late.openedCount, late.discardedCount)
     }
 
     @Test
@@ -460,6 +542,61 @@ private class RejectingExecutor(
     /** 跑完已入队的任务：窗口关闭后它们必须直接退出，不再读底层。 */
     fun runAll() {
         while (tasks.isNotEmpty()) tasks.removeFirst().run()
+    }
+}
+
+/** 打开会阻塞到放行：等待放在 NonCancellable 里，等价于取消打不断的阻塞打开。 */
+private class LateOpenReads : NetworkMediaReads {
+
+    val gate = CompletableDeferred<Unit>()
+    val started = CountDownLatch(1)
+
+    @Volatile
+    var startedCount = 0
+
+    @Volatile
+    var openedCount = 0
+
+    @Volatile
+    var discardedCount = 0
+
+    override suspend fun openRead(location: String, size: Long): ByteSource {
+        startedCount++
+        started.countDown()
+        withContext(NonCancellable) { gate.await() }
+        openedCount++
+        return object : ByteSource {
+            override val size: Long = 64
+
+            override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = 0
+
+            override fun close() = Unit
+
+            override fun discard() {
+                discardedCount++
+            }
+        }
+    }
+
+    /** 等两个条目都发起打开。 */
+    suspend fun awaitStarted(count: Int) {
+        withTimeout(5_000) { while (startedCount < count) delay(10) }
+    }
+
+    /** 等晚到的打开收尾。 */
+    suspend fun awaitLateOpenDiscarded() {
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) {
+                while (true) {
+                    if (openedCount > 0 && discardedCount == openedCount) {
+                        // 留一段时间让预读句柄也打开完，再确认没有落下。
+                        delay(100)
+                        if (discardedCount == openedCount) return@withTimeout
+                    }
+                    delay(10)
+                }
+            }
+        }
     }
 }
 
