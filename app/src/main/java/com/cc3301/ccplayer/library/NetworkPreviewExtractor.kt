@@ -8,13 +8,20 @@ import com.cc3301.ccplayer.streaming.ReadKind
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 网络预览解码接缝：真实现用 Media3 抽帧（视频）与系统内嵌封面（音频），测试用假实现。
@@ -25,6 +32,20 @@ fun interface NetworkPreviewDecoder {
 
     /** 从 [source] 取图；没有可用图时返回 null。 */
     suspend fun imageBytes(source: ByteSource, file: MediaFile, targetWidth: Int): ByteArray?
+}
+
+/**
+ * 网络预览准备接缝：打开主句柄、预读句柄与字节窗口，并从发起到可解码或被放弃为止负责收尾。
+ *
+ * 交棒前的打开失败、取消、超时与晚到结果都由实现收尾，调用方只接住返回的准备对象。
+ */
+fun interface NetworkPreviewPreparer {
+
+    /**
+     * 打开句柄并起定点预读；不占解码许可。
+     * [readAheadRank] 是这条目的预读派发顺序：可见项按列表索引，预取排在可见之后。
+     */
+    suspend fun prepare(file: MediaFile, readAheadRank: Long): NetworkPreviewPreparation?
 }
 
 /**
@@ -81,11 +102,15 @@ class NetworkPreviewExtractor(
     private val decoder: NetworkPreviewDecoder,
     private val readAhead: PreviewReadAhead = previewReadAhead,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
-) {
+    /** 打开脱离请求执行时跟随的范围；缺省自建进程级范围。 */
+    private val backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /** 打开等待上限；超时只停止等待，晚到的结果由这里作废。 */
+    private val openTimeoutMillis: Long = NETWORK_OPEN_TIMEOUT_MILLIS,
+) : NetworkPreviewPreparer {
 
     /** 仅测试使用；生产的网络取图只走 [prepare]。 */
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray? {
-        val prepared = prepare(file) ?: return null
+        val prepared = prepare(file, PREVIEW_PREFETCH_RANK) ?: return null
         try {
             return prepared.decode(targetWidth)
         } finally {
@@ -94,59 +119,90 @@ class NetworkPreviewExtractor(
     }
 
     /**
-     * 打开句柄并起定点预读；不占解码许可。失败或取消时关闭已打开的两条句柄。
-     * [readAheadRank] 是这条目的预读派发顺序：可见项按列表索引，预取排在可见之后。
+     * 打开句柄并起定点预读；不占解码许可。等待上限为 [openTimeoutMillis]。
+     *
+     * 打开是取消不掉的阻塞原生调用：放在脱离请求的协程里跑，超时或调用方放弃只停止等待。
+     * 等待结束仍无人接手时，晚到的准备在这里作废，句柄不留在无人持有的地方。
      */
-    suspend fun prepare(
+    override suspend fun prepare(file: MediaFile, readAheadRank: Long): NetworkPreviewPreparation? {
+        val opened = CompletableDeferred<Result<NetworkPreviewPreparation?>>()
+        // 父 Job 跟随进程级范围：请求取消不会连带取消这次打开。
+        val opening = CoroutineScope(
+            currentCoroutineContext() + Job(backgroundScope.coroutineContext[Job]),
+        ).launch {
+            val result = try {
+                Result.success(open(file, readAheadRank))
+            } catch (cancellation: CancellationException) {
+                opened.completeExceptionally(cancellation)
+                return@launch
+            } catch (failure: Throwable) {
+                Result.failure(failure)
+            }
+            // 没人接手（超时或取消）时在这里作废，句柄不留在无人持有的地方，会话也不留给下一次重试。
+            if (!opened.complete(result)) runCatching { result.getOrNull()?.discard() }
+        }
+        return try {
+            // 等待固定在 IO 上：打开超时按真实时间计时，不跟随调用方的时钟。
+            val settled = withContext(Dispatchers.IO) {
+                withTimeoutOrNull(openTimeoutMillis) { opened.await() }
+            }
+            if (settled == null) throw PreviewStageException(PreviewFailureStage.Timeout, "网络预览打开超时")
+            settled.getOrThrow()
+        } catch (failure: Throwable) {
+            // 超时、调用方放弃，或已经交付但取消在返回后生效：结果一律由打开方作废。
+            abandonOpen(opened, opening, CancellationException("网络预览打开已放弃"))
+            throw failure
+        }
+    }
+
+    /** 打开主句柄与预读句柄并建字节窗口；失败或取消时关闭已打开的资源。 */
+    private suspend fun open(
         file: MediaFile,
-        readAheadRank: Long = PREVIEW_PREFETCH_RANK,
+        readAheadRank: Long,
     ): NetworkPreviewPreparation? {
         val waitedMillis = AtomicLong()
         var window: PreviewByteWindow? = null
         var primary: ByteSource? = null
         var readAheadHandle: ByteSource? = null
         try {
-            return withContext(Dispatchers.IO) {
-                if (mediaKindOf(file.name) == null) return@withContext null
-                val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
-                    waitedMillis.addAndGet(millis)
-                }
-                primary = source
-                readAheadHandle = openReadAhead(file, waitedMillis)
-                val previewWindow = PreviewByteWindow(
-                    origin = source,
-                    readAheadSource = readAheadHandle,
-                    readAhead = readAhead,
-                    readAheadRank = readAheadRank,
-                )
-                window = previewWindow
-                previewWindow.startMetadataReadAhead()
-                NetworkPreviewPreparation(
-                    // 解码入口不跟随调用方所在线程：音频解码固定在 `Dispatchers.IO` 发起，视频抽帧由 Media3 的加载线程读字节。
-                    decodeBlock = { targetWidth ->
-                        withContext(Dispatchers.IO) {
-                            try {
-                                decode(previewWindow, file, targetWidth)
-                            } finally {
-                                // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
-                                diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
-                            }
-                        }
-                    },
-                    closeBlock = {
-                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
-                    },
-                    discardBlock = {
-                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.discard() } }
-                    },
-                    abandonBlock = {
-                        withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.abandon() } }
-                    },
-                )
+            if (mediaKindOf(file.name) == null) return null
+            val source = readPriority.wrap(reads.openRead(file.location, file.size), ReadKind.Thumbnail) { millis ->
+                waitedMillis.addAndGet(millis)
             }
+            primary = source
+            readAheadHandle = openReadAhead(file, waitedMillis)
+            val previewWindow = PreviewByteWindow(
+                origin = source,
+                readAheadSource = readAheadHandle,
+                readAhead = readAhead,
+                readAheadRank = readAheadRank,
+            )
+            window = previewWindow
+            previewWindow.startMetadataReadAhead()
+            return NetworkPreviewPreparation(
+                // 解码入口不跟随调用方所在线程：音频解码固定在 `Dispatchers.IO` 发起，视频抽帧由 Media3 的加载线程读字节。
+                decodeBlock = { targetWidth ->
+                    withContext(Dispatchers.IO) {
+                        try {
+                            decode(previewWindow, file, targetWidth)
+                        } finally {
+                            // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
+                            diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
+                        }
+                    }
+                },
+                closeBlock = {
+                    withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.close() } }
+                },
+                discardBlock = {
+                    withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.discard() } }
+                },
+                abandonBlock = {
+                    withContext(NonCancellable + Dispatchers.IO) { runCatching { previewWindow.abandon() } }
+                },
+            )
         } catch (failure: Throwable) {
-            // 取消可能在 withContext 返回后才生效并丢弃结果：已打开的资源在这里兜底关闭。
-            // 关闭句柄可能阻塞在网络上：取消时也要执行，固定在 `Dispatchers.IO` 上收尾。
+            // 打开途中失败或取消：已打开的资源在这里收尾；关闭句柄可能阻塞在网络上，取消时也要执行。
             withContext(NonCancellable + Dispatchers.IO) {
                 val openedWindow = window
                 // 打开被放弃时协程会以取消收尾：打开阶段没有解码读，放弃一律作废会话。
@@ -212,7 +268,29 @@ class NetworkPreviewExtractor(
             }
             image
         }
+
+    /**
+     * 放弃等待这次打开。
+     *
+     * 先用 [CompletableDeferred.completeExceptionally] 争这次交接的收尾权：
+     * 争到（返回 true）说明子方还没交付，它随后的 complete 会返回 false 并自己作废；
+     * 争不到（返回 false）说明子方已经交付，这一次成功打开的结果由父方接手作废，不能丢。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun abandonOpen(
+        opened: CompletableDeferred<Result<NetworkPreviewPreparation?>>,
+        opening: Job,
+        reason: CancellationException,
+    ) {
+        if (!opened.completeExceptionally(reason)) {
+            runCatching { opened.getCompleted().getOrNull()?.discard() }
+        }
+        opening.cancel()
+    }
 }
+
+/** 网络预览打开的等待上限；打开超时只停止等待，阻塞中的原生打开留待它自己返回后作废。 */
+private const val NETWORK_OPEN_TIMEOUT_MILLIS = 15_000L
 
 /**
  * 打开阶段该失败是否说明读取会话已失效：传输层失败才算。

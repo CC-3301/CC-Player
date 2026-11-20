@@ -15,7 +15,9 @@ import com.cc3301.ccplayer.diagnostics.NoDiagnosticsLog
 import com.cc3301.ccplayer.streaming.ByteSource
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 
 /**
@@ -29,16 +31,19 @@ class AndroidMediaPreviewExtractor(
     private val context: Context,
     networkReads: NetworkMediaReads? = null,
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
+    backgroundScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : MediaPreviewExtractor {
 
     // 预览源在进程内只有一个：抽帧器随它创建一次并复用。context 是 application context，不持有界面。
     private val media3 = Media3VideoFrameExtractor(context, diagnostics)
 
-    private val networkPreview = networkReads?.let { reads ->
+    /** 网络预览准备；本地目录没有网络读取时为 null。 */
+    val networkPreviews: NetworkPreviewPreparer? = networkReads?.let { reads ->
         NetworkPreviewExtractor(
             reads,
             decoder = AndroidNetworkPreviewDecoder(media3, diagnostics),
             diagnostics = diagnostics,
+            backgroundScope = backgroundScope,
         )
     }
 
@@ -51,15 +56,6 @@ class AndroidMediaPreviewExtractor(
             }
         }
     }
-
-    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation? =
-        prepareNetworkPreview(file, PREVIEW_PREFETCH_RANK)
-
-    override suspend fun prepareNetworkPreview(
-        file: MediaFile,
-        readAheadRank: Long,
-    ): NetworkPreviewPreparation? =
-        if (file.source == MediaSource.Network) networkPreview?.prepare(file, readAheadRank) else null
 
     override suspend fun durationMillis(file: MediaFile): Long? {
         // 网络条目不显示时长角标（ADR-0017）。

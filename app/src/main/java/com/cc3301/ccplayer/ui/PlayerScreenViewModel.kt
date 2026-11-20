@@ -48,9 +48,6 @@ class PlayerScreenViewModel : ViewModel() {
 
     private val _failures = MutableSharedFlow<PlaybackFailure>(extraBufferCapacity = 8)
 
-    /** 引擎当前的缓冲事实；打开交接期间的实际显示值由界面与入口阶段合成。 */
-    val controllerBuffering: Boolean get() = engineBuffering
-
     /** 控制层是否在切集。 */
     val switching: Boolean get() = switchingValue
 
@@ -143,11 +140,31 @@ class PlayerScreenViewModel : ViewModel() {
         failed = false
     }
 
+    /**
+     * 组装加载事实：阶段、缓冲与「打开是否已被控制层接手」由同一处派生，
+     * 界面显示、控件可用性与返回决策共用同一份。
+     */
+    fun loading(
+        entryPhase: EntryPhase?,
+        preparesInPage: Boolean,
+        playbackState: PlaybackState = playbackStateValue,
+        switching: Boolean = switchingValue,
+        restoring: Boolean = restoringValue,
+    ): PlayerLoadingFacts = playerScreenLoading(
+        PlayerScreenLoadFacts(
+            entryPhase = entryPhase,
+            preparesInPage = preparesInPage,
+            playbackState = playbackState,
+            switching = switching,
+            restoring = restoring,
+            controllerBuffering = engineBuffering,
+        ),
+    )
+
     /** 组装当前会话事实；入口事实与来自设置的菜单事实由界面在这一帧同步传入。 */
     fun session(
         entryPhase: EntryPhase?,
         preparesInPage: Boolean,
-        bufferingShown: Boolean,
         orientationMode: OrientationMode,
         orientationOverride: ScreenOrientation?,
         screenOrientation: ScreenOrientation,
@@ -164,18 +181,7 @@ class PlayerScreenViewModel : ViewModel() {
                 surfacePresentation = surfacePresentationValue,
                 audioTarget = media != null && mediaKindOf(media.name) == MediaKind.Audio,
             ),
-            loading = PlayerLoadingFacts(
-                phase = playerScreenPhase(
-                    PlayerScreenLoadFacts(
-                        entryPhase = entryPhase,
-                        preparesInPage = preparesInPage,
-                        playbackState = playbackStateValue,
-                        switching = switchingValue,
-                        restoring = restoringValue,
-                    ),
-                ),
-                buffering = bufferingShown,
-            ),
+            loading = loading(entryPhase = entryPhase, preparesInPage = preparesInPage),
             menu = PlayerMenuFacts(
                 decodeMode = menuFacts.decodeMode,
                 loopMode = menuFacts.loopMode,

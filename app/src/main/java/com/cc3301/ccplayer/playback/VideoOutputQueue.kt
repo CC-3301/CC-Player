@@ -1,5 +1,7 @@
 package com.cc3301.ccplayer.playback
 
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -19,8 +21,8 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal class VideoOutputQueue(
     private val execute: (() -> Unit) -> Unit,
-    /** 排队任务超过时限仍未执行的计时器；返回是否排上。不注入时按没有超时处理。 */
-    private val schedule: (delayMillis: Long, task: () -> Unit) -> Boolean = { _, _ -> false },
+    /** 排队任务超过时限仍未执行的计时器；返回是否排上。默认用进程内共用的守护计时线程。 */
+    private val schedule: (delayMillis: Long, task: () -> Unit) -> Boolean = ::scheduleOnOutputTimer,
     /** 静默丢弃时的留痕出口：投递被拒、超时计时没排上都从这里记一行。 */
     private val onDiagnostic: (String) -> Unit = {},
 ) {
@@ -53,6 +55,9 @@ internal class VideoOutputQueue(
     fun invalidate() {
         generation.incrementAndGet()
     }
+
+    /** 排一次超时计时；恢复编排的重挂上限与排队挂载共用同一个计时器。 */
+    fun scheduleTimeout(delayMillis: Long, task: () -> Unit): Boolean = schedule(delayMillis, task)
 
     /**
      * 挂载 Surface：队列没有在途任务时在调用线程当场挂；有在途任务就把挂载排到它们之后，
@@ -96,10 +101,8 @@ internal class VideoOutputQueue(
     }
 
     /** 下发 Surface 尺寸：与挂载投同一条队列，同一线程内保持「先挂载、再下尺寸、再开输出」。 */
-    fun postSurfaceSize(width: Int, height: Int, setProperty: (String, String) -> Unit) {
-        val accepted = postAlways {
-            setProperty("android-surface-size", "${width}x$height")
-        }
+    fun postSurfaceSize(width: Int, height: Int, apply: (Int, Int) -> Unit) {
+        val accepted = postAlways { apply(width, height) }
         if (!accepted) onDiagnostic("尺寸: 视频输出线程不再受理，尺寸没有下发")
     }
 
@@ -124,3 +127,15 @@ internal class VideoOutputQueue(
         if (ticket.settleOnce()) pending.decrementAndGet()
     }
 }
+
+/** 默认计时器：第一次真正排超时时才创建，进程内共用一条守护线程。 */
+private val outputTimer by lazy {
+    Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "video-output-timeout").apply { isDaemon = true }
+    }
+}
+
+private fun scheduleOnOutputTimer(delayMillis: Long, task: () -> Unit): Boolean =
+    runCatching {
+        outputTimer.schedule({ task() }, delayMillis, TimeUnit.MILLISECONDS)
+    }.isSuccess

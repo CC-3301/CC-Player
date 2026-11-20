@@ -66,6 +66,7 @@ class PlaybackService : Service() {
 
     private val fileProviderAuthority: String get() = "$packageName.fileprovider"
 
+    /** 播放引擎接缝：挂载恢复只按 libmpv 操作使用，不依赖具体实现。 */
     val engine: PlaybackEngine get() = playbackEngine
 
     val controller: PlaybackController get() = playbackController
@@ -206,6 +207,11 @@ class PlaybackService : Service() {
         val engine: PlaybackEngine get() = this@PlaybackService.engine
 
         val controller: PlaybackController get() = this@PlaybackService.controller
+
+        /** 只把任务投递到视频输出线程；挂载策略不在这里。 */
+        internal fun postToVideoOutput(task: () -> Unit) {
+            this@PlaybackService.playbackEngine.postToVideoOutput(task)
+        }
 
         /** 后台播放关闭且已退到后台：此时播放已按策略暂停。 */
         val blocksBackgroundPlayback: Boolean

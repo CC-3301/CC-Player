@@ -269,9 +269,10 @@ class FakePlaybackEngine : PlaybackEngine {
     var flipVideoOutputCalls = 0
         private set
 
-    override fun attachSurface(surface: Surface) {
-        if (attachedSurface === surface) return
+    override fun attachSurface(surface: Surface): Boolean {
+        if (attachedSurface === surface) return true
         attachedSurface = surface
+        return true
     }
 
     override fun startVideoOutput() = Unit

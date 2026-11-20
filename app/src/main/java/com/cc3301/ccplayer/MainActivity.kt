@@ -68,7 +68,9 @@ import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerOption
+import com.cc3301.ccplayer.playback.SurfaceMountRecovery
 import com.cc3301.ccplayer.playback.SurfaceSession
+import com.cc3301.ccplayer.playback.VideoOutputQueue
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -93,6 +95,7 @@ import com.cc3301.ccplayer.ui.PlaybackEntryOpener
 import com.cc3301.ccplayer.ui.PlayerActions
 import com.cc3301.ccplayer.ui.PlayerBackAction
 import com.cc3301.ccplayer.ui.PlayerLevelControls
+import com.cc3301.ccplayer.ui.PlayerLoadingFacts
 import com.cc3301.ccplayer.ui.PlayerScreen
 import com.cc3301.ccplayer.ui.PlayerScreenAccess
 import com.cc3301.ccplayer.ui.PlayerScreenViewModel
@@ -186,21 +189,38 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 的挂载与分离由会话持有；拆挂只由 Surface 生命周期回调触发。 */
+    /**
+     * Surface 挂载恢复：三态、队列、超时、重挂、「挂载 → 尺寸 → 开输出」顺序与可渲染事实都归它。
+     * 队列负责视频输出线程与计时，恢复策略在恢复模块里。
+     */
+    private val surfaceRecovery by lazy {
+        SurfaceMountRecovery(
+            queue = VideoOutputQueue(
+                execute = { task ->
+                    playback?.postToVideoOutput(task) ?: throw IllegalStateException("播放引擎不在")
+                },
+                onDiagnostic = { message -> diagnostics.log { message } },
+            ),
+            mount = { surface -> playback?.engine?.attachSurface(surface) ?: false },
+            detachOutput = { playback?.engine?.detachSurface() },
+            resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
+            openOutput = { playback?.engine?.startVideoOutput() },
+            // 挂载可能落在视频输出线程上：控制层的渲染可用性仍在主线程收。
+            onAvailabilityChanged = { available ->
+                runOnUiThread { playback?.controller?.setRenderSurfaceAvailable(available) }
+            },
+            onDiagnostic = { message -> diagnostics.log { message } },
+        )
+    }
+
+    /** Surface 会话只报生命周期与 Surface 有效性；挂载、尺寸与可渲染事实归挂载恢复。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
-                playback?.engine?.let {
-                    it.attachSurface(surface)
-                    true
-                } ?: false
+                if (playback != null) surfaceRecovery.attach(surface)
             },
-            startOutput = { playback?.engine?.startVideoOutput() },
-            detachEngine = { playback?.engine?.detachSurface() },
-            resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
-            onAvailabilityChanged = { available ->
-                playback?.controller?.setRenderSurfaceAvailable(available)
-            },
+            detach = { surfaceRecovery.detach() },
+            resize = { width, height -> surfaceRecovery.setSurfaceSize(width, height) },
         )
     }
 
@@ -286,8 +306,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
             surfaceSession.onEngineAvailable()
-            // 新控制器默认认为 Surface 可用；连上后同步一次会话的真实状态。
-            binder.controller.setRenderSurfaceAvailable(surfaceSession.available)
+            // 新控制器默认认为 Surface 可用；连上后同步一次挂载恢复的真实事实。
+            binder.controller.setRenderSurfaceAvailable(surfaceRecovery.available)
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             attemptOpenHandover()
         }
@@ -295,7 +315,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         override fun onServiceDisconnected(name: ComponentName) {
             playback = null
             playerScreen.detach()
-            surfaceSession.onEngineLost()
+            surfaceRecovery.reset()
         }
     }
 
@@ -553,11 +573,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                         val playerSession = playerScreen.session(
                             entryPhase = openingHandover.phase,
                             preparesInPage = openingHandover.preparesInPage,
-                            bufferingShown = openingHandover.showsBuffering(
-                                controllerBuffering = playerScreen.controllerBuffering,
-                                playbackState = playerScreen.playbackState,
-                                switching = playerScreen.switching,
-                            ),
                             orientationMode = orientationMode,
                             orientationOverride = sessionOrientation.override,
                             screenOrientation = screenOrientation,
@@ -980,22 +995,31 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         surfaceSession.onSurfaceChanged(width, height)
     }
 
+    /** 播放页加载事实：入口事实与控制层事实合到一处，返回与顶栏共用。 */
+    private fun playerLoadingFacts(
+        playbackState: PlaybackState = playerScreen.playbackState,
+        switching: Boolean = playerScreen.switching,
+        restoring: Boolean = playerScreen.restoring,
+    ): PlayerLoadingFacts = playerScreen.loading(
+        entryPhase = openingHandover.phase,
+        preparesInPage = openingHandover.preparesInPage,
+        playbackState = playbackState,
+        switching = switching,
+        restoring = restoring,
+    )
+
     /**
      * 播放页系统返回：切集只取消这一跳；首次加载、恢复原片与错误态退出播放页；
      * 其余播放状态按「APP 内后台播放」决定离开后是否继续播放。
      */
     private fun handlePlayerBack() {
         val state = playerScreen.playbackState
-        val switching = playerScreen.switching
         when (
             playerBackAction(
-                state = state,
-                switching = switching,
-                restoring = playerScreen.restoring,
-                initialLoading = openingHandover.initialLoading(state, switching),
+                loading = playerLoadingFacts(),
+                playbackState = state,
                 failed = playerScreen.playbackFailed,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
-                entryPhase = openingHandover.phase,
                 atEpisodeEnd = playback?.controller?.atEpisodeEnd == true,
             )
         ) {
@@ -1006,9 +1030,9 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         }
     }
 
-    /** 顶栏返回：准备期与系统返回走同一套判定；其余阶段左上角返回总是结束播放。 */
+    /** 顶栏返回：打开尚未接手时与系统返回走同一套判定；其余阶段左上角返回总是结束播放。 */
     private fun handlePlayerTopBarBack() {
-        if (playerTopBarBackEndsPlayback(openingHandover.phase)) {
+        if (playerTopBarBackEndsPlayback(playerLoadingFacts())) {
             closePlayer()
         } else {
             handlePlayerBack()
@@ -1029,13 +1053,14 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         val switching = binder.controller.switching.value
         when (
             playerBackAction(
-                state = state,
-                switching = switching,
-                restoring = binder.controller.restoring.value,
-                initialLoading = openingHandover.initialLoading(state, switching),
+                loading = playerLoadingFacts(
+                    playbackState = state,
+                    switching = switching,
+                    restoring = binder.controller.restoring.value,
+                ),
+                playbackState = state,
                 failed = binder.controller.playbackFailed.value,
                 inAppBackgroundPlayback = inAppBackgroundPlayback,
-                entryPhase = openingHandover.phase,
                 atEpisodeEnd = binder.controller.atEpisodeEnd,
             )
         ) {
@@ -1133,7 +1158,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         playerScreen.detach()
         playback = null
         // 引擎已经不在：挂载记录随之作废，重新连上时按现有 Surface 补挂。
-        surfaceSession.onEngineLost()
+        surfaceRecovery.reset()
         if (bound) {
             unbindService(connection)
             bound = false
@@ -1244,6 +1269,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     override fun onDestroy() {
         if (isFinishing) diagnostics.logSync("应用退出")
         surfaceSession.release()
+        surfaceRecovery.release()
         releaseNetworkStreams()
         stopPlaybackService()
         super.onDestroy()

@@ -34,6 +34,8 @@ data class PlayerScreenLoadFacts(
     val playbackState: PlaybackState,
     val switching: Boolean,
     val restoring: Boolean,
+    /** 控制层此刻是否在缓冲。 */
+    val controllerBuffering: Boolean = false,
 )
 
 /**
@@ -50,6 +52,27 @@ fun playerScreenPhase(facts: PlayerScreenLoadFacts): PlayerScreenPhase = when {
     facts.playbackState == PlaybackState.Loading -> PlayerScreenPhase.Loading
     else -> PlayerScreenPhase.Ready
 }
+
+/**
+ * 派生播放页的加载事实：阶段与缓冲一次算齐，界面显示、控件可用性与返回决策共用同一份。
+ *
+ * 缓冲 = 控制层正在缓冲，或这次打开的入口还没把缓冲交还给控制层：准备期、等待接手与接手后的首次加载
+ * 都由入口顶着；首个就绪、转入切集与到达终态后只看控制层。
+ */
+fun playerScreenLoading(facts: PlayerScreenLoadFacts): PlayerLoadingFacts {
+    val phase = playerScreenPhase(facts)
+    return PlayerLoadingFacts(
+        phase = phase,
+        buffering = facts.controllerBuffering || entryBuffering(facts, phase),
+        opening = facts.entryPhase != null && facts.entryPhase != EntryPhase.Accepted,
+    )
+}
+
+/** 入口缓冲：这次打开在页面里准备，且阶段还停在准备期或首次加载。 */
+private fun entryBuffering(facts: PlayerScreenLoadFacts, phase: PlayerScreenPhase): Boolean =
+    facts.preparesInPage &&
+        facts.entryPhase != null &&
+        (phase.isPreparing || phase == PlayerScreenPhase.Loading)
 
 /** 准备中与等待接手都属于准备期。 */
 val PlayerScreenPhase.isPreparing: Boolean

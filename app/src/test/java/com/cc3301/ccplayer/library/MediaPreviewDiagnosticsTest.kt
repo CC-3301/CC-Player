@@ -86,6 +86,7 @@ class MediaPreviewDiagnosticsTest {
     private fun source(diagnostics: Diagnostics): CachedMediaPreviewSource =
         CachedMediaPreviewSource(
             extractor = extractor,
+            networkPreviews = extractor,
             cache = ThumbnailCache(
                 directory = directory,
                 maxBytes = 1 shl 20,

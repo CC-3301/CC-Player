@@ -14,7 +14,7 @@ class FakeMediaPreviewExtractor(
     var durationDelayMillis: Long = 0,
     /** 读时长时抛出的异常，用来模拟元数据读取失败。 */
     var durationFailure: Exception? = null,
-) : MediaPreviewExtractor {
+) : MediaPreviewExtractor, NetworkPreviewPreparer {
 
     val imageRequests = mutableListOf<String>()
     val imageWidths = mutableListOf<Int>()
@@ -29,7 +29,7 @@ class FakeMediaPreviewExtractor(
     }
 
     /** 测试用准备：解码时才调用 [imageBytes]，不新开真实句柄。 */
-    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation =
+    override suspend fun prepare(file: MediaFile, readAheadRank: Long): NetworkPreviewPreparation =
         NetworkPreviewPreparation(
             decodeBlock = { targetWidth -> imageBytes(file, targetWidth) },
             closeBlock = {},
