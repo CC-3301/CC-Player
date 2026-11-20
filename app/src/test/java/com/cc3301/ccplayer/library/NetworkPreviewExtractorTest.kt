@@ -7,6 +7,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -427,9 +428,12 @@ class NetworkPreviewExtractorTest {
 
         // 迟到的打开终于返回：没人接手，晚到的句柄在这里作废。
         late.gate.complete(Unit)
-        late.awaitLateOpenDiscarded()
-        assertTrue("晚到的句柄要关闭", late.discardedCount > 0)
-        assertEquals("每条晚到句柄只作废一次", late.openedCount, late.discardedCount)
+        assertTrue(
+            "晚到的打开应收尾：已打开 ${late.openedTotal}，已作废 ${late.discardedTotal}",
+            late.awaitLateOpenDiscarded(),
+        )
+        assertTrue("晚到的句柄要关闭", late.discardedTotal > 0)
+        assertEquals("每条晚到句柄只作废一次", late.openedTotal, late.discardedTotal)
     }
 
     @Test
@@ -448,9 +452,12 @@ class NetworkPreviewExtractorTest {
         late.gate.complete(Unit)
         withTimeout(5_000) { job.join() }
 
-        late.awaitLateOpenDiscarded()
-        assertTrue("晚到的句柄要关闭", late.discardedCount > 0)
-        assertEquals("每条晚到句柄只作废一次", late.openedCount, late.discardedCount)
+        assertTrue(
+            "晚到的打开应收尾：已打开 ${late.openedTotal}，已作废 ${late.discardedTotal}",
+            late.awaitLateOpenDiscarded(),
+        )
+        assertTrue("晚到的句柄要关闭", late.discardedTotal > 0)
+        assertEquals("每条晚到句柄只作废一次", late.openedTotal, late.discardedTotal)
     }
 
     @Test
@@ -469,7 +476,10 @@ class NetworkPreviewExtractorTest {
         val second = async(Dispatchers.Default) {
             runCatching { extractor.prepare(movie.copy(location = "smb://nas/media/另一部.mkv"), PREVIEW_PREFETCH_RANK) }
         }
-        late.awaitStarted(2)
+        assertTrue(
+            "两个条目的打开都应各自开始：已发起 ${late.startedTotal}",
+            late.awaitStarted(2),
+        )
 
         listOf(first, second).forEach { request ->
             val failure = request.await().exceptionOrNull()
@@ -478,8 +488,11 @@ class NetworkPreviewExtractorTest {
         }
 
         late.gate.complete(Unit)
-        late.awaitLateOpenDiscarded()
-        assertEquals("晚到句柄全部作废", late.openedCount, late.discardedCount)
+        assertTrue(
+            "晚到的打开应收尾：已打开 ${late.openedTotal}，已作废 ${late.discardedTotal}",
+            late.awaitLateOpenDiscarded(),
+        )
+        assertEquals("晚到句柄全部作废", late.openedTotal, late.discardedTotal)
     }
 
     @Test
@@ -551,20 +564,24 @@ private class LateOpenReads : NetworkMediaReads {
     val gate = CompletableDeferred<Unit>()
     val started = CountDownLatch(1)
 
-    @Volatile
-    var startedCount = 0
+    private val startedCount = AtomicInteger()
+    private val openedCount = AtomicInteger()
+    private val discardedCount = AtomicInteger()
 
-    @Volatile
-    var openedCount = 0
+    /** 已发起打开的条目数。 */
+    val startedTotal: Int get() = startedCount.get()
 
-    @Volatile
-    var discardedCount = 0
+    /** 已打开并返回的句柄数。 */
+    val openedTotal: Int get() = openedCount.get()
+
+    /** 已作废的句柄数。 */
+    val discardedTotal: Int get() = discardedCount.get()
 
     override suspend fun openRead(location: String, size: Long): ByteSource {
-        startedCount++
+        startedCount.incrementAndGet()
         started.countDown()
         withContext(NonCancellable) { gate.await() }
-        openedCount++
+        openedCount.incrementAndGet()
         return object : ByteSource {
             override val size: Long = 64
 
@@ -573,31 +590,34 @@ private class LateOpenReads : NetworkMediaReads {
             override fun close() = Unit
 
             override fun discard() {
-                discardedCount++
+                discardedCount.incrementAndGet()
             }
         }
     }
 
-    /** 等两个条目都发起打开。 */
-    suspend fun awaitStarted(count: Int) {
-        withTimeout(5_000) { while (startedCount < count) delay(10) }
-    }
+    /** 等 [count] 个条目都发起打开；超时返回 false。 */
+    suspend fun awaitStarted(count: Int): Boolean =
+        withTimeoutOrNull(5_000) {
+            while (startedCount.get() < count) delay(10)
+            true
+        } ?: false
 
-    /** 等晚到的打开收尾。 */
-    suspend fun awaitLateOpenDiscarded() {
+    /** 等晚到的打开收尾；超时返回 false。 */
+    suspend fun awaitLateOpenDiscarded(): Boolean =
         withContext(Dispatchers.Default) {
-            withTimeout(5_000) {
+            withTimeoutOrNull(5_000) {
                 while (true) {
-                    if (openedCount > 0 && discardedCount == openedCount) {
+                    val opened = openedCount.get()
+                    if (opened > 0 && discardedCount.get() == opened) {
                         // 留一段时间让预读句柄也打开完，再确认没有落下。
                         delay(100)
-                        if (discardedCount == openedCount) return@withTimeout
+                        if (discardedCount.get() == openedCount.get()) break
                     }
                     delay(10)
                 }
-            }
+                true
+            } ?: false
         }
-    }
 }
 
 /** 记录读取位置与关闭状态的假随机读句柄。 */
