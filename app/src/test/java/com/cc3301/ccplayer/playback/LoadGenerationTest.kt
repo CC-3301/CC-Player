@@ -281,7 +281,7 @@ class LoadGenerationTest {
         val generation = generation()
         generation.beginFirst(targetIndex = 0, targetUrl = "root/a.mkv")
         generation.beginAttempt(1)
-        generation.noteMediaLoaded(hasVideo = true)
+        generation.noteMediaLoaded(hasVideo = false)
         generation.showTargetFrame()
         generation.noteResumeSeek(requiredSeekSerial = 2)
         generation.noteOutputLive()
