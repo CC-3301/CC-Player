@@ -16,15 +16,15 @@ class SurfaceRemountRecoveryTest {
 
     private fun recovery(): SurfaceMountRecovery = SurfaceMountRecovery(
         execute = { task -> tasks.addLast(task) },
+        mount = { events += "mount" },
+        detachOutput = { events += "detach" },
+        resize = { width, height -> events += "size=${width}x${height}" },
+        // 开输出由引擎投递到同一条视频输出线程：这里按同样方式入队，顺序才是 production 的顺序。
+        openOutput = { tasks.addLast { events += "output" } },
         schedule = { _, task ->
             timedTasks += task
             true
         },
-        mount = { events += "mount" },
-        detachOutput = { events += "detach" },
-        setProperty = { name, value -> events += "$name=$value" },
-        openOutput = { events += "output" },
-        onMountGivenUp = { timedOut -> events += if (timedOut) "timeout" else "skipped" },
         isValid = { true },
     )
 
@@ -35,18 +35,18 @@ class SurfaceRemountRecoveryTest {
     @Test
     fun `挂载超时后重挂并恢复出画`() {
         val recovery = recovery()
-        // 占住视频输出线程：挂载只能排队，随后按超时收尾。
-        recovery.postMustRun { events += "busy" }
-
         recovery.attach(surface)
+        // 挂载之后队里还有尺寸与分离：新 Surface 的挂载只能排队。
+        recovery.setSurfaceSize(1920, 1080)
+        recovery.detach()
+        recovery.attach(surface)
+
         timedTasks[0].invoke()
-
-        assertEquals(listOf("timeout"), events)
-
         runPending()
 
-        // 队列恢复后按最新意图重挂，挂上才开输出。
-        assertEquals(listOf("timeout", "busy", "mount", "output"), events)
+        // 队列恢复后按最新意图重挂：先挂上、再补尺寸、最后开输出。
+        assertEquals("mount", events.first())
+        assertEquals(listOf("mount", "size=1920x1080", "output"), events.takeLast(3))
         assertTrue(recovery.hasMount())
     }
 
@@ -61,7 +61,7 @@ class SurfaceRemountRecoveryTest {
 
         runPending()
 
-        assertEquals(listOf("mount", "android-surface-size=1920x1080", "output"), events)
+        assertEquals(listOf("mount", "size=1920x1080", "output"), events)
         assertTrue(recovery.hasMount())
     }
 
@@ -78,6 +78,21 @@ class SurfaceRemountRecoveryTest {
         runPending()
 
         assertEquals(listOf("detach"), events)
+    }
+
+    @Test
+    fun `引擎断开后按现有 Surface 补挂`() {
+        val recovery = recovery()
+        recovery.attach(surface)
+        runPending()
+        events.clear()
+
+        recovery.reset()
+        recovery.attach(surface)
+        runPending()
+
+        assertEquals(listOf("mount", "output"), events)
+        assertTrue(recovery.hasMount())
     }
 
     private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)

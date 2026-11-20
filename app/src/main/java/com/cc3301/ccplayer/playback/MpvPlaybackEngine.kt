@@ -38,6 +38,10 @@ class MpvPlaybackEngine(
     @Volatile
     private var videoOutputStopped = false
 
+    /** 引擎自己挂着的 Surface：由挂载与分离两个 libmpv 操作维护。 */
+    @Volatile
+    private var surfaceMounted = false
+
     /** 挂载后等待播放位置再次前进，作为画面已重新输出到 Surface 的信号。 */
     @Volatile
     private var awaitingSurfaceFrame = false
@@ -102,38 +106,6 @@ class MpvPlaybackEngine(
     private val videoOutputExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "mpv-video-output").apply { isDaemon = true }
     }
-
-    /**
-     * 挂载超时的计时线程：排队挂载超时后按失败收尾。
-     * 与释放收尾一样不能占用调用线程，主线程只负责发起。
-     */
-    private val surfaceTimeoutExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
-        Thread(runnable, "mpv-surface-timeout").apply { isDaemon = true }
-    }
-
-    /** Surface 挂载恢复：三态、队列、超时、重挂与开输出顺序的唯一所有者。 */
-    private val surfaceRecovery = SurfaceMountRecovery(
-        execute = { task -> videoOutputExecutor.execute { task() } },
-        schedule = { delayMillis, task ->
-            runCatching {
-                surfaceTimeoutExecutor.schedule({ task() }, delayMillis, TimeUnit.MILLISECONDS)
-            }.isSuccess
-        },
-        mount = { surface -> MPVLib.attachSurface(surface) },
-        detachOutput = ::detachVideoOutputTask,
-        setProperty = { name, value -> if (!released) MPVLib.setPropertyString(name, value) },
-        openOutput = ::openVideoOutput,
-        onMountGivenUp = { timedOut ->
-            if (timedOut) awaitingSurfaceFrame = false
-            videoOutputStopped = true
-        },
-        onMountCleared = {
-            awaitingSurfaceFrame = false
-            cancelRefreshSeek()
-            videoOutputStopped = true
-        },
-        onDiagnostic = { message -> diagnostics.log { message } },
-    )
 
     /** 计时器的取消与重装、以及释放后不再受理，都在同一把锁内。 */
     private val seekTimeoutLock = Any()
@@ -447,10 +419,11 @@ class MpvPlaybackEngine(
         MPVLib.setPropertyString(VID_PROPERTY, if (enabled) VID_AUTO else VID_OFF)
     }
 
-    /** 会话要求挂载这块 Surface：排队、超时、重挂与后续开输出都归挂载恢复。 */
+    /** libmpv 挂载：排队、超时、重挂与后续开输出都归挂载恢复。 */
     override fun attachSurface(surface: Surface) {
         if (released) return
-        surfaceRecovery.attach(surface)
+        MPVLib.attachSurface(surface)
+        surfaceMounted = true
     }
 
     /**
@@ -459,7 +432,11 @@ class MpvPlaybackEngine(
      */
     override fun startVideoOutput() {
         if (released) return
-        surfaceRecovery.startVideoOutput()
+        postVideoOutput {
+            // 排队期间挂载可能已被放弃或分离：只有真正挂着的 Surface 才开输出。
+            if (!surfaceMounted) return@postVideoOutput
+            openVideoOutput()
+        }
     }
 
     /** libmpv 开窗口并恢复视频输出：视频输出初始化时就能拿到 Surface 与尺寸。 */
@@ -480,7 +457,7 @@ class MpvPlaybackEngine(
      * 不 seek、不改播放位置，也不碰音频。
      */
     override fun awaitFramePresentation() {
-        if (released || !surfaceRecovery.hasMount() || videoOutputStopped) return
+        if (released || !surfaceMounted || videoOutputStopped) return
         awaitingSurfaceFrame = true
     }
 
@@ -490,9 +467,9 @@ class MpvPlaybackEngine(
      * 只有这次刷新自己的序号能触发帧上屏回执；别的序号照常走普通 seek 路径。
      */
     override fun refreshFrame() {
-        if (released || !surfaceRecovery.hasMount()) return
+        if (released || !surfaceMounted) return
         postVideoOutput {
-            if (released || !surfaceRecovery.hasMount() || videoOutputStopped) return@postVideoOutput
+            if (released || !surfaceMounted || videoOutputStopped) return@postVideoOutput
             val queued = runCatching { seekCommandExecutor.execute { issueRefreshSeek() } }
             if (queued.isFailure) {
                 diagnostics.log {
@@ -504,7 +481,7 @@ class MpvPlaybackEngine(
 
     /** 命令线程上预留并下发刷新：与真实 seek 共用同一顺序，序号不会互换。 */
     private fun issueRefreshSeek() {
-        if (released || !surfaceRecovery.hasMount() || videoOutputStopped) return
+        if (released || !surfaceMounted || videoOutputStopped) return
         if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
         if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return
         // 刷新会让 audio-pts 跳变：探针基线在命令下发前重新起算，暂停态重挂不误报出声。
@@ -573,25 +550,31 @@ class MpvPlaybackEngine(
 
     /** 只翻转视频输出：不 seek、不改播放位置，交给播放核心按当前帧重建输出；刷新无回执时由控制层兜底调用。 */
     override fun flipVideoOutput() {
-        if (!surfaceRecovery.hasMount() || videoOutputStopped) return
+        if (!surfaceMounted || videoOutputStopped) return
         cancelRefreshSeek()
         awaitingSurfaceFrame = true
         postVideoOutput {
+            // 排队期间可能已经分离：分离之后不再把输出翻回来。
+            if (!surfaceMounted || videoOutputStopped) return@postVideoOutput
             MPVLib.setPropertyString("vo", "null")
             MPVLib.setPropertyString("vo", MpvOptions.VIDEO_OUTPUT)
         }
     }
 
     /**
-     * 分离 Surface：清挂载事实、作废排队中的开输出并投递分离任务，都归挂载恢复。
-     * 调用线程只发起，重建整条输出的耗时都在视频输出线程上；分离任务不参与代际作废。
+     * libmpv 分离：先关输出再撤窗口，最后摘挂载。
+     * 排队、作废与投递都归挂载恢复，这里只在视频输出线程上执行拆卸。
      */
     override fun detachSurface() {
         if (released) return
-        surfaceRecovery.detach()
+        surfaceMounted = false
+        awaitingSurfaceFrame = false
+        cancelRefreshSeek()
+        videoOutputStopped = true
+        detachVideoOutputTask()
     }
 
-    /** libmpv 分离：先关输出再撤窗口，最后摘挂载。 */
+    /** 视频输出线程上的拆卸动作：先关输出再撤窗口，最后摘挂载。 */
     private fun detachVideoOutputTask() {
         val startedAtNanos = System.nanoTime()
         detachVideoOutput(
@@ -603,10 +586,15 @@ class MpvPlaybackEngine(
         logVideoOutputTiming("拆视频输出（仅视频输出线程动作）", System.nanoTime() - startedAtNanos)
     }
 
-    /** 把开输出属性交给专用线程；拆挂之后到点的任务作废，释放后不再受理。 */
+    /** 把任务投递到视频输出线程：只负责线程，不承载挂载策略。 */
+    internal fun postToVideoOutput(task: () -> Unit) {
+        videoOutputExecutor.execute { task() }
+    }
+
+    /** 把开输出属性交给专用线程；释放后不再受理。 */
     private fun postVideoOutput(task: () -> Unit) {
         if (released) return
-        surfaceRecovery.postOutput(task)
+        postToVideoOutput(task)
     }
 
     /**
@@ -615,7 +603,7 @@ class MpvPlaybackEngine(
      */
     override fun setSurfaceSize(width: Int, height: Int) {
         if (released) return
-        surfaceRecovery.setSurfaceSize(width, height)
+        MPVLib.setPropertyString("android-surface-size", "${width}x$height")
     }
 
     /**
@@ -641,15 +629,17 @@ class MpvPlaybackEngine(
         audioResumeExecutor.shutdownNow()
         seekTimeoutExecutor.shutdownNow()
         seekCommandExecutor.shutdownNow()
-        surfaceTimeoutExecutor.shutdownNow()
         // 视频输出线程可能正卡在 vo 重建里：投一个闸门任务，确认它前面的任务都已跑完。
         // 闸门在 [VIDEO_OUTPUT_RELEASE_WAIT_MILLIS] 内没跑到，说明重建还没结束：
         // 此时放弃销毁，晚到的属性调用不会踩到已销毁的实例，实例随进程退出回收。
-        // 作废排队中的开输出：唯一的等待就是下面有上限的闸门。
-        // 还挂着 Surface 就先投分离：分离不参与作废，闸门排在它后面，闸门跑到就说明分离过。
-        surfaceRecovery.release()
+        // 还挂着 Surface 就先投分离：闸门排在它后面，闸门跑到就说明分离过。
+        if (surfaceMounted) {
+            surfaceMounted = false
+            awaitingSurfaceFrame = false
+            runCatching { postToVideoOutput { detachVideoOutputTask() } }
+        }
         val drained = CountDownLatch(1)
-        val queued = surfaceRecovery.postMustRun { drained.countDown() }
+        val queued = runCatching { postToVideoOutput { drained.countDown() } }.isSuccess
         // 先登记再启动线程：创建方等的是这个完成信号；线程还没起来也不会立即放行。
         val teardown = nativeCore.registerTeardown()
         val thread = Thread({
@@ -680,7 +670,7 @@ class MpvPlaybackEngine(
                 drained.await(VIDEO_OUTPUT_RELEASE_WAIT_MILLIS, TimeUnit.MILLISECONDS)
             }.getOrDefault(false)
         videoOutputExecutor.shutdownNow()
-        surfaceRecovery.clear()
+        surfaceMounted = false
         videoOutputStopped = true
         if (!finished) {
             diagnostics.log("释放: 视频输出线程未收尾，跳过销毁播放核心")
@@ -765,7 +755,7 @@ class MpvPlaybackEngine(
      * 只认 Surface 仍挂着、没有开始新加载、有视频轨且没有播到片尾的那一次。
      */
     private fun reportRefreshFrame() {
-        if (released || !surfaceRecovery.hasMount() || videoOutputStopped) return
+        if (released || !surfaceMounted || videoOutputStopped) return
         if (!loadCoordinator.isFileLoaded || !hasVideoTrack) return
         if (MPVLib.getPropertyBoolean(EOF_REACHED_PROPERTY) == true) return
         val token = loadCoordinator.currentLoadedToken() ?: return
@@ -801,7 +791,7 @@ class MpvPlaybackEngine(
         if (isPaused()) return
         // 纯音频没有画面可证明，首帧信号由 AUDIO_RECONFIG 处理。
         if (!hasVideoTrack) return
-        if (!surfaceRecovery.hasMount() || videoOutputStopped) return
+        if (!surfaceMounted || videoOutputStopped) return
         if (!awaitingLoadFrame && !awaitingSurfaceFrame) return
         val token = loadCoordinator.currentLoadedToken() ?: return
         awaitingLoadFrame = false

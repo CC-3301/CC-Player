@@ -1,43 +1,53 @@
 package com.cc3301.ccplayer.playback
 
 import android.view.Surface
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Surface 挂载恢复：挂载三态、挂载队列、挂载超时、按最新意图重挂与「挂载 → 尺寸 → 开输出」
  * 组合顺序的唯一所有者。
  *
- * 调用方只报 Surface 与引擎生命周期，不逐方法维护挂载、尺寸与输出顺序；
- * 三态与队列仍是可独立测试的内部接缝，完整恢复由本类自己的组合验证。
- * 挂载、分离、尺寸与开输出都是 libmpv 操作，由播放引擎以回调提供，本类不碰原生调用。
+ * 由界面在接线处创建并持有；Surface 会话只报生命周期，播放引擎只提供 libmpv 操作与
+ * 把任务投递到视频输出线程的入口。三态与队列仍是可独立测试的内部接缝，
+ * 完整恢复由本类自己的组合验证。
  */
 internal class SurfaceMountRecovery(
-    /** 视频输出线程：挂载、尺寸、开输出与分离都在这条线程上按投递顺序执行。 */
-    execute: (() -> Unit) -> Unit,
-    /** 挂载超时与重挂超时的计时器；返回是否排上。 */
-    private val schedule: (delayMillis: Long, task: () -> Unit) -> Boolean,
+    /** 视频输出线程的投递入口；引擎不在时抛异常，队列据此结算这次投递。 */
+    private val execute: (() -> Unit) -> Unit,
     /** libmpv 挂载。 */
     private val mount: (Surface) -> Unit,
     /** libmpv 分离：先关输出再撤窗口，最后摘挂载。 */
     private val detachOutput: () -> Unit,
     /** libmpv 下发 Surface 尺寸。 */
-    private val setProperty: (String, String) -> Unit,
+    private val resize: (Int, Int) -> Unit,
     /** libmpv 开窗口并恢复视频输出。 */
     private val openOutput: () -> Unit,
-    /** 挂载意图被放弃时引擎的清场：跳过与超时都要停输出，超时还要撤等帧。 */
-    private val onMountGivenUp: (timedOut: Boolean) -> Unit = {},
-    /** 挂载事实被清掉时引擎的清场：撤等帧、停输出。 */
-    private val onMountCleared: () -> Unit = {},
+    /** 超时计时；不注入时用本类自己的计时线程。 */
+    schedule: ((delayMillis: Long, task: () -> Unit) -> Boolean)? = null,
     private val isValid: (Surface) -> Boolean = { it.isValid },
     private val onDiagnostic: (String) -> Unit = {},
 ) {
 
     private val state = SurfaceMountState()
 
+    /** 计时线程按需创建：注入计时器时这里不占线程。 */
+    private val timer = lazy {
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "surface-mount-timeout").apply { isDaemon = true }
+        }
+    }
+
+    private val scheduleTask: (delayMillis: Long, task: () -> Unit) -> Boolean =
+        schedule ?: { delayMillis, task ->
+            runCatching { timer.value.schedule({ task() }, delayMillis, TimeUnit.MILLISECONDS) }.isSuccess
+        }
+
     /** 挂载队列：挂载、尺寸、开输出与分离都在视频输出线程上按投递顺序执行。 */
     private val queue = VideoOutputQueue(
         execute = execute,
-        schedule = schedule,
+        schedule = scheduleTask,
         onDiagnostic = onDiagnostic,
     )
 
@@ -58,18 +68,16 @@ internal class SurfaceMountRecovery(
                 mount(surface)
                 state.onMounted(surface)
                 applySurfaceSize()
-                startVideoOutput()
+                openMountedSurface()
             },
             onSkipped = {
                 if (state.onSkipped(surface)) {
-                    onMountGivenUp(false)
                     onDiagnostic("挂载: 这次挂载没执行（Surface 已换、已释放或视频输出线程已关）")
                 }
             },
             timeoutMillis = ATTACH_TIMEOUT_MILLIS,
             onTimeout = {
                 if (state.onTimedOut(surface)) {
-                    onMountGivenUp(true)
                     onDiagnostic("挂载: 视频输出线程 ${ATTACH_TIMEOUT_MILLIS}ms 内没有执行，放弃这次挂载")
                     scheduleRemount(surface)
                 }
@@ -82,58 +90,41 @@ internal class SurfaceMountRecovery(
         this.width = width
         this.height = height
         if (!state.hasMount()) return
-        queue.postSurfaceSize(width, height, setProperty)
-    }
-
-    /** 挂载之后开窗口并恢复视频输出：只对真正挂着的 Surface 开。 */
-    fun startVideoOutput() {
-        val target = state.intended() ?: return
-        queue.postOutput {
-            if (state.isMounted(target)) openOutput()
-        }
+        queue.postSurfaceSize(width, height) { w, h -> resize(w, h) }
     }
 
     /** Surface 真正销毁：清掉三态、作废排队中的开输出，再投递分离任务。 */
     fun detach() {
         if (!state.detach()) return
-        onMountCleared()
         queue.invalidate()
-        postDetach()
+        if (!queue.postAlways(detachOutput)) {
+            onDiagnostic("分离: 视频输出线程不再受理，分离任务没投递")
+        }
     }
 
-    /** 释放前的收尾：作废排队中的开输出；还挂着就先投分离，之后的排空闸门排在它后面。 */
-    fun release() {
-        queue.invalidate()
-        if (!state.detach()) return
-        onMountCleared()
-        postDetach()
-    }
-
-    /** 只清三态、不投递任务：释放收尾时用。 */
-    fun clear() {
+    /** 引擎断开：旧引擎的挂载不再有效，只清挂载事实，不动引擎。 */
+    fun reset() {
         state.detach()
     }
 
-    /** 投一条参与代际作废的开输出任务（翻转、刷新）。 */
-    fun postOutput(task: () -> Unit) {
-        queue.postOutput(task)
+    /** 界面销毁：清挂载事实并停掉计时线程。 */
+    fun release() {
+        state.detach()
+        if (timer.isInitialized()) timer.value.shutdownNow()
     }
-
-    /** 投一条必须执行的任务（释放排空闸门）；投递被拒时返回 false。 */
-    fun postMustRun(task: () -> Unit): Boolean = queue.postAlways(task)
 
     /** 是否有在途或已挂载的 Surface。 */
     fun hasMount(): Boolean = state.hasMount()
 
     private fun applySurfaceSize() {
         if (width <= 0 || height <= 0) return
-        queue.postSurfaceSize(width, height, setProperty)
+        queue.postSurfaceSize(width, height) { w, h -> resize(w, h) }
     }
 
-    private fun postDetach() {
-        if (!queue.postAlways(detachOutput)) {
-            onDiagnostic("分离: 视频输出线程不再受理，分离任务没投递")
-        }
+    /** 挂载完成后开窗口并恢复视频输出：只对真正挂着的 Surface 开。 */
+    private fun openMountedSurface() {
+        val target = state.intended() ?: return
+        if (state.isMounted(target)) openOutput()
     }
 
     /**
@@ -142,7 +133,7 @@ internal class SurfaceMountRecovery(
      */
     private fun scheduleRemount(surface: Surface) {
         val settled = AtomicBoolean(false)
-        val armed = schedule(REMOUNT_TIMEOUT_MILLIS) {
+        val armed = scheduleTask(REMOUNT_TIMEOUT_MILLIS) {
             if (settled.compareAndSet(false, true)) {
                 onDiagnostic("重挂: 视频输出线程 ${REMOUNT_TIMEOUT_MILLIS}ms 内仍未执行，等下一次会话重建")
             }
@@ -157,7 +148,8 @@ internal class SurfaceMountRecovery(
             when (state.remount(surface) { mount(surface) }) {
                 SurfaceMountState.RemountResult.Attached -> {
                     onDiagnostic("挂载: 视频输出线程恢复后重挂一次")
-                    startVideoOutput()
+                    applySurfaceSize()
+                    openMountedSurface()
                 }
                 SurfaceMountState.RemountResult.Superseded ->
                     onDiagnostic("重挂: 会话已换 Surface 或已分离，跳过")
