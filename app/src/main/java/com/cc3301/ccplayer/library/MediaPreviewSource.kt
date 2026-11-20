@@ -11,7 +11,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -145,24 +144,9 @@ interface MediaPreviewExtractor {
 
     /**
      * 取预览图字节：视频按策略抽帧，音频是文件内嵌封面；没有可用图时返回 null，读取失败抛出异常。
-     * 只用于本地文件；网络条目只走 [prepareNetworkPreview]。
+     * 只用于本地文件；网络条目只走 [NetworkPreviewPreparer.prepare]。
      */
     suspend fun imageBytes(file: MediaFile, targetWidth: Int): ByteArray?
-
-    /**
-     * 网络取图的准备：在取得解码许可之前打开句柄并按目标位置起预读。
-     * 返回 null 表示没有可用的读取会话，调用方按无图处理，不再另开句柄取图。
-     */
-    suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation?
-
-    /**
-     * 带预读 rank 的同一件事：[readAheadRank] 决定这条目的预读在池里的先后，
-     * 可见项按列表索引，预取排在可见之后。默认忽略 rank，实现只覆盖一参版本。
-     */
-    suspend fun prepareNetworkPreview(
-        file: MediaFile,
-        readAheadRank: Long,
-    ): NetworkPreviewPreparation? = prepareNetworkPreview(file)
 
     /** 取时长（毫秒）；元数据里没有时长时返回 null，读取失败抛出异常。 */
     suspend fun durationMillis(file: MediaFile): Long?
@@ -214,6 +198,8 @@ data class ThumbnailPolicy(
  */
 class CachedMediaPreviewSource(
     private val extractor: MediaPreviewExtractor,
+    /** 网络取图的准备入口；本地目录没有网络读取时为空。 */
+    private val networkPreviews: NetworkPreviewPreparer? = null,
     private val cache: ThumbnailCache,
     private val policy: ThumbnailPolicy = ThumbnailPolicy(),
     /** 单调时钟，单位毫秒；本次运行内的失败退避按它比较。 */
@@ -559,7 +545,7 @@ class CachedMediaPreviewSource(
         // 打开数据源不设名额：打开是取消不掉的阻塞调用，等待有上限，超时只停止等待。
         val openStarted = monotonicClockMillis()
         val prepared = (try {
-            openOutsideRequest(file, priority)
+            networkPreviews?.prepare(file, priority.rank)
         } finally {
             diagnostics.log { "网络封面: ${file.name} 打开数据源 ${monotonicClockMillis() - openStarted}ms" }
         }) ?: return LoadedPreview(image = null, durationMillis = null)
@@ -583,7 +569,7 @@ class CachedMediaPreviewSource(
                     val decodeStarted = monotonicClockMillis()
                     decoding += key
                     val done = try {
-                        withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) {
+                        withTimeoutOrNull(NETWORK_DECODE_TIMEOUT_MILLIS) {
                             decoded = prepared.decode(targetWidth)
                             true
                         } ?: false
@@ -632,66 +618,6 @@ class CachedMediaPreviewSource(
             // 句柄无论解码成功、失败还是取消都要关；解码超时或取消按是否打断传输读决定是否丢弃会话。
             if (abandoned) prepared.abandon() else prepared.close()
         }
-    }
-
-    /**
-     * 打开句柄并按目标位置起预读。
-     *
-     * 打开是取消不掉的阻塞原生调用：放在脱离请求的协程里跑，超时只停止等待，
-     * 后面的可见项不跟着一个坏条目一起等。
-     * 打开最终结束后仍无人接手（超时或取消）时由打开方关闭句柄与预读。
-     */
-    private suspend fun openOutsideRequest(
-        file: MediaFile,
-        priority: PreviewPriority,
-    ): NetworkPreviewPreparation? {
-        val opened = CompletableDeferred<Result<NetworkPreviewPreparation?>>()
-        // 父 Job 跟随进程级范围，调度器沿用调用方的：请求取消不会连带取消这次打开。
-        val opening = CoroutineScope(
-            currentCoroutineContext() + Job(backgroundScope.coroutineContext[Job]),
-        ).launch {
-            val result = try {
-                Result.success(extractor.prepareNetworkPreview(file, priority.rank))
-            } catch (cancellation: CancellationException) {
-                opened.completeExceptionally(cancellation)
-                return@launch
-            } catch (failure: Throwable) {
-                Result.failure(failure)
-            }
-            // 没人接手（超时或取消）时在这里作废，句柄不留在无人持有的地方，会话也不留给下一次重试。
-            if (!opened.complete(result)) runCatching { result.getOrNull()?.discard() }
-        }
-        val settled = try {
-            withTimeoutOrNull(NETWORK_TIMEOUT_MILLIS) { opened.await() }
-        } catch (failure: Throwable) {
-            abandonOpen(opened, opening, CancellationException("网络预览打开已放弃"))
-            throw failure
-        }
-        if (settled == null) {
-            abandonOpen(opened, opening, CancellationException("网络预览打开超时"))
-            throw PreviewStageException(PreviewFailureStage.Timeout, "网络预览打开超时")
-        }
-        return settled.getOrThrow()
-    }
-
-    /**
-     * 放弃等待这次打开。
-     *
-     * 先用 [CompletableDeferred.completeExceptionally] 争这次交接的收尾权：
-     * 争到（返回 true）说明子方还没交付，它随后的 complete 会返回 false 并自己关句柄；
-     * 争不到（返回 false）说明子方已经交付，这一次成功打开的结果由父方接手关闭，不能丢。
-     */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private suspend fun abandonOpen(
-        opened: CompletableDeferred<Result<NetworkPreviewPreparation?>>,
-        opening: Job,
-        reason: CancellationException,
-    ) {
-        if (!opened.completeExceptionally(reason)) {
-            // 争到的是已经交付的成功打开：打开已被放弃，会话一并作废，下一次重试换新会话。
-            runCatching { opened.getCompleted().getOrNull()?.discard() }
-        }
-        opening.cancel()
     }
 
     /**
@@ -848,10 +774,10 @@ class CachedMediaPreviewSource(
         private const val EXTRACTION_CONCURRENCY = 1
 
         /**
-         * 网络取图的打开与解码各自的等待上限；取许可的排队时间不计入。
-         * 打开超时只放弃等待，阻塞中的原生打开留在后台，由传输层超时收尾。
+         * 网络取图的解码等待上限；取许可的排队时间不计入。
+         * 打开阶段的等待上限由 [NetworkPreviewExtractor] 负责。
          */
-        private const val NETWORK_TIMEOUT_MILLIS = 15_000L
+        private const val NETWORK_DECODE_TIMEOUT_MILLIS = 15_000L
 
         /** 等解码许可的上限；许可被前一项占着时不能无限期排队。 */
         private const val DECODE_PERMIT_TIMEOUT_MILLIS = 20_000L
@@ -871,8 +797,15 @@ class CachedMediaPreviewSource(
         ): CachedMediaPreviewSource {
             val appContext = context.applicationContext
             val policy = ThumbnailPolicy()
+            val extractor = AndroidMediaPreviewExtractor(
+                appContext,
+                networkReads,
+                diagnostics,
+                backgroundScope,
+            )
             return CachedMediaPreviewSource(
-                extractor = AndroidMediaPreviewExtractor(appContext, networkReads, diagnostics),
+                extractor = extractor,
+                networkPreviews = extractor.networkPreviews,
                 cache = thumbnailCache(appContext),
                 policy = policy,
                 diagnostics = diagnostics,

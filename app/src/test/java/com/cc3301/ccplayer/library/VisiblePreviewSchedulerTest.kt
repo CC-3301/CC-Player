@@ -395,6 +395,7 @@ class VisiblePreviewSchedulerTest {
             val extractor = OrderRecordingExtractor()
             val source = CachedMediaPreviewSource(
                 extractor = extractor,
+                networkPreviews = extractor,
                 cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
                 backgroundScope = backgroundScope,
             )
@@ -786,11 +787,11 @@ private class CompletionGateSource(
 }
 
 /** 记录抽图开始顺序的抽取器，用来断言一屏可见项的出图顺序。 */
-private class OrderRecordingExtractor : MediaPreviewExtractor {
+private class OrderRecordingExtractor : MediaPreviewExtractor, NetworkPreviewPreparer {
 
     val started = mutableListOf<Int>()
 
-    override suspend fun prepareNetworkPreview(file: MediaFile): NetworkPreviewPreparation =
+    override suspend fun prepare(file: MediaFile, readAheadRank: Long): NetworkPreviewPreparation =
         NetworkPreviewPreparation(
             decodeBlock = { targetWidth -> imageBytes(file, targetWidth) },
             closeBlock = {},
