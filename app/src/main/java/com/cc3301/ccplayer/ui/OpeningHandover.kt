@@ -4,8 +4,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.cc3301.ccplayer.library.MediaFile
-import com.cc3301.ccplayer.playback.PlaybackState
-import com.cc3301.ccplayer.playback.isInitialLoading
 
 /** 一次打开的唯一步骤事实；同一时刻只有一个。 */
 enum class EntryPhase {
@@ -43,7 +41,7 @@ enum class HandoverAttempt {
  * 时间由外部推进，本类不自带协程；收尾动作由界面按返回值决定。
  *
  * 兜底只在等待接手阶段计时，只在前台累计；失败与取消直接清空阶段与代际。
- * 已接手后目标的首个就绪、切集与终态不改阶段：它们只参与缓冲指示的推导，事实由控制层提供。
+ * 已接手后目标的首个就绪、切集与终态不改阶段：它们只作为播放页加载事实的输入。
  */
 class OpeningHandover(
     private val startPlayback: (
@@ -152,25 +150,6 @@ class OpeningHandover(
     }
 
     /**
-     * 缓冲指示：入口阶段未结束时由入口显示；已接手后，目标首个就绪、转入切集或到达终态即交还给控制层。
-     * 准备中与等待接手期间的上报仍属于上一段会话，不参与判定。
-     */
-    fun showsBuffering(controllerBuffering: Boolean, playbackState: PlaybackState, switching: Boolean): Boolean =
-        controllerBuffering || (preparesInPage && phase != null && !handoverSettled(playbackState, switching))
-
-    /** 已接手的目标是否已经越过首次加载：首个就绪、切集或终态。 */
-    private fun handoverSettled(playbackState: PlaybackState, switching: Boolean): Boolean =
-        phase == EntryPhase.Accepted &&
-            (
-                switching || playbackState.isReady ||
-                    playbackState == PlaybackState.Ended || playbackState == PlaybackState.Idle
-                )
-
-    /** 准备期与首次加载（非切集）只允许返回与不依赖加载的控件。 */
-    fun initialLoading(playbackState: PlaybackState, switching: Boolean): Boolean =
-        phase.isPreparingPhase || isInitialLoading(playbackState, switching)
-
-    /**
      * 首次加载失败：只接受当前代际、在播放页里准备的打开；后续播放失败与音频首播失败都不关播放页。
      * 「是不是首次加载」由控制层的失败事件判定，入口不再另存窗口。
      */
@@ -226,6 +205,3 @@ class OpeningHandover(
         const val DEFAULT_TIMEOUT_MILLIS = 5_000L
     }
 }
-
-private val PlaybackState.isReady: Boolean
-    get() = this == PlaybackState.Playing || this == PlaybackState.Paused

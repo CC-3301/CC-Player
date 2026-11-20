@@ -38,10 +38,12 @@ data class PlayerProgressFacts(
     val audioTarget: Boolean = false,
 )
 
-/** 加载阶段组：加载阶段与引擎缓冲事实。 */
+/** 加载阶段组：播放页阶段、缓冲事实与这次打开是否已被控制层接手。 */
 data class PlayerLoadingFacts(
     val phase: PlayerScreenPhase = PlayerScreenPhase.Ready,
     val buffering: Boolean = false,
+    /** 这次打开还没被播放控制层接手：准备期界面、撤回与顶栏返回按它判定。 */
+    val opening: Boolean = false,
 )
 
 /** 菜单偏好组：解码、循环、方向、连播、睡眠定时与字幕选择。 */

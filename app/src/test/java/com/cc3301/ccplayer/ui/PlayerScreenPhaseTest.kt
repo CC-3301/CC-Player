@@ -204,24 +204,255 @@ class PlayerScreenPhaseTest {
         assertEquals(PlayerScreenPhase.values().toSet(), produced)
     }
 
+    private fun loadingOf(
+        entryPhase: EntryPhase? = null,
+        preparesInPage: Boolean = false,
+        playbackState: PlaybackState = PlaybackState.Playing,
+        switching: Boolean = false,
+        restoring: Boolean = false,
+        controllerBuffering: Boolean = false,
+    ): PlayerLoadingFacts = playerScreenLoading(
+        PlayerScreenLoadFacts(
+            entryPhase = entryPhase,
+            preparesInPage = preparesInPage,
+            playbackState = playbackState,
+            switching = switching,
+            restoring = restoring,
+            controllerBuffering = controllerBuffering,
+        ),
+    )
+
+    @Test
+    fun `加载事实同时给出阶段与缓冲`() {
+        data class Case(
+            val name: String,
+            val loading: PlayerLoadingFacts,
+            val phase: PlayerScreenPhase,
+            val buffering: Boolean,
+            val opening: Boolean,
+        )
+
+        val cases = listOf(
+            Case(
+                "页面内准备中",
+                loadingOf(entryPhase = EntryPhase.Preparing, preparesInPage = true, playbackState = PlaybackState.Idle),
+                PlayerScreenPhase.Preparing,
+                buffering = true,
+                opening = true,
+            ),
+            Case(
+                "页面内等待接手",
+                loadingOf(
+                    entryPhase = EntryPhase.AwaitingHandover,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Paused,
+                ),
+                PlayerScreenPhase.AwaitingHandover,
+                buffering = true,
+                opening = true,
+            ),
+            Case(
+                "接手后首次加载仍由入口顶着",
+                loadingOf(
+                    entryPhase = EntryPhase.Accepted,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Loading,
+                ),
+                PlayerScreenPhase.Loading,
+                buffering = true,
+                opening = false,
+            ),
+            Case(
+                "已接手保留到下次打开：首个就绪后只看控制层",
+                loadingOf(
+                    entryPhase = EntryPhase.Accepted,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Playing,
+                ),
+                PlayerScreenPhase.Ready,
+                buffering = false,
+                opening = false,
+            ),
+            Case(
+                "已接手到达片尾不算缓冲",
+                loadingOf(
+                    entryPhase = EntryPhase.Accepted,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Ended,
+                ),
+                PlayerScreenPhase.Ready,
+                buffering = false,
+                opening = false,
+            ),
+            Case(
+                "接手后转入切集交还控制层",
+                loadingOf(
+                    entryPhase = EntryPhase.Accepted,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Loading,
+                    switching = true,
+                ),
+                PlayerScreenPhase.Switching,
+                buffering = false,
+                opening = false,
+            ),
+            Case(
+                "切集中控制层缓冲照样是缓冲",
+                loadingOf(playbackState = PlaybackState.Loading, switching = true, controllerBuffering = true),
+                PlayerScreenPhase.Switching,
+                buffering = true,
+                opening = false,
+            ),
+            Case(
+                "恢复原片交还控制层",
+                loadingOf(playbackState = PlaybackState.Paused, switching = true, restoring = true),
+                PlayerScreenPhase.Restoring,
+                buffering = false,
+                opening = false,
+            ),
+            Case(
+                "就绪后控制层缓冲",
+                loadingOf(playbackState = PlaybackState.Playing, controllerBuffering = true),
+                PlayerScreenPhase.Ready,
+                buffering = true,
+                opening = false,
+            ),
+            Case(
+                "音频不在页面内准备，只认控制层缓冲",
+                loadingOf(
+                    entryPhase = EntryPhase.Preparing,
+                    preparesInPage = false,
+                    playbackState = PlaybackState.Loading,
+                    controllerBuffering = true,
+                ),
+                PlayerScreenPhase.Loading,
+                buffering = true,
+                opening = true,
+            ),
+            Case(
+                "没有进行中的打开",
+                loadingOf(playbackState = PlaybackState.Loading),
+                PlayerScreenPhase.Loading,
+                buffering = false,
+                opening = false,
+            ),
+        )
+
+        cases.forEach { case ->
+            assertEquals(case.name, case.phase, case.loading.phase)
+            assertEquals(case.name, case.buffering, case.loading.buffering)
+            assertEquals(case.name, case.opening, case.loading.opening)
+        }
+    }
+
+    @Test
+    fun `同一播放页会话场景覆盖缓冲控件可用性与返回`() {
+        data class Scenario(
+            val name: String,
+            val loading: PlayerLoadingFacts,
+            val playbackState: PlaybackState,
+            val buffering: Boolean,
+            val playPauseAllowed: Boolean,
+            val back: PlayerBackAction,
+        )
+
+        val scenarios = listOf(
+            Scenario(
+                name = "打开交接中",
+                loading = loadingOf(
+                    entryPhase = EntryPhase.Preparing,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Playing,
+                ),
+                playbackState = PlaybackState.Playing,
+                buffering = true,
+                playPauseAllowed = false,
+                back = PlayerBackAction.CancelOpening,
+            ),
+            Scenario(
+                name = "接手后首次加载",
+                loading = loadingOf(
+                    entryPhase = EntryPhase.Accepted,
+                    preparesInPage = true,
+                    playbackState = PlaybackState.Loading,
+                ),
+                playbackState = PlaybackState.Loading,
+                buffering = true,
+                playPauseAllowed = false,
+                back = PlayerBackAction.StopAndLeave,
+            ),
+            Scenario(
+                name = "切集中",
+                loading = loadingOf(
+                    playbackState = PlaybackState.Loading,
+                    switching = true,
+                    controllerBuffering = true,
+                ),
+                playbackState = PlaybackState.Loading,
+                buffering = true,
+                playPauseAllowed = false,
+                back = PlayerBackAction.CancelSwitch,
+            ),
+            Scenario(
+                name = "恢复原片",
+                loading = loadingOf(
+                    playbackState = PlaybackState.Paused,
+                    switching = true,
+                    restoring = true,
+                ),
+                playbackState = PlaybackState.Paused,
+                buffering = false,
+                playPauseAllowed = false,
+                back = PlayerBackAction.StopAndLeave,
+            ),
+            Scenario(
+                name = "就绪",
+                loading = loadingOf(playbackState = PlaybackState.Playing),
+                playbackState = PlaybackState.Playing,
+                buffering = false,
+                playPauseAllowed = true,
+                back = PlayerBackAction.LeaveAndContinue,
+            ),
+        )
+
+        scenarios.forEach { scenario ->
+            assertEquals(scenario.name, scenario.buffering, scenario.loading.buffering)
+            assertEquals(
+                scenario.name,
+                scenario.playPauseAllowed,
+                actionAllowed(PlayerAction.PlayPause, scenario.loading.phase),
+            )
+            assertEquals(
+                scenario.name,
+                scenario.back,
+                playerBackAction(
+                    loading = scenario.loading,
+                    playbackState = scenario.playbackState,
+                    failed = false,
+                    inAppBackgroundPlayback = true,
+                ),
+            )
+        }
+    }
+
     @Test
     fun `宿主按入口事实组装会话与阶段`() {
         val viewModel = PlayerScreenViewModel()
         val ready = viewModel.session(
             entryPhase = null,
             preparesInPage = false,
-            bufferingShown = false,
             orientationMode = OrientationMode.System,
             orientationOverride = null,
             screenOrientation = ScreenOrientation.Portrait,
             autoPlayNext = false,
         )
         assertEquals(PlayerScreenPhase.Ready, ready.loading.phase)
+        assertFalse(ready.loading.buffering)
+        assertFalse(ready.loading.opening)
 
         val preparing = viewModel.session(
             entryPhase = EntryPhase.Preparing,
             preparesInPage = true,
-            bufferingShown = true,
             orientationMode = OrientationMode.System,
             orientationOverride = null,
             screenOrientation = ScreenOrientation.Portrait,
@@ -229,6 +460,7 @@ class PlayerScreenPhaseTest {
         )
         assertEquals(PlayerScreenPhase.Preparing, preparing.loading.phase)
         assertTrue(preparing.loading.buffering)
+        assertTrue(preparing.loading.opening)
         assertTrue(preparing.menu.autoPlayNext)
     }
 }

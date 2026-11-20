@@ -38,40 +38,38 @@ enum class PlayerBackAction {
 /**
  * 播放页返回的判定。
  *
- * 准备期（准备中与等待接手）按撤回或退出处理：有旧会话且不在片尾就撤回打开交接，
- * 没有旧会话或旧会话停在片尾就退出播放页。其余状态：切集只取消这一跳；
- * 首次加载、恢复原片与错误态退出播放页；其余按「APP 内后台播放」决定离开后是否继续播放。
+ * 打开还没被控制层接手时按撤回或退出处理：有旧会话且不在片尾就撤回打开交接，
+ * 没有旧会话或旧会话停在片尾就退出播放页。其余阶段逐项显式映射：恢复原片、首次加载、
+ * 错误态与没有播放内容时退出播放页；切集中只取消这一跳；其余按「APP 内后台播放」
+ * 决定离开后是否继续播放。
  */
 fun playerBackAction(
-    state: PlaybackState,
-    switching: Boolean,
-    restoring: Boolean,
-    initialLoading: Boolean,
+    loading: PlayerLoadingFacts,
+    playbackState: PlaybackState,
     failed: Boolean,
     inAppBackgroundPlayback: Boolean,
-    entryPhase: EntryPhase? = null,
     atEpisodeEnd: Boolean = false,
 ): PlayerBackAction = when {
-    // 恢复原片期间 switching 仍为真，必须先按恢复态退出播放页。
-    restoring -> PlayerBackAction.StopAndLeave
+    // 恢复原片期间切集标志仍为真，必须先按恢复态退出播放页。
+    loading.phase.isRestoring -> PlayerBackAction.StopAndLeave
     // 失败优先于准备期：已经失败时返回一律结束播放，不再撤回交接。
     failed -> PlayerBackAction.StopAndLeave
-    // 准备期：有旧会话就撤回交接，否则按普通退出处理；片尾停留不撤回。
-    entryPhase.isPreparingPhase ->
-        if (state != PlaybackState.Idle && !atEpisodeEnd) {
+    // 打开尚未接手：有旧会话就撤回交接，否则按普通退出处理；片尾停留不撤回。
+    loading.opening ->
+        if (playbackState != PlaybackState.Idle && !atEpisodeEnd) {
             PlayerBackAction.CancelOpening
         } else {
             PlayerBackAction.StopAndLeave
         }
-    initialLoading -> PlayerBackAction.StopAndLeave
-    switching -> PlayerBackAction.CancelSwitch
-    state == PlaybackState.Idle || state == PlaybackState.Loading -> PlayerBackAction.StopAndLeave
+    loading.phase.isSwitching -> PlayerBackAction.CancelSwitch
+    loading.phase == PlayerScreenPhase.Loading -> PlayerBackAction.StopAndLeave
+    playbackState == PlaybackState.Idle -> PlayerBackAction.StopAndLeave
     inAppBackgroundPlayback -> PlayerBackAction.LeaveAndContinue
     else -> PlayerBackAction.StopAndLeave
 }
 
-/** 顶栏返回是否按「总是结束播放」处理；准备期它与系统返回等价，交给同一套判定。 */
-fun playerTopBarBackEndsPlayback(entryPhase: EntryPhase?): Boolean = !entryPhase.isPreparingPhase
+/** 顶栏返回是否按「总是结束播放」处理；打开尚未接手时它与系统返回等价，交给同一套判定。 */
+fun playerTopBarBackEndsPlayback(loading: PlayerLoadingFacts): Boolean = !loading.opening
 
 /** 面板或抽屉打开时，系统返回只消费为关闭面板，不离开播放页。 */
 fun playerBackClosesPanel(anyPanelOpen: Boolean): Boolean = anyPanelOpen

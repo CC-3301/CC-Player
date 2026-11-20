@@ -10,23 +10,23 @@ import org.junit.Test
 /** 播放页返回与库页面点开条目的判定。 */
 class PlayerNavigationPolicyTest {
 
+    private fun loading(
+        phase: PlayerScreenPhase = PlayerScreenPhase.Ready,
+        opening: Boolean = false,
+    ): PlayerLoadingFacts = PlayerLoadingFacts(phase = phase, opening = opening)
+
     private fun back(
+        phase: PlayerScreenPhase = PlayerScreenPhase.Ready,
         state: PlaybackState = PlaybackState.Playing,
-        switching: Boolean = false,
-        restoring: Boolean = false,
-        initialLoading: Boolean = false,
         failed: Boolean = false,
         inAppBackgroundPlayback: Boolean = false,
-        entryPhase: EntryPhase? = null,
         atEpisodeEnd: Boolean = false,
+        opening: Boolean = phase.isPreparing,
     ): PlayerBackAction = playerBackAction(
-        state = state,
-        switching = switching,
-        restoring = restoring,
-        initialLoading = initialLoading,
+        loading = loading(phase = phase, opening = opening),
+        playbackState = state,
         failed = failed,
         inAppBackgroundPlayback = inAppBackgroundPlayback,
-        entryPhase = entryPhase,
         atEpisodeEnd = atEpisodeEnd,
     )
 
@@ -64,11 +64,19 @@ class PlayerNavigationPolicyTest {
     fun `切集中返回只取消这一跳`() {
         assertEquals(
             PlayerBackAction.CancelSwitch,
-            back(state = PlaybackState.Loading, switching = true, inAppBackgroundPlayback = true),
+            back(
+                phase = PlayerScreenPhase.Switching,
+                state = PlaybackState.Loading,
+                inAppBackgroundPlayback = true,
+            ),
         )
         assertEquals(
             PlayerBackAction.CancelSwitch,
-            back(state = PlaybackState.Loading, switching = true, inAppBackgroundPlayback = false),
+            back(
+                phase = PlayerScreenPhase.Switching,
+                state = PlaybackState.Loading,
+                inAppBackgroundPlayback = false,
+            ),
         )
     }
 
@@ -76,7 +84,11 @@ class PlayerNavigationPolicyTest {
     fun `首次加载返回退出播放页`() {
         assertEquals(
             PlayerBackAction.StopAndLeave,
-            back(state = PlaybackState.Loading, initialLoading = true, inAppBackgroundPlayback = true),
+            back(
+                phase = PlayerScreenPhase.Loading,
+                state = PlaybackState.Loading,
+                inAppBackgroundPlayback = true,
+            ),
         )
     }
 
@@ -86,9 +98,8 @@ class PlayerNavigationPolicyTest {
         assertEquals(
             PlayerBackAction.StopAndLeave,
             back(
+                phase = PlayerScreenPhase.Restoring,
                 state = PlaybackState.Paused,
-                switching = true,
-                restoring = true,
                 inAppBackgroundPlayback = true,
             ),
         )
@@ -96,14 +107,14 @@ class PlayerNavigationPolicyTest {
 
     @Test
     fun `准备期有旧会话时返回撤回打开交接`() {
-        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+        listOf(PlayerScreenPhase.Preparing, PlayerScreenPhase.AwaitingHandover).forEach { phase ->
             assertEquals(
                 PlayerBackAction.CancelOpening,
-                back(state = PlaybackState.Playing, entryPhase = phase, inAppBackgroundPlayback = true),
+                back(phase = phase, state = PlaybackState.Playing, inAppBackgroundPlayback = true),
             )
             assertEquals(
                 PlayerBackAction.CancelOpening,
-                back(state = PlaybackState.Paused, entryPhase = phase),
+                back(phase = phase, state = PlaybackState.Paused),
             )
         }
     }
@@ -111,20 +122,20 @@ class PlayerNavigationPolicyTest {
     @Test
     fun `准备期已经失败时返回结束播放`() {
         // 失败优先于准备期：不再撤回交接、也不留在播放页。
-        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+        listOf(PlayerScreenPhase.Preparing, PlayerScreenPhase.AwaitingHandover).forEach { phase ->
             assertEquals(
                 PlayerBackAction.StopAndLeave,
-                back(state = PlaybackState.Playing, failed = true, entryPhase = phase),
+                back(phase = phase, state = PlaybackState.Playing, failed = true),
             )
         }
     }
 
     @Test
     fun `准备期没有旧会话时返回退出播放页`() {
-        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
+        listOf(PlayerScreenPhase.Preparing, PlayerScreenPhase.AwaitingHandover).forEach { phase ->
             assertEquals(
                 PlayerBackAction.StopAndLeave,
-                back(state = PlaybackState.Idle, entryPhase = phase, inAppBackgroundPlayback = true),
+                back(phase = phase, state = PlaybackState.Idle, inAppBackgroundPlayback = true),
             )
         }
     }
@@ -135,18 +146,23 @@ class PlayerNavigationPolicyTest {
         listOf(PlaybackState.Ended, PlaybackState.Paused).forEach { state ->
             assertEquals(
                 PlayerBackAction.StopAndLeave,
-                back(state = state, entryPhase = EntryPhase.AwaitingHandover, atEpisodeEnd = true),
+                back(phase = PlayerScreenPhase.AwaitingHandover, state = state, atEpisodeEnd = true),
             )
         }
     }
 
     @Test
-    fun `准备期顶栏返回与系统返回等价`() {
-        listOf(EntryPhase.Preparing, EntryPhase.AwaitingHandover).forEach { phase ->
-            assertFalse(playerTopBarBackEndsPlayback(phase))
+    fun `打开尚未接手时顶栏返回与系统返回等价`() {
+        listOf(PlayerScreenPhase.Preparing, PlayerScreenPhase.AwaitingHandover).forEach { phase ->
+            assertFalse(playerTopBarBackEndsPlayback(loading(phase = phase, opening = true)))
         }
-        listOf(null, EntryPhase.Accepted).forEach { phase ->
-            assertTrue(playerTopBarBackEndsPlayback(phase))
+        listOf(
+            PlayerScreenPhase.Loading,
+            PlayerScreenPhase.Switching,
+            PlayerScreenPhase.Restoring,
+            PlayerScreenPhase.Ready,
+        ).forEach { phase ->
+            assertTrue(playerTopBarBackEndsPlayback(loading(phase = phase)))
         }
     }
 
@@ -154,18 +170,47 @@ class PlayerNavigationPolicyTest {
     fun `错误态返回退出播放页`() {
         assertEquals(
             PlayerBackAction.StopAndLeave,
-            back(state = PlaybackState.Ended, failed = true, inAppBackgroundPlayback = true),
+            back(phase = PlayerScreenPhase.Ready, state = PlaybackState.Ended, failed = true, inAppBackgroundPlayback = true),
         )
     }
 
     @Test
     fun `没有播放内容时返回退出播放页`() {
-        listOf(PlaybackState.Idle, PlaybackState.Loading).forEach { state ->
-            assertEquals(
-                PlayerBackAction.StopAndLeave,
-                back(state = state, inAppBackgroundPlayback = true),
-            )
-        }
+        assertEquals(
+            PlayerBackAction.StopAndLeave,
+            back(phase = PlayerScreenPhase.Ready, state = PlaybackState.Idle, inAppBackgroundPlayback = true),
+        )
+        assertEquals(
+            PlayerBackAction.StopAndLeave,
+            back(phase = PlayerScreenPhase.Loading, state = PlaybackState.Loading, inAppBackgroundPlayback = true),
+        )
+    }
+
+    @Test
+    fun `音频打开尚未接手时返回仍撤回交接`() {
+        // 音频的准备在浏览页完成，播放页阶段不算准备期；撤回仍按打开是否已接手判定。
+        assertEquals(
+            PlayerBackAction.CancelOpening,
+            back(
+                phase = PlayerScreenPhase.Ready,
+                state = PlaybackState.Playing,
+                opening = true,
+                inAppBackgroundPlayback = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `接手后返回不再撤回交接`() {
+        assertEquals(
+            PlayerBackAction.LeaveAndContinue,
+            back(
+                phase = PlayerScreenPhase.Ready,
+                state = PlaybackState.Playing,
+                opening = false,
+                inAppBackgroundPlayback = true,
+            ),
+        )
     }
 
     @Test
