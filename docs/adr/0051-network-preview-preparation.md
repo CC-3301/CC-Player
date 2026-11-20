@@ -11,8 +11,9 @@
 ## 决策
 
 - 网络预览准备由 NetworkPreviewExtractor 统一拥有，从发起到可解码或被放弃为止，包括脱离请求后的等待结束、晚到句柄作废与部分资源清理。
+- 准备结果交给解码是交棒点。交棒前的打开失败、取消、超时与晚到结果由 NetworkPreviewExtractor 完整收尾；交棒后的正常完成、解码失败与放弃也通过同一准备对象的唯一关闭或放弃出口收尾，调用方只选择其中一个并调用一次，不分别清理主句柄、预读句柄与字节窗口。
 - 缓存抽帧源只保留缓存、可见范围与全局解码许可，不再为每个网络请求拼接等待任务与多种清理动作。
-- 网络准备不经过只有转发的 MediaPreviewExtractor 路径；SMB/WebDAV 仍通过 NetworkMediaReads 的真实 seam 变化。
+- 移除 MediaPreviewExtractor 路径与 Android 解码 adapter 上的网络准备浅转发；调用方与测试统一穿过 NetworkPreviewExtractor 的准备 interface，SMB/WebDAV 仍通过 NetworkMediaReads 的真实 seam 变化。
 - 可见请求调度与全局抽帧许可继续保持两条独立机制，不合并队列；打开数据源不设名额，预取延迟与出图顺序不变，继续遵循 ADR-0044。
 - 测试使用网络读取与解码替身，穿过同一准备 interface 验证阻塞打开、调用方放弃、晚到句柄作废与部分失败清理。
 
