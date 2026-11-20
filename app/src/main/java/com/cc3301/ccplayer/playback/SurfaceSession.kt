@@ -3,15 +3,14 @@ package com.cc3301.ccplayer.playback
 import android.view.Surface
 
 /**
- * Surface 会话：视频输出与 Surface 挂载的唯一所有者。
+ * Surface 会话：把 Surface 回调与播放服务连接转成挂载恢复要的生命周期事件。
  *
- * Surface 回调、尺寸变化与服务连接只向这里转发。
- * 拆挂只由 Surface 生命周期回调触发：Surface 就绪时挂载，Surface 真正销毁时先标记不可用、
- * 再分离；Activity 的停止与恢复（窗口不可见）不拆不挂。挂载与分离幂等，可重复、可乱序。
+ * 只做 Android 与宿主生命周期 adapter：Surface 就绪时报告挂载，Surface 真正销毁时报告分离；
+ * Activity 的停止与恢复（窗口不可见）不拆不挂。挂载、尺寸与输出顺序归挂载恢复，
+ * 这里只跟踪当前 Surface 与可渲染状态。挂载与分离幂等，可重复、可乱序。
  */
 class SurfaceSession(
     private val attach: (Surface) -> Boolean,
-    private val startOutput: () -> Unit,
     private val detachEngine: () -> Unit,
     private val resize: (Int, Int) -> Unit,
     private val onAvailabilityChanged: (Boolean) -> Unit,
@@ -28,6 +27,7 @@ class SurfaceSession(
     /** 当前挂在引擎上的 Surface；与 [surface] 分开记录，销毁时先标记不可用。 */
     private var mountedSurface: Surface? = null
 
+    /** 最近一次视图尺寸：引擎晚于尺寸事件连上时，挂载前补报一次。 */
     private var surfaceWidth = 0
     private var surfaceHeight = 0
 
@@ -42,10 +42,11 @@ class SurfaceSession(
         publish()
     }
 
+    /** 尺寸变化只转发：先挂载、再尺寸、再开输出由挂载恢复保证。 */
     fun onSurfaceChanged(width: Int, height: Int) {
         surfaceWidth = width
         surfaceHeight = height
-        if (mounted) resize(width, height)
+        resize(width, height)
     }
 
     /**
@@ -81,14 +82,12 @@ class SurfaceSession(
 
     private fun attachCurrent() {
         val target = surface?.takeIf(isValid) ?: return
-        // 同一个 Surface 才是幂等挂载；对象身份不能当作会话 ID，销毁后的重挂要先分离。
+        // 同一个 Surface 才是幂等挂载；对象身份不能当作会话 ID，换 Surface 时先分离由挂载恢复负责。
         if (mountedSurface === target) return
-        detachIfMounted()
+        // 尺寸先于引擎到达时补报一次：挂载时补下尺寸、再开输出的顺序仍归挂载恢复。
+        if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
         if (!attach(target)) return
         mountedSurface = target
-        // 挂载顺序：先挂 Surface，再设尺寸，最后开窗口并恢复视频输出。
-        if (surfaceWidth > 0 && surfaceHeight > 0) resize(surfaceWidth, surfaceHeight)
-        startOutput()
     }
 
     private fun detachIfMounted() {

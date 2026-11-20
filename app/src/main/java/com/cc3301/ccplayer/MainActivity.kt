@@ -186,7 +186,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 的挂载与分离由会话持有；拆挂只由 Surface 生命周期回调触发。 */
+    /** Surface 会话只报生命周期；挂载、尺寸与输出顺序归引擎里的挂载恢复。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
@@ -195,7 +195,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                     true
                 } ?: false
             },
-            startOutput = { playback?.engine?.startVideoOutput() },
             detachEngine = { playback?.engine?.detachSurface() },
             resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
             onAvailabilityChanged = { available ->
