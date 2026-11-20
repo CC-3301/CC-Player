@@ -70,6 +70,7 @@ import com.cc3301.ccplayer.playback.PlaybackState
 import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SurfaceMountRecovery
 import com.cc3301.ccplayer.playback.SurfaceSession
+import com.cc3301.ccplayer.playback.VideoOutputQueue
 import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbLocation
@@ -187,34 +188,38 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     private var playback: PlaybackService.LocalBinder? = null
     private var bound = false
 
-    /** Surface 挂载恢复：三态、队列、超时、重挂与「挂载 → 尺寸 → 开输出」顺序都归它。 */
+    /**
+     * Surface 挂载恢复：三态、队列、超时、重挂、「挂载 → 尺寸 → 开输出」顺序与可渲染事实都归它。
+     * 队列负责视频输出线程与计时，恢复策略在恢复模块里。
+     */
     private val surfaceRecovery by lazy {
         SurfaceMountRecovery(
-            execute = { task ->
-                playback?.engine?.postToVideoOutput(task) ?: throw IllegalStateException("播放引擎不在")
-            },
-            mount = { surface -> playback?.engine?.attachSurface(surface) },
+            queue = VideoOutputQueue(
+                execute = { task ->
+                    playback?.postToVideoOutput(task) ?: throw IllegalStateException("播放引擎不在")
+                },
+                onDiagnostic = { message -> diagnostics.log { message } },
+            ),
+            mount = { surface -> playback?.engine?.attachSurface(surface) ?: false },
             detachOutput = { playback?.engine?.detachSurface() },
             resize = { width, height -> playback?.engine?.setSurfaceSize(width, height) },
             openOutput = { playback?.engine?.startVideoOutput() },
+            // 挂载可能落在视频输出线程上：控制层的渲染可用性仍在主线程收。
+            onAvailabilityChanged = { available ->
+                runOnUiThread { playback?.controller?.setRenderSurfaceAvailable(available) }
+            },
             onDiagnostic = { message -> diagnostics.log { message } },
         )
     }
 
-    /** Surface 会话只报生命周期；挂载、尺寸与输出顺序归挂载恢复。 */
+    /** Surface 会话只报生命周期与 Surface 有效性；挂载、尺寸与可渲染事实归挂载恢复。 */
     private val surfaceSession by lazy {
         SurfaceSession(
             attach = { surface ->
-                playback?.engine?.let {
-                    surfaceRecovery.attach(surface)
-                    true
-                } ?: false
+                if (playback != null) surfaceRecovery.attach(surface)
             },
-            detachEngine = { surfaceRecovery.detach() },
+            detach = { surfaceRecovery.detach() },
             resize = { width, height -> surfaceRecovery.setSurfaceSize(width, height) },
-            onAvailabilityChanged = { available ->
-                playback?.controller?.setRenderSurfaceAvailable(available)
-            },
         )
     }
 
@@ -300,8 +305,8 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                 launch { settings.decodeMode.collect { binder.controller.setDecodeMode(it) } }
             }
             surfaceSession.onEngineAvailable()
-            // 新控制器默认认为 Surface 可用；连上后同步一次会话的真实状态。
-            binder.controller.setRenderSurfaceAvailable(surfaceSession.available)
+            // 新控制器默认认为 Surface 可用；连上后同步一次挂载恢复的真实事实。
+            binder.controller.setRenderSurfaceAvailable(surfaceRecovery.available)
             binder.setAppInForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
             attemptOpenHandover()
         }
@@ -309,7 +314,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         override fun onServiceDisconnected(name: ComponentName) {
             playback = null
             playerScreen.detach()
-            surfaceSession.onEngineLost()
             surfaceRecovery.reset()
         }
     }
@@ -1148,7 +1152,6 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
         playerScreen.detach()
         playback = null
         // 引擎已经不在：挂载记录随之作废，重新连上时按现有 Surface 补挂。
-        surfaceSession.onEngineLost()
         surfaceRecovery.reset()
         if (bound) {
             unbindService(connection)

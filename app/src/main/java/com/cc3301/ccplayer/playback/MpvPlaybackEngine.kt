@@ -420,23 +420,21 @@ class MpvPlaybackEngine(
     }
 
     /** libmpv 挂载：排队、超时、重挂与后续开输出都归挂载恢复。 */
-    override fun attachSurface(surface: Surface) {
-        if (released) return
+    override fun attachSurface(surface: Surface): Boolean {
+        if (released || !surface.isValid) return false
         MPVLib.attachSurface(surface)
         surfaceMounted = true
+        return true
     }
 
     /**
-     * 挂载、设尺寸之后才开窗口并恢复视频输出：视频输出初始化时就能拿到 Surface 与尺寸。
+     * 开窗口并恢复视频输出：视频输出初始化时就能拿到 Surface 与尺寸。
+     * 排队、作废与顺序归挂载恢复，它只在这条视频输出线程上、确认仍挂载后调用本方法。
      * 暂停态没有后续解码推进，输出重建本身不保证重绘当前帧，由控制层随后请求一次精确刷新。
      */
     override fun startVideoOutput() {
-        if (released) return
-        postVideoOutput {
-            // 排队期间挂载可能已被放弃或分离：只有真正挂着的 Surface 才开输出。
-            if (!surfaceMounted) return@postVideoOutput
-            openVideoOutput()
-        }
+        if (released || !surfaceMounted) return
+        openVideoOutput()
     }
 
     /** libmpv 开窗口并恢复视频输出：视频输出初始化时就能拿到 Surface 与尺寸。 */

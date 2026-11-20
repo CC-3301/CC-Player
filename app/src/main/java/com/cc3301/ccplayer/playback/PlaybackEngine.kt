@@ -78,11 +78,14 @@ interface PlaybackEngine {
     /** 关闭字幕显示。 */
     fun disableSubtitles()
 
-    /** 把画面接到视图的 Surface 上；不开启视频输出。 */
-    fun attachSurface(surface: Surface)
+    /**
+     * 把画面接到视图的 Surface 上；不开启视频输出。
+     * Surface 已失效或引擎已释放时返回 false，此时没有挂上任何东西。
+     */
+    fun attachSurface(surface: Surface): Boolean
 
     /**
-     * 挂载完成后开启视频输出。必须在 [attachSurface] 与 [setSurfaceSize] 之后调用，
+     * 开启视频输出。由挂载恢复在视频输出线程上、确认 Surface 仍挂载后调用，
      * 顺序固定为挂载 Surface、设尺寸、开窗口、恢复视频输出。
      */
     fun startVideoOutput()

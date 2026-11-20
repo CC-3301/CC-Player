@@ -7,24 +7,21 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Surface 会话：只做 Surface 与宿主生命周期 adapter，挂载与分离幂等。 */
+/** Surface 会话：只做 Surface 与宿主生命周期 adapter，挂载与可渲染事实归挂载恢复。 */
 class SurfaceSessionTest {
 
     private val attached = mutableListOf<Surface>()
     private val operations = mutableListOf<String>()
     private val resized = mutableListOf<Pair<Int, Int>>()
-    private val availability = mutableListOf<Boolean>()
     private var detachCalls = 0
     private var surfaceValid = true
-    private var engineReady = true
 
     private fun session(): SurfaceSession = SurfaceSession(
         attach = { surface ->
             operations += "attach"
             attached += surface
-            engineReady
         },
-        detachEngine = {
+        detach = {
             operations += "detach"
             detachCalls++
         },
@@ -32,102 +29,53 @@ class SurfaceSessionTest {
             resized += width to height
             operations += "resize"
         },
-        onAvailabilityChanged = { availability += it },
         isValid = { surfaceValid },
     )
 
     @Test
-    fun `mounting the same surface twice attaches once`() {
+    fun `surface creation is reported for mounting`() {
         val session = session()
         val surface = testSurface()
 
         session.onSurfaceCreated(surface)
-        session.onSurfaceCreated(surface)
 
-        assertEquals(1, attached.size)
+        assertEquals(listOf("attach"), operations)
         assertSame(surface, attached.single())
-        assertEquals(SurfaceSession.State.Ready, session.state)
+        assertTrue(session.hasSurface)
     }
 
     @Test
-    fun `surface destruction detaches the mount immediately`() {
+    fun `surface destruction reports detach immediately`() {
         val session = session()
         val surface = testSurface()
 
         session.onSurfaceCreated(surface)
         session.onSurfaceDestroyed()
 
-        // Surface 真正销毁就分离：调用方没有第二处可摘挂的入口。
+        // Surface 真正销毁就报告分离：调用方没有第二处可摘挂的入口。
+        assertEquals(listOf("attach", "detach"), operations)
         assertEquals(1, detachCalls)
-        assertEquals(SurfaceSession.State.Detached, session.state)
         assertFalse(session.hasSurface)
     }
 
     @Test
-    fun `a new surface replaces a destroyed mount`() {
-        val session = session()
-        val oldSurface = testSurface()
-        val newSurface = testSurface()
-
-        session.onSurfaceCreated(oldSurface)
-        session.onSurfaceDestroyed()
-        session.onSurfaceCreated(newSurface)
-
-        // 旧 Surface 已销毁：先分离，再挂新 Surface。
-        assertEquals(listOf("attach", "detach", "attach"), operations)
-        assertSame(newSurface, attached.last())
-        assertEquals(SurfaceSession.State.Ready, session.state)
-    }
-
-    @Test
-    fun `a reused surface identity is remounted after destruction`() {
+    fun `invalid stored surface is not reported for mounting`() {
         val session = session()
         val surface = testSurface()
-
-        session.onSurfaceCreated(surface)
-        session.onSurfaceDestroyed()
-        session.onSurfaceCreated(surface)
-
-        // Surface 对象身份可能被复用，销毁过就必须重建挂载。
-        assertEquals(2, attached.size)
-        assertSame(surface, attached.last())
-        assertEquals(SurfaceSession.State.Ready, session.state)
-    }
-
-    @Test
-    fun `availability follows the ready state`() {
-        val session = session()
-        val surface = testSurface()
-
-        session.onSurfaceCreated(surface)
-        session.onSurfaceDestroyed()
-        session.onSurfaceCreated(surface)
-
-        // 销毁即分离、即不可渲染，一次上报；重新挂载后恢复可用。
-        assertEquals(listOf(true, false, true), availability)
-    }
-
-    @Test
-    fun `invalid stored surface is not attached`() {
-        val session = session()
-        val surface = testSurface()
-        session.onSurfaceCreated(surface)
-        session.onSurfaceDestroyed()
         surfaceValid = false
 
         session.onSurfaceCreated(surface)
 
-        assertEquals(1, attached.size)
-        assertSame(surface, attached.single())
+        assertEquals(emptyList<String>(), operations)
+        assertEquals(emptyList<Surface>(), attached)
         assertFalse(session.hasSurface)
     }
 
     @Test
-    fun `surface size changes are forwarded to the engine`() {
+    fun `surface size changes are forwarded`() {
         val session = session()
-        val surface = testSurface()
 
-        session.onSurfaceCreated(surface)
+        session.onSurfaceCreated(testSurface())
         session.onSurfaceChanged(1920, 1080)
         session.onSurfaceChanged(1280, 720)
 
@@ -136,104 +84,44 @@ class SurfaceSessionTest {
     }
 
     @Test
-    fun `the first available callback reports attach then size`() {
+    fun `service reconnect reports the stored surface again`() {
         val session = session()
         val surface = testSurface()
 
-        // 画面载体的可用回调自带视图尺寸：先报告挂载，再转发尺寸。
         session.onSurfaceCreated(surface)
-        session.onSurfaceChanged(1280, 720)
-
-        assertEquals(listOf("attach", "resize"), operations)
-        assertEquals(listOf(1280 to 720), resized)
-    }
-
-    @Test
-    fun `size reported before the engine is available is applied on mount`() {
-        val session = session()
-        val surface = testSurface()
-        engineReady = false
-
-        session.onSurfaceCreated(surface)
-        session.onSurfaceChanged(1920, 1080)
-        engineReady = true
-        operations.clear()
-        resized.clear()
-
-        // 补挂前先报当前尺寸：挂载后补下尺寸、再开输出。
         session.onEngineAvailable()
 
-        assertEquals(listOf(1920 to 1080), resized)
-        assertEquals(listOf("resize", "attach"), operations)
+        // 播放服务晚于 Surface 连上：连上后补挂保存的 Surface。
+        assertEquals(listOf("attach", "attach"), operations)
+        assertSame(surface, attached.last())
+        assertTrue(session.hasSurface)
     }
 
     @Test
     fun `no detach without a surface destruction callback`() {
         val session = session()
-        val surface = testSurface()
-        session.onSurfaceCreated(surface)
+        session.onSurfaceCreated(testSurface())
         operations.clear()
 
         // 窗口不可见与服务重连都不带 Surface 销毁回调：挂载与视频输出保持不动。
         session.onEngineAvailable()
         session.onSurfaceChanged(1920, 1080)
 
-        assertEquals(listOf("resize"), operations)
+        assertEquals(listOf("attach", "resize"), operations)
         assertEquals(0, detachCalls)
-        assertTrue(session.available)
-        assertEquals(SurfaceSession.State.Ready, session.state)
-    }
-
-    @Test
-    fun `service availability attaches the stored surface`() {
-        val session = session()
-        val surface = testSurface()
-        engineReady = false
-
-        session.onSurfaceCreated(surface)
-        assertFalse(session.state == SurfaceSession.State.Ready)
-
-        // 播放服务晚于 Surface 连上：连上后补挂保存的 Surface。
-        engineReady = true
-        session.onEngineAvailable()
-
-        assertEquals(2, attached.size)
-        assertSame(surface, attached.last())
         assertTrue(session.hasSurface)
-        assertTrue(session.available)
-        assertEquals(SurfaceSession.State.Ready, session.state)
     }
 
     @Test
-    fun `engine reconnect only publishes real state transitions`() {
+    fun `release reports detach and forgets the surface`() {
         val session = session()
-        val surface = testSurface()
+        session.onSurfaceCreated(testSurface())
 
-        session.onSurfaceCreated(surface)
-        // 已挂载且状态未变：重连不重复发可用回调。
-        session.onEngineAvailable()
-        assertEquals(listOf(true), availability)
+        session.release()
 
-        session.onEngineLost()
-        session.onEngineAvailable()
-
-        assertEquals(listOf(true, false, true), availability)
-        assertEquals(SurfaceSession.State.Ready, session.state)
-    }
-
-    @Test
-    fun `service loss makes the next connect remount the surface`() {
-        val session = session()
-        val surface = testSurface()
-
-        session.onSurfaceCreated(surface)
-        session.onEngineLost()
-
-        session.onEngineAvailable()
-
-        assertEquals(2, attached.size)
-        assertSame(surface, attached.last())
-        assertEquals(SurfaceSession.State.Ready, session.state)
+        assertEquals(listOf("attach", "detach"), operations)
+        assertEquals(1, detachCalls)
+        assertFalse(session.hasSurface)
     }
 
     private fun testSurface(): Surface = unsafeAllocate(Surface::class.java)
