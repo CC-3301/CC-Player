@@ -645,8 +645,8 @@ class PlaybackController(
     }
 
     /**
-     * 显式播放意图的收尾：状态迁移与保留集合发布在同一处完成。
-     * 切集与恢复原片由各自的新加载下发后单独发布；目标帧接管与引擎回声不发布。
+     * 普通显式播放意图的收尾：状态迁移与保留集合发布在同一处完成。
+     * 切集与恢复原片不走这里：各自在新加载下发后发布，切集接管成功与片尾恢复收尾各再发布一次。
      */
     private fun settleExplicitIntent(state: PlaybackState) {
         updateState(state)
@@ -1942,7 +1942,7 @@ class PlaybackController(
         if (loadPhase != LoadPhase.Switching) return
         logLoadSucceeded()
         generation?.markReady()
-        // 切集接管成功：原目标不再被读取，此刻才移出保留集合。
+        // 切集接管成功：原目标不再被读取，此刻移出保留集合。
         retainSources()
         // 切集就绪（打开交接被切集接管的路径同样到此放声）。
         releaseOpeningAudio()
@@ -2391,7 +2391,7 @@ class PlaybackController(
         }
         if (paused) {
             updateState(PlaybackState.Paused)
-            // 片尾恢复同样停在一段片尾。
+            // 恢复后停在片尾：原片不再被读取，收尾时移出保留集合。
             if (restoredAtEnd) retainSources()
             // 后台切集失败回退原片：屏上已没有旧画面时补一帧，回前台不会停在纯黑暂停。
             restorePausedFrameIfNoPicture()
