@@ -534,7 +534,7 @@ class CachedMediaPreviewSource(
 
     /**
      * 打开句柄并起预读，再等解码许可、在许可内串行解码。
-     * 打开与解码各自受 [NETWORK_TIMEOUT_MILLIS] 约束；打开超时不跟着阻塞的原生调用一起等。
+     * 解码受 [NETWORK_DECODE_TIMEOUT_MILLIS] 约束；打开等待上限由 NetworkPreviewExtractor 负责，不跟着阻塞的原生调用一起等。
      */
     private suspend fun prepareAndDecode(
         file: MediaFile,
