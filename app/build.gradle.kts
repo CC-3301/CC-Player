@@ -23,7 +23,7 @@ android {
         applicationId = "com.cc3301.ccplayer"
         minSdk = 26
         targetSdk = 35
-        versionName = "0.1.6"
+        versionName = "0.1.7"
     }
 
     signingConfigs {
