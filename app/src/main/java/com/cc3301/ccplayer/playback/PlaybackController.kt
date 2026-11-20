@@ -778,7 +778,7 @@ class PlaybackController(
         val waiting = beginSurfaceRestore(reason = "回前台播放态")
         // 本来就没有画面但确实进入等待：同样按黑屏无提示处理。
         if (waiting && !_surfacePresentation.value.showsPicture) {
-            generation?.setQuietBlack(true)
+            generation?.dropFrameQuietly()
             settlePresentation()
         }
     }

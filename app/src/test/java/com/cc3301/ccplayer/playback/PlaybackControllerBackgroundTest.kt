@@ -500,6 +500,26 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
+    fun `回前台时屏上本来没有画面也不显示缓冲提示`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+        // Surface 销毁只撤帧，不改这次黑屏是否显示提示。
+        reattach(controller)
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertFalse(controller.surfacePresentation.value.quietBlack)
+
+        controller.setAppInForeground(false)
+        controller.setAppInForeground(true)
+
+        // 本来就没有画面但确实进入等新帧：同样按黑屏无提示处理。
+        assertFalse(controller.surfacePresentation.value.showsPicture)
+        assertTrue(controller.surfacePresentation.value.quietBlack)
+
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+    }
+
+    @Test
     fun `首次加载中回前台不留下黑屏无提示标记`() = runTest {
         val controller = controller()
         val files = listOf(MediaFile(name = "ep1.mkv", location = "root/ep1.mkv"))

@@ -268,10 +268,7 @@ internal class LoadGeneration(
      */
     fun beginAttempt(loadToken: Int) {
         this.loadToken = loadToken
-        mediaLoaded = false
-        hasVideo = true
-        seekPendingForReady = false
-        deferredReadyNeedsFrame = null
+        clearLoadEvidence()
     }
 
     /** 本代际当前的加载作废（打开交接接管、会话结束）。 */
@@ -347,15 +344,20 @@ internal class LoadGeneration(
 
     /** 进入新一轮加载：上一轮的加载与就绪证据作废；[resumeLookupDone] 表示这次不用再查续播位置。 */
     fun resetReadyForLoad(resumeLookupDone: Boolean) {
-        hasVideo = true
-        mediaLoaded = false
+        clearLoadEvidence()
         outputLive = false
         // 上一轮加载自己的画面不再算数；切集起点的原片画面仍然沿用。
         if (screenFrame == ScreenFrame.Target) screenFrame = ScreenFrame.None
-        seekPendingForReady = false
-        deferredReadyNeedsFrame = null
         requiredSeekSerial = 0
         this.resumeLookupDone = resumeLookupDone
+    }
+
+    /** 媒体还没加载完成、就绪证据作废：新的一次尝试与新的一轮加载共用这一组重置。 */
+    private fun clearLoadEvidence() {
+        mediaLoaded = false
+        hasVideo = true
+        seekPendingForReady = false
+        deferredReadyNeedsFrame = null
     }
 
     /** 续播位置已查明。 */
