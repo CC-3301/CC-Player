@@ -80,6 +80,47 @@ class PlaybackControllerTransportRecoveryTest {
     }
 
     @Test
+    fun `未绑定界面时也按真实分类恢复传输`() = runTest {
+        classification = PlaybackTransportFailure.Transport
+        val controller = controller()
+        // 刻意不调用 attachNetworkSources：分类出口在构造时给足，不随界面绑定变化。
+        open(controller, "ep1.mkv")
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(40_000, 600_000)
+        val starts = engine.startedUrls.size
+
+        engine.reportPlaybackFailed("读取超时")
+        runCurrent()
+
+        assertEquals(starts + 1, engine.startedUrls.size)
+        assertEquals(40_000L, engine.startedPositions.last())
+        assertFalse(controller.playbackFailed.value)
+    }
+
+    @Test
+    fun `新传输结果在真实恢复之后才写进诊断`() = runTest {
+        classification = PlaybackTransportFailure.Transport
+        val diagnostics = RecordingDiagnostics()
+        val controller = controller(diagnostics)
+        open(controller, "ep1.mkv")
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(40_000, 600_000)
+
+        engine.reportPlaybackFailed("读取超时")
+        runCurrent()
+        // 这一步只是发起了换传输：不把意图当结果写。
+        assertFalse(diagnostics.messages.joinToString("\n").contains("已换传输"))
+
+        engine.reportMediaLoaded()
+        engine.reportPositionChanged(60_000, 600_000)
+        classification = null
+        engine.reportPlaybackFailed("解码失败")
+        runCurrent()
+
+        assertTrue(diagnostics.messages.joinToString("\n").contains("新传输结果: 新传输已恢复"))
+    }
+
+    @Test
     fun `首次打开遇到传输失效按同一目标换传输恢复`() = runTest {
         classification = PlaybackTransportFailure.Transport
         val controller = controller()
@@ -246,7 +287,8 @@ class PlaybackControllerTransportRecoveryTest {
     @Test
     fun `新传输仍连不上时按网络服务器终态收尾`() = runTest {
         classification = PlaybackTransportFailure.Unreachable
-        val controller = controller()
+        val diagnostics = RecordingDiagnostics()
+        val controller = controller(diagnostics)
         open(controller, "ep1.mkv")
         engine.reportMediaLoaded()
         engine.reportPositionChanged(40_000, 600_000)
@@ -260,6 +302,7 @@ class PlaybackControllerTransportRecoveryTest {
         assertEquals(starts, engine.startedUrls.size)
         assertEquals(1, failures.size)
         assertEquals(PlaybackState.Ended, controller.state.value)
+        assertTrue(diagnostics.messages.joinToString("\n").contains("新传输结果: 网络／服务器终态"))
     }
 
     @Test

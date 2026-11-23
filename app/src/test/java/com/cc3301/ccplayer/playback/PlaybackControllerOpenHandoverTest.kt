@@ -30,6 +30,7 @@ class PlaybackControllerOpenHandoverTest {
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
+        classifyPlaybackFailure = { null },
     )
 
     /** 起播第一集并等首帧就绪，作为打开新目标前的旧会话。 */

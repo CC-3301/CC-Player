@@ -43,6 +43,7 @@ class PlaybackControllerSourceReturnTest {
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
+        classifyPlaybackFailure = { null },
         retain = { locations ->
             (retained - locations).forEach { location ->
                 returned += location

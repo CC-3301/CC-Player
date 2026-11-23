@@ -24,6 +24,7 @@ import com.cc3301.ccplayer.MainActivity
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.smb.SmbPlaybackFailure
 import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
@@ -59,6 +60,14 @@ class PlaybackService : Service() {
     /** 系统媒体封面的进程级预览源：生成用同一个抽帧许可，转屏与界面重建后复用。 */
     private val mediaPreview: MediaPreviewSource get() = (application as CcPlayerApplication).mediaPreview
 
+    /** 播放这一路读的失败分类：SMB 会话层在失败现场判定，界面没绑定时也照样生效。 */
+    private fun classifyPlaybackFailure(location: String): PlaybackTransportFailure? =
+        when ((application as CcPlayerApplication).smbSessions.playbackFailure(location)) {
+            SmbPlaybackFailure.Transport -> PlaybackTransportFailure.Transport
+            SmbPlaybackFailure.Unreachable -> PlaybackTransportFailure.Unreachable
+            null -> null
+        }
+
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** 通知刷新串行化：状态与每秒进度都可能触发，只保留最新一次。 */
@@ -93,6 +102,7 @@ class PlaybackService : Service() {
             scope,
             marshalCallbacks = true,
             diagnostics = diagnostics,
+            classifyPlaybackFailure = ::classifyPlaybackFailure,
         )
         backgroundPolicy = BackgroundPlaybackPolicy(
             pausePlayback = playbackController::pauseForBackground,
