@@ -32,6 +32,13 @@ fun interface NetworkPreviewDecoder {
 
     /** 从 [source] 取图；没有可用图时返回 null。 */
     suspend fun imageBytes(source: ByteSource, file: MediaFile, targetWidth: Int): ByteArray?
+
+    /**
+     * 系统媒体封面字节：最长边不超过 [maxSide]，等比缩小，原图不足时不放大。
+     * 缺省按普通缩略图的目标宽度取图，自有尺寸规则的实现覆写它。
+     */
+    suspend fun systemCoverBytes(source: ByteSource, file: MediaFile, maxSide: Int): ByteArray? =
+        imageBytes(source, file, maxSide)
 }
 
 /**
@@ -61,10 +68,15 @@ class NetworkPreviewPreparation(
     private val discardBlock: suspend () -> Unit = closeBlock,
     /** 放弃解码中的读取：打断在途传输读时丢弃会话，否则只关句柄。缺省等同 [closeBlock]，仅测试替身可省略接线。 */
     private val abandonBlock: suspend () -> Unit = closeBlock,
+    /** 系统封面的取图入口；缺省按普通目标宽度解码，仅测试替身可省略接线。 */
+    private val systemCoverBlock: (suspend (Int) -> ByteArray?)? = null,
 ) {
 
     /** 在解码许可内取图；没有可用图时返回 null。 */
     suspend fun decode(targetWidth: Int): ByteArray? = decodeBlock(targetWidth)
+
+    /** 在解码许可内取系统媒体封面：最长边不超过 [maxSide]，等比缩小且不放大。 */
+    suspend fun decodeSystemCover(maxSide: Int): ByteArray? = (systemCoverBlock ?: decodeBlock)(maxSide)
 
     /** 关闭句柄与预读；可重复调用。取消时也要关，不能随请求一起丢弃。 */
     suspend fun close() = closeBlock()
@@ -182,13 +194,13 @@ class NetworkPreviewExtractor(
             return NetworkPreviewPreparation(
                 // 解码入口不跟随调用方所在线程：音频解码固定在 `Dispatchers.IO` 发起，视频抽帧由 Media3 的加载线程读字节。
                 decodeBlock = { targetWidth ->
-                    withContext(Dispatchers.IO) {
-                        try {
-                            decode(previewWindow, file, targetWidth)
-                        } finally {
-                            // 让给播放读取的时长：与取许可等待分开记，能区分排队与等播放读；两条句柄合计。
-                            diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
-                        }
+                    decodeInIo(previewWindow, file, waitedMillis) {
+                        decoder.imageBytes(previewWindow, file, targetWidth)
+                    }
+                },
+                systemCoverBlock = { maxSide ->
+                    decodeInIo(previewWindow, file, waitedMillis) {
+                        decoder.systemCoverBytes(previewWindow, file, maxSide)
                     }
                 },
                 closeBlock = {
@@ -237,17 +249,31 @@ class NetworkPreviewExtractor(
         null
     }
 
+    /** 解码不跟随调用方所在线程；让给播放读取的时长与取许可等待分开记，两条句柄合计。 */
+    private suspend fun decodeInIo(
+        window: PreviewByteWindow,
+        file: MediaFile,
+        waitedMillis: AtomicLong,
+        block: suspend () -> ByteArray?,
+    ): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            decode(window, block)
+        } finally {
+            diagnostics.log { "网络封面: ${file.name} 等播放读 ${waitedMillis.get()}ms" }
+        }
+    }
+
     /**
      * 解码在独立协程里跑；父协程取消时关闭句柄，避免阻塞读把许可一直占住。
      * 解码侧的异常先收在子协程里：关闭句柄会让阻塞读抛错，取消收尾时按取消上报，不当成抽取失败。
      */
-    private suspend fun decode(window: PreviewByteWindow, file: MediaFile, targetWidth: Int): ByteArray? =
+    private suspend fun decode(window: PreviewByteWindow, block: suspend () -> ByteArray?): ByteArray? =
         coroutineScope {
             var image: ByteArray? = null
             var failure: Throwable? = null
             val decoding = async {
                 try {
-                    image = decoder.imageBytes(window, file, targetWidth)
+                    image = block()
                 } catch (error: Throwable) {
                     failure = error
                 }

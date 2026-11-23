@@ -24,6 +24,7 @@ import com.cc3301.ccplayer.MainActivity
 import com.cc3301.ccplayer.R
 import com.cc3301.ccplayer.library.CachedMediaPreviewSource
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.MediaPreviewSource
 import com.cc3301.ccplayer.progress.RoomPlaybackProgressRepository
 import com.cc3301.ccplayer.settings.SettingsRepository
 import java.io.File
@@ -34,6 +35,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,6 +56,9 @@ class PlaybackService : Service() {
     private lateinit var backgroundPolicy: BackgroundPlaybackPolicy
     private lateinit var coverCache: NotificationCoverCache
 
+    /** 系统媒体封面的进程级预览源：生成用同一个抽帧许可，转屏与界面重建后复用。 */
+    private val mediaPreview: MediaPreviewSource get() = (application as CcPlayerApplication).mediaPreview
+
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** 通知刷新串行化：状态与每秒进度都可能触发，只保留最新一次。 */
@@ -62,6 +67,7 @@ class PlaybackService : Service() {
     private var appIconBitmap: Bitmap? = null
     private var coverBitmapPath: String? = null
     private var coverBitmap: Bitmap? = null
+    private var systemCoverJob: Job? = null
     private var grantedCoverUri: Uri? = null
 
     private val fileProviderAuthority: String get() = "$packageName.fileprovider"
@@ -131,6 +137,14 @@ class PlaybackService : Service() {
                 playbackController.currentIndex,
                 playbackController.playlist,
             ) { _, _, _, _, _ -> Unit }.collect { requestRefresh() }
+        }
+        stateScope.launch {
+            combine(
+                playbackController.currentIndex,
+                playbackController.playlist,
+            ) { index, playlist -> playlist.getOrNull(index) }
+                .distinctUntilChanged()
+                .collect { media -> media?.let(::requestSystemCover) }
         }
         // 焦点跟随播放状态：开始或继续播放前先确保拿到；停住或结束会释放并回基准音量。
         // 暂停不释放；退后台不触发任何焦点命令。
@@ -321,7 +335,19 @@ class PlaybackService : Service() {
         )
     }
 
-    /** 封面解码放到 IO；按 256px 上限降采样并按文件路径复用，换媒体时丢弃旧位图。 */
+    /**
+     * 换媒体时生成系统媒体封面：独立大图条目，排在列表首屏出图之后，生成完再刷新一次通知。
+     * 结果由 [NotificationCoverCache] 在下一次刷新时读到。
+     */
+    private fun requestSystemCover(media: MediaFile) {
+        systemCoverJob?.cancel()
+        systemCoverJob = stateScope.launch {
+            mediaPreview.systemCover(media)
+            requestRefresh()
+        }
+    }
+
+    /** 封面解码放到 IO 并按文件路径复用，换媒体时丢弃旧位图；系统封面已按 1024 上限落盘，不再降采样。 */
     private suspend fun coverBitmap(file: File?): Bitmap {
         if (file == null) {
             coverBitmapPath = null
@@ -330,7 +356,7 @@ class PlaybackService : Service() {
         }
         val path = file.absolutePath
         if (coverBitmapPath == path) coverBitmap?.let { return it }
-        val decoded = withContext(Dispatchers.IO) { decodeCover(file) }
+        val decoded = withContext(Dispatchers.IO) { BitmapFactory.decodeFile(file.absolutePath) }
         if (decoded == null) {
             coverBitmapPath = null
             coverBitmap = null
@@ -339,18 +365,6 @@ class PlaybackService : Service() {
         coverBitmapPath = path
         coverBitmap = decoded
         return decoded
-    }
-
-    private fun decodeCover(file: File): Bitmap? {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
-        val longest = maxOf(bounds.outWidth, bounds.outHeight)
-        var sample = 1
-        while (longest > 0 && longest / sample > MAX_COVER_SIZE) sample *= 2
-        return BitmapFactory.decodeFile(
-            file.absolutePath,
-            BitmapFactory.Options().apply { inSampleSize = sample },
-        )
     }
 
     private fun coverUri(file: File?): Uri? {
@@ -495,7 +509,6 @@ class PlaybackService : Service() {
         const val MEDIA_SESSION_TAG = "ccplayer-playback"
         const val SYSTEM_UI_PACKAGE = "com.android.systemui"
         const val OPEN_PLAYER_REQUEST_CODE = 100
-        const val MAX_COVER_SIZE = 256
         const val APP_ICON_SIZE = 192
 
         /** 音频焦点暂降时的输出音量百分比；拿到焦点后回到满音量。 */
