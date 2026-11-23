@@ -61,6 +61,9 @@ class SmbSessions(
     /** 按共享复用的会话：主机、端口、共享名与凭据相同即同一条。 */
     private val sessions = HashMap<SessionKey, Session>()
 
+    /** 播放这一路读的最近一次失败：告诉播放控制层该换传输恢复还是按网络／服务器终态收尾。 */
+    private val playbackFailures = SmbPlaybackFailures()
+
     /** 列出服务器共享名：共享枚举走独立的一次性连接，不占用会话表。 */
     suspend fun shares(host: String, port: Int, username: String, password: String?): List<String> =
         connector.shares(host, port, username, password)
@@ -119,7 +122,20 @@ class SmbSessions(
      * 打开读句柄；已拿到会话后打开句柄失败，按失败范围重建一次。
      * 建立会话不在重发范围：建立失败直接抛出。
      */
-    private suspend fun open(target: SmbTarget, playbackLease: Boolean): ByteSource {
+    private suspend fun open(target: SmbTarget, playbackLease: Boolean): ByteSource = try {
+        openSource(target, playbackLease).also {
+            // 新的播放读打开成功：上一次失败到此为止，不再参与传输恢复判定。
+            if (playbackLease) playbackFailures.clear(target.url)
+        }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Throwable) {
+        if (playbackLease) notePlaybackOpenFailure(target, failure)
+        throw failure
+    }
+
+    /** 打开读句柄；播放读的读源带上失败分类出口。 */
+    private suspend fun openSource(target: SmbTarget, playbackLease: Boolean): ByteSource {
         val session = acquire(target, playbackFlow = playbackLease)
         val opened = try {
             ReadLease(session, session.connection.openRead(target.path), playbackLease)
@@ -151,8 +167,35 @@ class SmbSessions(
             }
             reopenRead(target, playbackLease)
         }
-        return SmbStreamSource(opened)
+        return SmbStreamSource(opened, playbackFailureRecorder(target, playbackLease))
     }
+
+    /** 播放读的失败分类出口；浏览与封面的读不记。 */
+    private fun playbackFailureRecorder(
+        target: SmbTarget,
+        playbackLease: Boolean,
+    ): ((SmbPlaybackFailure) -> Unit)? =
+        if (!playbackLease) {
+            null
+        } else {
+            { failure -> playbackFailures.note(target.url, failure) }
+        }
+
+    /**
+     * 播放读打开失败的分类：全新传输连不上按网络／服务器故障，其余传输异常按本地 SMB 异常。
+     * 认证、路径与业务失败换传输也解决不了，不记。
+     */
+    private fun notePlaybackOpenFailure(target: SmbTarget, failure: Throwable) {
+        val classification = when {
+            smbFailureOf(failure) == MediaFailure.Unreachable -> SmbPlaybackFailure.Unreachable
+            smbFailureScope(failure) == SmbFailureScope.Transport -> SmbPlaybackFailure.Transport
+            else -> return
+        }
+        playbackFailures.note(target.url, classification)
+    }
+
+    /** 播放这一路读最近一次失败的分类；没有未恢复的失败时为空。 */
+    fun playbackFailure(location: String): SmbPlaybackFailure? = playbackFailures.classify(location)
 
     /** 重发一次；第二次失败同样作废会话，失败原样抛出。 */
     private suspend fun <T> resendUse(target: SmbTarget, request: suspend (SmbConnection) -> T): T {

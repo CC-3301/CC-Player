@@ -177,6 +177,12 @@ internal class LoadGeneration(
     var retrySerial: Int = 0
     var byteSourceRebuilds: Int = 0
     var discardSkipped: Boolean = false
+
+    /** 本代际已经换了几次传输：真实进展清零，同一目标连续最多两次。 */
+    var transportSwitches: Int = 0
+
+    /** 最近一次换传输的新传输结果；没有换过传输时为空。 */
+    var transportResult: String? = null
     val retargets: MutableList<String> = mutableListOf()
 
     /** 首次打开：没有可沿用的旧目标，屏上从黑屏开始，目标可以出声。 */
