@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.smb
 
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
+import com.cc3301.ccplayer.streaming.ByteSource
 import com.hierynomus.protocol.transport.TransportException
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.CountDownLatch
@@ -440,6 +441,70 @@ class SmbSessionsTest {
         assertTrue("不关传输", connector.closedTransports.isEmpty())
 
         playback.close()
+    }
+
+    @Test
+    fun `重发再次遇本地传输失效时淘汰新传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        val sessions = SmbSessions(connector)
+        var preview: ByteSource? = null
+        var lists = 0
+        connector.duringList = {
+            lists++
+            // 重发那一次列举期间另有一份读取占着同一条会话，传输不会因引用归零被顺带关掉。
+            if (lists == 2) preview = sessions.openRead(target)
+        }
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        connector.duringList = null
+        connector.listFailure = null
+        sessions.probe(target)
+
+        assertEquals("下一次取用建新传输，不复用已证实失效的那条", 3, connector.transports.size)
+        preview?.close()
+    }
+
+    @Test
+    fun `打开句柄重开再次遇本地传输失效时淘汰新传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        connector.openReadFailure = MediaSourceException(MediaFailure.Unreachable, "链路断了")
+        val sessions = SmbSessions(connector)
+        var opens = 0
+        connector.duringOpenRead = {
+            opens++
+            // 重开那一次另有一条会话挂在同一条传输上，传输不会因引用归零被顺带关掉。
+            if (opens == 2) sessions.probe(target.copy(share = "剧集"))
+        }
+
+        runCatching { sessions.openRead(target) }
+
+        connector.duringOpenRead = null
+        connector.openReadFailure = null
+        sessions.probe(target)
+
+        assertEquals("下一次取用建新传输，不复用已证实失效的那条", 3, connector.transports.size)
+    }
+
+    @Test
+    fun `重发第二次失败时播放已持有读取租约则不关共享传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        val sessions = SmbSessions(connector)
+        var playback: ByteSource? = null
+        var lists = 0
+        connector.duringList = {
+            lists++
+            if (lists == 2) playback = sessions.openPlaybackRead(target)
+        }
+
+        val failure = runCatching { sessions.use(target) { connection -> connection.list("") } }.exceptionOrNull()
+
+        assertTrue("失败原样交给调用方", failure is TransportException)
+        assertEquals("只关第一次的传输", listOf("nas:445"), connector.closedTransports)
+        assertEquals("播放用的那条不关", false, connector.transports[1].closed)
+        playback?.close()
     }
 
     @Test

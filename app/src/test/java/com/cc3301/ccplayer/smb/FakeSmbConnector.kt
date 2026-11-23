@@ -21,6 +21,12 @@ class FakeSmbConnector : SmbConnector {
     /** 列目录时抛出的异常；非空时每次列举都失败。 */
     var listFailure: Throwable? = null
 
+    /** 列举目录时执行；测试用它在中途占住会话，观察关闭权与传输淘汰。 */
+    var duringList: (suspend () -> Unit)? = null
+
+    /** 打开读句柄时执行；测试用它在中途占住会话，观察关闭权与传输淘汰。 */
+    var duringOpenRead: (suspend () -> Unit)? = null
+
     /** 每次连接用到的用户名与密码。 */
     val logins = CopyOnWriteArrayList<Pair<String, String?>>()
 
@@ -140,11 +146,13 @@ class FakeSmbConnector : SmbConnector {
     private inner class FakeSmbConnection(private val share: String) : SmbConnection {
 
         override suspend fun list(path: String): List<SmbEntry> {
+            duringList?.invoke()
             listFailure?.let { throw it }
             return childrenByPath["$share/$path"].orEmpty()
         }
 
         override suspend fun openRead(path: String): SmbReadHandle {
+            duringOpenRead?.invoke()
             openReadFailure?.let { throw it }
             val bytes = bytesByPath["$share/$path"]
                 ?: throw MediaSourceException(MediaFailure.NotFound, "没有这个文件：$path")

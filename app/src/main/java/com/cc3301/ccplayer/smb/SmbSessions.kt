@@ -154,7 +154,7 @@ class SmbSessions(
         return SmbStreamSource(opened)
     }
 
-    /** 重发一次；第二次失败同样作废会话，失败原样抛出。 */
+    /** 重发一次；第二次仍是本地传输失效就淘汰这条传输，失败原样抛出。 */
     private suspend fun <T> resendUse(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
         val retry = acquire(target, playbackFlow = false)
         try {
@@ -162,7 +162,7 @@ class SmbSessions(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
-            if (smbFailureScope(failure) != SmbFailureScope.None) retry.discardSession()
+            discardAfterFailure(retry, failure, playbackFlow = false)
             throw failure
         } finally {
             retry.release()
@@ -178,7 +178,7 @@ class SmbSessions(
             lease.release()
             throw cancellation
         } catch (failure: Throwable) {
-            if (smbFailureScope(failure) != SmbFailureScope.None) lease.discardSession()
+            discardAfterFailure(lease, failure, playbackLease)
             lease.release()
             throw failure
         }
@@ -249,6 +249,22 @@ class SmbSessions(
     /** 本地传输失效时能否换掉这条传输：播放自己的故障流程可以，浏览操作只在没有播放读取租约时可以。 */
     private fun mayReplaceTransport(session: Session, playbackFlow: Boolean): Boolean =
         playbackFlow || !session.transport.playbackLeaseHeld
+
+    /**
+     * 失败之后作废到哪一层：本地传输失效且关闭权允许时连这条传输一起淘汰，否则只作废会话；
+     * 认证、路径与业务失败不动。
+     *
+     * 一次本地传输失效已经说明这条传输不可用；同一个 host:port 上再次确认传输失效时不淘汰它，
+     * 就等于把已失效的传输留在共享表里等下一次取用。
+     */
+    private fun discardAfterFailure(lease: SessionLease, failure: Throwable, playbackFlow: Boolean) {
+        when (smbFailureScope(failure)) {
+            SmbFailureScope.None -> Unit
+            SmbFailureScope.Session -> lease.discardSession()
+            SmbFailureScope.Transport ->
+                if (lease.mayReplaceTransport(playbackFlow)) lease.discardTransport() else lease.discardSession()
+        }
+    }
 
     private fun reuse(key: SessionKey): Session? = synchronized(lock) {
         val session = sessions[key] ?: return null
@@ -490,18 +506,13 @@ class SmbSessions(
 
         /**
          * 与 close 共用同一个开关：关过之后不再作废会话，否则会话被摘出表后没人关连接。
-         * 本地传输失效时，播放自己的故障流程与没有播放读取租约的浏览读都可以换掉这条传输。
+         * 没有失败（陈旧源丢弃）只作废会话；读失败按失败范围处置，
+         * 本地传输失效时播放自己的故障流程与没有播放读取租约的浏览读都淘汰这条传输。
          */
         override fun discard(failure: Throwable?) {
             if (!closed.compareAndSet(false, true)) return
             if (playbackLease) lease.session.transport.endPlaybackRead()
-            lease.discardSession()
-            if (failure != null &&
-                smbFailureScope(failure) == SmbFailureScope.Transport &&
-                lease.mayReplaceTransport(playbackLease)
-            ) {
-                lease.discardTransport()
-            }
+            if (failure == null) lease.discardSession() else discardAfterFailure(lease, failure, playbackLease)
             runCatching { handle.close() }
             lease.release()
         }
