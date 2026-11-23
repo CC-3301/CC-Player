@@ -52,8 +52,11 @@ class PlaybackController(
     discardByteSources: suspend () -> Boolean = { false },
     /** 保留集合出口：声明此刻仍需保留的媒体位置；未注入时按没有源可还处理。 */
     retain: (Set<String>) -> Unit = { },
-    /** 播放传输失败分类出口：返回该目标最近一次播放读失败的分类；未注入时按非传输失败处理。 */
-    classifyPlaybackFailure: (String) -> PlaybackTransportFailure? = { null },
+    /**
+     * 播放传输失败分类出口：返回该目标最近一次播放读失败的分类，空表示不是传输失败。
+     * 由构造方提供且不随界面绑定变化，服务未绑定界面时照样生效。
+     */
+    private val classifyPlaybackFailure: (String) -> PlaybackTransportFailure?,
 ) : PlaybackEngine.Listener {
 
     /** 字节源丢弃出口：服务先构造控制层，界面绑定后再注入。 */
@@ -61,9 +64,6 @@ class PlaybackController(
 
     /** 字节源保留集合出口：界面侧当场摘走不在集合里的已就绪源、在后台关闭。 */
     private var sourceRetain = retain
-
-    /** 播放传输失败分类出口：界面绑定后注入；服务只构造控制层。 */
-    private var playbackFailureClassify = classifyPlaybackFailure
 
     private val _state = MutableStateFlow<PlaybackState>(PlaybackState.Idle)
     val state: StateFlow<PlaybackState> = _state.asStateFlow()
@@ -767,11 +767,9 @@ class PlaybackController(
     fun attachNetworkSources(
         discardByteSources: suspend () -> Boolean,
         retain: (Set<String>) -> Unit,
-        classifyPlaybackFailure: (String) -> PlaybackTransportFailure?,
     ) {
         loadSourceDiscard = discardByteSources
         sourceRetain = retain
-        playbackFailureClassify = classifyPlaybackFailure
     }
 
     /**
@@ -2209,8 +2207,9 @@ class PlaybackController(
     private fun recoverTransport(errorText: String?): Boolean {
         if (!active) return false
         val media = _playlist.value.getOrNull(loadTargetIndex) ?: return false
-        val classification = playbackFailureClassify(media.location) ?: return false
+        val classification = classifyPlaybackFailure(media.location) ?: return false
         if (classification == PlaybackTransportFailure.Unreachable) {
+            transportResult = "网络／服务器终态"
             diagnostics.log {
                 "传输恢复放弃: ${media.name} | 分类: 网络／服务器故障 | 连续换传输: $transportSwitches 次"
             }
@@ -2232,7 +2231,8 @@ class PlaybackController(
         val phase = loadPhase
         val token = expectedLoadToken
         transportSwitches += 1
-        transportResult = "已换传输"
+        // 结果要等新传输真的恢复或再失败才写，先清掉上一条。
+        transportResult = null
         transportSwitchInFlight = true
         diagnostics.log {
             "传输恢复: ${media.name} | 阶段: ${loadPhaseLabel(phase)} | 第 $transportSwitches 次 | " +
@@ -2364,7 +2364,8 @@ class PlaybackController(
 
     /** 记录一条进展：同类事件只记第一次，记到任一条就结束本轮看护。 */
     private fun noteLoadProgress(progress: LoadProgress) {
-        // 真实进展把连续换传输次数清零：预算只算连续失败。
+        // 真实进展说明换上的新传输确实能用，同时把连续换传输次数清零。
+        if (transportSwitches > 0) transportResult = "新传输已恢复"
         transportSwitches = 0
         if (!loadGuardPhase()) return
         val at = guardElapsed.elapsedMillis()
@@ -2670,10 +2671,10 @@ class PlaybackController(
     /** 字节源重建次数；重试时没能执行就注明，避免把「没重建」读成「重建了 0 次」。 */
     /** 失败行里的传输现场：连续换传输次数与新传输结果；没换过传输时不写。 */
     private fun transportRecoveryText(): String =
-        if (transportSwitches == 0) {
+        if (transportSwitches == 0 && transportResult == null) {
             ""
         } else {
-            " | 连续换传输: $transportSwitches 次 | 新传输结果: $transportResult"
+            " | 连续换传输: $transportSwitches 次 | 新传输结果: ${transportResult ?: "等待恢复"}"
         }
 
     private fun byteSourceRebuildText(): String =

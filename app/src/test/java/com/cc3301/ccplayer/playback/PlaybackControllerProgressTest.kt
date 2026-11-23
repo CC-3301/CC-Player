@@ -258,5 +258,6 @@ class PlaybackControllerProgressTest {
             progress,
             backgroundScope,
             nowMillis = { testScheduler.currentTime },
+            classifyPlaybackFailure = { null },
         )
 }

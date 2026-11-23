@@ -74,6 +74,20 @@ class SmbBrowseRecoveryTest {
     }
 
     @Test
+    fun `播放持租约时存活确认判出本地传输失效也在同一传输上重建会话`() = runTest {
+        addSource()
+        val playback = playbackRead()
+        connector.pingFailure = TransportException(TimeoutException("读超时"))
+
+        val entries = library.list(directory).getOrThrow()
+
+        assertEquals(listOf(movie), entries.map { it.location })
+        assertEquals("不换传输", 1, connector.transports.size)
+        assertTrue("不关传输", connector.closedTransports.isEmpty())
+        playback.close()
+    }
+
+    @Test
     fun `播放持有租约时重发再失败只报一次错`() = runTest {
         addSource()
         val playback = playbackRead()

@@ -73,6 +73,7 @@ class PlaybackControllerVideoTrackTest {
             progress,
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
+            classifyPlaybackFailure = { null },
         )
     }
 

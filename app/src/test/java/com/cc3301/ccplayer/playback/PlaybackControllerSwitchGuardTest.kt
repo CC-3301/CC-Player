@@ -568,6 +568,7 @@ class PlaybackControllerSwitchGuardTest {
         nowMillis = { testScheduler.currentTime },
         diagnostics = diagnostics,
         discardByteSources = discard,
+        classifyPlaybackFailure = { null },
     )
 
     /** 记下诊断日志的出口：放行与拦截都按日志内容断言。 */
