@@ -75,7 +75,8 @@ class SmbSessions(
 
     /**
      * 借用会话完成一次请求；失败按作废范围重建一次：会话失效只重建会话，本地传输失效连传输一起换掉。
-     * 播放持有读取租约时浏览操作不换传输，失败原样抛出。会话建立失败不重发：建立预算只算一次。
+     * 播放持有读取租约时不换也不关共享传输，只作废自己的会话后重发一次。
+     * 重发只有一次：第二次失败原样抛出。会话建立失败不重发：建立预算只算一次。
      */
     suspend fun <T> use(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
         val first = acquire(target, playbackFlow = false)
@@ -92,12 +93,13 @@ class SmbSessions(
                 }
                 SmbFailureScope.Transport -> {
                     if (!first.mayReplaceTransport(playbackFlow = false)) {
-                        diagnostics.log { "SMB 请求失败，播放持有读取租约，只作废本次会话: ${target.share}" }
+                        // 播放持有读取租约：不能换也不能关这条传输，只作废自己的会话后重发一次。
+                        diagnostics.log { "SMB 请求失败，播放持有读取租约，只作废本次会话后重发: ${target.share}" }
                         first.discardSession()
-                        throw failure
+                    } else {
+                        diagnostics.log { "SMB 请求失败，换传输后重发: ${target.share} (${failure.message})" }
+                        first.discardTransport()
                     }
-                    diagnostics.log { "SMB 请求失败，换传输后重发: ${target.share} (${failure.message})" }
-                    first.discardTransport()
                 }
             }
         } finally {
