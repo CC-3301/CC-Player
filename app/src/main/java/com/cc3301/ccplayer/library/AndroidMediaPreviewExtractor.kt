@@ -57,6 +57,25 @@ class AndroidMediaPreviewExtractor(
         }
     }
 
+    /** 系统媒体封面：最长边不超过 [maxSide]，等比缩小，原图不足时不放大。 */
+    override suspend fun systemCoverBytes(file: MediaFile, maxSide: Int): ByteArray? = withContext(Dispatchers.IO) {
+        withRetriever(file) { retriever ->
+            when (mediaKindOf(file.name)) {
+                MediaKind.Video -> localVideoBytes(
+                    media3 = media3,
+                    file = file,
+                    retriever = retriever,
+                    duration = retriever.readDuration(),
+                    targetWidth = maxSide,
+                    systemCover = true,
+                )
+
+                MediaKind.Audio -> audioCoverBytes(retriever, maxSide, file, systemCover = true)
+                null -> null
+            }
+        }
+    }
+
     override suspend fun durationMillis(file: MediaFile): Long? {
         // 网络条目不显示时长角标（ADR-0017）。
         if (file.source != MediaSource.Local) return null
@@ -115,12 +134,13 @@ class AndroidMediaPreviewExtractor(
         retriever: MediaMetadataRetriever,
         targetWidth: Int,
         file: MediaFile,
+        systemCover: Boolean = false,
     ): ByteArray? {
         val systemPicture = embeddedPictureOrNull(retriever)
         var systemDecodeFailure: PreviewStageException? = null
         if (systemPicture != null) {
             try {
-                return encodeCover(systemPicture, targetWidth)
+                return encodeCover(systemPicture, targetWidth, systemCover)
             } catch (decode: PreviewStageException) {
                 // 系统给了图却解不出来：继续走 ID3 兜底；两条都失败时保留这次解码失败作为阶段。
                 systemDecodeFailure = decode
@@ -132,7 +152,7 @@ class AndroidMediaPreviewExtractor(
             "封面兜底: ${file.name} 系统取图${systemLabel}，ID3 解析 ${id3Label(id3)}"
         }
         return when (id3) {
-            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
+            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth, systemCover)
             is Id3CoverResult.Missing -> {
                 val decode = systemDecodeFailure
                 if (decode != null) throw decode
@@ -160,8 +180,21 @@ private class AndroidNetworkPreviewDecoder(
             null -> null
         }
 
+    /** 系统媒体封面：最长边不超过 [maxSide]，等比缩小，原图不足时不放大。 */
+    override suspend fun systemCoverBytes(source: ByteSource, file: MediaFile, maxSide: Int): ByteArray? =
+        when (mediaKindOf(file.name)) {
+            MediaKind.Video -> networkVideoFrameBytes(media3, source, file, maxSide, systemCover = true)
+            MediaKind.Audio -> networkAudioCoverBytes(source, file, maxSide, systemCover = true)
+            null -> null
+        }
+
     /** 网络音频封面：先取系统内嵌图；取不到或解码失败时按字节范围只读 ID3 标签段再取一次。 */
-    private fun networkAudioCoverBytes(source: ByteSource, file: MediaFile, targetWidth: Int): ByteArray? {
+    private fun networkAudioCoverBytes(
+        source: ByteSource,
+        file: MediaFile,
+        targetWidth: Int,
+        systemCover: Boolean = false,
+    ): ByteArray? {
         val retriever = MediaMetadataRetriever()
         return try {
             try {
@@ -171,7 +204,7 @@ private class AndroidNetworkPreviewDecoder(
             } catch (failure: Exception) {
                 throw PreviewStageException(PreviewFailureStage.OpenSource, "打开数据源失败", failure)
             }
-            audioCoverBytes(retriever, source, targetWidth)
+            audioCoverBytes(retriever, source, targetWidth, systemCover)
         } finally {
             retriever.release()
             // 句柄由调用方在读取会话收尾时关闭。
@@ -183,12 +216,13 @@ private class AndroidNetworkPreviewDecoder(
         retriever: MediaMetadataRetriever,
         source: ByteSource,
         targetWidth: Int,
+        systemCover: Boolean = false,
     ): ByteArray? {
         val systemPicture = embeddedPictureOrNull(retriever)
         var systemDecodeFailure: PreviewStageException? = null
         if (systemPicture != null) {
             try {
-                return encodeCover(systemPicture, targetWidth)
+                return encodeCover(systemPicture, targetWidth, systemCover)
             } catch (decode: PreviewStageException) {
                 systemDecodeFailure = decode
             }
@@ -199,7 +233,7 @@ private class AndroidNetworkPreviewDecoder(
             "网络封面: 系统取图${systemLabel}，ID3 解析 ${id3Label(id3)}"
         }
         return when (id3) {
-            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth)
+            is Id3CoverResult.Picture -> encodeCover(id3.bytes, targetWidth, systemCover)
             is Id3CoverResult.Missing -> {
                 val decode = systemDecodeFailure
                 if (decode != null) throw decode
@@ -250,10 +284,11 @@ private suspend fun localVideoBytes(
     retriever: MediaMetadataRetriever,
     duration: PreviewDuration,
     targetWidth: Int,
+    systemCover: Boolean = false,
 ): ByteArray? {
     // 时长读不到时改用固定候选位置，不因此丢弃已经能解出的帧。
     val positions = framePositions((duration as? PreviewDuration.Known)?.millis ?: 0, LOCAL_FRAME_COUNT)
-    return decodeStage("视频抽帧失败") { media3.localImage(file, positions, targetWidth) }
+    return decodeStage("视频抽帧失败") { media3.localImage(file, positions, targetWidth, systemCover) }
 }
 
 /** 网络视频：时长用于挑候选位置；抽帧走 Media3，候选全不合格时保持占位图。 */
@@ -262,8 +297,9 @@ private suspend fun networkVideoFrameBytes(
     source: ByteSource,
     file: MediaFile,
     targetWidth: Int,
+    systemCover: Boolean = false,
 ): ByteArray? = decodeStage("视频抽帧失败") {
-    media3.networkImage(file, source, networkFrameCandidates(readNetworkDuration(source)), targetWidth)
+    media3.networkImage(file, source, networkFrameCandidates(readNetworkDuration(source)), targetWidth, systemCover)
 }
 
 /** 只读网络时长；读不到时返回 null，候选位置退回 1 秒。 */
@@ -290,22 +326,25 @@ private fun readDurationOrNull(retriever: MediaMetadataRetriever): Long? = try {
     null
 }
 
-/** 内嵌封面按与视频帧相同的宽度和 JPEG 质量处理；解码失败按「解码」阶段收尾。 */
-private fun encodeCover(picture: ByteArray, targetWidth: Int): ByteArray {
+/** 内嵌封面按与视频帧相同的规则处理；解码失败按「解码」阶段收尾。 */
+private fun encodeCover(picture: ByteArray, targetWidth: Int, systemCover: Boolean = false): ByteArray {
     // 先读尺寸并按 2 的幂降采样，避免超大封面先解出全尺寸位图。
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(picture, 0, picture.size, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
         throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败")
     }
-    val target = targetFrameWidth(bounds.outWidth, targetWidth)
     val options = BitmapFactory.Options().apply {
-        inSampleSize = coverSampleSize(bounds.outWidth, target)
+        inSampleSize = if (systemCover) {
+            systemCoverSampleSize(bounds.outWidth, bounds.outHeight, targetWidth)
+        } else {
+            coverSampleSize(bounds.outWidth, targetFrameWidth(bounds.outWidth, targetWidth))
+        }
     }
     val bitmap = BitmapFactory.decodeByteArray(picture, 0, picture.size, options)
         ?: throw PreviewStageException(PreviewFailureStage.Decode, "封面解码失败")
     return try {
-        val scaled = scaleFrame(bitmap, targetWidth)
+        val scaled = scaleFrame(bitmap, targetWidth, systemCover)
         try {
             compressFrame(scaled)
                 ?: throw PreviewStageException(PreviewFailureStage.Decode, "封面压缩失败")
@@ -379,8 +418,15 @@ private fun MediaMetadataRetriever.readDuration(): PreviewDuration = try {
 private fun durationMillis(retriever: MediaMetadataRetriever): Long? =
     retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
 
-/** 按 320–512 的输出宽度缩放；宽度已相同时不重建位图。 */
-internal fun scaleFrame(frame: Bitmap, targetWidth: Int): Bitmap {
+/**
+ * 缩放一帧：App 内缩略图按 320–512 的输出宽度；系统媒体封面按最长边不超过目标宽度等比缩小。
+ * 目标尺寸与源图一致时直接返回原位图，不重建。
+ */
+internal fun scaleFrame(frame: Bitmap, targetWidth: Int, systemCover: Boolean = false): Bitmap {
+    if (systemCover) {
+        val size = systemCoverScaledSize(frame.width, frame.height, targetWidth) ?: return frame
+        return frame.scale(size.width, size.height, filter = true).also { frame.recycle() }
+    }
     val width = targetFrameWidth(frame.width, targetWidth)
     if (width <= 0 || width == frame.width) return frame
     val height = maxOf(1, (frame.height.toLong() * width / frame.width).toInt())
