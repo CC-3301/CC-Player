@@ -18,8 +18,11 @@ class FakeSmbConnector : SmbConnector {
 
     var failure: MediaSourceException? = null
 
-    /** 列目录时抛出的异常；非空时每次列举都失败。 */
+    /** 列目录时抛出的异常；非空时按 [listFailureTimes] 次数失败。 */
     var listFailure: Throwable? = null
+
+    /** 还要抛几次列目录失败；默认一直抛，用来驱动「失败一次后自动恢复成功」。 */
+    var listFailureTimes: Int = Int.MAX_VALUE
 
     /** 每次连接用到的用户名与密码。 */
     val logins = CopyOnWriteArrayList<Pair<String, String?>>()
@@ -140,7 +143,11 @@ class FakeSmbConnector : SmbConnector {
     private inner class FakeSmbConnection(private val share: String) : SmbConnection {
 
         override suspend fun list(path: String): List<SmbEntry> {
-            listFailure?.let { throw it }
+            listFailure?.let { failure ->
+                if (listFailureTimes <= 0) return childrenByPath["$share/$path"].orEmpty()
+                listFailureTimes -= 1
+                throw failure
+            }
             return childrenByPath["$share/$path"].orEmpty()
         }
 

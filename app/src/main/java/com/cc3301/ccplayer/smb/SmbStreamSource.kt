@@ -30,6 +30,8 @@ interface SmbReadLease {
  */
 class SmbStreamSource(
     private val lease: SmbReadLease,
+    /** 播放读失败的分类出口；浏览与封面的读不注入。 */
+    private val onFailure: ((SmbPlaybackFailure) -> Unit)? = null,
 ) : ByteSource {
 
     override val size: Long get() = lease.handle.size
@@ -39,9 +41,12 @@ class SmbStreamSource(
     override fun readAt(position: Long, buffer: ByteArray, offset: Int, length: Int): Int = try {
         lease.handle.readAt(position, buffer, offset, length)
     } catch (failure: Throwable) {
+        val scope = smbFailureScope(failure)
         // 业务失败由调用方按原因报错，不动会话。
-        if (smbFailureScope(failure) == SmbFailureScope.None) throw failure
+        if (scope == SmbFailureScope.None) throw failure
         lease.discard(failure)
+        // 已经连上的传输读不出数据：本地传输异常，换传输才能恢复。
+        if (scope == SmbFailureScope.Transport) onFailure?.invoke(SmbPlaybackFailure.Transport)
         throw failure
     }
 

@@ -374,7 +374,8 @@ class SmbSessionsTest {
         assertTrue("失败原样交给调用方", failure is TransportException)
         assertTrue("不换传输", connector.transports.size == 1)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
-        assertEquals("不重发", 1, connector.shares.size)
+        // 播放持有读取租约：不换传输，但可以作废自己的会话后再试一次；重发也失败才交给调用方。
+        assertEquals("只重发一次", 2, connector.shares.size)
 
         connector.listFailure = null
         playback.close()

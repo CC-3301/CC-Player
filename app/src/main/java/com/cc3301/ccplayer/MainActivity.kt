@@ -67,6 +67,7 @@ import com.cc3301.ccplayer.playback.LoopMode
 import com.cc3301.ccplayer.playback.OPEN_PLAYER_ACTION
 import com.cc3301.ccplayer.playback.PlaybackService
 import com.cc3301.ccplayer.playback.PlaybackState
+import com.cc3301.ccplayer.playback.PlaybackTransportFailure
 import com.cc3301.ccplayer.playback.SleepTimerOption
 import com.cc3301.ccplayer.playback.SurfaceMountRecovery
 import com.cc3301.ccplayer.playback.SurfaceSession
@@ -75,6 +76,7 @@ import com.cc3301.ccplayer.settings.OrientationMode
 import com.cc3301.ccplayer.settings.SettingsRepository
 import com.cc3301.ccplayer.smb.SmbLocation
 import com.cc3301.ccplayer.smb.SmbLocator
+import com.cc3301.ccplayer.smb.SmbPlaybackFailure
 import com.cc3301.ccplayer.smb.SmbStreams
 import com.cc3301.ccplayer.streaming.StaleSourceDiscardPolicy
 import com.cc3301.ccplayer.ui.AppScreen
@@ -297,6 +299,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
             binder.controller.attachNetworkSources(
                 discardByteSources = ::discardByteSourcesForSwitch,
                 retain = { locations -> streams?.retain(locations) },
+                classifyPlaybackFailure = ::classifyPlaybackFailure,
             )
             // 播放页事实由播放页 ViewModel 收集；界面只把设置变化写回控制层。
             playerScreen.attach(binder.controller)
@@ -962,6 +965,17 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     /** 切集重试前丢弃已建立的字节源：下一次加载重新建源；返回是否真的丢弃了源。 */
     private suspend fun discardByteSourcesForSwitch(): Boolean = discardByteSources()
 
+    /**
+     * 播放这一路读的失败分类：SMB 会话层在失败现场判定，控制层据此换传输或走既有收尾。
+     * 不是 SMB 位置时没有分类，按非传输失败处理。
+     */
+    private fun classifyPlaybackFailure(location: String): PlaybackTransportFailure? =
+        when (smbSessions.playbackFailure(location)) {
+            SmbPlaybackFailure.Transport -> PlaybackTransportFailure.Transport
+            SmbPlaybackFailure.Unreachable -> PlaybackTransportFailure.Unreachable
+            null -> null
+        }
+
     override fun onStart() {
         super.onStart()
         diagnostics.log("应用进入前台")
@@ -1152,7 +1166,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
 
     private fun stopPlaybackService() {
         // 控制层可能比界面活得久：先摘下字节源出口，别把已销毁的界面留在服务里。
-        playback?.controller?.attachNetworkSources(discardByteSources = { false }, retain = { })
+        playback?.controller?.attachNetworkSources(
+            discardByteSources = { false },
+            retain = { },
+            classifyPlaybackFailure = { null },
+        )
         settingsCollection?.cancel()
         settingsCollection = null
         playerScreen.detach()
