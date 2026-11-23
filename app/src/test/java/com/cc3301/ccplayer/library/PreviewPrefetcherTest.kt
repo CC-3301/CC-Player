@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.library
 
+import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -178,6 +179,8 @@ private class RecordingPreviewSource : MediaPreviewSource {
     }
 
     override fun isPreviewExtracting(file: MediaFile): Boolean = false
+
+    override suspend fun systemCover(file: MediaFile): File? = null
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) {
         events += PreviewEvent.Window(visibleLocations, prefetchLocations)

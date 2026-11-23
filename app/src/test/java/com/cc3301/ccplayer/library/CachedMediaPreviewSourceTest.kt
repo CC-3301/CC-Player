@@ -1976,6 +1976,22 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `可见请求失败不记成预取抑制`() = runTest {
+        val file = network("可见失败.mkv")
+        source.updatePreviewWindow(visibleLocations = setOf(file.location), prefetchLocations = emptySet())
+        extractor.imageFailure = IOException("读取失败")
+        assertTrue(source.visiblePreview(file, 0).retryable)
+
+        // 离开可见范围后再预取：可见请求的结果不记成预取抑制，仍会重新准备与解码。
+        extractor.imageFailure = null
+        extractor.imageBytes = byteArrayOf(1)
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNotNull(source.prefetch(file).image)
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
     fun `系统封面按最长边 1024 独立抽取并落盘`() = runTest {
         val cover = byteArrayOf(7, 7, 7)
         extractor.imageBytes = cover
