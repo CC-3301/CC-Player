@@ -52,6 +52,11 @@ class PlaybackController(
     discardByteSources: suspend () -> Boolean = { false },
     /** 保留集合出口：声明此刻仍需保留的媒体位置；未注入时按没有源可还处理。 */
     retain: (Set<String>) -> Unit = { },
+    /**
+     * 播放传输失败分类出口：返回该目标最近一次播放读失败的分类，空表示不是传输失败。
+     * 由构造方提供且不随界面绑定变化，服务未绑定界面时照样生效。
+     */
+    private val classifyPlaybackFailure: (String) -> PlaybackTransportFailure?,
 ) : PlaybackEngine.Listener {
 
     /** 字节源丢弃出口：服务先构造控制层，界面绑定后再注入。 */
@@ -394,6 +399,22 @@ class PlaybackController(
         set(value) {
             generation?.byteSourceRebuilds = value
         }
+    /** 本代际连续换传输次数与新传输结果：真实进展清零，同一目标连续最多两次。 */
+    private var transportSwitches: Int
+        get() = generation?.transportSwitches ?: 0
+        set(value) {
+            generation?.transportSwitches = value
+        }
+
+    private var transportResult: String?
+        get() = generation?.transportResult
+        set(value) {
+            generation?.transportResult = value
+        }
+
+    /** 换传输准备中：期间的重复失败回调不再起第二次。 */
+    private var transportSwitchInFlight = false
+
     private var loadDiscardSkipped: Boolean
         get() = generation?.discardSkipped ?: false
         set(value) {
@@ -1209,6 +1230,11 @@ class PlaybackController(
             diagnostics.log { "切集期间播放键: 排队${if (pauseIntent) "暂停" else "继续"}" }
             return
         }
+        // 传输恢复耗尽后停在错误态：播放键按当前目标与位置重新加载，不是只恢复一个读不动的引擎。
+        if (_playbackFailed.value && _state.value == PlaybackState.Paused && _currentIndex.value != NO_MEDIA) {
+            playAt(_currentIndex.value)
+            return
+        }
         when (_state.value) {
             PlaybackState.Playing -> pause()
             PlaybackState.Paused -> resume()
@@ -1777,6 +1803,10 @@ class PlaybackController(
         // 取消、改目标或打开交接之后，旧目标迟到的失败不能改变当前阶段，也不提示。
         val current = generation ?: return
         if (!current.accepts(loadToken, null)) return
+        // 换传输准备中的重复回调（同一次失败可能回两条）不再起第二次。
+        if (transportSwitchInFlight) return
+        // 本地传输失效先换传输，不占普通重发；网络／服务器终态与业务失败交给既有收尾。
+        if (recoverTransport(errorText)) return
         if (!active || !loadGuardPhase()) {
             handleLoadFailure(errorText = errorText)
             return
@@ -2017,6 +2047,9 @@ class PlaybackController(
             loadRetargets.clear()
             loadByteSourceRebuilds = 0
             loadDiscardSkipped = false
+            // 新的一次加载重新给满换传输预算。
+            transportSwitches = 0
+            transportResult = null
             loadCompletedAtMillis = null
             loadFirstFrameAtMillis = null
             loadPositionAdvancedAtMillis = null
@@ -2162,7 +2195,142 @@ class PlaybackController(
     /** 看护到点仍无进展：各阶段按原有失败收尾，提示都由 [handleLoadFailure] 统一发。 */
     private fun failLoadWithoutProgress() {
         if (!active || !loadGuardPhase()) return
+        // 本地传输失效先换传输：换完重新给一次完整看护，不在恢复前判失败。
+        if (recoverTransport(null)) return
         handleLoadFailure(LoadFailureSource.NoProgress)
+    }
+
+    /**
+     * 换传输恢复：故障目标的本地传输失效按真实目标与位置重载。
+     * 返回是否由传输恢复接手；没有分类说明不是传输失败，交给既有重发与失败收尾。
+     */
+    private fun recoverTransport(errorText: String?): Boolean {
+        if (!active) return false
+        val media = _playlist.value.getOrNull(loadTargetIndex) ?: return false
+        val classification = classifyPlaybackFailure(media.location) ?: return false
+        if (classification == PlaybackTransportFailure.Unreachable) {
+            transportResult = "网络／服务器终态"
+            diagnostics.log {
+                "传输恢复放弃: ${media.name} | 分类: 网络／服务器故障 | 连续换传输: $transportSwitches 次"
+            }
+            return false
+        }
+        if (transportSwitches >= MAX_TRANSPORT_SWITCHES) {
+            stopRecoverable(media)
+            return true
+        }
+        switchTransport(media, errorText)
+        return true
+    }
+
+    /**
+     * 换传输：丢弃失效字节源后按真实目标与位置重新加载，再重置一次完整看护。
+     * 重发预算不因换传输刷新：换传输不与非传输失败的普通重发叠加。
+     */
+    private fun switchTransport(media: MediaFile, errorText: String?) {
+        val phase = loadPhase
+        val token = expectedLoadToken
+        transportSwitches += 1
+        // 结果要等新传输真的恢复或再失败才写，先清掉上一条。
+        transportResult = null
+        transportSwitchInFlight = true
+        diagnostics.log {
+            "传输恢复: ${media.name} | 阶段: ${loadPhaseLabel(phase)} | 第 $transportSwitches 次 | " +
+                "分类: 本地 SMB 传输失效 | 真实目标: ${media.playbackLocation} | " +
+                "失败来源: ${errorText ?: "无进展超时"}"
+        }
+        scope.launch {
+            val discarded = runCatching { loadSourceDiscard() }.getOrDefault(false)
+            // 丢弃期间目标前移或加载已结束时这一轮作废，不另起一次加载。
+            if (!active || loadPhase != phase || (phase != LoadPhase.None && expectedLoadToken != token)) {
+                transportSwitchInFlight = false
+                return@launch
+            }
+            transportSwitchInFlight = false
+            if (discarded) loadByteSourceRebuilds += 1 else loadDiscardSkipped = true
+            when (phase) {
+                // 切集途中故障：真实目标还是这次切集的目标，按切集重发，位置由续播查询决定。
+                LoadPhase.Switching -> reloadTarget(media, LoadPhase.Switching)
+                LoadPhase.Initial -> reloadTarget(media, LoadPhase.Initial)
+                // 播放中与恢复原片：真实位置就是当前播放位置。
+                LoadPhase.None, LoadPhase.Restoring, LoadPhase.Pending -> resumeAfterTransportFailure(media)
+            }
+            restartLoadGuardClock()
+        }
+    }
+
+    /** 换传输后重置一次完整看护：计时从头起算；重发预算不刷新。 */
+    private fun restartLoadGuardClock() {
+        guardJob?.cancel()
+        guardJob = null
+        guardElapsed.reset()
+        guardElapsed.start()
+        armLoadGuard()
+    }
+
+    /**
+     * 播放中传输失效：保留真实目标与位置，按原位置重新加载，播放意图不变。
+     * 允许短暂缓冲，不结束会话；目标帧回来后接着播。
+     */
+    private fun resumeAfterTransportFailure(media: MediaFile) {
+        val targetIndex = loadTargetIndex
+        val switches = transportSwitches
+        val result = transportResult
+        val previous = generation
+        val position = playedPositionMillis
+        val keepBlack = holdBlack
+        val current = newGeneration()
+        // 换的是传输、不是新的一次加载：预算与新传输结果跟着同一个目标走。
+        current.transportSwitches = switches
+        current.transportResult = result
+        generation = current
+        current.beginRestore(
+            targetIndex = targetIndex,
+            targetUrl = media.playbackLocation,
+            screenFrame = previous?.screenFrame ?: ScreenFrame.None,
+            originAspectRatio = previous?.originAspectRatio,
+            holdBlack = keepBlack,
+        )
+        syncAudioMute()
+        _switching.value = false
+        _restoring.value = true
+        restartFromStartAfterRestore = false
+        loadStartPositionMillis = position
+        playedPositionMillis = position
+        _progress.value = PlaybackProgress(position, playedDurationMillis)
+        savedPositionMillis = position
+        watchedToEnd = false
+        pausedAtEpisodeEnd = false
+        updateState(PlaybackState.Loading)
+        settlePresentation()
+        resetSeekForNewLoad()
+        loadGeneration++
+        current.beginAttempt(engine.start(media.playbackLocation, paused = true, startPositionMillis = position))
+        retainSources()
+    }
+
+    /**
+     * 换传输预算耗尽且仍是本地 SMB 异常：保留真实目标与位置，进入可恢复暂停／错误。
+     * 不结束会话、不无限重试；用户按播放可重新加载当前目标。
+     */
+    private fun stopRecoverable(media: MediaFile) {
+        transportResult = "仍是本地 SMB 异常"
+        diagnostics.log {
+            "传输恢复耗尽: ${media.name} | 连续换传输: $transportSwitches 次 | 新传输结果: 仍是本地 SMB 异常"
+        }
+        cancelLoadGuard()
+        endPendingFrameWatchdog()
+        _switching.value = false
+        _restoring.value = false
+        switchFramePending = false
+        switchPlaybackStarted = false
+        engine.pause()
+        paused = true
+        // 看护退出：真实目标与位置留在当前代际上，不回到原片。
+        generation?.markReady()
+        _playbackFailed.value = true
+        updateState(PlaybackState.Paused)
+        settlePresentation()
     }
 
     /**
@@ -2196,6 +2364,9 @@ class PlaybackController(
 
     /** 记录一条进展：同类事件只记第一次，记到任一条就结束本轮看护。 */
     private fun noteLoadProgress(progress: LoadProgress) {
+        // 真实进展说明换上的新传输确实能用，同时把连续换传输次数清零。
+        if (transportSwitches > 0) transportResult = "新传输已恢复"
+        transportSwitches = 0
         if (!loadGuardPhase()) return
         val at = guardElapsed.elapsedMillis()
         when (progress) {
@@ -2493,11 +2664,19 @@ class PlaybackController(
             "$title: ${loadLabel()} | 目标: ${loadTargetUrl ?: "-"} | 加载令牌: $expectedLoadToken | " +
                 "阶段: ${loadPhaseLabel(phase)} | 来源: ${loadSource.label} | $guardText" +
                 "Surface: ${surfaceText()} | 后台: ${backgroundText()} | " +
-                "失败来源: ${failureSourceText(source, errorText)}"
+                "失败来源: ${failureSourceText(source, errorText)}${transportRecoveryText()}"
         }
     }
 
     /** 字节源重建次数；重试时没能执行就注明，避免把「没重建」读成「重建了 0 次」。 */
+    /** 失败行里的传输现场：连续换传输次数与新传输结果；没换过传输时不写。 */
+    private fun transportRecoveryText(): String =
+        if (transportSwitches == 0 && transportResult == null) {
+            ""
+        } else {
+            " | 连续换传输: $transportSwitches 次 | 新传输结果: ${transportResult ?: "等待恢复"}"
+        }
+
     private fun byteSourceRebuildText(): String =
         if (loadDiscardSkipped) "$loadByteSourceRebuilds 次（重建未执行）" else "$loadByteSourceRebuilds 次"
 
@@ -2843,6 +3022,9 @@ class PlaybackController(
 
         /** 加载从最近一次目标开始算的判失败时长；重发不顺延，三个阶段共用。 */
         const val LOAD_FAIL_DELAY_MILLIS = 10_000L
+
+        /** 同一目标连续最多换传输次数；真实进展清零。 */
+        const val MAX_TRANSPORT_SWITCHES = 2
 
         private const val NO_MEDIA = -1
 

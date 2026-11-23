@@ -23,6 +23,7 @@ class PlaybackControllerEpisodeEndTest {
         progress,
         CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
         nowMillis = { testScheduler.currentTime },
+        classifyPlaybackFailure = { null },
     )
 
     private fun mediaFile(name: String): MediaFile = MediaFile(name = name, location = "root/${name}")

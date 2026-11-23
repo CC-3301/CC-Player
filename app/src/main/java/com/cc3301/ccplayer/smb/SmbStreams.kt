@@ -55,9 +55,9 @@ class SmbStreams(
         server.close()
     }
 
-    /** 代理在自己的线程上取流，这里阻塞等打开完成。 */
+    /** 代理在自己的线程上取流，这里阻塞等打开完成；播放读持有读取租约。 */
     private fun openBlocking(location: String): ByteSource = runBlocking {
-        NetworkReadPriority.shared.wrap(sessions.openRead(targetOf(location)), ReadKind.Playback)
+        NetworkReadPriority.shared.wrap(sessions.openPlaybackRead(targetOf(location)), ReadKind.Playback)
     }
 
     private suspend fun targetOf(location: String): SmbTarget =

@@ -55,6 +55,12 @@ interface MediaPreviewSource {
     suspend fun cachedImage(file: MediaFile): File? = null
 
     /**
+     * 系统媒体封面：通知栏、锁屏与快捷设置媒体卡片共用的独立大图条目，最长边不超过 1024。
+     * 命中缓存立即返回；没有时按低于列表可见请求的优先级生成一次，取不到时返回 null。
+     */
+    suspend fun systemCover(file: MediaFile): File?
+
+    /**
      * 开始一轮可见订阅：已试次数从零计，本地与网络同一规则。
      * 可见请求调度器为每一项新订阅调用一次。
      */
@@ -166,6 +172,12 @@ interface MediaPreviewExtractor {
         }
         return MediaPreviewExtraction(image, duration)
     }
+
+    /**
+     * 系统媒体封面字节：最长边不超过 [maxSide]，等比缩小，原图不足时不放大。
+     * 缺省按普通缩略图的目标宽度取图，自有尺寸规则的实现覆写它。
+     */
+    suspend fun systemCoverBytes(file: MediaFile, maxSide: Int): ByteArray? = imageBytes(file, maxSide)
 }
 
 /** 缓存键使用的抽帧策略；任一项变化都视为另一份缓存。 */
@@ -289,6 +301,7 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
+        systemCover: Boolean = false,
     ): MediaPreview {
         val cached = cache.entry(key)
         // 上次运行的失败记录还在退避窗口内：跳过抽取，保持占位图。
@@ -311,7 +324,7 @@ class CachedMediaPreviewSource(
             file = file,
             key = key,
             priority = priority,
-            load = { extractLocal(file, key, targetWidth, priority) },
+            load = { extractLocal(file, key, targetWidth, priority, systemCover) },
         )
         if (loaded.abandoned) return MediaPreview(image = null, durationMillis = null)
         val stage = loaded.failureStage
@@ -327,6 +340,22 @@ class CachedMediaPreviewSource(
         if (file.isDirectory) return null
         val targetWidth = previewTargetWidth(file, policy)
         return cache.entry(thumbnailCacheKey(file, policy, targetWidth))?.file
+    }
+
+    /**
+     * 系统媒体封面：独立大图条目，取图尺寸规则与其他预览不同（最长边 1024、不放大）。
+     * 只在通知需要时生成一次，排在列表可见项与预取之后，不挤占列表首屏出图。
+     */
+    override suspend fun systemCover(file: MediaFile): File? {
+        if (file.isDirectory) return null
+        val key = systemCoverCacheKey(file, policy)
+        cache.entry(key)?.file?.let { return it }
+        val priority = PreviewPriority.SystemCover
+        val maxSide = SYSTEM_COVER_MAX_SIZE
+        return when (file.source) {
+            MediaSource.Local -> localPreview(file, key, maxSide, priority, systemCover = true).image
+            MediaSource.Network -> networkImage(file, key, maxSide, priority, systemCover = true).image
+        }
     }
 
     /** 抽取结果转成卡片预览：失败的结果带上可重试标记。 */
@@ -372,6 +401,7 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
+        systemCover: Boolean = false,
     ): LoadedPreview {
         // 等解码许可有上限：前一项卡住时不能无限期停在这一段。
         val requestedAt = monotonicClockMillis()
@@ -390,7 +420,15 @@ class CachedMediaPreviewSource(
             val started = monotonicClockMillis()
             decoding += key
             val extracted = try {
-                extractor.imageAndDuration(file, targetWidth)
+                if (systemCover) {
+                    // 系统封面只取图、不读时长：条目按时长未知记录，不写成“确定没有时长”。
+                    MediaPreviewExtraction(
+                        imageBytes = extractor.systemCoverBytes(file, targetWidth),
+                        duration = PreviewDuration.Failed,
+                    )
+                } else {
+                    extractor.imageAndDuration(file, targetWidth)
+                }
             } finally {
                 decoding -= key
                 diagnostics.log { "本地封面: ${file.name} 抽帧完成 ${monotonicClockMillis() - started}ms" }
@@ -491,6 +529,7 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
+        systemCover: Boolean = false,
     ): LoadedPreview {
         // 本次运行已确认无图：不再重复抽取，重启后重新确认。
         if (isNoImageRemembered(key)) return LoadedPreview(image = null, durationMillis = null)
@@ -515,7 +554,7 @@ class CachedMediaPreviewSource(
                 if (!mayExtract(file.location, priority)) {
                     LoadedPreview(image = null, durationMillis = null, abandoned = true)
                 } else {
-                    prepareAndDecode(file, key, targetWidth, priority)
+                    prepareAndDecode(file, key, targetWidth, priority, systemCover)
                 }
             },
         )
@@ -541,6 +580,7 @@ class CachedMediaPreviewSource(
         key: String,
         targetWidth: Int,
         priority: PreviewPriority,
+        systemCover: Boolean = false,
     ): LoadedPreview {
         // 打开数据源不设名额：打开是取消不掉的阻塞调用，等待有上限，超时只停止等待。
         val openStarted = monotonicClockMillis()
@@ -570,7 +610,11 @@ class CachedMediaPreviewSource(
                     decoding += key
                     val done = try {
                         withTimeoutOrNull(NETWORK_DECODE_TIMEOUT_MILLIS) {
-                            decoded = prepared.decode(targetWidth)
+                            decoded = if (systemCover) {
+                                prepared.decodeSystemCover(targetWidth)
+                            } else {
+                                prepared.decode(targetWidth)
+                            }
                             true
                         } ?: false
                     } finally {
@@ -623,9 +667,10 @@ class CachedMediaPreviewSource(
     /**
      * 排队请求取得许可后的复查：只有预取需要复查，且以当前位置是否仍在可见或预取范围为准。
      * 可见请求不复查：卡片被放弃后不会以相同键重试，会永久停在占位图。
+     * 系统封面同样不复查：它对应正在播放的条目，通常不在列表的可见与预取范围里。
      */
     private fun mayExtract(location: String, priority: PreviewPriority): Boolean =
-        priority.isVisible || previewWindow.contains(location)
+        priority.ignoresPreviewWindow || previewWindow.contains(location)
 
     /**
      * 让第一个调用者抽取，同一缓存键的并发调用等待同一结果；缓存命中已在调用方先行返回。
@@ -833,6 +878,13 @@ internal fun thumbnailCacheKey(
     return if (file.lastModified > 0) "$base|m${file.lastModified}" else base
 }
 
+/**
+ * 系统媒体封面的缓存键：与列表缩略图共用缓存目录和目标宽度键，只把目标宽度换成系统封面上限，
+ * 因此独立成一条大图条目，列表已有缓存不受影响。
+ */
+internal fun systemCoverCacheKey(file: MediaFile, policy: ThumbnailPolicy): String =
+    thumbnailCacheKey(file, policy, SYSTEM_COVER_MAX_SIZE)
+
 /** 生产环境使用的单调时钟，单位为毫秒。 */
 internal fun systemMonotonicMillis(): Long = System.nanoTime() / 1_000_000
 
@@ -874,15 +926,19 @@ private class AbandonedPreviewException : CancellationException("预览请求已
  */
 private data class PreviewPriority(val kind: Kind, val order: Int) {
 
-    enum class Kind { Visible, Prefetch, Duration }
+    enum class Kind { Visible, Prefetch, SystemCover, Duration }
 
     val isVisible: Boolean get() = kind == Kind.Visible
+
+    /** 系统封面不受可见范围约束：正在播放的条目通常不在列表的可见与预取范围里。 */
+    val ignoresPreviewWindow: Boolean get() = kind == Kind.Visible || kind == Kind.SystemCover
 
     /** 取许可与派发预读用同一套 rank：可见项按列表索引，预取与时长补读排在最后。 */
     val rank: Long
         get() = when (kind) {
             Kind.Visible -> order.toLong()
             Kind.Prefetch -> PREVIEW_PREFETCH_RANK
+            Kind.SystemCover -> PREVIEW_SYSTEM_COVER_RANK
             Kind.Duration -> PREVIEW_DURATION_RANK
         }
 
@@ -890,6 +946,9 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
         fun visible(order: Int) = PreviewPriority(Kind.Visible, order)
 
         val Prefetch = PreviewPriority(Kind.Prefetch, Int.MAX_VALUE)
+
+        /** 系统媒体封面：排在列表可见项与预取之后，不挤占列表首屏出图。 */
+        val SystemCover = PreviewPriority(Kind.SystemCover, Int.MAX_VALUE)
 
         /** 命中缓存后补读时长：排在任何可见请求与预取之后。 */
         val Duration = PreviewPriority(Kind.Duration, Int.MAX_VALUE)

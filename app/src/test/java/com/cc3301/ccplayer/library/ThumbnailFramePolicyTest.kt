@@ -319,4 +319,33 @@ class ThumbnailFramePolicyTest {
         assertEquals(320, effectiveTargetWidth(100))
         assertEquals(512, effectiveTargetWidth(1_000))
     }
+
+    @Test
+    fun `系统封面按最长边缩到 1024 并保持比例`() {
+        assertEquals(CoverSize(1024, 576), systemCoverScaledSize(1920, 1080, SYSTEM_COVER_MAX_SIZE))
+        assertEquals(CoverSize(576, 1024), systemCoverScaledSize(1080, 1920, SYSTEM_COVER_MAX_SIZE))
+        assertEquals(CoverSize(1024, 768), systemCoverScaledSize(2_000, 1_500, SYSTEM_COVER_MAX_SIZE))
+    }
+
+    @Test
+    fun `系统封面不放大不足 1024 的来源`() {
+        assertNull(systemCoverScaledSize(1_024, 1_024, SYSTEM_COVER_MAX_SIZE))
+        assertNull(systemCoverScaledSize(1_000, 800, SYSTEM_COVER_MAX_SIZE))
+        assertNull(systemCoverScaledSize(320, 180, SYSTEM_COVER_MAX_SIZE))
+    }
+
+    @Test
+    fun `系统封面尺寸无效时不缩放`() {
+        assertNull(systemCoverScaledSize(0, 0, SYSTEM_COVER_MAX_SIZE))
+        assertNull(systemCoverScaledSize(-1, 100, SYSTEM_COVER_MAX_SIZE))
+        assertNull(systemCoverScaledSize(100, 0, SYSTEM_COVER_MAX_SIZE))
+    }
+
+    @Test
+    fun `系统封面解码降采样按最长边取二的幂`() {
+        assertEquals(1, systemCoverSampleSize(1_024, 768, SYSTEM_COVER_MAX_SIZE))
+        assertEquals(2, systemCoverSampleSize(2_048, 1_536, SYSTEM_COVER_MAX_SIZE))
+        assertEquals(4, systemCoverSampleSize(4_096, 2_160, SYSTEM_COVER_MAX_SIZE))
+        assertEquals(1, systemCoverSampleSize(0, 0, SYSTEM_COVER_MAX_SIZE))
+    }
 }

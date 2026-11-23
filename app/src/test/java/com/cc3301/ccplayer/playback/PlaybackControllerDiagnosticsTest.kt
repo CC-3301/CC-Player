@@ -32,6 +32,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
+            classifyPlaybackFailure = { null },
         )
 
         controller.openPlaylistForTest(TEST_ENTRY_GENERATION, listOf(media), media)
@@ -182,6 +183,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher()),
             diagnostics = diagnostics,
             nowMillis = { 0L },
+            classifyPlaybackFailure = { null },
         )
         open(controller)
 
@@ -384,6 +386,7 @@ class PlaybackControllerDiagnosticsTest {
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             diagnostics = diagnostics,
             nowMillis = { testScheduler.currentTime },
+            classifyPlaybackFailure = { null },
         )
 
     private fun open(controller: PlaybackController) {

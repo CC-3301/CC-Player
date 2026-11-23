@@ -962,6 +962,7 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
     /** 切集重试前丢弃已建立的字节源：下一次加载重新建源；返回是否真的丢弃了源。 */
     private suspend fun discardByteSourcesForSwitch(): Boolean = discardByteSources()
 
+
     override fun onStart() {
         super.onStart()
         diagnostics.log("应用进入前台")

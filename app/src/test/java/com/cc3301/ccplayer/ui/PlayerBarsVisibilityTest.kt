@@ -1,6 +1,5 @@
 package com.cc3301.ccplayer.ui
 
-import androidx.compose.ui.geometry.Offset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,7 +9,14 @@ class PlayerBarsVisibilityTest {
 
     private var now = 0L
     private val controls = PlayerControlsVisibility(elapsedMillis = { now })
-    private val pointer = PlayerPointerVisibility(elapsedMillis = { now })
+
+    /** 生产判据：由播放 UI 在场状态派生指针可见性。 */
+    private fun pointerVisibleWithBars(
+        barsPresent: Boolean,
+        lockUiPresent: Boolean = false,
+        playlistPresent: Boolean = false,
+        bufferingPresent: Boolean = false,
+    ): Boolean = playerPointerVisible(barsPresent, lockUiPresent, playlistPresent, bufferingPresent)
 
     /** 生产判据：未锁定、抽屉关闭时的顶/底栏动画目标与在场。 */
     private fun presence(firstBuffering: Boolean = false): PlayerBarsPresence = playerBarsPresence(
@@ -228,18 +234,13 @@ class PlayerBarsVisibilityTest {
 
     @Test
     fun `淡出中指针保持可见第五秒完全隐藏时才消失`() {
-        pointer.onPointerEnter()
-
         now = 4_000L
         controls.beginFadeOutIfExpired()
-        pointerFollowsBars(presence().present, pointer)
-        assertTrue(pointer.visible)
+        assertTrue(pointerVisibleWithBars(presence().present))
 
         now = 5_000L
         controls.completeFadeOut()
-        pointerFollowsBars(presence().present, pointer)
-
-        assertFalse(pointer.visible)
+        assertFalse(pointerVisibleWithBars(presence().present))
     }
 
     @Test
@@ -260,46 +261,31 @@ class PlayerBarsVisibilityTest {
     }
 
     @Test
-    fun `指针跟随栏的在场状态`() {
-        pointer.onPointerEnter()
+    fun `锁定态指针只随锁 UI 显隐`() {
+        val lockedBars = playerBarsPresence(
+            locked = true,
+            phase = controls.phase,
+            panelBarsVisible = true,
+            firstBuffering = false,
+        )
 
-        now = 4_000L
-        controls.beginFadeOutIfExpired()
-        assertTrue(presence().present)
-        pointerFollowsBars(presence().present, pointer)
-        assertTrue(pointer.visible)
-
-        now = 5_000L
-        controls.completeFadeOut()
-        pointerFollowsBars(presence().present, pointer)
-        assertFalse(pointer.visible)
+        // 锁定后顶/底栏不显示，指针改由锁 UI 决定。
+        assertFalse(pointerVisibleWithBars(lockedBars.present))
+        assertTrue(pointerVisibleWithBars(barsPresent = false, lockUiPresent = true))
     }
 
     @Test
-    fun `锁定或抽屉打开时指针随栏一起隐藏`() {
-        pointer.onPointerEnter()
-        pointerFollowsBars(
-            barsPresent = playerBarsPresence(
-                locked = true,
-                phase = controls.phase,
-                panelBarsVisible = true,
-                firstBuffering = false,
-            ).present,
-            pointer = pointer,
+    fun `抽屉打开时指针随播放列表保持可见`() {
+        val drawerBars = playerBarsPresence(
+            locked = false,
+            phase = controls.phase,
+            panelBarsVisible = false,
+            firstBuffering = false,
         )
-        assertFalse(pointer.visible)
 
-        pointer.onPointerEnter()
-        pointerFollowsBars(
-            barsPresent = playerBarsPresence(
-                locked = false,
-                phase = controls.phase,
-                panelBarsVisible = false,
-                firstBuffering = false,
-            ).present,
-            pointer = pointer,
-        )
-        assertFalse(pointer.visible)
+        // 抽屉打开时顶/底栏让位给抽屉，指针仍随抽屉可见。
+        assertFalse(drawerBars.present)
+        assertTrue(pointerVisibleWithBars(barsPresent = drawerBars.present, playlistPresent = true))
     }
 
     @Test

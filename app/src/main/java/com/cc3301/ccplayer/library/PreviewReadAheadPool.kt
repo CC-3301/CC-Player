@@ -1,7 +1,10 @@
 package com.cc3301.ccplayer.library
 
 /** 预取条目的预读 rank：排在全部可见项之后。 */
-const val PREVIEW_PREFETCH_RANK = Long.MAX_VALUE - 1
+const val PREVIEW_PREFETCH_RANK = Long.MAX_VALUE - 2
+
+/** 系统媒体封面的预读 rank：排在预取之后、时长补读之前。 */
+const val PREVIEW_SYSTEM_COVER_RANK = Long.MAX_VALUE - 1
 
 /** 时长补读的 rank：排在最后。 */
 const val PREVIEW_DURATION_RANK = Long.MAX_VALUE

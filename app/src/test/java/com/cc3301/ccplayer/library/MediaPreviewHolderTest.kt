@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.library
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -36,6 +37,8 @@ class MediaPreviewHolderTest {
 
     private class FakePreviewSource : MediaPreviewSource {
         override suspend fun preview(file: MediaFile): MediaPreview = MediaPreview(image = null, durationMillis = null)
+
+        override suspend fun systemCover(file: MediaFile): File? = null
 
         override fun isPreviewExtracting(file: MediaFile): Boolean = false
     }

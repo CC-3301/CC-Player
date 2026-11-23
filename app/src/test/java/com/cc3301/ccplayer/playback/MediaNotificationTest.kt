@@ -1,6 +1,7 @@
 package com.cc3301.ccplayer.playback
 
 import com.cc3301.ccplayer.library.MediaFile
+import com.cc3301.ccplayer.library.SYSTEM_COVER_MAX_SIZE
 import com.cc3301.ccplayer.library.ThumbnailCache
 import com.cc3301.ccplayer.library.ThumbnailPolicy
 import com.cc3301.ccplayer.library.previewTargetWidth
@@ -25,6 +26,9 @@ class MediaNotificationTest {
 
     private fun cacheKey(media: MediaFile, policy: ThumbnailPolicy = ThumbnailPolicy()) =
         thumbnailCacheKey(media, policy, previewTargetWidth(media, policy))
+
+    private fun systemCoverKey(media: MediaFile, policy: ThumbnailPolicy = ThumbnailPolicy()) =
+        thumbnailCacheKey(media, policy, SYSTEM_COVER_MAX_SIZE)
 
     @After
     fun deleteDirectory() {
@@ -70,9 +74,9 @@ class MediaNotificationTest {
     }
 
     @Test
-    fun `cover uses the cached thumbnail when present`() = runBlocking {
+    fun `cover uses the system cover entry when present`() = runBlocking {
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv", lastModified = 100)
-        val saved = cache.save(cacheKey(media), byteArrayOf(1, 2, 3))
+        val saved = cache.save(systemCoverKey(media), byteArrayOf(1, 2, 3))
         val covers = NotificationCoverCache(cache)
 
         val content = content(state = PlaybackState.Playing, media = media, coverFile = covers.file(media))
@@ -81,7 +85,15 @@ class MediaNotificationTest {
     }
 
     @Test
-    fun `cover falls back when the thumbnail is missing`() = runBlocking {
+    fun `cover does not reuse the smaller list thumbnail`() = runBlocking {
+        val media = MediaFile(name = "a.mkv", location = "root/a.mkv", lastModified = 100)
+        cache.save(cacheKey(media), byteArrayOf(1, 2, 3))
+
+        assertNull(NotificationCoverCache(cache).file(media))
+    }
+
+    @Test
+    fun `cover falls back when the system cover is missing`() = runBlocking {
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv", lastModified = 100)
 
         val content = content(state = PlaybackState.Playing, media = media, coverFile = NotificationCoverCache(cache).file(media))
@@ -90,29 +102,29 @@ class MediaNotificationTest {
     }
 
     @Test
-    fun `a thumbnail written after the first miss is picked up`() = runBlocking {
+    fun `a system cover written after the first miss is picked up`() = runBlocking {
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv", lastModified = 100)
         val covers = NotificationCoverCache(cache)
 
         assertNull(covers.file(media))
-        val saved = cache.save(cacheKey(media), byteArrayOf(4, 5, 6))
+        val saved = cache.save(systemCoverKey(media), byteArrayOf(4, 5, 6))
 
         assertEquals(saved, covers.file(media))
     }
 
     @Test
-    fun `a cached thumbnail stays valid without expiry`() = runBlocking {
+    fun `a cached system cover stays valid without expiry`() = runBlocking {
         var now = 1_000L
         val policy = ThumbnailPolicy()
         val persistentCache = ThumbnailCache(directory = directory, maxBytes = 64, clock = { now })
         val media = MediaFile(name = "a.mkv", location = "root/a.mkv")
-        persistentCache.save(cacheKey(media, policy), byteArrayOf(7, 8, 9))
+        persistentCache.save(systemCoverKey(media, policy), byteArrayOf(7, 8, 9))
         val covers = NotificationCoverCache(persistentCache, policy)
 
-        assertEquals(persistentCache.file(cacheKey(media, policy)), covers.file(media))
+        assertEquals(persistentCache.file(systemCoverKey(media, policy)), covers.file(media))
 
         now += 365L * 24 * 60 * 60 * 1000
-        assertEquals(persistentCache.file(cacheKey(media, policy)), covers.file(media))
+        assertEquals(persistentCache.file(systemCoverKey(media, policy)), covers.file(media))
     }
 
     @Test

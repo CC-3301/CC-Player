@@ -1462,6 +1462,36 @@ class CachedMediaPreviewSourceTest {
     }
 
     @Test
+    fun `系统封面排在列表可见请求之后取得许可`() = runTest {
+        val tracker = GatedExtractor()
+        val bounded = CachedMediaPreviewSource(
+            extractor = tracker,
+            networkPreviews = tracker,
+            cache = ThumbnailCache(directory, 1 shl 20, ioDispatcher = Dispatchers.Unconfined),
+        )
+        val blocker = async { bounded.preview(network("占位.mkv")) }
+        runCurrent()
+        assertEquals(1, tracker.started.size)
+
+        val playing = network("正在播放.mkv")
+        val cover = async { bounded.systemCover(playing) }
+        runCurrent()
+        val visible = async { bounded.visiblePreview(network("可见.mkv"), 0) }
+        runCurrent()
+        assertEquals(1, tracker.started.size)
+
+        tracker.imageGate?.complete(Unit)
+        assertNotNull(visible.await().image)
+        assertNotNull(cover.await())
+        blocker.await()
+
+        // 系统封面后到也排在列表可见项之后，且仍只占一份抽帧许可。
+        assertEquals(1, tracker.started.indexOf("smb://nas/media/可见.mkv"))
+        assertEquals(2, tracker.started.indexOf(playing.location))
+        assertEquals(1, tracker.maxConcurrent)
+    }
+
+    @Test
     fun `预取失败不记无图，回到可见后重新抽取`() = runTest {
         extractor.imageBytes = null
         val file = network("预取无图.mkv")
@@ -1943,6 +1973,92 @@ class CachedMediaPreviewSourceTest {
 
         val text = sink.lines.joinToString("\n")
         assertTrue("应记取消原因：$text", text.contains("缩略图取消: 取消.mkv | 原因: 离屏"))
+    }
+
+    @Test
+    fun `可见请求失败不记成预取抑制`() = runTest {
+        val file = network("可见失败.mkv")
+        source.updatePreviewWindow(visibleLocations = setOf(file.location), prefetchLocations = emptySet())
+        extractor.imageFailure = IOException("读取失败")
+        assertTrue(source.visiblePreview(file, 0).retryable)
+
+        // 离开可见范围后再预取：可见请求的结果不记成预取抑制，仍会重新准备与解码。
+        extractor.imageFailure = null
+        extractor.imageBytes = byteArrayOf(1)
+        source.updatePreviewWindow(visibleLocations = emptySet(), prefetchLocations = setOf(file.location))
+
+        assertNotNull(source.prefetch(file).image)
+        assertEquals(2, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `系统封面按最长边 1024 独立抽取并落盘`() = runTest {
+        val cover = byteArrayOf(7, 7, 7)
+        extractor.imageBytes = cover
+        val file = local("电影.mkv")
+
+        val generated = source.systemCover(file)
+
+        assertArrayEquals(cover, generated!!.readBytes())
+        assertEquals(listOf(SYSTEM_COVER_MAX_SIZE), extractor.imageWidths)
+        assertNotNull(cache().entry(thumbnailCacheKey(file, ThumbnailPolicy(), SYSTEM_COVER_MAX_SIZE)))
+    }
+
+    @Test
+    fun `已有列表缩略图时系统封面仍按大图生成`() = runTest {
+        val file = local("电影.mkv")
+        extractor.imageBytes = byteArrayOf(1)
+        source.preview(file)
+        extractor.imageBytes = byteArrayOf(2)
+
+        val generated = source.systemCover(file)
+
+        assertArrayEquals(byteArrayOf(2), generated!!.readBytes())
+        assertEquals(listOf(512, SYSTEM_COVER_MAX_SIZE), extractor.imageWidths)
+    }
+
+    @Test
+    fun `系统封面命中缓存后不再抽取`() = runTest {
+        val file = local("电影.mkv")
+        extractor.imageBytes = byteArrayOf(3)
+        val first = source.systemCover(file)
+        extractor.imageBytes = byteArrayOf(4)
+
+        val second = source.systemCover(file)
+
+        assertEquals(first, second)
+        assertEquals(1, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `系统封面不像预取那样受可见范围约束`() = runTest {
+        extractor.imageBytes = byteArrayOf(5)
+        val file = local("电影.mkv")
+        source.updatePreviewWindow(emptySet(), emptySet())
+
+        assertNull(source.prefetch(file).image)
+        assertNotNull(source.systemCover(file))
+        assertEquals(1, extractor.imageRequests.size)
+    }
+
+    @Test
+    fun `系统封面抽取失败时返回空，由通知回退应用图标`() = runTest {
+        extractor.imageFailure = IOException("读取失败")
+
+        assertNull(source.systemCover(local("电影.mkv")))
+    }
+
+    @Test
+    fun `网络系统封面按 1024 取图并写独立条目`() = runTest {
+        extractor.imageBytes = byteArrayOf(6)
+        val file = network("共享电影.mkv")
+
+        val generated = source.systemCover(file)
+
+        assertArrayEquals(byteArrayOf(6), generated!!.readBytes())
+        assertEquals(listOf(SYSTEM_COVER_MAX_SIZE), extractor.imageWidths)
+        assertNull(cache().entry(cacheKey(file)))
+        assertNotNull(cache().entry(thumbnailCacheKey(file, ThumbnailPolicy(), SYSTEM_COVER_MAX_SIZE)))
     }
 
     private fun local(name: String, size: Long = 0, lastModified: Long = 0) =

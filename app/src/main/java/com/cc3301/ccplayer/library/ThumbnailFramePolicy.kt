@@ -180,6 +180,51 @@ internal fun effectiveTargetWidth(targetWidth: Int): Int =
 internal fun previewTargetWidth(file: MediaFile, policy: ThumbnailPolicy): Int =
     if (file.source == MediaSource.Network) NETWORK_TARGET_WIDTH else effectiveTargetWidth(policy.targetWidth)
 
+/** 系统媒体封面的最长边上限：通知栏、锁屏与快捷设置媒体卡片共用这一份大图。 */
+internal const val SYSTEM_COVER_MAX_SIZE = 1024
+
+/** 系统封面的输出尺寸（像素）。 */
+internal data class CoverSize(val width: Int, val height: Int)
+
+/**
+ * 系统封面的输出尺寸：最长边不超过 [maxSide]，等比缩小。
+ * 原图不足上限或尺寸无效时返回 null，表示保持原尺寸，不放大。
+ */
+internal fun systemCoverScaledSize(
+    width: Int,
+    height: Int,
+    maxSide: Int,
+): CoverSize? {
+    if (width <= 0 || height <= 0 || maxSide <= 0) return null
+    val longest = maxOf(width, height)
+    if (longest <= maxSide) return null
+    return if (width >= height) {
+        CoverSize(maxSide, scaledCoverSide(height, longest, maxSide))
+    } else {
+        CoverSize(scaledCoverSide(width, longest, maxSide), maxSide)
+    }
+}
+
+/**
+ * 系统封面解码的降采样倍数：按 2 的幂降采样，避免先解出超大图；
+ * 最长边不超过上限时不解，与按宽度判定的 [coverSampleSize] 分开。
+ */
+internal fun systemCoverSampleSize(
+    width: Int,
+    height: Int,
+    maxSide: Int,
+): Int {
+    val longest = maxOf(width, height)
+    if (longest <= 0 || maxSide <= 0) return 1
+    var sample = 1
+    while (longest / (sample * 2) >= maxSide) sample *= 2
+    return sample
+}
+
+/** 按最长边等比缩小的另一边，至少保留 1 像素。 */
+private fun scaledCoverSide(side: Int, longest: Int, maxSide: Int): Int =
+    (side.toLong() * maxSide / longest).toInt().coerceAtLeast(1)
+
 /** 缩放后的宽度：输出钳在 320–512，源图更窄时放大到下限。 */
 internal fun targetFrameWidth(originalWidth: Int, targetWidth: Int = THUMBNAIL_TARGET_WIDTH): Int {
     if (originalWidth <= 0) return 0

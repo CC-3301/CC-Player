@@ -51,10 +51,15 @@ internal class Media3VideoFrameExtractor(
 ) {
 
     /** 本地视频：按候选位置解码，取第一张可用帧；候选帧都不可用时按抽取失败处理。 */
-    suspend fun localImage(file: MediaFile, positions: List<FramePosition>, targetWidth: Int): ByteArray? {
+    suspend fun localImage(
+        file: MediaFile,
+        positions: List<FramePosition>,
+        targetWidth: Int,
+        systemCover: Boolean = false,
+    ): ByteArray? {
         val decoded = withTimeoutOrNull(LOCAL_EXTRACT_TIMEOUT_MILLIS) {
             withContext(Dispatchers.Main.immediate) {
-                decodeLocal(file, positions, targetWidth)
+                decodeLocal(file, positions, targetWidth, systemCover)
             }
         }
         if (decoded == null) {
@@ -72,17 +77,18 @@ internal class Media3VideoFrameExtractor(
         source: ByteSource,
         positions: List<Long>,
         targetWidth: Int,
+        systemCover: Boolean = false,
     ): ByteArray? {
         val chosen = withContext(Dispatchers.Main.immediate) {
             decodeNetwork(file, source, positions)
         } ?: return null
         return try {
-            val scaled = scaleFrame(chosen, targetWidth)
+            val scaled = scaleFrame(chosen, targetWidth, systemCover)
             try {
                 compressFrame(scaled)
                     ?: throw PreviewStageException(PreviewFailureStage.Decode, "视频帧压缩失败")
             } finally {
-                scaled.recycle()
+                if (scaled !== chosen) scaled.recycle()
             }
         } finally {
             chosen.recycle()
@@ -93,13 +99,14 @@ internal class Media3VideoFrameExtractor(
         file: MediaFile,
         positions: List<FramePosition>,
         targetWidth: Int,
+        systemCover: Boolean,
     ): List<Pair<FramePosition, Bitmap>> {
         val extractor = buildExtractor(file, localMediaSourceFactory(file))
         return try {
             // 每帧解出后立刻缩放，避免同时持有三张全尺寸位图；缩放不占主线程。
             positions.mapNotNull { position ->
                 val bitmap = frameAt(extractor, position.micros, file.name) ?: return@mapNotNull null
-                position to withContext(Dispatchers.Default) { scaleFrame(bitmap, targetWidth) }
+                position to withContext(Dispatchers.Default) { scaleFrame(bitmap, targetWidth, systemCover) }
             }
         } finally {
             // 超时或取消不取消 future：取消会打乱 Media3 的串行队列；关闭句柄让在途读取以错误收尾。

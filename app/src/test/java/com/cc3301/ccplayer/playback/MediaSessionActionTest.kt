@@ -26,6 +26,7 @@ class MediaSessionActionTest {
         progress,
         CoroutineScope(dispatcher),
         nowMillis = { dispatcher.scheduler.currentTime },
+        classifyPlaybackFailure = { null },
     )
 
     @Test

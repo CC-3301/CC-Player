@@ -61,6 +61,7 @@ class SettlementSequenceTest {
             FakePlaybackProgressRepository(),
             CoroutineScope(UnconfinedTestDispatcher(testScheduler)),
             nowMillis = { testScheduler.currentTime },
+            classifyPlaybackFailure = { null },
         )
         controller.openPlaylistForTest(TEST_ENTRY_GENERATION, files, files.first())
         engine.reportMediaLoaded()
