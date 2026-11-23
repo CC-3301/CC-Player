@@ -290,12 +290,6 @@ val PlayerSeekHintDeltaFontSize = 32.sp
 /** 拖动提示两行之间的间距。 */
 val PlayerSeekHintLineGap = 6.dp
 
-/** 播放页内鼠标静止多久后隐藏指针。 */
-const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
-
-/** 指针位移死区：指针隐藏后，起点到当前指针位置的直线距离要达到它才唤出指针。 */
-val PlayerPointerMoveDeadZone = 100.dp
-
 /** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
 val PlayerSeekDragDeadZone = 3.dp
 

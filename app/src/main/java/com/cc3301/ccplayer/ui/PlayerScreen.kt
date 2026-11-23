@@ -89,7 +89,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -103,13 +102,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.areAnyPressed
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -154,7 +152,6 @@ import com.cc3301.ccplayer.ui.theme.AppRadius
 import com.cc3301.ccplayer.ui.theme.AppSpacing
 import java.io.File
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -272,12 +269,6 @@ private fun Modifier.holdControlsVisible(onPressChange: (Boolean) -> Unit): Modi
             }
         }
     }
-
-/** 鼠标移动或进入时的指针位置；触摸与手写笔不参与指针显隐，返回 null。 */
-private fun PointerEvent.mousePosition(): Offset? {
-    if (type != PointerEventType.Enter && type != PointerEventType.Move) return null
-    return changes.firstOrNull { it.type == PointerType.Mouse }?.position
-}
 
 /** 播放页点击：按下即显示按压反馈；被闸门拦下的控件收不到按下，也不显示任何反馈。 */
 @Composable
@@ -624,41 +615,46 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 指针跟随顶/底栏的实际可见性：栏在场时直接跟随鼠标，栏隐藏时一并隐藏、只由有效移动唤出。其它界面不处理指针。
+    // 指针随当前可见播放 UI 显隐：控制层、锁 UI、播放列表与缓冲 UI 在场即可见，全部移除即隐藏。
     val context = LocalContext.current
     val hiddenPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
-    val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(barsPresent) {
-        pointerFollowsBars(barsPresent, pointer)
-    }
-    // 指针静止满 3 秒隐藏：常驻循环在指针可见时按剩余时间计时，移动与显示都从当前时刻重新起算。
-    LaunchedEffect(pointer) {
-        runPointerAutoHide(
-            pointer = pointer,
-            awaitVisible = { snapshotFlow { pointer.visible }.first { it } },
-            delayMillis = { delay(it) },
-        )
-    }
+    val bufferingVisible = bufferingHint(
+        kind = bufferingKind,
+        buffering = buffering,
+        showsPicture = surfacePresentation.showsPicture,
+        quietBlack = surfacePresentation.quietBlack,
+    )
+    val pointerVisible = playerPointerVisible(
+        barsPresent = barsPresent,
+        lockUiPresent = locked && lock.unlockVisible,
+        playlistPresent = playlistVisible && panelVisible,
+        bufferingPresent = bufferingVisible,
+    )
+    val pointerWake = remember { PlayerPointerWake() }
+    val latestPointerVisible = rememberUpdatedState(pointerVisible)
 
-    val pointerDensity = LocalDensity.current
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)
         .pointerHoverIcon(
-            icon = if (pointer.visible) PointerIcon.Default else hiddenPointerIcon,
+            icon = if (pointerVisible) PointerIcon.Default else hiddenPointerIcon,
             overrideDescendants = true,
         )
-        .pointerInput(pointerDensity.density) {
+        // 隐藏态只有鼠标左键按下唤醒播放 UI 与指针；移动、滚轮、右键与中键不唤醒。
+        .pointerInput(locked) {
             awaitPointerEventScope {
                 while (true) {
-                    val event = awaitPointerEvent()
-                    val position = event.mousePosition() ?: continue
-                    if (event.type == PointerEventType.Enter) {
-                        pointer.onPointerEnter()
-                    } else {
-                        pointer.onPointerMove(position, pointerDensity, pressed = event.buttons.areAnyPressed)
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
+                    if (event.type == PointerEventType.Press) {
+                        if (!latestPointerVisible.value && event.buttons.isPrimaryPressed) {
+                            pointerWake.onWakePress()
+                            if (locked) lock.tapScreen() else controls.showByUserAction()
+                        }
+                    } else if (event.type == PointerEventType.Release) {
+                        pointerWake.onRelease(mouse.uptimeMillis)
                     }
                 }
             }
@@ -710,20 +706,14 @@ fun PlayerScreen(
             PlayerCoverLayer(coverFile = coverFile, modifier = Modifier.fillMaxSize())
         }
         // 提示规则：打开与恢复原片显示转圈和「正在缓冲」；切集与片尾自动切集不显示。
-        if (
-            bufferingHint(
-                kind = bufferingKind,
-                buffering = buffering,
-                showsPicture = surfacePresentation.showsPicture,
-                quietBlack = surfacePresentation.quietBlack,
-            )
-        ) {
+        if (bufferingVisible) {
             BufferingIndicator(modifier = Modifier.align(Alignment.Center))
         }
         PlayerGestureLayer(
             locked = locked,
             panelOpen = panelVisible,
             controlsPresent = controlsPresent,
+            pointerWake = pointerWake,
             phase = phase,
             positionMillis = progress.positionMillis,
             durationMillis = progress.durationMillis,
@@ -1065,6 +1055,7 @@ private fun PlayerGestureLayer(
     locked: Boolean,
     panelOpen: Boolean,
     controlsPresent: Boolean,
+    pointerWake: PlayerPointerWake,
     phase: PlayerScreenPhase,
     positionMillis: Long,
     durationMillis: Long,
@@ -1160,7 +1151,7 @@ private fun PlayerGestureLayer(
             .pointerInput(gesturesEnabled, playPauseAllowed, seekAllowed) {
                 tapGesture.cancel()
                 if (!gesturesEnabled) return@pointerInput
-                detectPlayerTaps(tapGesture, dispatchTap)
+                detectPlayerTaps(tapGesture, pointerWake, dispatchTap)
             }
             // 按下即上报一次操作：按住不动同样不隐藏，双指按到最后一指抬起才结束。
             .pointerInput(gesturesEnabled) {
@@ -1190,6 +1181,10 @@ private fun PlayerGestureLayer(
                 val seekDeadZonePx = PlayerSeekDragDeadZone.toPx()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    // 唤醒手势整次吞掉：不调音量、不跳转、不显示跳转提示。
+                    if (down.type == PointerType.Mouse && pointerWake.swallows(down.uptimeMillis)) {
+                        return@awaitEachGesture
+                    }
                     val pointerId = down.id
                     val drag = PlayerDragGesture(threshold, touchSlop)
                     drag.start(gestureZone(down.position.x, size.width))
@@ -1287,10 +1282,15 @@ private fun PlayerGestureLayer(
 /** 单击/双击统一交给 [PlayerTapGesture]：单击延迟到双击窗口结束，第二次按下转为拖动时明确取消。 */
 private suspend fun PointerInputScope.detectPlayerTaps(
     gesture: PlayerTapGesture,
+    pointerWake: PlayerPointerWake,
     onAction: (TapGestureAction) -> Unit,
 ) {
     awaitEachGesture {
         val firstDown = awaitFirstDown()
+        // 指针隐藏后的第一次左键及其双击窗口只用于唤醒：这一次手势不产生单击或双击。
+        if (firstDown.type == PointerType.Mouse && pointerWake.swallows(firstDown.uptimeMillis)) {
+            return@awaitEachGesture
+        }
         gesture.press(firstDown.uptimeMillis, firstDown.position)?.let(onAction)
         val firstUp = waitForUpOrCancellation()
         if (firstUp == null) {
