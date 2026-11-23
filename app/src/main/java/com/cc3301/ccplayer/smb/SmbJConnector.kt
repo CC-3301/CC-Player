@@ -37,50 +37,28 @@ class SmbJConnector(
     private val diagnostics: DiagnosticsLog = NoDiagnosticsLog,
 ) : SmbConnector {
 
-    private val client = SMBClient(config)
+    private val config = config
 
     /** 协商结果只记一次：方言与读上限不随重连变化，重复记只是刷日志。 */
     private val negotiateLogged = AtomicBoolean(false)
 
-    /** 建连、认证与打开共享分三段：失败时日志能指出卡在哪一环，会话建立预算也在段之间生效。 */
-    override suspend fun connect(
-        host: String,
-        port: Int,
-        share: String,
-        username: String,
-        password: String?,
-    ): SmbConnection {
+    /**
+     * 每条共享传输自带一个客户端：smbj 的客户端按地址缓存连接，几个传输共用一个客户端时，
+     * 本地已半死的连接会被当作可用发回来，关掉一条传输也会连带关掉别的传输。
+     */
+    override suspend fun connectTransport(host: String, port: Int): SmbTransport {
+        val client = SMBClient(config)
         val connection = try {
             withContext(Dispatchers.IO) { client.connect(host, port) }
         } catch (cancellation: CancellationException) {
+            closeQuietly(client)
             throw cancellation
         } catch (failure: Exception) {
-            throw failure.asSourceFailure("建连/协商", "连不上 SMB 服务器 $host:$port")
+            closeQuietly(client)
+            throw failure.asSourceFailure("建连/协商", "连不上 SMB 服务器 $host:$port", diagnostics)
         }
-        return try {
-            logNegotiated(connection)
-            val session = try {
-                withContext(Dispatchers.IO) { connection.authenticate(authenticationOf(username, password)) }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Exception) {
-                throw failure.asSourceFailure("认证", "SMB 认证失败：$host")
-            }
-            val diskShare = try {
-                withContext(Dispatchers.IO) { session.connectShare(share) }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Exception) {
-                throw failure.asSourceFailure("打开共享", "打开 SMB 共享失败：$host/$share")
-            }
-            if (diskShare !is DiskShare) {
-                throw MediaSourceException(MediaFailure.NotFound, "共享不是目录共享：$share")
-            }
-            SmbJConnection(connection, session, diskShare)
-        } catch (failure: Throwable) {
-            runCatching { connection.close() }
-            throw failure
-        }
+        logNegotiated(connection)
+        return SmbJTransport(host, client, connection, diagnostics)
     }
 
     /** 协商事实：方言决定最大读尺寸，SMB2.0.2 只有 64 KiB，块会退化为 64 KiB。 */
@@ -93,16 +71,10 @@ class SmbJConnector(
         }
     }
 
-    private fun authenticationOf(username: String, password: String?): AuthenticationContext =
-        if (username.isEmpty()) {
-            AuthenticationContext.guest()
-        } else {
-            AuthenticationContext(username, password.orEmpty().toCharArray(), null)
-        }
-
     /** 共享枚举走 IPC$ 上的 srvsvc 命名管道；SMBJ 没有现成接口，报文由 [SrvsvcShareEnum] 编解码。 */
     override suspend fun shares(host: String, port: Int, username: String, password: String?): List<String> =
         withContext(Dispatchers.IO) {
+            val client = SMBClient(config)
             var connection: Connection? = null
             try {
                 connection = client.connect(host, port)
@@ -128,18 +100,15 @@ class SmbJConnector(
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (failure: Exception) {
-                throw failure.asSourceFailure("列举共享", "列不出 SMB 服务器 $host 的共享")
+                throw failure.asSourceFailure("列举共享", "列不出 SMB 服务器 $host 的共享", diagnostics)
             } finally {
                 runCatching { connection?.close() }
+                closeQuietly(client)
             }
         }
 
-    private fun Throwable.asSourceFailure(stage: String, summary: String): MediaSourceException {
-        if (this is MediaSourceException) return this
-        diagnostics.log {
-            "SMB 失败于$stage: ${this::class.java.simpleName}: ${message}"
-        }
-        return MediaSourceException(smbFailureOf(this), summary, this)
+    private fun closeQuietly(client: SMBClient) {
+        runCatching { client.close() }
     }
 
     companion object {
@@ -180,10 +149,52 @@ class SmbJConnector(
     }
 }
 
-private class SmbJConnection(
+/** 一条共享传输：一个只服务这条传输的客户端，与它建好的连接。 */
+private class SmbJTransport(
+    private val host: String,
+    private val client: SMBClient,
     private val connection: Connection,
+    private val diagnostics: DiagnosticsLog,
+) : SmbTransport {
+
+    /** 协商出的单次读上限：随传输协商一次，这条传输上的各条会话共用。 */
+    private val maxReadSize: Int = runCatching { connection.negotiatedProtocol.maxReadSize }.getOrDefault(0)
+
+    override suspend fun connectShare(share: String, username: String, password: String?): SmbConnection {
+        val session = try {
+            withContext(Dispatchers.IO) { connection.authenticate(authenticationOf(username, password)) }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            throw failure.asSourceFailure("认证", "SMB 认证失败：$host", diagnostics)
+        }
+        val diskShare = try {
+            withContext(Dispatchers.IO) { session.connectShare(share) }
+        } catch (cancellation: CancellationException) {
+            runCatching { session.close() }
+            throw cancellation
+        } catch (failure: Exception) {
+            runCatching { session.close() }
+            throw failure.asSourceFailure("打开共享", "打开 SMB 共享失败：$host/$share", diagnostics)
+        }
+        if (diskShare !is DiskShare) {
+            runCatching { session.close() }
+            throw MediaSourceException(MediaFailure.NotFound, "共享不是目录共享：$share")
+        }
+        return SmbJConnection(session, diskShare, maxReadSize)
+    }
+
+    override fun close() {
+        runCatching { connection.close() }
+        runCatching { client.close() }
+    }
+}
+
+/** 一条共享会话：目录、句柄与存活确认都走这条会话；关闭只断会话，不断它下面的传输。 */
+private class SmbJConnection(
     private val session: Session,
     private val share: DiskShare,
+    private val maxReadSize: Int,
 ) : SmbConnection {
 
     override suspend fun list(path: String): List<SmbEntry> = withContext(Dispatchers.IO) {
@@ -209,7 +220,7 @@ private class SmbJConnection(
         }
         try {
             // 读尺寸按协商上限给出：底层不会按协商上限自动切分，超限的单次读会被服务端拒绝。
-            SmbJReadHandle(file, maxReadSize = negotiatedMaxReadSize())
+            SmbJReadHandle(file, maxReadSize = maxReadSize)
         } catch (failure: Exception) {
             runCatching { file.close() }
             throw failure.asSourceFailure("打不开共享内文件：$path")
@@ -227,12 +238,9 @@ private class SmbJConnection(
         }
     }
 
-    private fun negotiatedMaxReadSize(): Int =
-        runCatching { connection.negotiatedProtocol.maxReadSize }.getOrDefault(0)
-
     override fun close() {
         runCatching { share.close() }
-        runCatching { connection.close() }
+        runCatching { session.close() }
     }
 }
 
@@ -254,6 +262,25 @@ private class SmbJReadHandle(
     override fun close() {
         runCatching { file.close() }
     }
+}
+
+private fun authenticationOf(username: String, password: String?): AuthenticationContext =
+    if (username.isEmpty()) {
+        AuthenticationContext.guest()
+    } else {
+        AuthenticationContext(username, password.orEmpty().toCharArray(), null)
+    }
+
+private fun Throwable.asSourceFailure(
+    stage: String,
+    summary: String,
+    diagnostics: DiagnosticsLog,
+): MediaSourceException {
+    if (this is MediaSourceException) return this
+    diagnostics.log {
+        "SMB 失败于$stage: ${this::class.java.simpleName}: $message"
+    }
+    return MediaSourceException(smbFailureOf(this), summary, this)
 }
 
 private fun Throwable.asSourceFailure(summary: String): MediaSourceException =

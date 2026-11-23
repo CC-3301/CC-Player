@@ -293,4 +293,189 @@ class SmbSessionsTest {
 
         assertEquals(listOf("media"), connector.closedShares)
     }
+
+    @Test
+    fun `同一服务器的不同共享共用一条传输`() = runTest {
+        val sessions = SmbSessions(connector)
+
+        sessions.probe(target)
+        sessions.probe(target.copy(share = "剧集"))
+
+        assertEquals("两条会话", 2, connector.shares.size)
+        assertEquals("一条传输", 1, connector.transports.size)
+    }
+
+    @Test
+    fun `会话失效只重建会话，传输沿用`() = runTest {
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        connector.pingFailure = sessionLostFailure()
+
+        sessions.probe(target)
+
+        assertEquals("会话重建一次", 2, connector.shares.size)
+        assertEquals("传输继续用", 1, connector.transports.size)
+        assertTrue("传输没被换掉", connector.closedTransports.isEmpty())
+    }
+
+    @Test
+    fun `本地传输失效换掉故障服务器端口的传输`() = runTest {
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        val sessions = SmbSessions(connector)
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("重发建在新传输上", 2, connector.transports.size)
+        assertTrue("旧传输关掉", connector.transports[0].closed)
+    }
+
+    @Test
+    fun `换传输只影响故障的服务器端口`() = runTest {
+        val other = target.copy(host = "别的服务器", share = "剧集")
+        connector.addDirectory("media", "", fileEntry("电影.mkv"))
+        connector.addDirectory("剧集", "", fileEntry("第一集.mkv"))
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        sessions.probe(other)
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        connector.listFailure = null
+        sessions.probe(other)
+
+        assertTrue("故障服务器的旧传输关掉", connector.transports[0].closed)
+        assertEquals("另一台服务器的传输还在", false, connector.transports[1].closed)
+    }
+
+    @Test
+    fun `本地半死传输不会被重建的会话继续复用`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val source = sessions.openRead(target)
+        connector.readFailure = TransportException(TimeoutException("读超时"))
+        runCatching { source.readAt(0, ByteArray(16), 0, 16) }
+
+        connector.readFailure = null
+        sessions.openRead(target).close()
+
+        assertEquals("下一次取用建在新传输上", 2, connector.transports.size)
+        assertEquals("旧传输作废", listOf("nas:445"), connector.closedTransports)
+    }
+
+    @Test
+    fun `播放持有读取租约时浏览操作不关也不换共享传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val playback = sessions.openPlaybackRead(target)
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+
+        val failure = runCatching { sessions.use(target) { connection -> connection.list("") } }.exceptionOrNull()
+
+        assertTrue("失败原样交给调用方", failure is TransportException)
+        assertTrue("不换传输", connector.transports.size == 1)
+        assertTrue("不关传输", connector.closedTransports.isEmpty())
+        assertEquals("不重发", 1, connector.shares.size)
+
+        connector.listFailure = null
+        playback.close()
+    }
+
+    @Test
+    fun `没有播放读取租约时浏览操作可以重建传输`() = runTest {
+        connector.addDirectory("media", "", fileEntry("电影.mkv"))
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("换了一条传输", 2, connector.transports.size)
+        assertTrue("旧传输关掉", connector.transports[0].closed)
+    }
+
+    @Test
+    fun `播放自己的故障流程可以换掉这条传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val playback = sessions.openPlaybackRead(target)
+        connector.readFailure = TransportException(TimeoutException("读超时"))
+
+        runCatching { playback.readAt(0, ByteArray(16), 0, 16) }
+
+        assertEquals("传输作废并关闭", listOf("nas:445"), connector.closedTransports)
+
+        connector.readFailure = null
+        sessions.openPlaybackRead(target).close()
+
+        assertEquals("下一次播放读建新传输", 2, connector.transports.size)
+    }
+
+    @Test
+    fun `播放持有读取租约时封面读取失败不关也不换共享传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val cover = sessions.openRead(target)
+        val playback = sessions.openPlaybackRead(target)
+        connector.readFailure = TransportException(TimeoutException("读超时"))
+
+        runCatching { cover.readAt(0, ByteArray(16), 0, 16) }
+
+        assertEquals("不换传输", 1, connector.transports.size)
+        assertTrue("不关传输", connector.closedTransports.isEmpty())
+
+        playback.close()
+    }
+
+    @Test
+    fun `播放持有读取租约时探测遇传输失效不换共享传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        val playback = sessions.openPlaybackRead(target)
+        connector.pingFailure = TransportException(TimeoutException("读超时"))
+
+        val failure = runCatching { sessions.probe(target) }.exceptionOrNull()
+
+        assertTrue("失败交给调用方", failure is TransportException)
+        assertEquals("不换传输", 1, connector.transports.size)
+        assertTrue("不关传输", connector.closedTransports.isEmpty())
+
+        playback.close()
+    }
+
+    @Test
+    fun `认证失败不作废也不重建`() = runTest {
+        connector.addDirectory("media", "", fileEntry("电影.mkv"))
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        val denied = MediaSourceException(MediaFailure.Authentication, "凭据被拒")
+        connector.listFailure = denied
+
+        val failure = runCatching { sessions.use(target) { connection -> connection.list("") } }.exceptionOrNull()
+
+        assertEquals(denied, failure)
+        assertEquals("不重发", 1, connector.shares.size)
+        assertTrue("不换传输", connector.closedTransports.isEmpty())
+        assertEquals("不作废会话", emptyList<String>(), connector.closedShares)
+    }
+
+    @Test
+    fun `闲置回收只关本会话，传输留给仍在用的会话`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        connector.addFile("剧集", "第一集.mkv", payload)
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        val held = sessions.openRead(target.copy(share = "剧集", path = "第一集.mkv"))
+        sessions.probe(target)
+
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertEquals("电影会话闲置关闭", listOf("media"), connector.closedShares)
+        assertTrue("传输还被剧集会话用着", connector.closedTransports.isEmpty())
+
+        held.close()
+        advanceTimeBy(1_001)
+        runCurrent()
+
+        assertEquals(listOf("nas:445"), connector.closedTransports)
+    }
 }
