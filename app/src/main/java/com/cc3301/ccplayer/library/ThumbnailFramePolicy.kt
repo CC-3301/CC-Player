@@ -193,7 +193,7 @@ internal data class CoverSize(val width: Int, val height: Int)
 internal fun systemCoverScaledSize(
     width: Int,
     height: Int,
-    maxSide: Int = SYSTEM_COVER_MAX_SIZE,
+    maxSide: Int,
 ): CoverSize? {
     if (width <= 0 || height <= 0 || maxSide <= 0) return null
     val longest = maxOf(width, height)
@@ -212,7 +212,7 @@ internal fun systemCoverScaledSize(
 internal fun systemCoverSampleSize(
     width: Int,
     height: Int,
-    maxSide: Int = SYSTEM_COVER_MAX_SIZE,
+    maxSide: Int,
 ): Int {
     val longest = maxOf(width, height)
     if (longest <= 0 || maxSide <= 0) return 1

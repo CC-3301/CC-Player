@@ -58,7 +58,7 @@ interface MediaPreviewSource {
      * 系统媒体封面：通知栏、锁屏与快捷设置媒体卡片共用的独立大图条目，最长边不超过 1024。
      * 命中缓存立即返回；没有时按低于列表可见请求的优先级生成一次，取不到时返回 null。
      */
-    suspend fun systemCover(file: MediaFile): File? = null
+    suspend fun systemCover(file: MediaFile): File?
 
     /**
      * 开始一轮可见订阅：已试次数从零计，本地与网络同一规则。
@@ -567,7 +567,7 @@ class CachedMediaPreviewSource(
 
     /** 预取失败或无图时记下；放弃与取消不记，出图时由状态一起清掉。 */
     private fun notePrefetchOutcome(key: String, priority: PreviewPriority, loaded: LoadedPreview) {
-        if (!priority.isPrefetch || loaded.abandoned) return
+        if (priority.isVisible || loaded.abandoned) return
         if (loaded.failed || loaded.image == null) stateFor(key).suppressPrefetch()
     }
 
@@ -929,8 +929,6 @@ private data class PreviewPriority(val kind: Kind, val order: Int) {
     enum class Kind { Visible, Prefetch, SystemCover, Duration }
 
     val isVisible: Boolean get() = kind == Kind.Visible
-
-    val isPrefetch: Boolean get() = kind == Kind.Prefetch
 
     /** 系统封面不受可见范围约束：正在播放的条目通常不在列表的可见与预取范围里。 */
     val ignoresPreviewWindow: Boolean get() = kind == Kind.Visible || kind == Kind.SystemCover

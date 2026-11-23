@@ -449,6 +449,8 @@ class VisiblePreviewSchedulerTest {
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
 
+            override suspend fun systemCover(file: MediaFile): File? = null
+
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
@@ -483,6 +485,8 @@ class VisiblePreviewSchedulerTest {
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
 
+            override suspend fun systemCover(file: MediaFile): File? = null
+
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
         val scheduler = scheduler(source, backgroundScope)
@@ -515,6 +519,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override suspend fun systemCover(file: MediaFile): File? = null
 
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
@@ -553,6 +559,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override suspend fun systemCover(file: MediaFile): File? = null
 
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
@@ -593,6 +601,8 @@ class VisiblePreviewSchedulerTest {
             }
 
             override fun previewEntryState(file: MediaFile): PreviewEntryState = states.stateOf(file)
+
+            override suspend fun systemCover(file: MediaFile): File? = null
 
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
         }
@@ -635,6 +645,8 @@ class VisiblePreviewSchedulerTest {
             override fun beginVisiblePreview(file: MediaFile) {
                 states.beginVisible(file)
             }
+
+            override suspend fun systemCover(file: MediaFile): File? = null
 
             override fun isPreviewExtracting(file: MediaFile): Boolean = false
 
@@ -762,6 +774,8 @@ private class LateCancelSource : MediaPreviewSource {
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
 
+    override suspend fun systemCover(file: MediaFile): File? = null
+
     override fun isPreviewExtracting(file: MediaFile): Boolean = false
 }
 
@@ -782,6 +796,8 @@ private class CompletionGateSource(
     override suspend fun prefetch(file: MediaFile): MediaPreview = preview(file)
 
     override fun updatePreviewWindow(visibleLocations: Set<String>, prefetchLocations: Set<String>) = Unit
+
+    override suspend fun systemCover(file: MediaFile): File? = null
 
     override fun isPreviewExtracting(file: MediaFile): Boolean = false
 }
@@ -818,6 +834,8 @@ private class SchedulerRecordingSource : MediaPreviewSource {
 
     /** 已进入解码的位置：这些条目暂停时不取消，跑完再收尾。 */
     var extractingLocations: Set<String> = emptySet()
+
+    override suspend fun systemCover(file: MediaFile): File? = null
 
     override fun isPreviewExtracting(file: MediaFile): Boolean =
         file.location in extractingLocations
