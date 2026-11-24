@@ -231,7 +231,7 @@ private class SmbJConnection(
     /** 走会话级发送：签名与加密随会话走；回包非成功或超时都算会话已失效。 */
     override suspend fun ping(timeoutMillis: Long) {
         withContext(Dispatchers.IO) {
-            val echo: Future<SMB2Packet> = session.send(smbEcho(dialect))
+            val echo: Future<SMB2Packet> = session.send(SMB2Echo(dialect))
             val status = echo.get(timeoutMillis, TimeUnit.MILLISECONDS).header.statusCode
             if (status != NtStatus.STATUS_SUCCESS.value) {
                 throw MediaSourceException(MediaFailure.Unreachable, "SMB 会话存活确认失败：0x${status.toString(16)}")
@@ -244,9 +244,6 @@ private class SmbJConnection(
         runCatching { session.close() }
     }
 }
-
-/** 存活确认报文：SMB2 是 SMB 2/3 共用的报文格式名，方言取这条连接协商出的值。 */
-internal fun smbEcho(dialect: SMB2Dialect): SMB2Echo = SMB2Echo(dialect)
 
 private class SmbJReadHandle(
     private val file: File,
