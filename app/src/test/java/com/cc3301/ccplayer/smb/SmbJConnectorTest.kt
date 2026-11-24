@@ -2,6 +2,7 @@ package com.cc3301.ccplayer.smb
 
 import com.hierynomus.mssmb2.SMB2Dialect
 import com.hierynomus.protocol.commons.socket.ProxySocketFactory
+import com.hierynomus.smb.SMBBuffer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,5 +46,16 @@ class SmbJConnectorTest {
         assertEquals(8_000L, config.readTimeout)
         assertEquals(8_000L, config.writeTimeout)
         assertEquals(8_000L, config.transactTimeout)
+    }
+
+    @Test
+    fun `存活确认报文带着协商方言写出 68 字节`() {
+        // Echo 报文是 64 字节报文头加 4 字节消息体；方言为空时序列化抛空指针。
+        val packet = smbEcho(SMB2Dialect.SMB_3_1_1)
+        val buffer = SMBBuffer()
+
+        packet.write(buffer)
+
+        assertEquals(68, buffer.getCompactData().size)
     }
 }
