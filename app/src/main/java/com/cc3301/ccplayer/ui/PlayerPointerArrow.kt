@@ -70,6 +70,9 @@ fun playerPointerArrowSkeleton(
     )
 }
 
+/** 描边宽度：箭头宽度的 7%。 */
+fun playerPointerArrowStrokeWidth(width: Float): Float = width * PLAYER_POINTER_STROKE_RATIO
+
 /** 屏幕坐标（y 向下）里按逆时针方向旋转。 */
 private fun Offset.rotateOnScreen(degrees: Float): Offset {
     val radians = degrees / 180f * PI.toFloat()
@@ -96,7 +99,7 @@ fun PlayerPointerArrow(position: () -> Offset?, modifier: Modifier = Modifier) {
                 tiltDegrees = PLAYER_POINTER_TILT_DEGREES,
             ),
             position = at,
-            strokeWidth = widthPx * PLAYER_POINTER_STROKE_RATIO,
+            strokeWidth = playerPointerArrowStrokeWidth(widthPx),
         )
     }
 }

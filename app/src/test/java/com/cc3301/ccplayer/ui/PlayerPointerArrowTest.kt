@@ -85,6 +85,14 @@ class PlayerPointerArrowTest {
     }
 
     @Test
+    fun `描边宽度约为箭头宽度的百分之七`() {
+        // SPEC：描边约为箭头宽度的 7%。
+        val stroke = playerPointerArrowStrokeWidth(width)
+
+        assertEquals(0.07f, stroke / width, 0.0001f)
+    }
+
+    @Test
     fun `没有倾斜时尖端朝正上方`() {
         val direction = axisDirection(skeleton(tiltDegrees = 0f))
 
