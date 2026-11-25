@@ -617,7 +617,8 @@ fun PlayerScreen(
 
     // 指针随当前可见播放 UI 显隐：控制层、锁 UI、播放列表与缓冲 UI 在场即可见，全部移除即隐藏。
     val context = LocalContext.current
-    val hiddenPointerIcon = remember(context) {
+    // 播放页内系统指针固定为 TYPE_NULL：箭头由播放页自绘，不再让系统的空闲计时改变箭头显隐。
+    val nullPointerIcon = remember(context) {
         PointerIcon(android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL))
     }
     val bufferingVisible = bufferingHint(
@@ -634,31 +635,49 @@ fun PlayerScreen(
     )
     val pointerWake = remember { PlayerPointerWake() }
     val latestPointerVisible = rememberUpdatedState(pointerVisible)
+    // 自绘箭头的最后已知鼠标位置；还没有鼠标事件时不绘制。
+    var pointerPosition by remember { mutableStateOf<Offset?>(null) }
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
         .background(Color.Black)
-        .pointerHoverIcon(
-            icon = if (pointerVisible) PointerIcon.Default else hiddenPointerIcon,
-            overrideDescendants = true,
-        )
-        // 隐藏态只有鼠标左键按下唤醒播放 UI 与指针；移动、滚轮、右键与中键不唤醒。
-        .pointerInput(locked) {
-            awaitPointerEventScope {
-                while (true) {
-                    val event = awaitPointerEvent(PointerEventPass.Initial)
-                    val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
-                    if (event.type == PointerEventType.Press) {
-                        if (!latestPointerVisible.value && event.buttons.isPrimaryPressed) {
-                            pointerWake.onWakePress()
-                            if (locked) lock.tapScreen() else controls.showByUserAction()
+        // 离开播放页后这一层仍留在组合里：指针图标与指针事件都随页面可见性一并关闭。
+        .then(
+            if (visible) {
+                Modifier
+                    .pointerHoverIcon(icon = nullPointerIcon, overrideDescendants = true)
+                    .pointerInput(locked) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                // 指针移出窗口后不再绘制，重新进入时由 Enter/Move 补回位置。
+                                if (event.type == PointerEventType.Exit) {
+                                    pointerPosition = null
+                                    continue
+                                }
+                                val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
+                                if (event.type == PointerEventType.Enter ||
+                                    event.type == PointerEventType.Move ||
+                                    event.type == PointerEventType.Press
+                                ) {
+                                    pointerPosition = mouse.position
+                                }
+                                if (event.type == PointerEventType.Press) {
+                                    // 只有指针隐藏时的左键按下唤醒；移动、滚轮、右键与中键不唤醒。
+                                    if (pointerWake.press(latestPointerVisible.value, event.buttons.isPrimaryPressed)) {
+                                        if (locked) lock.tapScreen() else controls.showByUserAction()
+                                    }
+                                } else if (event.type == PointerEventType.Release) {
+                                    pointerWake.onRelease(mouse.uptimeMillis)
+                                }
+                            }
                         }
-                    } else if (event.type == PointerEventType.Release) {
-                        pointerWake.onRelease(mouse.uptimeMillis)
                     }
-                }
-            }
-        }) {
+            } else {
+                Modifier
+            },
+        ),
+    ) {
         val density = LocalDensity.current
         // 视频区始终铺满容器，比例与黑边交给 mpv 在 Surface 内处理。
         val viewport = videoViewport(
@@ -1033,6 +1052,11 @@ fun PlayerScreen(
                 enabled = actionAllowed(PlayerAction.Playlist, phase),
                 onSelect = { media -> panels.selectPlaylistItem(media, onPlaylistSelect) },
             )
+        }
+        // 箭头画在最上层且不接收输入：显隐只跟随当前可见的播放 UI，离开播放页即停止自绘。
+        // 位置在绘制阶段读取，鼠标移动只重绘箭头，不触发组合。
+        if (visible && pointerVisible) {
+            PlayerPointerArrow(position = { pointerPosition }, modifier = Modifier.fillMaxSize())
         }
     }
 }
