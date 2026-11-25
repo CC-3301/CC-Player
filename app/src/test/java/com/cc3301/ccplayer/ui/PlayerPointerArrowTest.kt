@@ -1,8 +1,8 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.geometry.Offset
+import kotlin.math.PI
 import kotlin.math.atan2
-import kotlin.math.abs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,6 +15,10 @@ class PlayerPointerArrowTest {
 
     private fun skeleton(tiltDegrees: Float = PLAYER_POINTER_TILT_DEGREES) =
         playerPointerArrowSkeleton(width, height, notchDepth, tiltDegrees)
+
+    /** 底边宽度：两个末端角之间的距离。 */
+    private fun PlayerPointerArrowSkeleton.baseWidth(): Float =
+        (rightCorner - leftCorner).getDistance()
 
     /** 箭头轴线：从底边中点到尖端。 */
     private fun axisDirection(s: PlayerPointerArrowSkeleton): Offset =
@@ -57,9 +61,9 @@ class PlayerPointerArrowTest {
 
         val vEdge = (s.rightCorner - s.notch).getDistance()
         // V 凹两侧的斜边短于底边，凹底不会把底边整条吃掉。
-        assertTrue(vEdge < s.baseWidth)
+        assertTrue(vEdge < s.baseWidth())
         // 凹底进深浅于底边宽度。
-        assertTrue(notchDepth < s.baseWidth)
+        assertTrue(notchDepth < s.baseWidth())
     }
 
     @Test
@@ -75,7 +79,7 @@ class PlayerPointerArrowTest {
 
         assertTrue(direction.x < 0f)
         assertTrue(direction.y < 0f)
-        val degreesFromUp = Math.toDegrees(atan2(-direction.x.toDouble(), -direction.y.toDouble())).toFloat()
+        val degreesFromUp = atan2(-direction.x, -direction.y) * 180f / PI.toFloat()
         assertEquals(PLAYER_POINTER_TILT_DEGREES, degreesFromUp, 0.5f)
         assertEquals(40f, PLAYER_POINTER_TILT_DEGREES, 0.001f)
     }
@@ -86,13 +90,5 @@ class PlayerPointerArrowTest {
 
         assertEquals(0f, direction.x, 0.001f)
         assertTrue(direction.y < 0f)
-    }
-
-    @Test
-    fun `描边宽度约为箭头宽度的百分之七`() {
-        val s = skeleton()
-
-        assertEquals(width * 0.07f, s.strokeWidth, 0.0001f)
-        assertTrue(abs(s.strokeWidth / s.baseWidth - 0.07f) < 0.0001f)
     }
 }

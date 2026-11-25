@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.ui
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,10 +52,10 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `唤醒手势抬手前一直只用于唤醒`() {
+    fun `指针隐藏时的左键按下只用于唤醒`() {
         val wake = PlayerPointerWake()
-        assertTrue(wake.press(pointerVisible = false, primaryPressed = true))
 
+        assertTrue(wake.press(pointerVisible = false, primaryPressed = true))
         assertTrue(wake.swallows(0L))
         assertTrue(wake.swallows(2_000L))
     }
@@ -103,23 +104,20 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `控制层完全显示时左键按下不是唤醒手势`() {
+    fun `指针可见时的按下不是唤醒手势，控件点击照常执行一次`() {
         val wake = PlayerPointerWake()
-
-        // 控制层已完全显示：这次按下交给控件自己执行，不唤出控制层、也不进入双击窗口。
-        assertFalse(wake.press(pointerVisible = true, primaryPressed = true))
+        // 界面只在 press 返回 true 时唤出播放 UI。
+        var wakeCount = 0
+        if (wake.press(pointerVisible = true, primaryPressed = true)) wakeCount += 1
+        assertEquals(0, wakeCount)
         assertFalse(wake.swallows(0L))
 
+        // 唤醒后的双击窗口内再按下：仍不是新的唤醒手势，控件点击照常执行一次；画面层按窗口吞掉。
+        wake.press(pointerVisible = false, primaryPressed = true)
         wake.onRelease(0L)
-        assertFalse(wake.swallows(0L))
-    }
-
-    @Test
-    fun `指针隐藏时左键按下才算唤醒手势`() {
-        val wake = PlayerPointerWake()
-
-        assertTrue(wake.press(pointerVisible = false, primaryPressed = true))
-        assertTrue(wake.swallows(0L))
+        assertFalse(wake.press(pointerVisible = true, primaryPressed = true))
+        assertEquals(0, wakeCount)
+        assertTrue(wake.swallows(100L))
     }
 
     @Test
@@ -128,15 +126,5 @@ class PlayerPointerVisibilityTest {
 
         assertFalse(wake.press(pointerVisible = false, primaryPressed = false))
         assertFalse(wake.swallows(0L))
-    }
-
-    @Test
-    fun `唤醒后的下一次按下按普通点击处理`() {
-        val wake = PlayerPointerWake()
-        wake.press(pointerVisible = false, primaryPressed = true)
-        wake.onRelease(0L)
-
-        // 指针已由唤醒显示：随后的按下不再算唤醒手势，控件点击照常执行一次。
-        assertFalse(wake.press(pointerVisible = true, primaryPressed = true))
     }
 }
