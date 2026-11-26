@@ -2,7 +2,7 @@ package com.cc3301.ccplayer.ui
 
 /**
  * 播放页指针可见性：普通控制层、锁 UI、播放列表与缓冲 UI 显示或淡出时可见，全部移除时同步隐藏。
- * 不设静止隐藏计时或位移唤醒判据；鼠标静止时由界面状态直接切换自绘箭头的绘制。
+ * 不设静止隐藏计时或位移唤醒判据；鼠标静止时同样由界面状态直接切换指针图标。
  */
 fun playerPointerVisible(
     barsPresent: Boolean,
