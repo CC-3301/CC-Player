@@ -618,10 +618,10 @@ fun PlayerScreen(
     // 指针随当前可见播放 UI 显隐：控制层、锁 UI、播放列表与缓冲 UI 在场即可见，全部移除即隐藏。
     val context = LocalContext.current
     // 系统「无图标」指针：挂上后系统不再绘制指针，鼠标移动也不使其重现。
-    val nullPlatformPointerIcon = remember(context) {
+    val platformNullPointerIcon = remember(context) {
         android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL)
     }
-    val nullPointerIcon = remember(nullPlatformPointerIcon) { PointerIcon(nullPlatformPointerIcon) }
+    val composeNullPointerIcon = remember { PointerIcon(platformNullPointerIcon) }
     val bufferingVisible = bufferingHint(
         kind = bufferingKind,
         buffering = buffering,
@@ -670,10 +670,10 @@ fun PlayerScreen(
                 Modifier
             },
         )
-        // 指针隐藏时把整层图标换成「无图标」：覆盖含视频区在内的整个可见区域，系统不再绘制指针。
+        // 指针隐藏时把整层图标换成「无图标」：覆盖 Compose 侧整个可见区域；视频视图另由下面的 AndroidView 单独切换。
         .then(
             if (pointerHidden) {
-                Modifier.pointerHoverIcon(icon = nullPointerIcon, overrideDescendants = true)
+                Modifier.pointerHoverIcon(icon = composeNullPointerIcon, overrideDescendants = true)
             } else {
                 Modifier
             },
@@ -706,7 +706,7 @@ fun PlayerScreen(
             update = { view ->
                 view.visibility = if (visible) View.VISIBLE else View.INVISIBLE
                 // 视频视图自己解析指针图标：悬停到画面上的指针也要一起换成「无图标」。
-                view.pointerIcon = if (pointerHidden) nullPlatformPointerIcon else null
+                view.pointerIcon = if (pointerHidden) platformNullPointerIcon else null
             },
         )
         // 黑底画在视频视图之后：屏幕上没有可显示的画面时铺黑底（首次打开、片尾恢复、切集无画面、无视频轨）。
