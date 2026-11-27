@@ -547,6 +547,9 @@ class PlaybackControllerBackgroundTest {
         engine.reportPositionChanged(42_000, 600_000)
 
         controller.onSurfaceSizeChanged()
+        // 静默窗口内不发：等最后一次尺寸落定后再重解。
+        assertEquals(0, engine.refreshFrameCalls)
+        advanceTimeBy(PlaybackController.SURFACE_SIZE_SETTLE_MILLIS)
         runCurrent()
 
         // 位置中性刷新：不 seek、不改播放位置、不自动继续。
@@ -572,22 +575,47 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停态连续尺寸变化按最后一次补一次刷新`() = runTest {
+    fun `暂停态连续尺寸变化只按最后一次发一次刷新`() = runTest {
         val controller = pausedController()
         engine.reportPositionChanged(42_000, 600_000)
 
+        // 一批连续变化：每次只重置计时，静默前一次都不发。
         controller.onSurfaceSizeChanged()
-        // 这次恢复还没收尾：先记下，不立刻再发。
+        advanceTimeBy(PlaybackController.SURFACE_SIZE_SETTLE_MILLIS / 2)
         controller.onSurfaceSizeChanged()
+        advanceTimeBy(PlaybackController.SURFACE_SIZE_SETTLE_MILLIS / 2)
+        controller.onSurfaceSizeChanged()
+        runCurrent()
+        assertEquals(0, engine.refreshFrameCalls)
+
+        // 静默后按最后一次尺寸只发一次。
+        advanceTimeBy(PlaybackController.SURFACE_SIZE_SETTLE_MILLIS)
+        runCurrent()
         assertEquals(1, engine.refreshFrameCalls)
 
+        // 之后不再补刷，也不翻转视频输出。
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS)
+        runCurrent()
+        assertEquals(1, engine.refreshFrameCalls)
+        assertEquals(0, engine.flipVideoOutputCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `静默窗口内恢复播放后尺寸变化不刷新`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        controller.onSurfaceSizeChanged()
+        // 计时还没到就恢复播放：播放态不因尺寸变化刷新。
+        controller.resume()
+        advanceTimeBy(PlaybackController.SURFACE_SIZE_SETTLE_MILLIS * 2)
         runCurrent()
 
-        // 收尾后按最后一次尺寸只补一次。
-        assertEquals(2, engine.refreshFrameCalls)
-        runCurrent()
-        assertEquals(2, engine.refreshFrameCalls)
-        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(0, engine.refreshFrameCalls)
     }
 
     @Test
@@ -602,16 +630,22 @@ class PlaybackControllerBackgroundTest {
     }
 
     @Test
-    fun `暂停在片尾时尺寸变化不刷新`() = runTest {
+    fun `暂停在片尾时尺寸变化不刷新也不翻转视频输出`() = runTest {
         val controller = pausedController()
+        // 睡定时等到片尾：暂停在片尾，会话还在。
+        controller.startSleepTimer(SleepTimerOption.EndOfEpisode)
         engine.reportPositionChanged(600_000, 600_000)
         engine.reportPlaybackEnded()
         runCurrent()
+        assertTrue(controller.atEpisodeEnd)
 
         controller.onSurfaceSizeChanged()
+        advanceTimeBy(PlaybackController.SURFACE_RESTORE_WAIT_MILLIS * 2)
         runCurrent()
 
+        // 片尾暂停没有可重解的当前帧：不刷新，也不进恢复等 3 秒翻转视频输出。
         assertEquals(0, engine.refreshFrameCalls)
+        assertEquals(0, engine.flipVideoOutputCalls)
         assertTrue(engine.seekPositions.isEmpty())
     }
 
