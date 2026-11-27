@@ -5,36 +5,31 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.PointerType
 
 /**
- * 指针是否跟随鼠标：任一类播放 UI 在场。
- * 控制层、锁 UI、播放列表与缓冲 UI 任一在场，指针就跟着鼠标走；全部离场指针立刻隐藏。
+ * 指针是否跟随鼠标：普通控制层、锁 UI、播放列表与缓冲 UI 任一项完全可见。
+ * 四项都不可见或已开始淡出时指针立刻隐藏，不参与淡入淡出。
  */
-fun playerPointerUiPresent(
-    barsPresent: Boolean,
-    lockUiPresent: Boolean,
-    playlistPresent: Boolean,
-    bufferingPresent: Boolean,
-): Boolean = barsPresent || lockUiPresent || playlistPresent || bufferingPresent
+fun playerPointerUiVisible(
+    normalControlsVisible: Boolean,
+    lockUiVisible: Boolean,
+    playlistVisible: Boolean,
+    bufferingVisible: Boolean,
+): Boolean = normalControlsVisible || lockUiVisible || playlistVisible || bufferingVisible
 
 /**
- * 这次指针事件是否让指针重新出现并重新计时：只有鼠标悬停移动算。
- * 滚轮、按住拖动、右键与中键都不重置隐藏计时，也不唤出控制层。
+ * 这次指针事件是否让指针重新出现并重新计时：只有鼠标移动算，悬停与按住拖动都算。
+ * 滚轮、右键与中键不重置隐藏计时，也不唤出控制层。
  */
-fun pointerHoverMoveResetsHideTimer(
-    eventType: PointerEventType,
-    pointerType: PointerType,
-    anyButtonPressed: Boolean,
-): Boolean = eventType == PointerEventType.Move &&
-    pointerType == PointerType.Mouse &&
-    !anyButtonPressed
+fun pointerMoveResetsHideTimer(eventType: PointerEventType): Boolean =
+    eventType == PointerEventType.Move
 
 /**
- * 播放页指针可见性：随播放 UI 瞬时显隐，不参与淡出。
+ * 播放页指针可见性：不参与淡入淡出。
  *
- * 播放 UI 在场时指针出现并跟随鼠标，鼠标静止满 [PLAYER_POINTER_HIDE_DELAY_MILLIS] 也隐藏；
- * 播放 UI 全部离场时立刻隐藏。隐藏后鼠标悬停移动即重新出现，不设位移判据。
+ * 普通控制层、锁 UI、播放列表与缓冲 UI 任一项完全可见时指针出现并跟随鼠标，鼠标静止满
+ * [PLAYER_POINTER_HIDE_DELAY_MILLIS] 也隐藏；都不可见或已开始淡出时立刻隐藏。隐藏后鼠标移动
+ * 即重新出现，不设位移判据。
  */
 class PlayerPointerVisibility(
     private val elapsedMillis: () -> Long = { SystemClock.elapsedRealtime() },
@@ -45,18 +40,18 @@ class PlayerPointerVisibility(
     /** 最近一次让指针重新计时的时刻，毫秒。 */
     private var lastActivityAtMillis = elapsedMillis()
 
-    /** 播放 UI 在场：指针出现与跟随鼠标的前提。 */
-    private var uiPresent = false
+    /** 播放 UI 是否有任一项完全可见：指针出现与跟随鼠标的前提。 */
+    private var uiFullyVisible = false
 
-    /** 播放 UI 在场状态变化：在场即出现并重新计时，全部离场立刻隐藏。 */
-    fun onUiPresenceChanged(present: Boolean) {
-        uiPresent = present
-        if (present) show() else hide()
+    /** 播放 UI 的完全可见状态变化：任一完全可见即出现并重新计时，否则立刻隐藏。 */
+    fun onUiVisibleChanged(fullyVisible: Boolean) {
+        uiFullyVisible = fullyVisible
+        if (fullyVisible) show() else hide()
     }
 
-    /** 鼠标悬停移动：指针出现并重新计时。 */
+    /** 鼠标移动（悬停或按住拖动）：指针出现并重新计时。 */
     fun onPointerMove() {
-        if (!uiPresent) return
+        if (!uiFullyVisible) return
         show()
     }
 
@@ -66,9 +61,9 @@ class PlayerPointerVisibility(
         lastActivityAtMillis = elapsedMillis()
     }
 
-    /** 距自动隐藏的剩余毫秒；指针已隐藏时返回 -1。 */
-    fun millisUntilHide(): Long {
-        if (!visible) return -1L
+    /** 距自动隐藏的剩余毫秒；指针已隐藏时为 null。 */
+    fun millisUntilHide(): Long? {
+        if (!visible) return null
         return (PLAYER_POINTER_HIDE_DELAY_MILLIS - (elapsedMillis() - lastActivityAtMillis)).coerceAtLeast(0L)
     }
 

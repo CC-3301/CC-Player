@@ -107,7 +107,6 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.areAnyPressed
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
@@ -533,7 +532,6 @@ fun PlayerScreen(
         firstBuffering = firstBuffering,
     )
     val barsShown = bars.shown
-    val barsPresent = bars.present
     // 面板可见性统一由此判定；不可见的面板不能拦截手势，打开期间切集不关闭面板。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -616,7 +614,7 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 指针随播放 UI 瞬时显隐：UI 在场时跟随鼠标，鼠标静止满 3 秒也隐藏；UI 全部离场立刻隐藏。
+    // 指针不参与淡入淡出：播放 UI 完全可见时跟随鼠标，都不可见或已开始淡出时立刻隐藏。
     val context = LocalContext.current
     // 系统「无图标」指针：挂上后系统不再绘制指针，鼠标移动也不使其重现。
     val platformNullPointerIcon = remember(context) {
@@ -629,26 +627,22 @@ fun PlayerScreen(
         showsPicture = surfacePresentation.showsPicture,
         quietBlack = surfacePresentation.quietBlack,
     )
-    val playbackUiPresent = playerPointerUiPresent(
-        barsPresent = barsPresent,
-        lockUiPresent = locked && lock.unlockVisible,
-        playlistPresent = playlistVisible && panelVisible,
-        bufferingPresent = bufferingVisible,
+    val playbackUiVisible = playerPointerUiVisible(
+        normalControlsVisible = barsShown,
+        lockUiVisible = locked && lock.unlockVisible && !lock.unlockFading,
+        playlistVisible = playlistVisible && panelVisible,
+        bufferingVisible = bufferingVisible,
     )
     val pointer = remember { PlayerPointerVisibility() }
-    LaunchedEffect(playbackUiPresent) {
-        pointer.onUiPresenceChanged(playbackUiPresent)
+    LaunchedEffect(playbackUiVisible) {
+        pointer.onUiVisibleChanged(playbackUiVisible)
     }
     // 静止计时：指针出现后按剩余时间等待，到点隐藏；每次重新出现都重启等待。
     LaunchedEffect(pointer.visible) {
-        if (!pointer.visible) return@LaunchedEffect
         while (true) {
-            val remaining = pointer.millisUntilHide()
-            if (remaining <= 0L) {
-                pointer.hideIfExpired()
-                break
-            }
+            val remaining = pointer.millisUntilHide() ?: break
             delay(remaining)
+            pointer.hideIfExpired()
         }
     }
     val pointerVisible = pointer.visible
@@ -679,16 +673,8 @@ fun PlayerScreen(
 
                                 PointerEventType.Release -> pointerWake.onRelease(mouse.uptimeMillis)
 
-                                // 悬停移动让指针重新出现并重新计时；滚轮、按住拖动与触摸都不算。
-                                else -> if (
-                                    pointerHoverMoveResetsHideTimer(
-                                        eventType = event.type,
-                                        pointerType = mouse.type,
-                                        anyButtonPressed = event.buttons.areAnyPressed,
-                                    )
-                                ) {
-                                    pointer.onPointerMove()
-                                }
+                                // 鼠标移动让指针重新出现并重新计时，悬停与按住拖动都算；滚轮不算。
+                                else -> if (pointerMoveResetsHideTimer(event.type)) pointer.onPointerMove()
                             }
                         }
                     }
@@ -697,11 +683,11 @@ fun PlayerScreen(
                 Modifier
             },
         )
-        // 指针图标二选一：隐藏时整层换成系统「无图标」，覆盖 Compose 侧整个可见区域；
-        // 视频视图另由下面的 AndroidView 单独切换。
+        // 指针图标二选一：隐藏时整层换成系统「无图标」并压过后代，覆盖 Compose 侧整个可见区域；
+        // 可见时回落到系统箭头、不压后代。视频视图另由下面的 AndroidView 单独切换。
         .pointerHoverIcon(
             icon = if (pointerHidden) composeNullPointerIcon else PointerIcon.Default,
-            overrideDescendants = true,
+            overrideDescendants = pointerHidden,
         ),
     ) {
         val density = LocalDensity.current

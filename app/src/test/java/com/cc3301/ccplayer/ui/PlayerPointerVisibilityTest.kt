@@ -1,9 +1,9 @@
 package com.cc3301.ccplayer.ui
 
 import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.PointerType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -13,15 +13,23 @@ class PlayerPointerVisibilityTest {
     private val pointer = PlayerPointerVisibility(elapsedMillis = { now })
 
     private fun uiPresent(
-        barsPresent: Boolean = false,
-        lockUiPresent: Boolean = false,
-        playlistPresent: Boolean = false,
-        bufferingPresent: Boolean = false,
-    ): Boolean = playerPointerUiPresent(barsPresent, lockUiPresent, playlistPresent, bufferingPresent)
+        normalControlsVisible: Boolean = false,
+        lockUiVisible: Boolean = false,
+        playlistVisible: Boolean = false,
+        bufferingVisible: Boolean = false,
+    ): Boolean = playerPointerUiVisible(normalControlsVisible, lockUiVisible, playlistVisible, bufferingVisible)
 
-    /** 进入播放页且播放 UI 在场：指针出现，静止计时从此刻起算。 */
+    /** 普通控制层在场判据：未锁定、抽屉关闭时的顶/底栏完全可见与在场。 */
+    private fun barsOf(controls: PlayerControlsVisibility): PlayerBarsPresence = playerBarsPresence(
+        locked = false,
+        phase = controls.phase,
+        panelBarsVisible = true,
+        firstBuffering = false,
+    )
+
+    /** 进入播放页且播放 UI 完全可见：指针出现，静止计时从此刻起算。 */
     private fun showWithUi() {
-        pointer.onUiPresenceChanged(uiPresent(barsPresent = true))
+        pointer.onUiVisibleChanged(uiPresent(normalControlsVisible = true))
     }
 
     @Test
@@ -30,27 +38,27 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `普通控制层在场时指针跟随鼠标`() {
-        assertTrue(uiPresent(barsPresent = true))
+    fun `普通控制层完全可见时指针跟随鼠标`() {
+        assertTrue(uiPresent(normalControlsVisible = true))
     }
 
     @Test
-    fun `锁 UI 在场时指针跟随鼠标`() {
-        assertTrue(uiPresent(lockUiPresent = true))
+    fun `锁 UI 完全可见时指针跟随鼠标`() {
+        assertTrue(uiPresent(lockUiVisible = true))
     }
 
     @Test
     fun `播放列表打开时指针跟随鼠标`() {
-        assertTrue(uiPresent(playlistPresent = true))
+        assertTrue(uiPresent(playlistVisible = true))
     }
 
     @Test
     fun `缓冲 UI 显示时指针跟随鼠标`() {
-        assertTrue(uiPresent(bufferingPresent = true))
+        assertTrue(uiPresent(bufferingVisible = true))
     }
 
     @Test
-    fun `播放 UI 在场时指针出现`() {
+    fun `播放 UI 完全可见时指针出现`() {
         showWithUi()
 
         assertTrue(pointer.visible)
@@ -58,11 +66,11 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `播放 UI 全部离场时指针立刻隐藏`() {
+    fun `播放 UI 全部不可见时指针立刻隐藏`() {
         showWithUi()
 
         now = 1_000L
-        pointer.onUiPresenceChanged(uiPresent())
+        pointer.onUiVisibleChanged(uiPresent())
 
         assertFalse(pointer.visible)
     }
@@ -79,7 +87,7 @@ class PlayerPointerVisibilityTest {
         pointer.hideIfExpired()
 
         assertFalse(pointer.visible)
-        assertEquals(-1L, pointer.millisUntilHide())
+        assertNull(pointer.millisUntilHide())
     }
 
     @Test
@@ -94,6 +102,23 @@ class PlayerPointerVisibilityTest {
         assertTrue(pointer.visible)
 
         now = 5_000L
+        pointer.hideIfExpired()
+        assertFalse(pointer.visible)
+    }
+
+    @Test
+    fun `拖动中持续移动不隐藏指针`() {
+        showWithUi()
+
+        // 拖动进度条期间指针随每次移动重新计时，不会在拖动中途静止隐藏。
+        repeat(5) {
+            now += 2_000L
+            pointer.onPointerMove()
+            pointer.hideIfExpired()
+            assertTrue(pointer.visible)
+        }
+
+        now += 3_000L
         pointer.hideIfExpired()
         assertFalse(pointer.visible)
     }
@@ -121,7 +146,7 @@ class PlayerPointerVisibilityTest {
 
     @Test
     fun `播放 UI 不在场时鼠标移动不唤出指针`() {
-        pointer.onUiPresenceChanged(uiPresent())
+        pointer.onUiVisibleChanged(uiPresent())
 
         now = 1_000L
         pointer.onPointerMove()
@@ -130,58 +155,37 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `悬停移动重置隐藏计时`() {
-        assertTrue(
-            pointerHoverMoveResetsHideTimer(
-                eventType = PointerEventType.Move,
-                pointerType = PointerType.Mouse,
-                anyButtonPressed = false,
-            ),
-        )
+    fun `控制层淡出后移动鼠标不让指针重新出现`() {
+        val controls = PlayerControlsVisibility(elapsedMillis = { now })
+        pointer.onUiVisibleChanged(uiPresent(normalControlsVisible = barsOf(controls).shown))
+        assertTrue(pointer.visible)
+
+        // 第 4 秒开始淡出：完全可见不再成立，指针立刻隐藏。
+        now = 4_000L
+        controls.beginFadeOutIfExpired()
+        pointer.onUiVisibleChanged(uiPresent(normalControlsVisible = barsOf(controls).shown))
+        assertFalse(pointer.visible)
+
+        // 淡出期间鼠标移动不把指针唤回来。
+        now = 4_500L
+        pointer.onPointerMove()
+        assertFalse(pointer.visible)
     }
 
     @Test
-    fun `按住拖动不重置隐藏计时`() {
-        assertFalse(
-            pointerHoverMoveResetsHideTimer(
-                eventType = PointerEventType.Move,
-                pointerType = PointerType.Mouse,
-                anyButtonPressed = true,
-            ),
-        )
+    fun `鼠标移动与拖动都重置隐藏计时`() {
+        assertTrue(pointerMoveResetsHideTimer(PointerEventType.Move))
     }
 
     @Test
     fun `滚轮不重置隐藏计时`() {
-        assertFalse(
-            pointerHoverMoveResetsHideTimer(
-                eventType = PointerEventType.Scroll,
-                pointerType = PointerType.Mouse,
-                anyButtonPressed = false,
-            ),
-        )
+        assertFalse(pointerMoveResetsHideTimer(PointerEventType.Scroll))
     }
 
     @Test
     fun `右键与中键按下不重置隐藏计时`() {
-        assertFalse(
-            pointerHoverMoveResetsHideTimer(
-                eventType = PointerEventType.Press,
-                pointerType = PointerType.Mouse,
-                anyButtonPressed = true,
-            ),
-        )
-    }
-
-    @Test
-    fun `触摸拖动不重置隐藏计时`() {
-        assertFalse(
-            pointerHoverMoveResetsHideTimer(
-                eventType = PointerEventType.Move,
-                pointerType = PointerType.Touch,
-                anyButtonPressed = false,
-            ),
-        )
+        assertFalse(pointerMoveResetsHideTimer(PointerEventType.Press))
+        assertFalse(pointerMoveResetsHideTimer(PointerEventType.Release))
     }
 
     @Test
@@ -237,20 +241,17 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `指针可见时的按下不是唤醒手势，控件点击照常执行一次`() {
+    fun `播放 UI 完全可见时第一次左键按下交给控件且只执行一次`() {
         val wake = PlayerPointerWake()
-        // 界面只在 press 返回 true 时唤出播放 UI。
-        var wakeCount = 0
-        if (wake.press(pointerVisible = true, primaryPressed = true)) wakeCount += 1
-        assertEquals(0, wakeCount)
-        assertFalse(wake.swallows(0L))
+        var executions = 0
 
-        // 唤醒后的双击窗口内再按下：仍不是新的唤醒手势，控件点击照常执行一次；画面层按窗口吞掉。
-        wake.press(pointerVisible = false, primaryPressed = true)
+        // 控件点击：指针可见，这次按下不进唤醒手势，手势层也不吞它，控件只执行一次。
+        if (!wake.press(pointerVisible = true, primaryPressed = true)) executions += 1
         wake.onRelease(0L)
-        assertFalse(wake.press(pointerVisible = true, primaryPressed = true))
-        assertEquals(0, wakeCount)
-        assertTrue(wake.swallows(100L))
+
+        assertEquals(1, executions)
+        assertFalse(wake.swallows(0L))
+        assertFalse(wake.swallows(300L))
     }
 
     @Test
