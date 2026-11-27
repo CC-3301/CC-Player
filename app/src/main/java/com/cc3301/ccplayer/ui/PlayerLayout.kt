@@ -293,6 +293,9 @@ val PlayerSeekHintLineGap = 6.dp
 /** 拖动跳转的像素死区：从最后一次下发 seek 的手指位置起算，越过它才再下发一次；预览目标不受它影响。 */
 val PlayerSeekDragDeadZone = 3.dp
 
+/** 播放页指针静止隐藏时长：播放 UI 在场时鼠标静止满这段时间也隐藏指针，毫秒。 */
+const val PLAYER_POINTER_HIDE_DELAY_MILLIS = 3_000L
+
 /** 预览保留的最长时间，避免 seek 未回传时时间停在旧值，毫秒。 */
 const val SEEK_PREVIEW_HOLD_MILLIS = 5_000L
 

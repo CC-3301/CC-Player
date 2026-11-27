@@ -532,7 +532,6 @@ fun PlayerScreen(
         firstBuffering = firstBuffering,
     )
     val barsShown = bars.shown
-    val barsPresent = bars.present
     // 面板可见性统一由此判定；不可见的面板不能拦截手势，打开期间切集不关闭面板。
     val panelVisible = panelVisible(
         anyOpen = panels.anyOpen,
@@ -615,7 +614,7 @@ fun PlayerScreen(
         if (seekPreviewMillis == null) seekHint = null
     }
 
-    // 指针随当前可见播放 UI 显隐：控制层、锁 UI、播放列表与缓冲 UI 在场即可见，全部移除即隐藏。
+    // 指针不参与淡入淡出：播放 UI 完全可见时跟随鼠标，都不可见或已开始淡出时立刻隐藏。
     val context = LocalContext.current
     // 系统「无图标」指针：挂上后系统不再绘制指针，鼠标移动也不使其重现。
     val platformNullPointerIcon = remember(context) {
@@ -628,16 +627,29 @@ fun PlayerScreen(
         showsPicture = surfacePresentation.showsPicture,
         quietBlack = surfacePresentation.quietBlack,
     )
-    val pointerVisible = playerPointerVisible(
-        barsPresent = barsPresent,
-        lockUiPresent = locked && lock.unlockVisible,
-        playlistPresent = playlistVisible && panelVisible,
-        bufferingPresent = bufferingVisible,
+    val playbackUiVisible = playerPointerUiVisible(
+        normalControlsVisible = barsShown,
+        lockUiVisible = locked && lock.unlockVisible && !lock.unlockFading,
+        playlistVisible = playlistVisible && panelVisible,
+        bufferingVisible = bufferingVisible,
     )
-    // 指针隐藏条件：在播放页且没有可见播放 UI；离开播放页恢复系统指针。
+    val pointer = remember { PlayerPointerVisibility() }
+    LaunchedEffect(playbackUiVisible) {
+        pointer.onUiVisibleChanged(playbackUiVisible)
+    }
+    // 静止计时：指针出现后按剩余时间等待，到点隐藏；每次重新出现都重启等待。
+    LaunchedEffect(pointer.visible) {
+        while (true) {
+            val remaining = pointer.millisUntilHide() ?: break
+            delay(remaining)
+            pointer.hideIfExpired()
+        }
+    }
+    val pointerVisible = pointer.visible
+    // 指针隐藏条件：在播放页且指针不可见；离开播放页恢复系统指针。
     val pointerHidden = visible && !pointerVisible
     val pointerWake = remember { PlayerPointerWake() }
-    val latestPointerVisible = rememberUpdatedState(pointerVisible)
+    val latestPlaybackUiVisible = rememberUpdatedState(playbackUiVisible)
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
@@ -649,19 +661,26 @@ fun PlayerScreen(
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
-                            if (event.type != PointerEventType.Press &&
-                                event.type != PointerEventType.Release
-                            ) {
-                                continue
-                            }
                             val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
-                            if (event.type == PointerEventType.Press) {
-                                // 只有指针隐藏时的左键按下唤醒；移动、滚轮、右键与中键不唤醒。
-                                if (pointerWake.press(latestPointerVisible.value, event.buttons.isPrimaryPressed)) {
-                                    if (locked) lock.tapScreen() else controls.showByUserAction()
+                            when (event.type) {
+                                // 播放 UI 完全不可见时的左键只用于唤醒；右键与中键不唤醒。
+                                PointerEventType.Press -> {
+                                    if (
+                                        pointerWake.press(
+                                            playbackUiVisible = latestPlaybackUiVisible.value,
+                                            primaryPressed = event.buttons.isPrimaryPressed,
+                                        )
+                                    ) {
+                                        if (locked) lock.tapScreen() else controls.showByUserAction()
+                                    }
+                                    // 左键按下让指针立刻出现：收起时随唤醒出现，完全可见时抹掉静止隐藏。
+                                    if (event.buttons.isPrimaryPressed) pointer.show()
                                 }
-                            } else {
-                                pointerWake.onRelease(mouse.uptimeMillis)
+
+                                PointerEventType.Release -> pointerWake.onRelease(mouse.uptimeMillis)
+
+                                // 鼠标移动让指针重新出现并重新计时，悬停与按住拖动都算；滚轮不算。
+                                else -> if (pointerMoveResetsHideTimer(event.type)) pointer.onPointerMove()
                             }
                         }
                     }
@@ -670,13 +689,11 @@ fun PlayerScreen(
                 Modifier
             },
         )
-        // 指针隐藏时把整层图标换成「无图标」：覆盖 Compose 侧整个可见区域；视频视图另由下面的 AndroidView 单独切换。
-        .then(
-            if (pointerHidden) {
-                Modifier.pointerHoverIcon(icon = composeNullPointerIcon, overrideDescendants = true)
-            } else {
-                Modifier
-            },
+        // 指针图标二选一：隐藏时整层换成系统「无图标」并压过后代，覆盖 Compose 侧整个可见区域；
+        // 可见时回落到系统箭头、不压后代。视频视图另由下面的 AndroidView 单独切换。
+        .pointerHoverIcon(
+            icon = if (pointerHidden) composeNullPointerIcon else PointerIcon.Default,
+            overrideDescendants = pointerHidden,
         ),
     ) {
         val density = LocalDensity.current
