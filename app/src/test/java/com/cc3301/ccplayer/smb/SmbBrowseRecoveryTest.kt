@@ -63,13 +63,20 @@ class SmbBrowseRecoveryTest {
         val playback = playbackRead()
         connector.listFailure = TransportException(TimeoutException("读超时"))
         connector.listFailureTimes = 1
+        var sessionsWhileBrowsing = 0
+        connector.duringList = {
+            connector.duringList = null
+            sessionsWhileBrowsing = connector.liveSessions
+        }
 
         val entries = library.list(directory).getOrThrow()
 
         assertEquals(listOf(movie), entries.map { it.location })
+        assertEquals("只重发一次", 2, connector.listCalls)
+        assertEquals("浏览侧新建自己的会话，播放那条照常在用", 2, sessionsWhileBrowsing)
+        assertEquals("只作废浏览自己的会话", listOf("media"), connector.closedShares)
         assertEquals("不换传输", 1, connector.transports.size)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
-        assertEquals("只重发一次", 2, connector.shares.size)
         playback.close()
     }
 
@@ -96,7 +103,7 @@ class SmbBrowseRecoveryTest {
         val result = library.list(directory)
 
         assertTrue("失败交给列表显示", result.isFailure)
-        assertEquals("只重发一次", 2, connector.shares.size)
+        assertEquals("只重发一次", 2, connector.listCalls)
         assertEquals("不换传输", 1, connector.transports.size)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
         playback.close()

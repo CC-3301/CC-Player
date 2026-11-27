@@ -64,8 +64,18 @@ class FakeSmbConnector : SmbConnector {
     /** 建连期间执行；测试用它把建连卡住，观察关闭是否等重连。 */
     var duringConnect: (() -> Unit)? = null
 
+    /** 存活确认期间执行；测试用它在这段窗口里插入别的取用。 */
+    var duringPing: (suspend () -> Unit)? = null
+
+    /** 会话握手期间执行；测试用它把握手卡在途，观察传输会不会被断开。 */
+    var duringConnectShare: (suspend () -> Unit)? = null
+
     /** 存活确认的次数。 */
     var pings: Int = 0
+        private set
+
+    /** 列目录请求的次数：用来断言重发了多少次，与建了几条会话无关。 */
+    var listCalls: Int = 0
         private set
 
     /** 最近一次存活确认给的上限。 */
@@ -92,6 +102,9 @@ class FakeSmbConnector : SmbConnector {
 
     /** 被关掉的会话属于哪个共享，用来断言淘汰选中了哪一条会话。 */
     val closedShares = CopyOnWriteArrayList<String>()
+
+    /** 还活着的会话条数：已握手减去已关闭的，与会话层是否复用了播放那条无关。 */
+    val liveSessions: Int get() = shares.size - closedShares.size
 
     fun addDirectory(share: String, path: String, vararg children: SmbEntry): FakeSmbConnector {
         childrenByPath["$share/$path"] = children.toList()
@@ -133,6 +146,7 @@ class FakeSmbConnector : SmbConnector {
             private set
 
         override suspend fun connectShare(share: String, username: String, password: String?): SmbConnection {
+            duringConnectShare?.invoke()
             logins += username to password
             shares += share
             return FakeSmbConnection(share)
@@ -149,6 +163,7 @@ class FakeSmbConnector : SmbConnector {
     private inner class FakeSmbConnection(private val share: String) : SmbConnection {
 
         override suspend fun list(path: String): List<SmbEntry> {
+            listCalls++
             duringList?.invoke()
             listFailure?.let { failure ->
                 if (listFailureTimes <= 0) return childrenByPath["$share/$path"].orEmpty()
@@ -184,7 +199,9 @@ class FakeSmbConnector : SmbConnector {
         override suspend fun ping(timeoutMillis: Long) {
             pings++
             lastPingTimeout = timeoutMillis
-            pingFailure?.let { throw it }
+            val failure = pingFailure
+            duringPing?.invoke()
+            failure?.let { throw it }
         }
 
         override fun close() {
