@@ -3043,10 +3043,10 @@ class PlaybackController(
 
         /**
          * 画面容器尺寸变化的静默窗口：静默这么久才按当前尺寸刷新一次。
-         * 0.1 秒是「瞬时」感知阈值，孤立变化不产生可感知延迟；转屏与窗口拖拽的连续尺寸回调
-         * 间隔都小于它，计时被重置，一批变化只发一次刷新。
+         * 取两帧，连续尺寸回调的间隔小于它，计时被重置，一批变化只发一次刷新；
+         * 窗口越长，暂停态下旧画面被拉成新视口的时间越长。
          */
-        const val SURFACE_SIZE_SETTLE_MILLIS = 100L
+        const val SURFACE_SIZE_SETTLE_MILLIS = 32L
 
         /** 切集结束、状态已就绪却还没上屏时，等新帧的总窗口。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
