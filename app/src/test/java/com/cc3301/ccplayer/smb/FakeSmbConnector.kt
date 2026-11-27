@@ -74,6 +74,10 @@ class FakeSmbConnector : SmbConnector {
     var pings: Int = 0
         private set
 
+    /** 列目录请求的次数：用来断言重发了多少次，与建了几条会话无关。 */
+    var listCalls: Int = 0
+        private set
+
     /** 最近一次存活确认给的上限。 */
     var lastPingTimeout: Long = 0
         private set
@@ -98,6 +102,9 @@ class FakeSmbConnector : SmbConnector {
 
     /** 被关掉的会话属于哪个共享，用来断言淘汰选中了哪一条会话。 */
     val closedShares = CopyOnWriteArrayList<String>()
+
+    /** 还活着的会话条数：已握手减去已关闭的，与会话层是否复用了播放那条无关。 */
+    val liveSessions: Int get() = shares.size - closedShares.size
 
     fun addDirectory(share: String, path: String, vararg children: SmbEntry): FakeSmbConnector {
         childrenByPath["$share/$path"] = children.toList()
@@ -156,6 +163,7 @@ class FakeSmbConnector : SmbConnector {
     private inner class FakeSmbConnection(private val share: String) : SmbConnection {
 
         override suspend fun list(path: String): List<SmbEntry> {
+            listCalls++
             duringList?.invoke()
             listFailure?.let { failure ->
                 if (listFailureTimes <= 0) return childrenByPath["$share/$path"].orEmpty()

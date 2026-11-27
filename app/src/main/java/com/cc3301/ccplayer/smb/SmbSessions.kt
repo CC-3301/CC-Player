@@ -75,7 +75,7 @@ class SmbSessions(
 
     /** 起播前探测：取到会话即交回，播放随后复用同一条。 */
     suspend fun probe(target: SmbTarget) {
-        acquire(target, playbackFlow = false).release()
+        acquire(target, lease = null).release()
     }
 
     /**
@@ -84,7 +84,7 @@ class SmbSessions(
      * 重发只有一次：第二次失败原样抛出。会话建立失败不重发：建立预算只算一次。
      */
     suspend fun <T> use(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
-        val first = acquire(target, playbackFlow = false)
+        val first = acquire(target, lease = null)
         try {
             return request(first.connection)
         } catch (cancellation: CancellationException) {
@@ -97,7 +97,7 @@ class SmbSessions(
                     first.discardSession()
                 }
                 SmbFailureScope.Transport -> {
-                    if (!first.mayReplaceTransport(playbackFlow = false)) {
+                    if (!first.mayReplaceTransport()) {
                         // 播放持有读取租约：不能换也不能关这条传输，只作废自己的会话后重发一次。
                         diagnostics.log { "SMB 请求失败，播放持有读取租约，只作废本次会话后重发: ${target.share}" }
                         first.discardSession()
@@ -129,22 +129,23 @@ class SmbSessions(
      * 打开读句柄；已拿到会话后打开句柄失败，按失败范围重建一次。
      * 建立会话不在重发范围：建立失败直接抛出。
      *
-     * 播放读取租约在这里就登记，覆盖随后的存活确认、会话重建、握手与打开读句柄；
-     * 不是读句柄打开成功后才登记，否则这段窗口里浏览操作会把播放刚建好的传输换掉。
+     * 播放读取租约在这里就占上，覆盖随后的存活确认、会话重建、握手与打开读句柄；
+     * 不是读句柄打开成功后才占上，否则这段窗口里浏览操作会把播放刚建好的传输换掉。
      */
     private suspend fun open(target: SmbTarget, playbackLease: Boolean): ByteSource {
-        if (playbackLease) transports.beginPlaybackRead(target.host, target.port)
+        // 租约在这里占上：随后的存活确认、会话重建、握手与打开读句柄都在租约内。
+        val lease = if (playbackLease) PlaybackReadLease(target) else null
         return try {
-            openSource(target, playbackLease).also {
+            openSource(target, lease).also {
                 // 新的播放读打开成功：上一次失败到此为止，不再参与传输恢复判定。
-                if (playbackLease) playbackFailures.clear(target.url)
+                if (lease != null) playbackFailures.clear(target.url)
             }
         } catch (cancellation: CancellationException) {
-            if (playbackLease) transports.endPlaybackRead(target.host, target.port)
+            lease?.release()
             throw cancellation
         } catch (failure: Throwable) {
-            if (playbackLease) {
-                transports.endPlaybackRead(target.host, target.port)
+            if (lease != null) {
+                lease.release()
                 notePlaybackOpenFailure(target, failure)
             }
             throw failure
@@ -152,10 +153,10 @@ class SmbSessions(
     }
 
     /** 打开读句柄；播放读的读源带上失败分类出口。 */
-    private suspend fun openSource(target: SmbTarget, playbackLease: Boolean): ByteSource {
-        val session = acquire(target, playbackLease)
+    private suspend fun openSource(target: SmbTarget, lease: PlaybackReadLease?): ByteSource {
+        val session = acquire(target, lease)
         val opened = try {
-            ReadLease(session, session.connection.openRead(target.path), playbackLease, target)
+            ReadLease(session, session.connection.openRead(target.path), lease)
         } catch (cancellation: CancellationException) {
             session.release()
             throw cancellation
@@ -171,7 +172,7 @@ class SmbSessions(
                     session.release()
                 }
                 SmbFailureScope.Transport -> {
-                    if (!session.mayReplaceTransport(playbackLease)) {
+                    if (!session.mayReplaceTransport()) {
                         diagnostics.log { "SMB 打开失败，播放持有读取租约，只作废本次会话: ${target.share}" }
                         session.discardSession()
                         session.release()
@@ -182,17 +183,17 @@ class SmbSessions(
                     session.release()
                 }
             }
-            reopenRead(target, playbackLease)
+            reopenRead(target, lease)
         }
-        return SmbStreamSource(opened, playbackFailureRecorder(target, playbackLease))
+        return SmbStreamSource(opened, playbackFailureRecorder(target, lease))
     }
 
     /** 播放读的失败分类出口；浏览与封面的读不记。 */
     private fun playbackFailureRecorder(
         target: SmbTarget,
-        playbackLease: Boolean,
+        lease: PlaybackReadLease?,
     ): ((SmbPlaybackFailure) -> Unit)? =
-        if (!playbackLease) {
+        if (lease == null) {
             null
         } else {
             { failure -> playbackFailures.note(target.url, failure) }
@@ -216,13 +217,13 @@ class SmbSessions(
 
     /** 重发一次；第二次仍是本地传输失效就淘汰这条传输，失败原样抛出。 */
     private suspend fun <T> resendUse(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
-        val retry = acquire(target, playbackFlow = false)
+        val retry = acquire(target, lease = null)
         try {
             return request(retry.connection)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (failure: Throwable) {
-            discardAfterFailure(retry, failure, playbackFlow = false)
+            discardAfterFailure(retry, failure)
             throw failure
         } finally {
             retry.release()
@@ -230,38 +231,36 @@ class SmbSessions(
     }
 
     /** 重连一次后打开句柄；这次建立失败同样不重试，失败原样抛出。 */
-    private suspend fun reopenRead(target: SmbTarget, playbackLease: Boolean): ReadLease {
-        val lease = acquire(target, playbackLease)
+    private suspend fun reopenRead(target: SmbTarget, lease: PlaybackReadLease?): ReadLease {
+        val session = acquire(target, lease)
         return try {
-            ReadLease(lease, lease.connection.openRead(target.path), playbackLease, target)
+            ReadLease(session, session.connection.openRead(target.path), lease)
         } catch (cancellation: CancellationException) {
-            lease.release()
+            session.release()
             throw cancellation
         } catch (failure: Throwable) {
-            discardAfterFailure(lease, failure, playbackLease)
-            lease.release()
+            discardAfterFailure(session, failure)
+            session.release()
             throw failure
         }
     }
 
     /** 复用的会话先占一个引用再确认存活；确认失败只作废本次会话并在同一传输上重建。 */
-    private suspend fun acquire(target: SmbTarget, playbackFlow: Boolean): SessionLease {
+    private suspend fun acquire(target: SmbTarget, lease: PlaybackReadLease?): SessionLease {
         val key = SessionKey.of(target)
-        val reused = reuse(key, playbackFlow)
-        if (reused != null) {
-            try {
-                reused.connection.ping(ALIVE_CHECK_MILLIS)
-            } catch (cancellation: CancellationException) {
-                endPlaybackRead(reused, playbackFlow)
-                release(reused)
-                throw cancellation
-            } catch (failure: Throwable) {
-                return rebuildAfterAliveCheck(key, target, reused, failure, playbackFlow)
-            }
-            diagnostics.log { "SMB 会话取用: $key (在用 ${reused.inUse})" }
-            return SessionLease(reused, playbackFlow)
+        val reused = reuse(key, lease)
+        if (reused == null) return SessionLease(establish(key, target, lease = lease), lease)
+        val held = SessionLease(reused, lease)
+        try {
+            reused.connection.ping(ALIVE_CHECK_MILLIS)
+        } catch (cancellation: CancellationException) {
+            held.release()
+            throw cancellation
+        } catch (failure: Throwable) {
+            return rebuildAfterAliveCheck(key, target, held, failure, lease)
         }
-        return SessionLease(establish(key, target, playbackFlow = playbackFlow), playbackFlow)
+        diagnostics.log { "SMB 会话取用: $key (在用 ${reused.inUse})" }
+        return held
     }
 
     /**
@@ -275,30 +274,31 @@ class SmbSessions(
     private suspend fun rebuildAfterAliveCheck(
         key: SessionKey,
         target: SmbTarget,
-        reused: Session,
+        held: SessionLease,
         failure: Throwable,
-        playbackFlow: Boolean,
+        lease: PlaybackReadLease?,
     ): SessionLease = when (smbFailureScope(failure)) {
         SmbFailureScope.None -> {
-            endPlaybackRead(reused, playbackFlow)
-            release(reused)
+            held.release()
             throw failure
         }
 
         SmbFailureScope.Session, SmbFailureScope.Transport -> {
-            val transport = transports.acquire(target.host, target.port)
-            // 这次取用自己标在会话上的播放读取先交还：作废的是本次取用。
-            endPlaybackRead(reused, playbackFlow)
-            invalidate(reused, keepForPlayback = !playbackFlow)
-            release(reused)
+            // 先占住这条传输：旧会话交还引用时它不会掉到零。传输建不起来时这次取用就此结束，
+            // 会话引用与播放读取照常交还，计数不留在半途。
+            val transport = try {
+                transports.acquire(target.host, target.port)
+            } catch (failure: Throwable) {
+                held.release()
+                throw failure
+            }
+            // 作废的是本次取用：先交还这次取用的播放读取，再从会话表摘掉这条会话。
+            held.discardSession()
+            held.release()
             diagnostics.log { "SMB 会话存活确认失败，作废会话重建: $key" }
-            SessionLease(establish(key, target, transport, playbackFlow), playbackFlow)
+            SessionLease(establish(key, target, transport, lease), lease)
         }
     }
-
-    /** 本地传输失效时能否换掉这条传输：播放自己的故障流程可以，浏览操作只在没有播放读取租约时可以。 */
-    private fun mayReplaceTransport(session: Session, playbackFlow: Boolean): Boolean =
-        playbackFlow || !session.transport.playbackLeaseHeld
 
     /**
      * 失败之后作废到哪一层：本地传输失效且关闭权允许时连这条传输一起淘汰，否则只作废会话；
@@ -307,12 +307,12 @@ class SmbSessions(
      * 一次本地传输失效已经说明这条传输不可用；同一个 host:port 上再次确认传输失效时不淘汰它，
      * 就等于把已失效的传输留在共享表里等下一次取用。
      */
-    private fun discardAfterFailure(lease: SessionLease, failure: Throwable, playbackFlow: Boolean) {
+    private fun discardAfterFailure(held: SessionLease, failure: Throwable) {
         when (smbFailureScope(failure)) {
             SmbFailureScope.None -> Unit
-            SmbFailureScope.Session -> lease.discardSession()
+            SmbFailureScope.Session -> held.discardSession()
             SmbFailureScope.Transport ->
-                if (lease.mayReplaceTransport(playbackFlow)) lease.discardTransport() else lease.discardSession()
+                if (held.mayReplaceTransport()) held.discardTransport() else held.discardSession()
         }
     }
 
@@ -320,13 +320,13 @@ class SmbSessions(
      * 从表里挑一条可用的会话并占一个引用。
      * 浏览侧不拿播放正在读的那条：拿它做存活确认，失败就会把它当成自己的作废掉。
      */
-    private fun reuse(key: SessionKey, playbackFlow: Boolean): Session? = synchronized(lock) {
-        val session = sessions[key]?.lastOrNull { it.usableBy(playbackFlow) } ?: return null
+    private fun reuse(key: SessionKey, lease: PlaybackReadLease?): Session? = synchronized(lock) {
+        val session = sessions[key]?.lastOrNull { it.usableBy(lease != null) } ?: return null
         session.idleJob?.cancel()
         session.idleJob = null
         session.inUse++
         session.lastUsedAt = clock()
-        if (playbackFlow) session.beginPlaybackRead()
+        lease?.attachLocked(session)
         session
     }
 
@@ -334,28 +334,27 @@ class SmbSessions(
         key: SessionKey,
         target: SmbTarget,
         transport: SmbTransports.TransportLease? = null,
-        playbackFlow: Boolean = false,
+        lease: PlaybackReadLease? = null,
     ): Session {
         val started = clock()
         val established = establishWithinBudget(target, transport)
         val registration = synchronized(lock) {
-            val current = sessions[key]?.lastOrNull { it.usableBy(playbackFlow) }
+            val current = sessions[key]?.lastOrNull { it.usableBy(lease != null) }
             val adopted = if (current != null) {
                 // 并发建连：留先登记的那条，自己这条没用上。
                 current.idleJob?.cancel()
                 current.idleJob = null
                 current.inUse++
                 current.lastUsedAt = clock()
-                if (playbackFlow) current.beginPlaybackRead()
                 current
             } else {
                 val fresh = Session(key, established.connection, established.transport)
                 fresh.inUse = 1
                 fresh.lastUsedAt = clock()
-                if (playbackFlow) fresh.beginPlaybackRead()
                 sessions.getOrPut(key) { mutableListOf() } += fresh
                 fresh
             }
+            lease?.attachLocked(adopted)
             Registration(adopted, evictBeyondLimitLocked(exclude = key))
         }
         if (registration.session.connection !== established.connection) established.discard()
@@ -450,7 +449,7 @@ class SmbSessions(
             session.invalidated = true
             session.idleJob?.cancel()
             session.idleJob = null
-            if (!keepForPlayback || session.playbackReads == 0) removeLocked(session)
+            if (!keepForPlayback || session.sessionPlaybackReads == 0) removeLocked(session)
         }
     }
 
@@ -463,12 +462,6 @@ class SmbSessions(
         val list = sessions[session.key] ?: return
         list.removeAll { it === session }
         if (list.isEmpty()) sessions.remove(session.key)
-    }
-
-    /** 交还这条取用自己标上的播放读取；不是播放读的取用不动计数。 */
-    private fun endPlaybackRead(session: Session, playbackFlow: Boolean) {
-        if (!playbackFlow) return
-        synchronized(lock) { session.endPlaybackRead() }
     }
 
     /**
@@ -493,7 +486,7 @@ class SmbSessions(
      */
     private fun evictBeyondLimitLocked(exclude: SessionKey): List<Session> {
         val evicted = ArrayList<Session>()
-        while (sessions.values.sumOf { it.size } > maxSessions) {
+        while (sessions.size > maxSessions) {
             val oldest = sessions.entries
                 .filter { entry -> entry.key != exclude }
                 .flatMap { entry -> entry.value }
@@ -529,8 +522,8 @@ class SmbSessions(
         /** 正在使用的引用数；不为 0 时不得关闭。 */
         var inUse = 0
 
-        /** 播放读取引用数；不为 0 时浏览侧不取用这条会话，也不把它从会话表摘除。 */
-        var playbackReads = 0
+        /** 会话级的播放读取租约数；不为 0 时浏览侧不取用这条会话，也不把它从会话表摘除。 */
+        var sessionPlaybackReads = 0
 
         /** 最近一次取用或归零的时刻。 */
         var lastUsedAt = 0L
@@ -545,77 +538,114 @@ class SmbSessions(
         var invalidated = false
 
         /** 这条会话能否交给这次取用：已作废的不行，浏览侧还要避开播放正在读的那条。 */
-        fun usableBy(playbackFlow: Boolean): Boolean = !invalidated && (playbackFlow || playbackReads == 0)
+        fun usableBy(playbackFlow: Boolean): Boolean = !invalidated && (playbackFlow || sessionPlaybackReads == 0)
 
-        /** 播放读取登记；只在会话层的锁内调用。 */
-        fun beginPlaybackRead() {
-            playbackReads += 1
+        /** 会话级播放读取登记；只在会话层的锁内、由播放读取租约调用。 */
+        fun beginSessionPlaybackRead() {
+            sessionPlaybackReads += 1
         }
 
-        /** 播放读取交还；只在会话层的锁内调用。 */
-        fun endPlaybackRead() {
-            playbackReads -= 1
+        /** 会话级播放读取交还；只在会话层的锁内、由播放读取租约调用。 */
+        fun endSessionPlaybackRead() {
+            sessionPlaybackReads -= 1
+        }
+    }
+
+    /**
+     * 播放读取租约：一次播放读从取用到句柄关闭，占住当前的会话与它所在的共享传输。
+     *
+     * 构造时占两个标记、[release] 时一起还，调用方不各自配对：会话级标记按会话身份记，
+     * 让浏览侧不取用也不摘除这条会话；服务器＋端口级标记按传输记，让浏览操作换不掉这条传输。
+     * 取用开始时会话与传输都可能还没建好，因此先只占服务器＋端口级标记，取到会话后由 [attachLocked]
+     * 挂上会话级标记；会话重建换了会话时，标记跟着搬到新会话。
+     */
+    private inner class PlaybackReadLease(private val target: SmbTarget) {
+
+        private val released = AtomicBoolean(false)
+
+        /** 挂着会话级标记的那条会话；只在会话层的锁内读写。 */
+        private var held: Session? = null
+
+        init {
+            transports.beginTransportPlaybackRead(target.host, target.port)
+        }
+
+        /** 把会话级标记挂到 [session] 上，换会话时先摘旧的；只在会话层的锁内调用。 */
+        fun attachLocked(session: Session) {
+            val previous = held
+            if (previous === session) return
+            previous?.endSessionPlaybackRead()
+            session.beginSessionPlaybackRead()
+            held = session
+        }
+
+        /** 摘掉会话级标记：会话此后可当作没有播放在读；只在会话层的锁内调用。 */
+        fun detachLocked() {
+            held?.endSessionPlaybackRead()
+            held = null
+        }
+
+        /** 唯一出口：两个标记一起还，重复调用没有效果。 */
+        fun release() {
+            if (!released.compareAndSet(false, true)) return
+            synchronized(lock) { detachLocked() }
+            transports.endTransportPlaybackRead(target.host, target.port)
         }
     }
 
     /** 一次取用：占用会话与它下面的传输直到释放。 */
-    private inner class SessionLease(val session: Session, private val playbackFlow: Boolean) {
+    private inner class SessionLease(val session: Session, private val lease: PlaybackReadLease?) {
 
         val connection: SmbConnection get() = session.connection
 
         private val released = AtomicBoolean(false)
 
-        private val playbackEnded = AtomicBoolean(false)
-
-        /**
-         * 本次取用的播放读取标记只交还一次：作废路径先交还，随后的释放不再重复减。
-         * 标记交还之后，会话才可能被当作"没有播放在读"作废或关闭。
-         */
-        private fun endPlaybackRead() {
-            if (!playbackEnded.compareAndSet(false, true)) return
-            this@SmbSessions.endPlaybackRead(session, playbackFlow)
-        }
+        /** 本地传输失效时能否换掉这条传输：播放自己的故障流程可以，浏览操作只在没有播放读取租约时可以。 */
+        fun mayReplaceTransport(): Boolean = lease != null || !session.transport.playbackLeaseHeld
 
         /** 会话失效：不再发给新的取用方；播放正在读的那条由 invalidate 决定留不留在表里。 */
         fun discardSession() {
-            endPlaybackRead()
-            invalidate(session, keepForPlayback = !playbackFlow)
+            detachPlaybackRead()
+            invalidate(session, keepForPlayback = lease == null)
         }
 
         /** 本地传输失效：会话与这条传输一起作废，下一次取用建新传输。 */
         fun discardTransport() {
-            endPlaybackRead()
-            invalidate(session, keepForPlayback = !playbackFlow)
+            detachPlaybackRead()
+            invalidate(session, keepForPlayback = lease == null)
             session.transport.discard()
         }
 
-        /** 本地传输失效时能否换掉这条传输。 */
-        fun mayReplaceTransport(playbackFlow: Boolean): Boolean =
-            this@SmbSessions.mayReplaceTransport(session, playbackFlow)
-
         fun release() {
             if (!released.compareAndSet(false, true)) return
-            endPlaybackRead()
+            detachPlaybackRead()
             this@SmbSessions.release(session)
+        }
+
+        /**
+         * 交还这次取用的会话级播放读取；不是播放读的取用不动计数，交还过的再调也没有效果。
+         * 交还之后会话才可能被当作"没有播放在读"作废或关闭。
+         */
+        private fun detachPlaybackRead() {
+            synchronized(lock) { lease?.detachLocked() }
         }
     }
 
     /**
      * 交给读源的一次打开：句柄、会话占用与（播放读的）读取租约。
-     * 播放读取租约在取用开始时已经登记，这里只在关闭或作废时交还。
+     * 播放读取租约在取用开始时已经占上，这里只在关闭或作废时交还。
      */
     private inner class ReadLease(
         private val lease: SessionLease,
         override val handle: SmbReadHandle,
-        private val playbackLease: Boolean,
-        private val target: SmbTarget,
+        private val playbackLease: PlaybackReadLease?,
     ) : SmbReadLease {
 
         private val closed = AtomicBoolean(false)
 
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
-            if (playbackLease) transports.endPlaybackRead(target.host, target.port)
+            playbackLease?.release()
             runCatching { handle.close() }
             lease.release()
         }
@@ -627,8 +657,8 @@ class SmbSessions(
          */
         override fun discard(failure: Throwable?) {
             if (!closed.compareAndSet(false, true)) return
-            if (playbackLease) transports.endPlaybackRead(target.host, target.port)
-            if (failure == null) lease.discardSession() else discardAfterFailure(lease, failure, playbackLease)
+            playbackLease?.release()
+            if (failure == null) lease.discardSession() else discardAfterFailure(lease, failure)
             runCatching { handle.close() }
             lease.release()
         }

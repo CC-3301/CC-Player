@@ -41,27 +41,27 @@ internal class SmbTransports(
 
     /**
      * 播放读取租约数，按服务器＋端口记：播放取用一开始就登记，那一刻传输可能还没建好，
-     * 不能挂在某一份传输上。
+     * 不能挂在某一份传输上。会话级的播放读取标记在会话层，两者由同一个租约对象一起占、一起还。
      */
-    private val playbackReads = HashMap<TransportKey, Int>()
+    private val transportPlaybackReads = HashMap<TransportKey, Int>()
 
-    /** 播放读取登记：覆盖存活确认、会话重建、握手与打开读句柄全程。 */
-    fun beginPlaybackRead(host: String, port: Int) {
-        synchronized(lock) { playbackReads.merge(TransportKey(host, port), 1, Int::plus) }
+    /** 服务器＋端口级的播放读取登记：覆盖存活确认、会话重建、握手与打开读句柄全程。 */
+    fun beginTransportPlaybackRead(host: String, port: Int) {
+        synchronized(lock) { transportPlaybackReads.merge(TransportKey(host, port), 1, Int::plus) }
     }
 
-    /** 播放读取交还。 */
-    fun endPlaybackRead(host: String, port: Int) {
+    /** 服务器＋端口级的播放读取交还。 */
+    fun endTransportPlaybackRead(host: String, port: Int) {
         synchronized(lock) {
             val key = TransportKey(host, port)
-            val remaining = (playbackReads[key] ?: return) - 1
-            if (remaining <= 0) playbackReads.remove(key) else playbackReads[key] = remaining
+            val remaining = (transportPlaybackReads[key] ?: return) - 1
+            if (remaining <= 0) transportPlaybackReads.remove(key) else transportPlaybackReads[key] = remaining
         }
     }
 
     /** 播放是否在这个服务器端口上有读取租约。 */
-    private fun playbackHeld(host: String, port: Int): Boolean =
-        synchronized(lock) { (playbackReads[TransportKey(host, port)] ?: 0) > 0 }
+    private fun transportPlaybackHeld(host: String, port: Int): Boolean =
+        synchronized(lock) { (transportPlaybackReads[TransportKey(host, port)] ?: 0) > 0 }
 
     /** 取一条传输并占一个引用；表里没有就建一条。宽限内的那条照样复用，不重开 TCP。 */
     suspend fun acquire(host: String, port: Int): TransportLease {
@@ -180,17 +180,11 @@ internal class SmbTransports(
         private var released = false
 
         /** 播放是否在这条传输上持有读取租约。 */
-        val playbackLeaseHeld: Boolean get() = playbackHeld(transport.host, transport.port)
+        val playbackLeaseHeld: Boolean get() = transportPlaybackHeld(transport.host, transport.port)
 
         /** 在这条传输上认证并打开共享会话。 */
         suspend fun connectShare(share: String, username: String, password: String?): SmbConnection =
             transport.connection.connectShare(share, username, password)
-
-        /** 播放读取登记：持有期间这条传输不因浏览操作的失败被换掉。 */
-        fun beginPlaybackRead() = this@SmbTransports.beginPlaybackRead(transport.host, transport.port)
-
-        /** 播放读取交还。 */
-        fun endPlaybackRead() = this@SmbTransports.endPlaybackRead(transport.host, transport.port)
 
         /** 本地传输失效：退出共享表，不再发给新的取用方。 */
         fun discard() = this@SmbTransports.discard(transport)
