@@ -9,6 +9,7 @@ import java.util.concurrent.TimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -415,8 +416,8 @@ class SmbSessionsTest {
         assertTrue("失败原样交给调用方", failure is TransportException)
         assertTrue("不换传输", connector.transports.size == 1)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
-        // 播放持有读取租约：不换传输，但可以作废自己的会话后再试一次；重发也失败才交给调用方。
-        assertEquals("只重发一次", 2, connector.shares.size)
+        // 播放持有读取租约：浏览侧不碰播放那条会话，自己新建一条；重发再建一条，共三次握手。
+        assertEquals("只重发一次", 3, connector.shares.size)
 
         connector.listFailure = null
         playback.close()
@@ -581,6 +582,86 @@ class SmbSessionsTest {
 
         held.close()
         advanceTimeBy(1_001)
+        runCurrent()
+        // 会话关掉后传输还要走完闲置宽限才断开。
+        assertTrue("宽限内不断开", connector.closedTransports.isEmpty())
+        advanceTimeBy(60_000)
+        runCurrent()
+
+        assertEquals(listOf("nas:445"), connector.closedTransports)
+    }
+
+    @Test
+    fun `播放读取租约自取用开始登记，存活确认在途时浏览操作不换传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        var transportsAfterBrowse = 0
+        connector.duringPing = {
+            // 播放的存活确认还在途：浏览侧这时判本地传输失效，没有租约就会把这条传输换掉。
+            connector.duringPing = null
+            connector.listFailure = TransportException(TimeoutException("读超时"))
+            runCatching { sessions.use(target) { connection -> connection.list("") } }
+            transportsAfterBrowse = connector.transports.size
+            connector.listFailure = null
+        }
+
+        sessions.openPlaybackRead(target).close()
+
+        assertEquals("浏览操作不换播放正在用的传输", 1, transportsAfterBrowse)
+        assertTrue("共享传输不换也不关", connector.closedTransports.isEmpty())
+    }
+
+    @Test
+    fun `浏览操作不拿播放正在读的会话做存活确认，也就不会把它作废`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        val playback = sessions.openPlaybackRead(target)
+        val pingsBeforeBrowse = connector.pings
+        connector.pingFailure = TransportException(TimeoutException("读超时"))
+
+        val listed = sessions.use(target) { connection -> connection.list("") }
+
+        assertTrue("浏览侧的请求照常完成", listed.isEmpty())
+        assertEquals("不拿播放正在读的会话做存活确认", pingsBeforeBrowse, connector.pings)
+        assertEquals("浏览侧新建自己的会话", 2, connector.shares.size)
+        assertTrue("共享传输不换也不关", connector.closedTransports.isEmpty())
+        playback.close()
+        assertTrue("播放的会话没被浏览侧作废", connector.closedShares.isEmpty())
+    }
+
+    @Test
+    fun `传输引用归零后进入闲置宽限，宽限内重新取用不停留在途握手`() = runTest {
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        sessions.probe(target)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals("会话闲置回收", listOf("media"), connector.closedShares)
+        assertTrue("传输引用归零后不立即断开", connector.closedTransports.isEmpty())
+
+        val handshake = CompletableDeferred<Unit>()
+        connector.duringConnectShare = { handshake.await() }
+        val take = launch { sessions.probe(target) }
+        runCurrent()
+        assertTrue("在途握手期间不断开", connector.closedTransports.isEmpty())
+        handshake.complete(Unit)
+        runCurrent()
+
+        assertEquals("宽限内复用同一条传输，不重开 TCP", 1, connector.transports.size)
+        assertTrue("宽限内不断开", connector.closedTransports.isEmpty())
+        take.join()
+    }
+
+    @Test
+    fun `传输闲置宽限到点且没有在用时断开`() = runTest {
+        val sessions = SmbSessions(connector, scope = this, idleMillis = 1_000)
+        sessions.probe(target)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertTrue("宽限内不断开", connector.closedTransports.isEmpty())
+
+        advanceTimeBy(60_000)
         runCurrent()
 
         assertEquals(listOf("nas:445"), connector.closedTransports)

@@ -69,7 +69,8 @@ class SmbBrowseRecoveryTest {
         assertEquals(listOf(movie), entries.map { it.location })
         assertEquals("不换传输", 1, connector.transports.size)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
-        assertEquals("只重发一次", 2, connector.shares.size)
+        // 浏览侧不碰播放那条会话：自己新建一条，重发再建一条，共三次握手。
+        assertEquals("只重发一次", 3, connector.shares.size)
         playback.close()
     }
 
@@ -96,7 +97,8 @@ class SmbBrowseRecoveryTest {
         val result = library.list(directory)
 
         assertTrue("失败交给列表显示", result.isFailure)
-        assertEquals("只重发一次", 2, connector.shares.size)
+        // 浏览侧不碰播放那条会话：自己新建一条，重发再建一条，共三次握手。
+        assertEquals("只重发一次", 3, connector.shares.size)
         assertEquals("不换传输", 1, connector.transports.size)
         assertTrue("不关传输", connector.closedTransports.isEmpty())
         playback.close()

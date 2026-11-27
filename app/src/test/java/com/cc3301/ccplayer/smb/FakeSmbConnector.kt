@@ -64,6 +64,12 @@ class FakeSmbConnector : SmbConnector {
     /** 建连期间执行；测试用它把建连卡住，观察关闭是否等重连。 */
     var duringConnect: (() -> Unit)? = null
 
+    /** 存活确认期间执行；测试用它在这段窗口里插入别的取用。 */
+    var duringPing: (suspend () -> Unit)? = null
+
+    /** 会话握手期间执行；测试用它把握手卡在途，观察传输会不会被断开。 */
+    var duringConnectShare: (suspend () -> Unit)? = null
+
     /** 存活确认的次数。 */
     var pings: Int = 0
         private set
@@ -133,6 +139,7 @@ class FakeSmbConnector : SmbConnector {
             private set
 
         override suspend fun connectShare(share: String, username: String, password: String?): SmbConnection {
+            duringConnectShare?.invoke()
             logins += username to password
             shares += share
             return FakeSmbConnection(share)
@@ -184,7 +191,9 @@ class FakeSmbConnector : SmbConnector {
         override suspend fun ping(timeoutMillis: Long) {
             pings++
             lastPingTimeout = timeoutMillis
-            pingFailure?.let { throw it }
+            val failure = pingFailure
+            duringPing?.invoke()
+            failure?.let { throw it }
         }
 
         override fun close() {
