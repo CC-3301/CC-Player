@@ -189,10 +189,10 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
-    fun `指针隐藏时的左键按下只用于唤醒`() {
+    fun `播放 UI 完全不可见时的左键按下只用于唤醒`() {
         val wake = PlayerPointerWake()
 
-        assertTrue(wake.press(pointerVisible = false, primaryPressed = true))
+        assertTrue(wake.press(playbackUiVisible = false, primaryPressed = true))
         assertTrue(wake.swallows(0L))
         assertTrue(wake.swallows(2_000L))
     }
@@ -200,7 +200,7 @@ class PlayerPointerVisibilityTest {
     @Test
     fun `唤醒手势的双击窗口从抬起起算`() {
         val wake = PlayerPointerWake()
-        wake.press(pointerVisible = false, primaryPressed = true)
+        wake.press(playbackUiVisible = false, primaryPressed = true)
         wake.onRelease(1_000L)
 
         assertTrue(wake.swallows(1_000L))
@@ -211,7 +211,7 @@ class PlayerPointerVisibilityTest {
     @Test
     fun `双击窗口内的第二次按下也被吞掉且不延长窗口`() {
         val wake = PlayerPointerWake()
-        wake.press(pointerVisible = false, primaryPressed = true)
+        wake.press(playbackUiVisible = false, primaryPressed = true)
         wake.onRelease(0L)
 
         // 第二次按下落在窗口内：整次手势吞掉，但窗口仍从第一次抬起起算。
@@ -225,7 +225,7 @@ class PlayerPointerVisibilityTest {
     @Test
     fun `窗口结束后按下不再被吞掉`() {
         val wake = PlayerPointerWake()
-        wake.press(pointerVisible = false, primaryPressed = true)
+        wake.press(playbackUiVisible = false, primaryPressed = true)
         wake.onRelease(0L)
 
         assertFalse(wake.swallows(301L))
@@ -245,8 +245,8 @@ class PlayerPointerVisibilityTest {
         val wake = PlayerPointerWake()
         var executions = 0
 
-        // 控件点击：指针可见，这次按下不进唤醒手势，手势层也不吞它，控件只执行一次。
-        if (!wake.press(pointerVisible = true, primaryPressed = true)) executions += 1
+        // 控件点击：播放 UI 完全可见，这次按下不进唤醒手势，手势层也不吞它，控件只执行一次。
+        if (!wake.press(playbackUiVisible = true, primaryPressed = true)) executions += 1
         wake.onRelease(0L)
 
         assertEquals(1, executions)
@@ -255,10 +255,51 @@ class PlayerPointerVisibilityTest {
     }
 
     @Test
+    fun `播放 UI 完全可见但指针已静止隐藏时左键按下交给控件且指针重新出现`() {
+        showWithUi()
+        now = 3_000L
+        pointer.hideIfExpired()
+        assertFalse(pointer.visible)
+
+        val wake = PlayerPointerWake()
+        // 控制层满 5 秒才收：此刻播放 UI 完全可见，这一下不是唤醒，控件照常执行。
+        assertFalse(wake.press(playbackUiVisible = true, primaryPressed = true))
+        assertFalse(wake.swallows(now))
+
+        // 界面在按下时让指针立刻出现。
+        pointer.show()
+        assertTrue(pointer.visible)
+    }
+
+    @Test
+    fun `锁定态播放 UI 不可见时第一次左键只显示锁 UI 不解锁`() {
+        val lock = PlayerLock(elapsedMillis = { now })
+        lock.tapLockButton()
+
+        // 锁 UI 满 5 秒自动收起，此时播放 UI 完全不可见。
+        now = 4_000L
+        lock.beginUnlockFadeOutIfExpired()
+        now = 5_000L
+        lock.completeUnlockFadeOut()
+        assertFalse(lock.unlockVisible)
+
+        val wake = PlayerPointerWake()
+        val waking = wake.press(playbackUiVisible = false, primaryPressed = true)
+        assertTrue(waking)
+        assertTrue(wake.swallows(now))
+
+        // 界面在唤醒时只让锁 UI 重新出现，不解锁。
+        lock.tapScreen()
+        assertTrue(lock.locked)
+        assertTrue(lock.unlockVisible)
+        assertFalse(lock.unlockFading)
+    }
+
+    @Test
     fun `右键与中键按下不唤醒`() {
         val wake = PlayerPointerWake()
 
-        assertFalse(wake.press(pointerVisible = false, primaryPressed = false))
+        assertFalse(wake.press(playbackUiVisible = false, primaryPressed = false))
         assertFalse(wake.swallows(0L))
     }
 }

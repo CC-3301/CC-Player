@@ -649,7 +649,7 @@ fun PlayerScreen(
     // 指针隐藏条件：在播放页且指针不可见；离开播放页恢复系统指针。
     val pointerHidden = visible && !pointerVisible
     val pointerWake = remember { PlayerPointerWake() }
-    val latestPointerVisible = rememberUpdatedState(pointerVisible)
+    val latestPlaybackUiVisible = rememberUpdatedState(playbackUiVisible)
 
     BoxWithConstraints(modifier = modifier
         .fillMaxSize()
@@ -663,12 +663,18 @@ fun PlayerScreen(
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             val mouse = event.changes.firstOrNull { it.type == PointerType.Mouse } ?: continue
                             when (event.type) {
-                                // 只有指针隐藏时的左键按下唤醒；右键与中键不唤醒。
-                                PointerEventType.Press -> if (
-                                    pointerWake.press(latestPointerVisible.value, event.buttons.isPrimaryPressed)
-                                ) {
-                                    pointer.show()
-                                    if (locked) lock.tapScreen() else controls.showByUserAction()
+                                // 播放 UI 完全不可见时的左键只用于唤醒；右键与中键不唤醒。
+                                PointerEventType.Press -> {
+                                    if (
+                                        pointerWake.press(
+                                            playbackUiVisible = latestPlaybackUiVisible.value,
+                                            primaryPressed = event.buttons.isPrimaryPressed,
+                                        )
+                                    ) {
+                                        if (locked) lock.tapScreen() else controls.showByUserAction()
+                                    }
+                                    // 左键按下让指针立刻出现：收起时随唤醒出现，完全可见时抹掉静止隐藏。
+                                    if (event.buttons.isPrimaryPressed) pointer.show()
                                 }
 
                                 PointerEventType.Release -> pointerWake.onRelease(mouse.uptimeMillis)
