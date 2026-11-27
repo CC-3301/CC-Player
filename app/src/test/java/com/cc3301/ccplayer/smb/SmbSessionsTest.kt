@@ -1,5 +1,6 @@
 package com.cc3301.ccplayer.smb
 
+import com.cc3301.ccplayer.diagnostics.DiagnosticsLog
 import com.cc3301.ccplayer.library.MediaFailure
 import com.cc3301.ccplayer.library.MediaSourceException
 import com.cc3301.ccplayer.streaming.ByteSource
@@ -320,6 +321,45 @@ class SmbSessionsTest {
     }
 
     @Test
+    fun `封面取用遇存活确认失败只重建会话，不作废共享传输`() = runTest {
+        connector.addFile("media", "电影.mkv", payload)
+        val diagnostics = RecordingDiagnostics()
+        val sessions = SmbSessions(connector, diagnostics)
+        sessions.probe(target)
+        connector.pingFailure = TransportException(TimeoutException("读超时"))
+
+        sessions.openRead(target).close()
+
+        assertEquals("本次取用重建一条会话", 2, connector.shares.size)
+        assertEquals("共享传输沿用", 1, connector.transports.size)
+        assertTrue("共享传输没被作废", connector.closedTransports.isEmpty())
+        assertTrue(
+            "重建日志不出现换传输",
+            diagnostics.messages.none { "换传输" in it },
+        )
+        assertTrue(
+            "不出现传输作废",
+            diagnostics.messages.none { "传输作废" in it },
+        )
+    }
+
+    @Test
+    fun `存活确认失败后同一传输上的真实读写失败仍然换传输`() = runTest {
+        val sessions = SmbSessions(connector)
+        sessions.probe(target)
+        connector.pingFailure = TransportException(TimeoutException("读超时"))
+        sessions.probe(target)
+        connector.pingFailure = null
+        connector.listFailure = TransportException(TimeoutException("读超时"))
+        connector.listFailureTimes = 1
+
+        runCatching { sessions.use(target) { connection -> connection.list("") } }
+
+        assertEquals("换了一条传输", 2, connector.transports.size)
+        assertEquals("旧传输作废", listOf("nas:445"), connector.closedTransports)
+    }
+
+    @Test
     fun `本地传输失效换掉故障服务器端口的传输`() = runTest {
         connector.listFailure = TransportException(TimeoutException("读超时"))
         val sessions = SmbSessions(connector)
@@ -544,5 +584,16 @@ class SmbSessionsTest {
         runCurrent()
 
         assertEquals(listOf("nas:445"), connector.closedTransports)
+    }
+
+    /** 记下诊断日志的出口：重建路径按日志内容断言。 */
+    private class RecordingDiagnostics : DiagnosticsLog {
+        override val enabled: Boolean = true
+
+        val messages = mutableListOf<String>()
+
+        override fun log(message: String) {
+            messages += message
+        }
     }
 }

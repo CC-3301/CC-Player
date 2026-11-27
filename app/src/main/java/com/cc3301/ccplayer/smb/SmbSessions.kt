@@ -35,8 +35,8 @@ private const val MAX_SESSIONS = 8
  * 应用级 SMB 会话层：按（服务器、端口、共享、凭据）复用一条会话，目录浏览、封面与播放共用同一条。
  *
  * 会话之下按（服务器、端口）复用一条共享传输，多条会话共用；传输的关闭只由引用计数决定，
- * 关会话不等于关传输。取用复用的会话前做一次会话级存活确认，失败按作废范围处理：
- * 会话失效只重建会话，本地传输失效换掉故障服务器＋端口的传输，
+ * 关会话不等于关传输。取用复用的会话前做一次会话级存活确认，失败只作废本次取用的会话并在同一
+ * 共享传输上重建，不判共享传输失效；传输失效只由本次取用在这条传输上的实际读写失败判定。
  * 认证、路径与业务失败不作废也不重试。播放读打开时持有读取租约，持有期间列表、封面与探测
  * 只作废自己的会话，不换也不关这条传输；没有播放读取租约时浏览操作才换传输。
  * 会话闲置且没有引用时关闭，下次取用时懒重建。
@@ -70,7 +70,7 @@ class SmbSessions(
 
     /** 起播前探测：取到会话即交回，播放随后复用同一条。 */
     suspend fun probe(target: SmbTarget) {
-        acquire(target, playbackFlow = false).release()
+        acquire(target).release()
     }
 
     /**
@@ -79,7 +79,7 @@ class SmbSessions(
      * 重发只有一次：第二次失败原样抛出。会话建立失败不重发：建立预算只算一次。
      */
     suspend fun <T> use(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
-        val first = acquire(target, playbackFlow = false)
+        val first = acquire(target)
         try {
             return request(first.connection)
         } catch (cancellation: CancellationException) {
@@ -138,7 +138,7 @@ class SmbSessions(
 
     /** 打开读句柄；播放读的读源带上失败分类出口。 */
     private suspend fun openSource(target: SmbTarget, playbackLease: Boolean): ByteSource {
-        val session = acquire(target, playbackFlow = playbackLease)
+        val session = acquire(target)
         val opened = try {
             ReadLease(session, session.connection.openRead(target.path), playbackLease)
         } catch (cancellation: CancellationException) {
@@ -201,7 +201,7 @@ class SmbSessions(
 
     /** 重发一次；第二次仍是本地传输失效就淘汰这条传输，失败原样抛出。 */
     private suspend fun <T> resendUse(target: SmbTarget, request: suspend (SmbConnection) -> T): T {
-        val retry = acquire(target, playbackFlow = false)
+        val retry = acquire(target)
         try {
             return request(retry.connection)
         } catch (cancellation: CancellationException) {
@@ -216,7 +216,7 @@ class SmbSessions(
 
     /** 重连一次后打开句柄；这次建立失败同样不重试，失败原样抛出。 */
     private suspend fun reopenRead(target: SmbTarget, playbackLease: Boolean): ReadLease {
-        val lease = acquire(target, playbackFlow = playbackLease)
+        val lease = acquire(target)
         return try {
             ReadLease(lease, lease.connection.openRead(target.path), playbackLease)
         } catch (cancellation: CancellationException) {
@@ -229,8 +229,8 @@ class SmbSessions(
         }
     }
 
-    /** 复用的会话先占一个引用再确认存活；失败按作废范围重建。 */
-    private suspend fun acquire(target: SmbTarget, playbackFlow: Boolean): SessionLease {
+    /** 复用的会话先占一个引用再确认存活；确认失败只作废本次会话并在同一传输上重建。 */
+    private suspend fun acquire(target: SmbTarget): SessionLease {
         val key = SessionKey.of(target)
         val reused = reuse(key)
         if (reused != null) {
@@ -240,7 +240,7 @@ class SmbSessions(
                 release(reused)
                 throw cancellation
             } catch (failure: Throwable) {
-                return rebuildAfterAliveCheck(key, target, reused, failure, playbackFlow)
+                return rebuildAfterAliveCheck(key, target, reused, failure)
             }
             diagnostics.log { "SMB 会话取用: $key (在用 ${reused.inUse})" }
             return SessionLease(reused)
@@ -251,45 +251,28 @@ class SmbSessions(
     /**
      * 存活确认失败之后的处理，返回重建出来的会话。
      *
-     * 存活确认失败本身就是会话不能复用的证据。会话失效只重建会话：先占住这条传输，
-     * 旧会话交还引用时它不会掉到零，重建的会话继续建在它上面。本地传输失效换掉这条传输；
-     * 播放持有读取租约时浏览操作只能处理自己的会话：重建会复用旧传输，不换也不关。
-     * 认证、路径与业务失败不作废也不重建。
+     * 存活确认失败本身就是会话不能复用的证据，两种作废范围处理相同：只作废本次取用的会话，
+     * 并在同一共享传输上重建会话。先占住这条传输，旧会话交还引用时它不会掉到零，重建的会话继续建在它上面。
+     * 确认报文打在共享传输与共享会话上，无法把失败归因到发起方，因此不判共享传输失效、不换传输；
+     * 传输失效只由本次取用在这条传输上的实际读写失败判定。认证、路径与业务失败不作废也不重建。
      */
     private suspend fun rebuildAfterAliveCheck(
         key: SessionKey,
         target: SmbTarget,
         reused: Session,
         failure: Throwable,
-        playbackFlow: Boolean,
     ): SessionLease = when (smbFailureScope(failure)) {
         SmbFailureScope.None -> {
             release(reused)
             throw failure
         }
 
-        SmbFailureScope.Session -> {
+        SmbFailureScope.Session, SmbFailureScope.Transport -> {
             val transport = transports.acquire(target.host, target.port)
             invalidate(reused)
             release(reused)
             diagnostics.log { "SMB 会话存活确认失败，作废会话重建: $key" }
             SessionLease(establish(key, target, transport))
-        }
-
-        SmbFailureScope.Transport -> {
-            if (!mayReplaceTransport(reused, playbackFlow)) {
-                diagnostics.log { "SMB 会话存活确认失败，播放持有读取租约，只作废本次会话后重建: $key" }
-                invalidate(reused)
-                release(reused)
-                // 不换也不关共享传输：只重建自己的会话；重建失败原样抛出，不再重试。
-                SessionLease(establish(key, target))
-            } else {
-                reused.transport.discard()
-                invalidate(reused)
-                release(reused)
-                diagnostics.log { "SMB 会话存活确认失败，换传输重建: $key" }
-                SessionLease(establish(key, target))
-            }
         }
     }
 
