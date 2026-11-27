@@ -541,6 +541,80 @@ class PlaybackControllerBackgroundTest {
         assertTrue(controller.surfacePresentation.value.showsPicture)
     }
 
+    @Test
+    fun `暂停态画面容器尺寸变化重解当前帧`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        controller.onSurfaceSizeChanged()
+        runCurrent()
+
+        // 位置中性刷新：不 seek、不改播放位置、不自动继续。
+        assertEquals(1, engine.refreshFrameCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+        assertEquals(42_000L, controller.progress.value.positionMillis)
+        assertEquals(PlaybackState.Paused, controller.state.value)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `播放态画面容器尺寸变化不刷新`() = runTest {
+        val controller = playingController()
+        engine.reportPositionChanged(30_000, 600_000)
+
+        controller.onSurfaceSizeChanged()
+        runCurrent()
+
+        // 新帧自然按新尺寸出图：不插刷新，也不进入等新帧。
+        assertEquals(0, engine.refreshFrameCalls)
+        assertEquals(0, engine.awaitFramePresentationCalls)
+        assertTrue(controller.surfacePresentation.value.showsPicture)
+    }
+
+    @Test
+    fun `暂停态连续尺寸变化按最后一次补一次刷新`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(42_000, 600_000)
+
+        controller.onSurfaceSizeChanged()
+        // 这次恢复还没收尾：先记下，不立刻再发。
+        controller.onSurfaceSizeChanged()
+        assertEquals(1, engine.refreshFrameCalls)
+
+        runCurrent()
+
+        // 收尾后按最后一次尺寸只补一次。
+        assertEquals(2, engine.refreshFrameCalls)
+        runCurrent()
+        assertEquals(2, engine.refreshFrameCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
+    @Test
+    fun `暂停态切集等目标帧时尺寸变化不刷新`() = runTest {
+        val controller = pausedController()
+        controller.next()
+
+        controller.onSurfaceSizeChanged()
+        runCurrent()
+
+        assertEquals(0, engine.refreshFrameCalls)
+    }
+
+    @Test
+    fun `暂停在片尾时尺寸变化不刷新`() = runTest {
+        val controller = pausedController()
+        engine.reportPositionChanged(600_000, 600_000)
+        engine.reportPlaybackEnded()
+        runCurrent()
+
+        controller.onSurfaceSizeChanged()
+        runCurrent()
+
+        assertEquals(0, engine.refreshFrameCalls)
+        assertTrue(engine.seekPositions.isEmpty())
+    }
+
     private fun TestScope.controller(): PlaybackController {
         engine.callbackScope = this
         return PlaybackController(
