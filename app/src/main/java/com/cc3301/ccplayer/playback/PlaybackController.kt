@@ -460,8 +460,8 @@ class PlaybackController(
     /** 本次恢复已经请求过刷新；退后台只收计时，不清它，回前台重进时不再补一次。 */
     private var refreshRequested = false
 
-    /** 恢复进行中又发生了尺寸变化：收尾后按最后一次尺寸补一次刷新。 */
-    private var sizeChangePending = false
+    /** 画面容器尺寸变化的静默计时：连续变化只重置它，静默后才按当前尺寸刷新一次。 */
+    private var sizeChangeSettleJob: Job? = null
 
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
@@ -865,15 +865,22 @@ class PlaybackController(
 
     /**
      * 画面容器尺寸变了（转屏、窗口尺寸变化）：暂停态按新视口重解当前帧。
-     * 跳过条件与其它恢复入口相同：片尾、已到结尾与切集等目标帧时不刷新。
+     * 一批连续变化只在静默后按最后一次尺寸刷新一次；片尾暂停与已到结尾没有可重解的当前帧，不进入恢复。
      */
     fun onSurfaceSizeChanged() {
         // 播放态由新帧自然按新尺寸出图，不插刷新。
         if (!active || !paused) return
         if (!rendersPicture) return
-        if (beginSurfaceRestore(reason = "画面容器尺寸变化")) return
-        // 本次恢复还没收尾：等它收尾后按最后一次尺寸再重解一次。
-        if (awaitingSurfaceFrame) sizeChangePending = true
+        if (pausedAtEpisodeEnd || reachedEnd()) return
+        // 只重置计时：静默后按当前尺寸刷新一次，逐帧到达的连续尺寸不会各刷一次。
+        sizeChangeSettleJob?.cancel()
+        sizeChangeSettleJob = scope.launch {
+            delay(SURFACE_SIZE_SETTLE_MILLIS)
+            sizeChangeSettleJob = null
+            // 静默窗口内可能已经恢复播放：播放态不因尺寸变化刷新，由新帧按新尺寸出图。
+            if (!paused) return@launch
+            beginSurfaceRestore(reason = "画面容器尺寸变化")
+        }
     }
 
     /**
@@ -927,8 +934,6 @@ class PlaybackController(
                 awaitingSurfaceFrame = false
                 // 本次恢复到此收尾：下一次恢复重新允许一次刷新。
                 refreshRequested = false
-                // 翻转后按黑底收尾：撞上来的尺寸变化不再补刷新。
-                sizeChangePending = false
                 engine.flipVideoOutput()
                 diagnostics.log {
                     "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出 | " +
@@ -948,7 +953,6 @@ class PlaybackController(
         cancelSurfaceRestoreTimer()
         awaitingSurfaceFrame = false
         refreshRequested = false
-        sizeChangePending = false
     }
 
     /** 只收翻转计时：恢复本身没结束，等待与已发出的刷新都留着。 */
@@ -1771,7 +1775,6 @@ class PlaybackController(
     private fun confirmFrame(loadToken: Int) {
         val current = generation ?: return
         if (!current.accepts(loadToken, null)) return
-        val sizeChangeAwaitsRefresh = sizeChangePending
         if (awaitingSurfaceFrame) {
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
@@ -1779,8 +1782,6 @@ class PlaybackController(
         // 首个新帧上屏也是一条进展：切集已经开始出画面，不再重试或判失败。
         noteLoadProgress(LoadProgress.FirstFrame)
         confirmTargetFrame()
-        // 恢复进行中到达的尺寸变化：按最后一次尺寸补一次刷新，末帧才按新视口重画。
-        if (sizeChangeAwaitsRefresh) onSurfaceSizeChanged()
     }
 
     /**
@@ -3039,6 +3040,13 @@ class PlaybackController(
 
         /** 挂载后等播放核心首个新帧的时长；仍无新帧只翻转一次视频输出。 */
         const val SURFACE_RESTORE_WAIT_MILLIS = 3_000L
+
+        /**
+         * 画面容器尺寸变化的静默窗口：静默这么久才按当前尺寸刷新一次。
+         * 0.1 秒是「瞬时」感知阈值，孤立变化不产生可感知延迟；转屏与窗口拖拽的连续尺寸回调
+         * 间隔都小于它，计时被重置，一批变化只发一次刷新。
+         */
+        const val SURFACE_SIZE_SETTLE_MILLIS = 100L
 
         /** 切集结束、状态已就绪却还没上屏时，等新帧的总窗口。 */
         const val NO_FRAME_WINDOW_MILLIS = 60_000L
