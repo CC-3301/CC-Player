@@ -10,7 +10,7 @@ class PlayerBarsVisibilityTest {
     private var now = 0L
     private val controls = PlayerControlsVisibility(elapsedMillis = { now })
 
-    /** 生产判据：未锁定、抽屉关闭时的顶/底栏动画目标与在场。 */
+    /** 生产判据：未锁定、抽屉关闭时的顶/底栏完全可见。 */
     private fun presence(firstBuffering: Boolean = false): PlayerBarsPresence = playerBarsPresence(
         locked = false,
         phase = controls.phase,
@@ -23,7 +23,6 @@ class PlayerBarsVisibilityTest {
         controls.toggle()
 
         assertFalse(presence().shown)
-        assertFalse(presence().present)
     }
 
     @Test
@@ -85,7 +84,6 @@ class PlayerBarsVisibilityTest {
         )
 
         assertFalse(locked.shown)
-        assertFalse(locked.present)
     }
 
     @Test
@@ -98,7 +96,6 @@ class PlayerBarsVisibilityTest {
         )
 
         assertFalse(drawerOpen.shown)
-        assertFalse(drawerOpen.present)
     }
 
     @Test
@@ -208,20 +205,21 @@ class PlayerBarsVisibilityTest {
         controls.beginFadeOutIfExpired()
         assertEquals(true, controls.fading)
 
+        // 手势提示按控制层是否在场判定（可见或淡出中），与界面的 controlsPresent 同一口径。
         now = 4_999L
         controls.completeFadeOut()
-        val present = presence().present
+        val present = !controls.hidden
         assertTrue(present)
         assertTrue(GestureHint.VolumePercent in shownGestureHints(present, GestureHintSource.Volume))
         assertTrue(GestureHint.DoubleTapRipple in shownGestureHints(present, GestureHintSource.DoubleTapSeek))
 
         now = 5_000L
         controls.completeFadeOut()
-        val hidden = presence().present
-        assertFalse(hidden)
+        val gone = !controls.hidden
+        assertFalse(gone)
 
-        assertFalse(GestureHint.VolumePercent in shownGestureHints(hidden, GestureHintSource.Volume))
-        assertFalse(GestureHint.DoubleTapRipple in shownGestureHints(hidden, GestureHintSource.DoubleTapSeek))
+        assertFalse(GestureHint.VolumePercent in shownGestureHints(gone, GestureHintSource.Volume))
+        assertFalse(GestureHint.DoubleTapRipple in shownGestureHints(gone, GestureHintSource.DoubleTapSeek))
     }
 
     @Test
@@ -230,14 +228,15 @@ class PlayerBarsVisibilityTest {
         feedback.onDoubleTap(DoubleTapSide.Left, 10_000L)
         assertEquals(1, feedback.ripples.size)
 
+        // 涟漪按控制层是否在场清理，与界面的 controlsPresent 同一口径。
         now = 4_000L
         controls.beginFadeOutIfExpired()
-        feedback.syncRipples(presence().present)
+        feedback.syncRipples(!controls.hidden)
         assertEquals(1, feedback.ripples.size)
 
         now = 5_000L
         controls.completeFadeOut()
-        feedback.syncRipples(presence().present)
+        feedback.syncRipples(!controls.hidden)
         assertEquals(0, feedback.ripples.size)
     }
 
