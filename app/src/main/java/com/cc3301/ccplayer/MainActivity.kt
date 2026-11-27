@@ -220,7 +220,11 @@ class MainActivity : ComponentActivity(), MpvTextureView.Callback, PlayerActions
                 if (playback != null) surfaceRecovery.attach(surface)
             },
             detach = { surfaceRecovery.detach() },
-            resize = { width, height -> surfaceRecovery.setSurfaceSize(width, height) },
+            resize = { width, height ->
+                surfaceRecovery.setSurfaceSize(width, height)
+                // 尺寸已下发：暂停态是否需要按新视口重解当前帧由控制层判定。
+                playback?.controller?.onSurfaceSizeChanged()
+            },
         )
     }
 

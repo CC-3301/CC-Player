@@ -460,6 +460,9 @@ class PlaybackController(
     /** 本次恢复已经请求过刷新；退后台只收计时，不清它，回前台重进时不再补一次。 */
     private var refreshRequested = false
 
+    /** 恢复进行中又发生了尺寸变化：收尾后按最后一次尺寸补一次刷新。 */
+    private var sizeChangePending = false
+
     /** 挂载后等首个新帧的计时；3 秒仍无帧只翻转一次视频输出。 */
     private var surfaceRestoreJob: Job? = null
 
@@ -861,7 +864,21 @@ class PlaybackController(
     }
 
     /**
-     * Surface 重挂、回前台播放态撤帧，或回前台暂停态没有画面时，等播放核心的首个新帧。
+     * 画面容器尺寸变了（转屏、窗口尺寸变化）：暂停态按新视口重解当前帧。
+     * 跳过条件与其它恢复入口相同：片尾、已到结尾与切集等目标帧时不刷新。
+     */
+    fun onSurfaceSizeChanged() {
+        // 播放态由新帧自然按新尺寸出图，不插刷新。
+        if (!active || !paused) return
+        if (!rendersPicture) return
+        if (beginSurfaceRestore(reason = "画面容器尺寸变化")) return
+        // 本次恢复还没收尾：等它收尾后按最后一次尺寸再重解一次。
+        if (awaitingSurfaceFrame) sizeChangePending = true
+    }
+
+    /**
+     * Surface 重挂、回前台播放态撤帧、回前台暂停态没有画面，或暂停态画面容器尺寸变化时，
+     * 等播放核心的首个新帧。
      * 暂停态没有新解码帧，先请求一次位置中性的精确刷新（不改变播放位置），
      * 以刷新自己的 PLAYBACK_RESTART（帧上屏回执）为撤黑判据，仅暂停态生效（ADR-0026）；
      * 播放态不 seek，只等播放位置前进。每次进入恢复都允许一次刷新；退后台只收掉翻转计时，
@@ -910,6 +927,8 @@ class PlaybackController(
                 awaitingSurfaceFrame = false
                 // 本次恢复到此收尾：下一次恢复重新允许一次刷新。
                 refreshRequested = false
+                // 翻转后按黑底收尾：撞上来的尺寸变化不再补刷新。
+                sizeChangePending = false
                 engine.flipVideoOutput()
                 diagnostics.log {
                     "Surface 恢复: ${SURFACE_RESTORE_WAIT_MILLIS / 1_000} 秒无新帧，翻转视频输出 | " +
@@ -929,6 +948,7 @@ class PlaybackController(
         cancelSurfaceRestoreTimer()
         awaitingSurfaceFrame = false
         refreshRequested = false
+        sizeChangePending = false
     }
 
     /** 只收翻转计时：恢复本身没结束，等待与已发出的刷新都留着。 */
@@ -1751,6 +1771,7 @@ class PlaybackController(
     private fun confirmFrame(loadToken: Int) {
         val current = generation ?: return
         if (!current.accepts(loadToken, null)) return
+        val sizeChangeAwaitsRefresh = sizeChangePending
         if (awaitingSurfaceFrame) {
             cancelSurfaceRestore()
             diagnostics.log("Surface 恢复: 新帧已上屏")
@@ -1758,6 +1779,8 @@ class PlaybackController(
         // 首个新帧上屏也是一条进展：切集已经开始出画面，不再重试或判失败。
         noteLoadProgress(LoadProgress.FirstFrame)
         confirmTargetFrame()
+        // 恢复进行中到达的尺寸变化：按最后一次尺寸补一次刷新，末帧才按新视口重画。
+        if (sizeChangeAwaitsRefresh) onSurfaceSizeChanged()
     }
 
     /**
